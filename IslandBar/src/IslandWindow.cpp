@@ -432,7 +432,11 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     // for the widened button, and it was the drawing side that was short.
     float rowRight = rowLeft;
     if (fitting > 0) {
-        rowRight = TaskIconButtonAt(restingIsland, fitting - 1, fitting, fitting - 1, 1.0f).right;
+        // From the row's own box, which the tray button has moved along -- the same box the icons are
+        // DRAWN from, so the region cannot stop short of them.
+        rowRight = TaskIconButtonAt(RowAnchorWithTray(restingIsland, trayIconCount > 0), fitting - 1,
+                                    fitting, fitting - 1, 1.0f)
+                       .right;
     }
     if (rowRight > right) right = rowRight;
 
@@ -559,6 +563,13 @@ bool IslandWindow::PointerOverControl(POINT screenPoint) const {
     if (IconAtScreen(screenPoint) >= 0) return true;
     if (StartAtScreen(screenPoint) || SystemButtonAtScreen(screenPoint)) return true;
 
+    // ... AND THE TRAY BUTTON IS ONE OF THE BUTTONS.
+    //
+    // Found by the check written beside it in Diagnostics: the tray was a control for the CLICK and not for
+    // the CURSOR, so the three dots that open the tray page showed a plain arrow -- the same defect the
+    // media card's transport buttons had, reported as "这些按钮 鼠标移上去 应该变成小手".
+    if (TrayButtonAtScreen(screenPoint)) return true;
+
     // THE CARD'S CONTROLS ARE THE CONTROLS OF THE CARD THAT IS UP.
     //
     // Gated on the owner, and that gate is not tidiness: the panel's tiles and the media card's transport
@@ -584,7 +595,12 @@ int IslandWindow::IconAtScreen(POINT screenPoint) const {
     const float widthDip = PixelsToDip(rect_.right - rect_.left, monitor_.dpi);
     const RoundedBox island = IslandBoxFor(widthDip, kCollapsedWidthDip, kCollapsedHeightDip);
     // ... the row is measured from the same box the drawing uses: see LayoutIslandFor.
-    const RoundedBox rowIsland = RowAnchorBox(motion_.Current(), island);
+    // ... AND THE TRAY BUTTON MOVES IT ALONG, exactly as the drawing does: the row is drawn one button
+    // further right and this is the hit test that has to agree with it. It did not, and the symptom was
+    // precise: pointing at the FIRST icon opened the SECOND, because the hit test still thought the row
+    // began where it used to. Reported as "鼠标移上去 第二个图片展开了".
+    const RoundedBox rowIsland = RowAnchorWithTray(RowAnchorBox(motion_.Current(), island),
+                                                   trayIconCount_ > 0);
 
     float localX = 0.0f;
     float localY = 0.0f;
@@ -1060,7 +1076,19 @@ void IslandWindow::UpdatePointerState() {
             // under it. Deciding only from the resting layout would then report "between buttons"
             // and close the button being pointed at, which ALSO let the island open, because "not on
             // an icon" is what permits that.
-            hovered = TaskIconToKeepOpen(island, RowButtonCount(), hoveredIcon_, localX, localY);
+            // From the row's own box, which the tray button has moved along: a hover test against the
+            // island's edge answers for a row that is not the one on screen.
+            //
+            // ... AND THROUGH RowAnchorBox, exactly as IconAtScreen answers. This is the HOVER half of
+            // the same rule the click half follows, and the two disagreed while a notice strip was up:
+            // the strip is 200 DIP wider than the pill, the row is DRAWN from the strip's right edge,
+            // and this test was still measuring from the resting pill -- so the point on the first
+            // drawn icon was answered as "somewhere along the row" or as a different slot. A hover
+            // test that names a different row from the one painted is the whole family of defect this
+            // function has now been fixed for twice.
+            const RoundedBox rowAnchor = RowAnchorBox(motion_.Current(), island);
+            hovered = TaskIconToKeepOpen(RowAnchorWithTray(rowAnchor, trayIconCount_ > 0),
+                                         RowButtonCount(), hoveredIcon_, localX, localY);
         }
         hoveredIcon_ = hovered;
 

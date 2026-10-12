@@ -331,6 +331,49 @@ void TestClickThrough(IslandWindow& window, const MonitorGeometry& monitor) {
         Check(window.PointerOverControl(toScreen(slotCentre, (row.top + row.bottom) * 0.5f)),
               L"an application icon is a control", cursorDetail);
 
+        // ... AND THE ICON UNDER THE POINTER IS STILL THE ICON THAT IS DRAWN THERE once the TRAY
+        // BUTTON stands between the island and the row.
+        //
+        // The row is DRAWN from a box the tray button has moved along (see RowAnchorWithTray), so the
+        // window's own hit test -- IconAtScreen, which is what a click is routed through -- has to be
+        // measured from that same box. It was not, and the report was exact: "鼠标移上去 第二个图片展开
+        // 了", pointing at the FIRST icon opened the SECOND, because the hit test still believed the
+        // row began one button to the left of where it is painted.
+        //
+        // Asserted from each icon's own DRAWN box, through the window's answer, so a future change
+        // that moves one of the two apart is a failing check rather than something only a user sees.
+        {
+            window.SetTrayIconCount(3);
+            const RoundedBox islandForRow = window.LayoutIslandFor();
+            const RoundedBox drawnRow = RowAnchorWithTray(islandForRow, true);
+            const int buttons = window.RowButtonCount();
+            int mismatches = 0;
+            int firstMismatch = -1;
+            for (int i = 0; i < buttons; ++i) {
+                const RectF box = TaskIconButtonAt(drawnRow, i, buttons, -1, 0.0f);
+                const POINT centre = toScreen((box.left + box.right) * 0.5f,
+                                              (box.top + box.bottom) * 0.5f);
+                if (window.IconAtScreen(centre) != i) {
+                    ++mismatches;
+                    if (firstMismatch < 0) firstMismatch = i;
+                }
+            }
+            wchar_t trayRowDetail[224];
+            std::swprintf(trayRowDetail, 224,
+                          L"drawn row starts at %.0f, %d buttons, %d mismatch(es), first %d",
+                          drawnRow.rect.right + kTaskIconPadDip, buttons, mismatches, firstMismatch);
+            Check(mismatches == 0,
+                  L"the icon under the pointer is the icon drawn there, with the tray button up",
+                  trayRowDetail);
+
+            // ... and the tray button itself is still a control, which is what the same box moves for.
+            Check(window.PointerOverControl(centreOf(TrayButtonFor(islandForRow))),
+                  L"the tray button beside the island is a control", trayRowDetail);
+
+            // Put the window back as it was found: the count is an input to every hit test below.
+            window.SetTrayIconCount(0);
+        }
+
         // ... and the deck's gap, which is a control only where a button is: the two buttons do not fill the
         // strip between them and the island, and that strip must stay an arrow.
         Check(!window.PointerOverControl(toScreen((start.right + system.left) * 0.5f,
@@ -5999,6 +6042,30 @@ void TestMusicCardLayout() {
                 Check(Nearly((button.top + button.bottom) * 0.5f,
                              (trayIsland.rect.top + trayIsland.rect.bottom) * 0.5f, 0.01f),
                       L"the tray button is on the island's own line", trayDetail);
+            }
+
+            // WHAT THE BUTTON MOVES, AND WHAT IT MUST NOT.
+            //
+            // The row is told where it starts by moving ONE edge of the box it is measured from (see
+            // RowAnchorWithTray): everything the row does -- its left edge, every button, every hit test --
+            // follows from that box's right edge, and nothing else about the box may change. The island's
+            // left edge, top and bottom belong to the deck and the pill: a version of this that moved them
+            // would take the Start button and the status line along with the tray.
+            {
+                const RoundedBox moved = RowAnchorWithTray(trayIsland, true);
+                const float reserved = TrayButtonReservedDip();
+                std::swprintf(trayDetail, 256,
+                              L"island right %.0f -> anchor right %.0f (reserved %.0f), anchor left %.0f",
+                              trayIsland.rect.right, moved.rect.right, reserved, moved.rect.left);
+                Check(Nearly(moved.rect.right, trayIsland.rect.right + reserved, 0.01f),
+                      L"the tray button moves the row's anchor by exactly its own width", trayDetail);
+                Check(Nearly(moved.rect.left, trayIsland.rect.left, 0.01f) &&
+                          Nearly(moved.rect.top, trayIsland.rect.top, 0.01f) &&
+                          Nearly(moved.rect.bottom, trayIsland.rect.bottom, 0.01f),
+                      L"... and moves nothing else, so the deck and the pill stay put", trayDetail);
+                const RoundedBox untrayed = RowAnchorWithTray(trayIsland, false);
+                Check(Nearly(untrayed.rect.right, trayIsland.rect.right, 0.01f),
+                      L"with no tray to show the anchor is the island itself", trayDetail);
             }
 
             // THE CARD'S GRID: the icons behind the button, in a wrapping grid inside the SAME card the

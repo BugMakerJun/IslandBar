@@ -3174,17 +3174,25 @@ float musicWavePhase = 0.0f;
                 const float monitorWidthDip =
                     static_cast<float>(window.Monitor().screen.right -
                                        window.Monitor().screen.left) / window.Scale();
-                // ... AND THE TRAY'S ROOM IS SPENT FIRST.
+                // ... AND THE TRAY BUTTON'S ROOM IS SPENT FIRST, WHEN THERE IS ONE.
                 //
-                // The tray is anchored to the monitor's right edge and does not move, so the application
-                // row is what has to give way: the row is sized for the room that is left once the tray
-                // has taken its strip. Without this the two overlap on a machine with many windows open --
-                // and an overlap of two live controls is not a cosmetic problem, it is two things claiming
-                // the same pixels and the same clicks.
+                // The button stands between the island and the row, so the application row is what has to
+                // give way: the row is sized for the room that is left once the button has taken its
+                // 26 DIP. Without this the two overlap on a machine with many windows open -- and an
+                // overlap of two live controls is not a cosmetic problem, it is two things claiming the
+                // same pixels and the same clicks.
+                //
+                // ... AND ONLY WHEN THERE IS ONE, which is what the button's own geometry says
+                // (RowAnchorWithTray): with no tray icons running the row is drawn from the island
+                // itself, so reserving room for a button that is not on screen is an icon the user
+                // does not get. This read the count into `trayShown` and then subtracted the room
+                // regardless -- the compiler had been pointing at the unused variable for a while.
                 const int trayShown =
                     trayIcons.Count() < island::kMaxTrayIcons ? trayIcons.Count()
                                                               : island::kMaxTrayIcons;
-                const float rowWidthDip = monitorWidthDip - island::TrayButtonReservedDip();
+                const float rowWidthDip =
+                    trayShown > 0 ? monitorWidthDip - island::TrayButtonReservedDip()
+                                  : monitorWidthDip;
                 int listed = island::TaskIconsThatFit(rowWidthDip, taskWindows.Count());
 
                 // EACH ICON'S ARRIVAL, and the row as the UNION of what is listed and what is leaving.
@@ -3352,7 +3360,15 @@ float musicWavePhase = 0.0f;
                     if ((rested || follow) && !frame.outerCardUp && IsWindow(wanted)) {
                         const RECT monitorPx = window.Monitor().screen;
                         const float scale = window.Scale();
-                        const island::RoundedBox islandBox = window.LayoutIslandFor();
+                        // THE ROW THE PREVIEW HANGS OFF IS THE ROW THAT IS DRAWN, tray button and all.
+                        //
+                        // The application icons are painted from a box the tray button has moved along
+                        // (see RowAnchorWithTray), and the preview is placed under "the icon the
+                        // pointer is on". Measuring the button from the un-shifted box put the card
+                        // one button to the LEFT of the icon it belongs to -- the same off-by-one
+                        // button that made the FIRST icon open the SECOND, seen from the drawing side.
+                        const island::RoundedBox islandBox = island::RowAnchorWithTray(
+                            window.LayoutIslandFor(), frame.trayIconCount > 0);
                         const island::RectF button = island::TaskIconButtonAtAmounts(
                             islandBox, hoveredIcon, drawn, taskHoverAmount);
                         RECT iconPx = {};
