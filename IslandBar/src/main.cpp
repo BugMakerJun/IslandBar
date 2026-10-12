@@ -3195,8 +3195,16 @@ float musicWavePhase = 0.0f;
                     }
 
                     const bool rested = wanted && (previewNow - previewSinceMs) >= kThumbnailDwellMs;
+                    // ONCE IT IS UP, IT FOLLOWS THE POINTER ALONG THE ROW AT ONCE.
+                    //
+                    // The dwell exists to stop a preview flashing up for every icon the pointer passes on
+                    // its way somewhere. Once one is already on screen the user has decided where to look,
+                    // and making them wait again for the neighbour is the flicker rather than the cure:
+                    // the preview would vanish and come back 350 ms later. It still goes away the moment
+                    // the pointer leaves the row.
+                    const bool follow = wanted != nullptr && preview.Visible();
                     bool shown = false;
-                    if (rested && !frame.outerCardUp && IsWindow(wanted)) {
+                    if ((rested || follow) && !frame.outerCardUp && IsWindow(wanted)) {
                         const RECT monitorPx = window.Monitor().screen;
                         const float scale = window.Scale();
                         const island::RoundedBox islandBox = window.LayoutIslandFor();
