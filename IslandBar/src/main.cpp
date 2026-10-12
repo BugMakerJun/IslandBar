@@ -653,6 +653,11 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     // The TRAY's own level of the same card: the icons behind the button at the right-hand end of the bar.
     // Kept beside the panel's flag because the two are two levels of one card (see the click handler).
     bool trayPageOpen = false;
+    // Whether the card that is up was opened by the TRAY button, so it stands under that button and not
+    // under the system button at the other end of the island. Held for the card's whole life, like the
+    // owner above it (see the frame loop): the two pages share one card, and a position read per frame
+    // would move the card sideways the instant the tray page was closed.
+    bool trayCardAnchor = false;
     // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
     // the whole set, and the arrows and dots are the controls for it.
     int systemPanelPage = 0;
@@ -3032,6 +3037,9 @@ float musicWavePhase = 0.0f;
                 // card: the panel's contents disappeared first and a blank rounded rectangle shrank
                 // afterwards. Reported as the panel "appearing and disappearing" with the pointer.
                 const bool cardUp = frame.outerCardUp;
+                // Which control the card that is up stands under, held for the card's whole life -- see
+                // NextTrayCardAnchor, which is the rule and its four cases, asserted in Diagnostics.
+                trayCardAnchor = island::NextTrayCardAnchor(trayCardAnchor, cardUp, trayPageOpen);
                 if (cardUp) {
                     if (soundPageOpen) {
                         // --- the panel's second level: the 声音输出 page ---
@@ -3091,7 +3099,9 @@ float musicWavePhase = 0.0f;
                         window.CloseSoundPage();
                     }
 
-                    // The card is CENTRED on the system button that opened it.
+                    // The card is CENTRED on the button that opened it -- the system button for the
+                    // panel, the tray button for the tray page (see DeckCardAnchorCentre, and the latch
+                    // just above this block).
                     //
                     // Chosen by the user after being shown the numbers: centring the card on the button
                     // puts its right half under the ISLAND, and the alternative -- keeping the card
@@ -3111,8 +3121,12 @@ float musicWavePhase = 0.0f;
                     // The anchor comes from the RESTING island, so the position does not move while the
                     // card's own width is animating.
                     const island::RoundedBox anchorIsland = window.LayoutIslandFor();
-                    const island::RectF systemButton = island::SystemButtonFor(anchorIsland);
-                    const float buttonCentre = (systemButton.left + systemButton.right) * 0.5f;
+                    // The centre of the control that opened the card -- the tray button for the tray page,
+                    // the system button for the panel. See DeckCardAnchorCentre for why this is one
+                    // function and not two lines: getting it from the wrong control is a card under the
+                    // wrong end of the bar, which is what "点击托盘按钮 弹出的卡片不在这个按钮下面" was.
+                    const float buttonCentre =
+                        island::DeckCardAnchorCentre(anchorIsland, trayCardAnchor);
                     // WHICH THING THE CARD HANGS FROM DEPENDS ON WHICH CARD IT IS.
                     //
                     // The system panel hangs from the control that opened it: the user chose that

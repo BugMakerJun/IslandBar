@@ -342,6 +342,34 @@ inline float CardLeftFor(float anchorLeftDip, float cardWidthDip, float windowWi
     return left;
 }
 
+// WHICH CONTROL THE CARD THAT IS UP STANDS UNDER, held for the card's whole life.
+//
+// The panel and the tray page are ONE card with ONE owner -- NextCardOwner sees only "a panel is asked
+// for" -- so where the card stands can only be chosen from the page, and the two controls that open those
+// pages are the island's two ends:
+//
+//     [ system ][ Start ]   island   [ tray ]  [ icon ] ...
+//
+// The tray page was centred on the SYSTEM button, which is a card under the wrong end of the bar:
+// reported as "点击托盘按钮 弹出的卡片不在这个按钮下面" (296 DIP of it, measured).
+//
+// The held flag is the whole reason this is a function rather than one line in the frame loop:
+//
+//   * the panel is pressed   -> not under the tray button
+//   * the tray button is pressed -> under it, from that frame on
+//   * the tray page is CLOSED -> STILL under it, until the card is gone. Read per frame instead, the card
+//     would jump back under the system button on the first frame of its exit and slide 296 DIP sideways
+//     while it shrank -- which is a visible bug, not a tidiness problem.
+//   * the card is gone (`cardUp` false) -> released, so the next press decides afresh
+//
+// `held` is the previous answer, so the caller feeds this back to itself exactly as it does with
+// NextCardOwner. Asserted in Diagnostics for all four rows of that table.
+inline bool NextTrayCardAnchor(bool held, bool cardUp, bool trayPageOpen) {
+    if (!cardUp) return false;
+    if (trayPageOpen) return true;
+    return held;
+}
+
 // --- the system panel --------------------------------------------------------------
 //
 // What the row of system indicators summarises, opened out. Its structure follows the shell's own

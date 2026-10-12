@@ -753,4 +753,23 @@ inline RoundedBox RowAnchorWithTray(const RoundedBox& island, bool trayButtonSho
     return out;
 }
 
+// WHERE AN OUTER CARD HANGS FROM: the centre of the control that opened it.
+//
+// The panel hangs from the system button and the tray page from the tray button -- one card, one rule,
+// two controls. And the two controls are at OPPOSITE ENDS of the island:
+//
+//     [ system ][ Start ]   island   [ tray ]  [ icon ] ...
+//
+// so an answer taken from the wrong one puts the card about 300 DIP away from the button that was
+// pressed. Reported exactly that way: "点击托盘按钮 弹出的卡片不在这个按钮下面" -- the tray page is
+// opened by the tray button and its card was still being centred on the system button, because the two
+// share the card and the owner that places it.
+//
+// A function rather than two lines in the frame loop, because the frame loop is where the answer was
+// wrong and the assertion that has to catch it lives beside these controls (see Diagnostics).
+inline float DeckCardAnchorCentre(const RoundedBox& island, bool trayPage) {
+    const RectF button = trayPage ? TrayButtonFor(island) : SystemButtonFor(island);
+    return (button.left + button.right) * 0.5f;
+}
+
 } // namespace island

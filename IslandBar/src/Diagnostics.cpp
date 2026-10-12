@@ -6106,6 +6106,69 @@ void TestMusicCardLayout() {
                 }
             }
 
+            // WHERE THE TRAY PAGE'S CARD STANDS: under the TRAY button, not under the one at the other
+            // end of the island.
+            //
+            // The panel and the tray page are one card with one owner (NextCardOwner sees only "a panel is
+            // asked for"), so the position can only come from the PAGE -- and the two controls are the
+            // island's two ends, about 300 DIP apart. The tray page was centred on the SYSTEM button, which
+            // is what "点击托盘按钮 弹出的卡片不在这个按钮下面" was: press the button on the right, get a
+            // card under the left.
+            //
+            // Asserted as the two things a user would notice: the answer names the button that was pressed,
+            // and the card that follows from it contains that button's centre and not the other's.
+            {
+                const float trayCentre = DeckCardAnchorCentre(trayIsland, true);
+                const float systemCentre = DeckCardAnchorCentre(trayIsland, false);
+                const RectF trayButton = TrayButtonFor(trayIsland);
+                const RectF systemButton = SystemButtonFor(trayIsland);
+                const float trayButtonCentre = (trayButton.left + trayButton.right) * 0.5f;
+                const float systemButtonCentre = (systemButton.left + systemButton.right) * 0.5f;
+
+                const float monitor = 2560.0f;
+                const float cardLeft = CardLeftFor(trayCentre - kExpandedWidthDip * 0.5f,
+                                                   kExpandedWidthDip, monitor);
+                const float cardRight = cardLeft + kExpandedWidthDip;
+
+                std::swprintf(trayDetail, 256,
+                              L"tray anchor %.0f (button %.0f), panel anchor %.0f (button %.0f), card "
+                              L"%.0f..%.0f",
+                              trayCentre, trayButtonCentre, systemCentre, systemButtonCentre, cardLeft,
+                              cardRight);
+                Check(Nearly(trayCentre, trayButtonCentre, 0.01f) &&
+                          Nearly(systemCentre, systemButtonCentre, 0.01f),
+                      L"each page's card is centred on the button that opened it", trayDetail);
+                Check(std::fabs(trayCentre - systemCentre) > 200.0f,
+                      L"... and those two buttons are far enough apart for a wrong answer to show",
+                      trayDetail);
+                Check(trayCentre > cardLeft && trayCentre < cardRight &&
+                          !(systemButtonCentre > cardLeft && systemButtonCentre < cardRight),
+                      L"the tray page's card covers the tray button and not the system button",
+                      trayDetail);
+                Check(cardLeft >= 8.0f && cardRight <= monitor - 8.0f,
+                      L"and that card is still on the screen", trayDetail);
+            }
+
+            // ... AND THE CHOICE SURVIVES THE PAGE BEING CLOSED, which is the half that is easy to lose.
+            //
+            // All four rows of NextTrayCardAnchor's table, because the third one is the one a later change
+            // would drop: the card is still on screen for the length of its exit, and an answer taken per
+            // frame from the page would move it 296 DIP back to the other end of the bar while it shrank.
+            {
+                const bool whenPanelOpens = NextTrayCardAnchor(false, true, false);
+                const bool whenTrayOpens = NextTrayCardAnchor(false, true, true);
+                const bool whileClosing = NextTrayCardAnchor(true, true, false);
+                const bool whenGone = NextTrayCardAnchor(true, false, false);
+                std::swprintf(trayDetail, 256,
+                              L"panel->%d tray->%d closing->%d gone->%d", whenPanelOpens ? 1 : 0,
+                              whenTrayOpens ? 1 : 0, whileClosing ? 1 : 0, whenGone ? 1 : 0);
+                Check(!whenPanelOpens && whenTrayOpens && whileClosing && !whenGone,
+                      L"the card's anchor follows the page it was opened with, and holds while it "
+                      L"closes", trayDetail);
+                Check(whileClosing == NextTrayCardAnchor(whileClosing, true, false),
+                      L"... held as long as the card is up, whatever the page flag says", trayDetail);
+            }
+
             // THE ROW GIVES WAY, AND THAT IS THE POINT OF THE RESERVATION.
             //
             // The count of application icons that fit is computed from the room left after the BUTTON
