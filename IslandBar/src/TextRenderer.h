@@ -109,33 +109,28 @@ public:
     // StatusStripFor for where the band is.
     //
     // THE LOOK IS THE REFERENCE'S, and it is not a sentence: it is a run of pieces read left to
-    // right, each set in its own weight and colour, with hairlines between the groups and two
-    // drawn glyphs in it --
+    // right, each set in its own weight and colour, with hairlines between the groups and a drawn
+    // glyph in it --
     //
-    //     [ calendar ] | weekday day | time | [ cloud ] sky temperature
+    //     weekday day | time | [ cloud ] sky temperature
     //
-    // asked for with a picture of exactly that ("星期 日期 时间 天气改成图片这样显示"). The pieces are
-    // measured, not guessed: the run with the two glyphs needs about 234 DIP, which the band (248)
-    // has and the 220 DIP pill (200) does not -- so the island draws the same run WITHOUT the
-    // glyphs and their hairlines, and the words, their weights and the hierarchy are identical in
-    // both. MeasureStatusLine is what says so, and the self-test calls it.
-
-    // What the two forms are drawn at, in DIPs. Gathered so the drawing and the measuring cannot
-    // disagree about the sizes they are adding up.
-    struct StatusLineMetrics {
-        float full = 0.0f;      // the whole run, glyphs included -- what the band draws
-        float compact = 0.0f;   // the words and the hairlines -- what the island has room for
-    };
-
-    // The widths of both forms, in the formats they are drawn with. Needs Initialize().
+    // asked for with a picture of exactly that ("星期 日期 时间 天气改成图片这样显示"). Two rounds of
+    // the user's eye shaped it: the calendar glyph that stood at the head of the run was removed on
+    // request ("去掉前面的日历图标"), and the run is now the SAME in both homes, glyph included
+    // ("胶囊里也带图标") -- which the removal is what made possible: 235.6 DIP with the calendar did
+    // not fit the 220 DIP pill, about 200 without it does.
     //
-    // A function of the STRINGS rather than of the clock, so the self-test can ask about the
-    // widest line that can ever occur without waiting for that day to come round.
-    StatusLineMetrics MeasureStatusLine(const wchar_t* weekday, const wchar_t* day,
-                                        const wchar_t* time, const wchar_t* sky,
-                                        const wchar_t* temperature) const;
+    // It fits, and that is measured rather than assumed: MeasureStatusLine is called by the
+    // self-test for the widest run that can ever occur, against both boxes.
 
-    // Draws the run centred in `box`, at whichever of the two forms fits it.
+    // The width the whole run is drawn at, in the formats it is drawn with. Needs Initialize().
+    //
+    // A function of the STRINGS rather than of the clock, so the self-test can ask about the widest
+    // run that can ever occur without waiting for that day to come round.
+    float MeasureStatusLine(const wchar_t* weekday, const wchar_t* day, const wchar_t* time,
+                            const wchar_t* sky, const wchar_t* temperature) const;
+
+    // Draws the run centred in `box`, on whatever `fill` says it is standing on.
     //
     // ONE function for both homes, because it is one line and the two places must not be able to
     // disagree about how it is set. What differs between them is only what it is drawn ON, and

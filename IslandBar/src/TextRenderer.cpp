@@ -133,13 +133,13 @@ bool TextRenderer::Initialize() {
         (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         return true;
     };
-    // The sizes are set by the tighter of the two boxes rather than by taste: the run is drawn
-    // inside a 220 DIP pill as well as in the 268 DIP band, and the pill's 200 usable DIP is what
+    // The sizes are set by the tighter of the two boxes rather than by taste: the same run is drawn
+    // inside a 220 DIP pill and in the 268 DIP band, and the pill -- less its padding -- is what
     // these four numbers have to live within. Measured by the self-test, not chosen by eye.
-    makeStatusFormat(12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusWeekdayFormat_);
-    makeStatusFormat(11.5f, DWRITE_FONT_WEIGHT_NORMAL, &statusDayFormat_);
-    makeStatusFormat(13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusTimeFormat_);
-    makeStatusFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &statusWeatherFormat_);
+    makeStatusFormat(12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusWeekdayFormat_);
+    makeStatusFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &statusDayFormat_);
+    makeStatusFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusTimeFormat_);
+    makeStatusFormat(11.5f, DWRITE_FONT_WEIGHT_NORMAL, &statusWeatherFormat_);
 
     // The music card's top row: the source name and the volume readout.
     //
@@ -441,22 +441,24 @@ namespace {
 // Every number the run is laid out from, in one place, so the measuring and the drawing cannot
 // disagree about the sizes they are adding up.
 struct StatusRunStyle {
-    float tileDip       = 19.0f;   // the calendar's rounded tile (its artwork is smaller than this)
     float glyphDip      = 16.0f;   // the weather glyph
-    float tileGapDip    = 5.0f;    // between the calendar tile and the hairline that follows it
     float groupGapDip   = 4.0f;    // inside a group: 周一 / 10月12日, 小雨 / 17°
-    float ruleGapDip    = 4.0f;    // on each side of a hairline
+    float ruleGapDip    = 3.0f;    // on each side of a hairline
     float ruleDip       = 1.0f;
     float ruleHeightDip = 10.0f;
-    float glyphGapDip   = 4.0f;    // between the weather glyph and the word beside it
+    float glyphGapDip   = 3.0f;    // between the weather glyph and the word beside it
 };
 
 constexpr StatusRunStyle kStatusRun;
 
 // One piece of the run. `widthDip` is the room it takes and `afterDip` the gap it insists on
 // leaving behind it, so the run's total is the sum of the two over all of them.
+//
+// There is no calendar here: one was drawn at the head of the run for an hour, and the user asked
+// for it to go -- "去掉前面的日历图标". The weather glyph stays, and it is now the ONE glyph, in both
+// homes (see the note on the forms below).
 struct StatusPiece {
-    enum class Kind { Calendar, Rule, Text, Cloud };
+    enum class Kind { Rule, Text, Cloud };
     Kind kind = Kind::Text;
     const wchar_t* text = nullptr;
     IDWriteTextFormat* format = nullptr;
@@ -495,13 +497,15 @@ float TextWidthIn(IDWriteFactory3* factory, IDWriteTextFormat* format, const wch
 
 // The run, built in one place so the measuring and the drawing walk the SAME list.
 //
-// `withGlyphs` is the whole difference between the two forms: the band draws the calendar, the
-// hairline after it and the weather glyph, and the island draws the same words with none of them --
-// 220 DIP of pill less its padding is 200, and the run with the glyphs is about 230. Nothing else
-// changes, so the island and the band can never disagree about what the line says.
+// ONE RUN FOR BOTH HOMES, which is a simplification the calendar bought: with the calendar at its
+// head the run was 235.6 DIP and the 220 DIP pill could not hold it, so the island drew a second,
+// glyph-less form. Remove the calendar and what is left -- a hairline, the weekday, the date,
+// a hairline, the time, a hairline, the weather glyph and two words -- is about 200 DIP, which fits
+// the pill with its padding and the band with room to spare. So there is no form to choose between
+// any more, and the two places cannot even in principle disagree.
 int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, const wchar_t* weekday,
                    const wchar_t* day, const wchar_t* time, const wchar_t* sky,
-                   const wchar_t* temperature, bool withGlyphs, StatusPiece* pieces, int capacity) {
+                   const wchar_t* temperature, StatusPiece* pieces, int capacity) {
     int count = 0;
     const auto push = [&](const StatusPiece& piece) {
         if (count < capacity) pieces[count++] = piece;
@@ -526,26 +530,16 @@ int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, co
         push(piece);
     };
 
-    if (withGlyphs) {
-        StatusPiece calendar;
-        calendar.kind = StatusPiece::Kind::Calendar;
-        calendar.widthDip = kStatusRun.tileDip;
-        calendar.afterDip = kStatusRun.tileGapDip;
-        push(calendar);
-        pushRule(kStatusRun.ruleGapDip);
-    }
     pushText(weekday, formats.weekday, kStatusRun.groupGapDip, 0.95f);
     pushText(day, formats.day, kStatusRun.ruleGapDip, 0.62f);
     pushRule(kStatusRun.ruleGapDip);
     pushText(time, formats.time, kStatusRun.ruleGapDip, 0.99f);
     pushRule(kStatusRun.glyphGapDip);
-    if (withGlyphs) {
-        StatusPiece cloud;
-        cloud.kind = StatusPiece::Kind::Cloud;
-        cloud.widthDip = kStatusRun.glyphDip;
-        cloud.afterDip = kStatusRun.glyphGapDip;
-        push(cloud);
-    }
+    StatusPiece cloud;
+    cloud.kind = StatusPiece::Kind::Cloud;
+    cloud.widthDip = kStatusRun.glyphDip;
+    cloud.afterDip = kStatusRun.glyphGapDip;
+    push(cloud);
     pushText(sky, formats.weather, kStatusRun.groupGapDip, 0.90f);
     pushText(temperature, formats.weather, 0.0f, 0.84f);
     return count;
@@ -555,72 +549,6 @@ float StatusRunWidth(const StatusPiece* pieces, int count) {
     float total = 0.0f;
     for (int i = 0; i < count; ++i) total += pieces[i].widthDip + pieces[i].afterDip;
     return total;
-}
-
-// The calendar tile: a rounded square, a calendar drawn inside it, and the one coloured dot the
-// reference has on it. Drawn as geometry on purpose, for the reason the Start button's mark gives:
-// an image would be one more thing to ship and one more thing to fail to load, and this shape
-// cannot go missing.
-void DrawCalendarGlyph(ID2D1DeviceContext2* context, const D2D1_RECT_F& box, float opacity) {
-    if (!context) return;
-    const float cx = (box.left + box.right) * 0.5f;
-    const float cy = (box.top + box.bottom) * 0.5f;
-
-    ID2D1SolidColorBrush* brush = nullptr;
-
-    // The tile the calendar sits on: a wash, not a panel -- it reads as a raised key beside the
-    // words without competing with them.
-    D2D1_ROUNDED_RECT tile = {D2D1::RectF(box.left, box.top, box.right, box.bottom), 6.0f, 6.0f};
-    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f * opacity),
-                                                 &brush)) &&
-        brush) {
-        context->FillRoundedRectangle(&tile, brush);
-        brush->Release();
-    }
-
-    // The calendar itself: an outlined page, two binding nubs above it, and its grid of days.
-    const float pageWidth = 13.0f;
-    const float pageHeight = 12.0f;
-    const D2D1_RECT_F page = D2D1::RectF(cx - pageWidth * 0.5f, cy - pageHeight * 0.5f + 1.2f,
-                                         cx + pageWidth * 0.5f, cy + pageHeight * 0.5f + 1.2f);
-    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.82f * opacity),
-                                                 &brush)) &&
-        brush) {
-        const D2D1_ROUNDED_RECT outline = {page, 3.0f, 3.0f};
-        context->DrawRoundedRectangle(&outline, brush, 1.2f);
-
-        const D2D1_ROUNDED_RECT nubs[2] = {
-            {D2D1::RectF(page.left + 2.4f, page.top - 2.4f, page.left + 4.6f, page.top + 1.2f), 1.1f,
-             1.1f},
-            {D2D1::RectF(page.right - 4.6f, page.top - 2.4f, page.right - 2.4f, page.top + 1.2f), 1.1f,
-             1.1f}};
-        for (const D2D1_ROUNDED_RECT& nub : nubs) context->FillRoundedRectangle(&nub, brush);
-        brush->Release();
-    }
-
-    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.46f * opacity),
-                                                 &brush)) &&
-        brush) {
-        for (int row = 0; row < 2; ++row) {
-            for (int column = 0; column < 3; ++column) {
-                const float x = page.left + 3.0f + column * 3.4f;
-                const float y = page.top + 4.6f + row * 3.4f;
-                const D2D1_ROUNDED_RECT dot = {D2D1::RectF(x, y, x + 1.5f, y + 1.5f), 0.7f, 0.7f};
-                context->FillRoundedRectangle(&dot, brush);
-            }
-        }
-        brush->Release();
-    }
-
-    // The one coloured thing in the run, which is what the eye lands on first in the reference.
-    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.32f, 0.62f, 1.00f, 0.95f * opacity),
-                                                 &brush)) &&
-        brush) {
-        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(page.right - 0.8f, page.bottom - 0.8f),
-                                            2.0f, 2.0f),
-                             brush);
-        brush->Release();
-    }
 }
 
 // The weather glyph: a cloud with rain under it, in the line's own blue. Flat rather than glossy --
@@ -661,25 +589,16 @@ void DrawCloudGlyph(ID2D1DeviceContext2* context, const D2D1_RECT_F& box, float 
 
 } // namespace
 
-TextRenderer::StatusLineMetrics TextRenderer::MeasureStatusLine(const wchar_t* weekday,
-                                                               const wchar_t* day,
-                                                               const wchar_t* time,
-                                                               const wchar_t* sky,
-                                                               const wchar_t* temperature) const {
-    StatusLineMetrics metrics;
-    if (!factory_) return metrics;
-
+float TextRenderer::MeasureStatusLine(const wchar_t* weekday, const wchar_t* day,
+                                      const wchar_t* time, const wchar_t* sky,
+                                      const wchar_t* temperature) const {
+    if (!factory_) return 0.0f;
     const StatusRunFormats formats{statusWeekdayFormat_, statusDayFormat_, statusTimeFormat_,
                                    statusWeatherFormat_};
     StatusPiece pieces[12] = {};
-    const int fullCount = BuildStatusRun(factory_, formats, weekday, day, time, sky, temperature,
-                                         true, pieces, 12);
-    metrics.full = StatusRunWidth(pieces, fullCount);
-
-    const int compactCount = BuildStatusRun(factory_, formats, weekday, day, time, sky, temperature,
-                                            false, pieces, 12);
-    metrics.compact = StatusRunWidth(pieces, compactCount);
-    return metrics;
+    const int count = BuildStatusRun(factory_, formats, weekday, day, time, sky, temperature,
+                                     pieces, 12);
+    return StatusRunWidth(pieces, count);
 }
 
 void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box,
@@ -717,22 +636,11 @@ void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox
                                    statusWeatherFormat_};
     if (!formats.weekday || !formats.day || !formats.time || !formats.weather) return;
 
-    // WHICH FORM, decided by measurement and not by a guess: the glyphs are the first thing to go
-    // and the only thing that goes. A box too narrow for even the words would clip them, which the
-    // self-test rules out for both boxes this is called with.
-    const float available = (box.rect.right - box.rect.left) - kStatusStripPadDip * 2.0f;
     StatusPiece pieces[12] = {};
-    const int fullCount = BuildStatusRun(factory_, formats, weekdayText_, dayText_, timeText_, sky,
-                                         temperature, true, pieces, 12);
-    const float fullWidth = StatusRunWidth(pieces, fullCount);
-
-    const bool withGlyphs = fullWidth <= available;
-    const int count = withGlyphs
-                          ? fullCount
-                          : BuildStatusRun(factory_, formats, weekdayText_, dayText_, timeText_, sky,
-                                           temperature, false, pieces, 12);
+    const int count = BuildStatusRun(factory_, formats, weekdayText_, dayText_, timeText_, sky,
+                                     temperature, pieces, 12);
     if (count <= 0) return;
-    const float runWidth = withGlyphs ? fullWidth : StatusRunWidth(pieces, count);
+    const float runWidth = StatusRunWidth(pieces, count);
 
     // CENTRED in the box, because the box is a fixed width and the run is not: the island is 220
     // whatever the date happens to be, and centring keeps its two ends even.
@@ -744,13 +652,6 @@ void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox
         const float centreY = (box.rect.top + box.rect.bottom) * 0.5f;
 
         switch (piece.kind) {
-            case StatusPiece::Kind::Calendar:
-                DrawCalendarGlyph(context,
-                                  D2D1::RectF(x, centreY - piece.widthDip * 0.5f,
-                                              x + piece.widthDip, centreY + piece.widthDip * 0.5f),
-                                  opacity);
-                break;
-
             case StatusPiece::Kind::Cloud:
                 DrawCloudGlyph(context,
                                D2D1::RectF(x, centreY - piece.widthDip * 0.5f, x + piece.widthDip,

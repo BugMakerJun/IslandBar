@@ -5408,7 +5408,7 @@ void TestMusicCardLayout() {
                       L"a frame of no length moves the fade nowhere", fadeDetail);
             }
 
-            // The run is a composition, and both of the boxes it is drawn in have to hold it.
+            // The run is a composition, and BOTH of the boxes it is drawn in have to hold it.
             //
             // THE BOX IS A FIXED WIDTH and the run is centred in it, so a run that outgrew its box
             // would lose a piece off each end -- and it would lose them at the moment the weather
@@ -5416,10 +5416,11 @@ void TestMusicCardLayout() {
             // Measured rather than eyeballed: the width of a piece is a property of the face and the
             // text, and both can change under this code.
             //
-            // The numbers that matter, and the reason the two forms exist at all: the band is 268
-            // wide (248 usable) and the island is 220 (200 usable), while the run WITH the two glyphs
-            // is about 230. So the island draws the compact form and the band draws the full one, and
-            // this is where that is checked rather than assumed.
+            // The island is the tighter of the two boxes and the one that sets the sizes: the band is
+            // 268 wide (252 usable) and the pill is 220 (204 usable), and the SAME run is drawn in
+            // both -- there is no second form to fall back to. That is only true because the calendar
+            // glyph at the head of the run was removed on the user's word; with it the run was
+            // 235.6 DIP and the pill could not hold it (HANDOFF 8.48, 8.49).
             {
                 TextRenderer runText;
                 if (runText.Initialize()) {
@@ -5431,38 +5432,29 @@ void TestMusicCardLayout() {
                     const wchar_t* sky = L"\u5f3a\u9635\u96e8";            // 强阵雨
                     const wchar_t* temperature = L"-12\u00b0";
 
-                    const TextRenderer::StatusLineMetrics widest =
+                    const float widest =
                         runText.MeasureStatusLine(weekday, day, time, sky, temperature);
                     const float bandAvailable = kStatusStripWidthDip - kStatusStripPadDip * 2.0f;
                     const float pillAvailable = kCollapsedWidthDip - kStatusStripPadDip * 2.0f;
 
                     wchar_t fitDetail[256];
                     std::swprintf(fitDetail, 256,
-                                  L"full %.1f / compact %.1f DIP; band %.1f, pill %.1f available",
-                                  widest.full, widest.compact, bandAvailable, pillAvailable);
-                    Check(widest.full > widest.compact,
-                          L"the run with the two glyphs is wider than the run without them",
-                          fitDetail);
-                    Check(widest.full > 0.0f && widest.full <= bandAvailable,
-                          L"the full run fits the band beside the deck", fitDetail);
-                    Check(widest.compact > 0.0f && widest.compact <= pillAvailable,
-                          L"the compact run fits inside the island itself", fitDetail);
-
-                    // AND THE ISLAND MUST CHOOSE THE FORM IT HAS ROOM FOR. The two boxes differ by
-                    // more than the glyphs are worth, so the pill would clip the full run -- which is
-                    // why the choice is made by this comparison and not by which caller is drawing.
-                    Check(widest.full > pillAvailable,
-                          L"the full run would NOT fit the island, so the island cannot take it",
-                          fitDetail);
+                                  L"widest run %.1f DIP; pill %.1f available, band %.1f",
+                                  widest, pillAvailable, bandAvailable);
+                    Check(pillAvailable < bandAvailable,
+                          L"the island is the tighter of the two boxes", fitDetail);
+                    Check(widest > 0.0f && widest <= pillAvailable,
+                          L"the widest run fits inside the island itself", fitDetail);
+                    Check(widest > 0.0f && widest <= bandAvailable,
+                          L"the same run fits the band beside the deck", fitDetail);
 
                     // A reading that is missing takes its word with it: with no sky the run is
                     // shorter, which is what a machine with no position and no city shows.
-                    const TextRenderer::StatusLineMetrics noReading =
+                    const float noReading =
                         runText.MeasureStatusLine(weekday, day, time, nullptr, nullptr);
-                    std::swprintf(fitDetail, 256, L"compact %.1f / without a reading %.1f DIP",
-                                  widest.compact, noReading.compact);
-                    Check(noReading.compact > 0.0f && noReading.compact <= pillAvailable &&
-                              noReading.compact < widest.compact,
+                    std::swprintf(fitDetail, 256, L"with a reading %.1f, without %.1f DIP", widest,
+                                  noReading);
+                    Check(noReading > 0.0f && noReading <= pillAvailable && noReading < widest,
                           L"a line with no reading is shorter and still fits", fitDetail);
                 }
             }

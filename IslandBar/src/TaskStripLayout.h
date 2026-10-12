@@ -622,12 +622,14 @@ inline int TaskIconsThatFit(float monitorWidthDip, int wanted) {
 inline constexpr float kStatusStripWidthDip  = 268.0f;
 inline constexpr float kStatusStripHeightDip = 26.0f;
 inline constexpr float kStatusStripGapDip    = 10.0f;   // between the strip and the system button
-// The line's own inset inside whichever box it is drawn in.
+// The run's own inset inside whichever box it is drawn in.
 //
-// 10 rather than 12, and the number is set by the PILL rather than by the band: the same line is
-// drawn inside a 220 DIP pill as well (see StatusPlacementFor), where 2 DIP of padding is 2 DIP of
-// room the widest line does not have. The strip is 268 wide, so its own inset hardly matters.
-inline constexpr float kStatusStripPadDip    = 10.0f;
+// 8, and the number is set by the PILL rather than by the band: the same run is drawn inside a
+// 220 DIP pill (see StatusPlacementFor), where every DIP of inset is a DIP of room the widest run
+// does not have -- measured at 196 DIP of the 204 that 8 DIP of inset leaves. The band is 268
+// wide, so its own inset hardly matters; the run is centred either way, so the inset is not a
+// layout choice, it is the clearance the text keeps from the capsule's rounded ends.
+inline constexpr float kStatusStripPadDip    = 8.0f;
 
 // The strip's rectangle, in window-local DIPs. Vertically centred on the island, like
 // the deck buttons, so the whole left cluster shares one line.
