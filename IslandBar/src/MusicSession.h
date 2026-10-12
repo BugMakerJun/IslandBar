@@ -222,26 +222,38 @@ int SessionScoreForTest(const wchar_t* appId, bool playing);
 inline constexpr unsigned long long kPollIntervalMs = 1000;
 inline constexpr unsigned long long kSkipPollIntervalMs = 250;
 inline constexpr unsigned long long kSkipPollWindowMs = 6000;
-// How often the poll may ask a player for a cover it has not published yet. Each ask opens a stream and
-// re-encodes a PNG, so this is deliberately slower than the poll itself.
+// How often the poll may ask a player for a cover it has not published yet.
+//
+// ASKING IS ALMOST FREE, and that is what the first version of this got wrong: it stopped asking 15 seconds
+// after the track changed, on the reasoning that "the player has had its chance". QQ音乐 published the cover
+// for 《蚂蚁 (Live)》 more than a minute in -- measured: `music: cover NONE (0 bytes)` at 16:53:56 and
+// `gsmtc_probe` reporting `Thumbnail: present` for the same track while the bar had already stopped, so the
+// whole track showed the ♪ placeholder ("封面老是查询不到").
+//
+// The cost of NOT asking is real (a missing cover for the whole song); the cost of asking is a property read:
+// `FetchArtwork` returns immediately when the session carries no thumbnail, and the stream open plus PNG
+// re-encode happen only once there is something to fetch -- after which the asking stops anyway, because the
+// cover is no longer missing. So: every second for the first stretch, then every few seconds for as long as
+// the track has none.
 inline constexpr unsigned long long kArtworkRetryMs = 1000;
-// ... and how long a track is given to publish one at all. A player that has none (some tracks simply have no
-// cover -- see HANDOFF 8.38) must not be asked once a second for the whole song.
-inline constexpr unsigned long long kArtworkRetryWindowMs = 15000;
+inline constexpr unsigned long long kArtworkRetryWindowMs = 15000;   // the fast stretch, then:
+inline constexpr unsigned long long kArtworkRetrySlowMs = 5000;
 
 // Whether this poll should ask the player for the cover.
 //
-// The rule the bar got wrong: it asked ONLY when the track changed, so a player that publishes the thumbnail a
-// moment after the metadata never had it picked up -- the cover appeared only after restarting the bar
-// ("切歌就没有了，关闭后再打开就能查到"). It now asks again while there is nothing for the current track, and
-// stops: once a cover arrives, and for good when the track's first kArtworkRetryWindowMs have gone by.
+// Two rules have been wrong here, in opposite directions, and the shape below is what is left after both:
+// the first asked ONLY when the track changed (a late thumbnail was never picked up at all), the second asked
+// for 15 seconds and then gave up (a thumbnail published at 60 seconds was never picked up either). It asks
+// while the current track has nothing, and stops only when there IS something.
 inline bool ShouldFetchArtwork(bool trackChanged, bool artworkMissing,
                               unsigned long long sinceLastTryMs,
                               unsigned long long sinceTrackChangeMs) {
     if (trackChanged) return true;
     if (!artworkMissing) return false;
-    if (sinceTrackChangeMs >= kArtworkRetryWindowMs) return false;
-    return sinceLastTryMs >= kArtworkRetryMs;
+    const unsigned long long cadence = (sinceTrackChangeMs < kArtworkRetryWindowMs)
+                                          ? kArtworkRetryMs
+                                          : kArtworkRetrySlowMs;
+    return sinceLastTryMs >= cadence;
 }
 
 inline unsigned long long NextPollIntervalMs(unsigned long long nowMs, unsigned long long lastSkipMs,

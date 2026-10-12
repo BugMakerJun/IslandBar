@@ -3801,8 +3801,14 @@ void TestMusicCardLayout() {
                       L"... but not more than once a second", coverDetail);
                 Check(!ShouldFetchArtwork(false, false, 5000, 1000),
                       L"a track that has a cover is not asked at all", coverDetail);
-                Check(!ShouldFetchArtwork(false, true, 5000, kArtworkRetryWindowMs),
-                      L"a track that never publishes one stops being asked", coverDetail);
+                // THE CASE THAT WAS STILL BROKEN: a player that publishes the thumbnail LATE -- or, as here,
+                // more than a minute in. The previous rule stopped asking after kArtworkRetryWindowMs, so
+                // 《蚂蚁 (Live)》 showed the placeholder for its whole length while the session was carrying
+                // the cover all along ("封面老是查询不到").
+                Check(ShouldFetchArtwork(false, true, kArtworkRetrySlowMs, 60000),
+                      L"a cover that arrives a minute late is still picked up", coverDetail);
+                Check(!ShouldFetchArtwork(false, true, kArtworkRetrySlowMs - 1, 60000),
+                      L"... but the late asking is slower than the early one", coverDetail);
             }
         }
     }

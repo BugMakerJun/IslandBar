@@ -1,0 +1,43 @@
+﻿watching 16 WeChat process(es): 5312, 11572, 12220, 13240, 14660, 25284, 26916, 27716, 28232, 36620, 38440, 4044, 8448, 13212, 24740, 25432
+NOW SEND A MESSAGE: from your phone to the File Transfer chat (wen jian chuan shu zhu shou), or have someone message you.
+watching for 8 seconds ...
+OCR engine available; recogniser languages: en-US, zh-Hans-CN
+NEW  hwnd=11141458 pid=4044 class='Qt51514QWindowIcon' title='微信音视频通话 ' visible=True rect=[1079,365 376x648] style=0x96C70000 ex=0x00000100
+     PrintWindow=True -> C:\PROJECT\Taskbar\IslandBar\captures\weixin-win-11141458.png
+     UIA root name='微信音视频通话 ' type='ControlType.Window'
+       UIA child 'Weixin' [ControlType.Pane]
+       UIA child 'MMUIRenderSubWindow' [ControlType.Pane]
+NEW  hwnd=396914 pid=4044 class='DisplayICC_SystemMessageWindow' title='' visible=False rect=[0,0 136x39] style=0x04C00000 ex=0x00000100
+NEW  hwnd=1248274 pid=24740 class='Base_PowerMessageWindow' title='' visible=False rect=[0,0 0x0] style=0x84000000 ex=0x08000000
+NEW  hwnd=1445410 pid=4044 class='Qt51514QWindowIcon' title='Weixin' visible=False rect=[1192,625 176x199] style=0x86CF0000 ex=0x00000100
+NEW  hwnd=2493884 pid=26916 class='Chrome_WidgetWin_0' title='' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000080
+NEW  hwnd=3542626 pid=4044 class='Qt51514WxTrayIconMessageWindowClass' title='WxTrayIconMessageWindow' visible=False rect=[130,162 1920x1035] style=0x04C00000 ex=0x00000100
+NEW  hwnd=11274292 pid=4044 class='Base_PowerMessageWindow' title='' visible=False rect=[0,0 0x0] style=0x84000000 ex=0x08000000
+NEW  hwnd=6754572 pid=38440 class='Chrome_WidgetWin_0' title='' visible=False rect=[104,136 1920x1035] style=0x06CF0000 ex=0x00000100
+NEW  hwnd=4326090 pid=38440 class='Base_PowerMessageWindow' title='' visible=False rect=[0,0 0x0] style=0x84000000 ex=0x08000000
+NEW  hwnd=2621648 pid=4044 class='Chrome_SystemMessageWindow' title='' visible=False rect=[0,0 136x39] style=0x04C00000 ex=0x00000100
+NEW  hwnd=69116 pid=25284 class='Chrome_WidgetWin_0' title='' visible=False rect=[286,318 1920x1035] style=0x06CF0000 ex=0x00000100
+NEW  hwnd=69108 pid=25284 class='Base_PowerMessageWindow' title='' visible=False rect=[0,0 0x0] style=0x84000000 ex=0x08000000
+NEW  hwnd=789872 pid=4044 class='Qt51514QWindowIcon' title='微信' visible=True rect=[-32000,-32000 160x28] style=0xB6C70000 ex=0x00000100
+     PrintWindow=True -> C:\PROJECT\Taskbar\IslandBar\captures\weixin-win-789872.png
+     UIA root name='微信' type='ControlType.Window'
+       UIA child 'Weixin' [ControlType.Pane]
+       UIA child 'MMUIRenderSubWindow' [ControlType.Pane]
+NEW  hwnd=19074630 pid=4044 class='MSCTFIME UI' title='MSCTFIME UI' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000000
+NEW  hwnd=3604888 pid=4044 class='IME' title='Default IME' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000000
+NEW  hwnd=526862 pid=24740 class='IME' title='Default IME' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000000
+NEW  hwnd=1248130 pid=38440 class='MSCTFIME UI' title='MSCTFIME UI' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000000
+NEW  hwnd=920050 pid=38440 class='IME' title='Default IME' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000000
+NEW  hwnd=2100030 pid=26916 class='IME' title='Default IME' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000000
+NEW  hwnd=69110 pid=25284 class='IME' title='Default IME' visible=False rect=[0,0 0x0] style=0x8C000000 ex=0x00000000
+NEW  hwnd=4460706 pid=4044 class='Qt51514QWindowIcon' title='Weixin' visible=True rect=[1446,1004 1x1] style=0x56000000 ex=0x00000000
+NEW  hwnd=4461292 pid=4044 class='MMUIRenderSubWindow' title='MMUIRenderSubWindow' visible=True rect=[1087,365 360x640] style=0x54000000 ex=0x00080020
+     PrintWindow=True -> C:\PROJECT\Taskbar\IslandBar\captures\weixin-win-4461292.png
+     UIA root name='MMUIRenderSubWindow' type='ControlType.Pane'
+NEW  hwnd=1641020 pid=38440 class='Chrome_WidgetWin_0' title='' visible=False rect=[1500,688 100x30] style=0x56000000 ex=0x08000020
+NEW  hwnd=1510248 pid=38440 class='Chrome_RenderWidgetHostHWND' title='Chrome Legacy Window' visible=False rect=[1500,688 100x30] style=0x56300000 ex=0x00000020
+NEW  hwnd=1576430 pid=26916 class='Intermediate D3D Window' title='' visible=False rect=[1500,688 100x30] style=0x58000000 ex=0x00280024
+NEW  hwnd=2034638 pid=4044 class='Qt51514QWindowIcon' title='Weixin' visible=True rect=[-30821,-31294 1x1] style=0x56000000 ex=0x00000000
+NEW  hwnd=5900994 pid=4044 class='MMUIRenderSubWindow' title='MMUIRenderSubWindow' visible=True rect=[-31992,-32000 1172x707] style=0x54000000 ex=0x00080020
+     PrintWindow=True -> C:\PROJECT\Taskbar\IslandBar\captures\weixin-win-5900994.png
+     UIA root name='MMUIRenderSubWindow' type='ControlType.Pane'

@@ -1,6 +1,6 @@
 # IslandBar 手工自测清单
 
-> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 750 项）覆盖几何、解析、像素，
+> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 751 项）覆盖几何、解析、像素，
 > 但"鼠标点下去到底发生什么"必须在真人手里过一遍。
 > **已脱敏**：命令里的 `$env:USERPROFILE` 就是你的用户目录（本文档按 PowerShell 写，所以用这个变量而不是 `%USERPROFILE%`）。
 >
@@ -165,6 +165,7 @@ start button: island x [1170, 1390] -> ... opacity 1.00
 | 换一首**没有封面**的歌，把鼠标移到岛上开卡片（2026-10-12 HANDOFF 8.33 起） | 卡片是一块**深色卡面**，字和进度条都在卡面里，**不该**是"字直接飘在壁纸上" | 想确认那首歌到底有没有封面：跑 `build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe`，看 `Thumbnail: present/none` —— `none` 就是这首歌没发布封面，栏只能给它一块自己的底面 |
 | 连续切两首歌，第二首**封面晚到**（2026-10-12 HANDOFF 8.42 起） | 第二首的封面必须**真的换成它自己的**；日志全对但画面不换，就是缓存键重复那类缺陷 | 日志正常不足以判定（`dropped`/`arrived late`/`decoded` 都会齐）；判定要看**画面**。核按钮：自检里 `a new cover with a repeated revision is not the old bitmap`（读数 `A cached 1, B cached 1, A still cached 0`）|
 | 切歌时盯住卡片左边那块（2026-10-12 HANDOFF 8.41 起） | 新歌**没有封面时**显示 **♪ 占位符**（绝不能还是上一首的专辑图）；播放器随后发出封面就自动换上 | 日志：换歌那行下面应是 `music: cover NONE` + `music: cover dropped (the new track has none yet)`；若封面稍后到达会再出现 `music: cover arrived late (N bytes)` |
+| 放歌时**别把鼠标移到岛上**，等它自然换歌（2026-10-12 HANDOFF 8.43 起） | 胶囊里那条**声波的颜色应该跟着新歌变**（以前不动鼠标就一直是上一首的颜色）| 日志：换歌后应出现 `music: cover decoded 宽x高`，且那一帧前后**没有** `state: expanded`（= 卡片没打开也解码了）|
 | 切歌后**封面还是空的**（2026-10-12 HANDOFF 8.40 起） | 应在一两秒内自己补上；日志里出现 `music: cover arrived late (N bytes)` 就是补上了 | 若仍是空的，跑探针看这首歌到底有没有封面：`gsmtc_probe.exe` 的 `Thumbnail: present/none`。**present 而栏写 `cover NONE` = 栏的读取出了问题**（8.40 修的就是这个：长度为 0 的流以前会被拒绝） |
 | 在**QQ音乐自己的窗口里**点切歌（2026-10-12 HANDOFF 8.39 起） | 新歌标题一秒内换上；封面若播放器晚发，**一两秒内自己出现**，不需要重启栏 | 日志：`music: cover NONE (0 bytes)` 之后若出现 **`music: cover arrived late (N bytes)`**，就是"晚到的封面被接住了"（这正是以前必须重启才能看到的那种）；轮询行距应 ≈1 秒（旧版是 2 秒） |
 | 点卡片上的 ⏭ ⏮ 切歌（2026-10-12 HANDOFF 8.38 起） | 新歌的**标题、封面、歌词**在**一秒内**换过来（以前要 2-3 秒） | 日志：`music: next requested` → `music: transport next accepted` → 新歌那行的时间差。跳曲后 4 秒内轮询是 ~250 ms 一次，所以新歌一出现就会被读到 |
@@ -255,7 +256,7 @@ Windows 把合成按键丢了；必须用那两个快捷方式启动，别从 ID
 # 最近 20 行日志
 Get-Content $env:USERPROFILE\IslandBar\island_bar.log -Tail 20
 
-# 全部自检（750 项：几何 / 解析 / 像素）
+# 全部自检（751 项：几何 / 解析 / 像素）
 & "$env:USERPROFILE\IslandBar\island_bar.exe" --self-test
 
 # Windows 侧最新的真通知（这条通道的调试口）

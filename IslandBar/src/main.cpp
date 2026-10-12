@@ -3355,7 +3355,22 @@ float musicWavePhase = 0.0f;
                 // track does. The blurred background is built here too -- it is a
                 // second encode/decode pair, and doing it per frame would be wasteful
                 // for a wash that only changes with the track.
-                if (frame.music && nowPlaying.artworkSize > 0) {
+                //
+                // ... AND IT IS DECODED WHETHER OR NOT THE CARD IS UP.
+                //
+                // This used to be gated on `frame.music` -- "nothing is displaying it, so do not decode it" --
+                // and that gate had two costs, which the user found one after the other:
+                //
+                //   * the pill's audio wave takes its COLOUR from this same decode, so with the card closed the
+                //     strip kept the previous track's accent for the whole song. Reported as "歌词后面的 随音乐
+                //     跳动的的颜色 如果鼠标不移入 就一直一个颜色" -- the colour only changed when the pointer
+                //     went onto the island, because that is what opened the card, and opening the card is what
+                //     ran the decode.
+                //   * a cover that arrived while the card was closed had not been decoded by the time the card
+                //     opened, so the card showed the placeholder for a moment and then caught up.
+                //
+                // One decode per track either way: the same work the card would have done a moment later.
+                if (nowPlaying.artworkSize > 0) {
                     if (nowPlaying.artworkRevision != lastDecodedArtworkRevision) {
                         lastDecodedArtworkRevision = nowPlaying.artworkRevision;
                         island::DecodedImage decoded;
@@ -3418,8 +3433,11 @@ float musicWavePhase = 0.0f;
                         // same cover, so it changes exactly when the cover does.
                         frame.backgroundRevision = nowPlaying.artworkRevision;
                         // The card's own fill has to become translucent or the wash
-                        // would be hidden behind it.
-                        frame.pill.fill = D2D1::ColorF(0.04f, 0.05f, 0.08f, 0.98f);
+                        // would be hidden behind it -- and only the CARD's: with no card up this would change
+                        // the island's own fill, which is the one thing the wash has nothing to do with.
+                        if (frame.music) {
+                            frame.pill.fill = D2D1::ColorF(0.04f, 0.05f, 0.08f, 0.98f);
+                        }
                     }
                 } else if (nowPlaying.artworkRevision == 0 && lastDecodedArtworkRevision != 0) {
                     // THE COVER BELONGS TO THE TRACK, SO DROP IT WHEN THE TRACK HAS NONE.
