@@ -626,7 +626,9 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 (frame.restingPill.rect.right > frame.restingPill.rect.left)
                     ? island::RowAnchorBox(box, frame.restingPill)
                     : box;
-            if (frame.statusStripOpacity > 0.01f) {
+            // ... and NOT while a full-screen application is in front: then only the island is the bar
+            // ("只要显示灵动岛就行 左右两侧的不用显示"), and this line stands in the band the island's left.
+            if (frame.statusStripOpacity > 0.01f && !frame.fullscreenApp) {
                 // Multiplied by the BAR's own strength, so a card opening beneath the strip cannot dim
                 // it -- the same rule the deck is drawn under -- and on the island's own colour, so the
                 // words stand on the bar rather than on the wallpaper.
@@ -892,7 +894,9 @@ void Renderer::RenderFrame(const FrameState& frame) {
         // `barIsland`, computed once above, is exactly that box -- the status strip stands beside this deck
         // and is measured from the same rectangle, so the two are the same shape by construction.
         const RoundedBox& deckIsland = barIsland;
-        if (frame.contentOpacity > 0.01f) {
+        // ... and not while a full-screen application is in front: the deck and the application icon row
+        // are the "left and right sides" that must stay off screen with it.
+        if (frame.contentOpacity > 0.01f && !frame.fullscreenApp) {
             DrawDecks(deckIsland, frame);
         }
     }

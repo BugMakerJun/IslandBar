@@ -3,7 +3,12 @@
 // =====================================================================
 #include "Monitor.h"
 
+#include <dwmapi.h>
 #include <shellscalingapi.h>
+
+#pragma comment(lib, "dwmapi.lib")
+
+#include <cwchar>
 
 namespace island {
 namespace {
@@ -82,6 +87,40 @@ int QueryAllMonitors(MonitorGeometry* out, int capacity) {
         reinterpret_cast<LPARAM>(&collector));
 
     return collector.count;
+}
+
+bool FullScreenAppInFront(const RECT& monitor) {
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground) return false;
+
+    // Our own windows do not count, and the pid is enough: the bar is one process and none of its windows
+    // is an application the user is playing. (It is also why this needs no handle passed in, which keeps
+    // the answer a function of the monitor alone.)
+    DWORD pid = 0;
+    GetWindowThreadProcessId(foreground, &pid);
+    if (pid == GetCurrentProcessId()) return false;
+
+    if (!IsWindowVisible(foreground) || IsIconic(foreground)) return false;
+
+    wchar_t className[64] = {};
+    GetClassNameW(foreground, className, 64);
+    if (::_wcsicmp(className, L"Progman") == 0 || ::_wcsicmp(className, L"WorkerW") == 0 ||
+        ::_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+        ::_wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0) {
+        return false;
+    }
+
+    // A window DWM has cloaked is not on screen: an application on another virtual desktop covers the
+    // monitor and nobody is looking at it.
+    int cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(foreground, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+        cloaked != 0) {
+        return false;
+    }
+
+    RECT rect = {};
+    if (!GetWindowRect(foreground, &rect)) return false;
+    return WindowCoversMonitor(rect, monitor);
 }
 
 } // namespace island

@@ -81,4 +81,18 @@ inline bool WindowCoversMonitor(const RECT& window, const RECT& monitor) {
            window.right >= monitor.right && window.bottom >= monitor.bottom;
 }
 
+// Whether a full-screen application is in front of this program on `monitor`.
+//
+// NOT the shell's answer, and it cannot be: the shell announces a full-screen application only to a bar
+// that is REGISTERED as an AppBar (ABN_FULLSCREENAPP), and this program is not one by default -- its own
+// log says "appbar: not claimed" on every run. So the flag the AppBar code maintains is false in the
+// shipped configuration, and the bar used to keep painting the island and its date-and-time line over a
+// game ("现在的灵动岛一行的在玩游戏的时候也显示出来了").
+//
+// The exceptions are the windows that cover the screen without being an application -- the desktop, the
+// shell's own surfaces -- and windows DWM has cloaked, which are not on screen at all (a UWP application
+// on another virtual desktop covers the monitor and nobody is looking at it). Windows of this process are
+// excluded by pid, which is what makes the answer "another application has the screen".
+bool FullScreenAppInFront(const RECT& monitor);
+
 } // namespace island

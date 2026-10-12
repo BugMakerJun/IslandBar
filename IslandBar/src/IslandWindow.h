@@ -164,9 +164,17 @@ public:
     // `cardLeftDip` is where the frame loop placed an outer card (its LEFT edge), or 0 when no card is
     // up. It is needed because the card is not inside the state's own shape: it hangs below the bar and
     // is pinned to the control that opened it, so a test built only from the shapes misses it.
+    // `fullscreenApp` is the one argument here that is not geometry: while an application has the screen
+    // only the ISLAND is the bar, because only the island is DRAWN then (see Renderer::RenderFrame). It is
+    // passed in rather than measured here so the predicate stays a function of its arguments, which is what
+    // lets the self-test ask about both answers.
     static bool ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                     POINT screenPoint, IslandState state, int iconCount = 0,
-                                    float cardLeftDip = 0.0f);
+                                    float cardLeftDip = 0.0f, bool fullscreenApp = false);
+
+    // Told by the frame loop, which measures it (see island::FullScreenAppInFront). The hit test is
+    // answered here, so it has to be told the same thing the renderer was.
+    void SetFullscreenApp(bool fullscreenApp);
 
     // Tells the window how many application icons are on screen.
     //
@@ -509,6 +517,9 @@ private:
     // Non-zero while the status strip (the date, the time and the weather) is up, in DIPs. Held here so
     // the input region can cover it; see SetStatusStripWidth.
     float statusStripWidthDip_ = 0.0f;
+    // Whether a full-screen application is in front, as measured by the frame loop. Held here because the
+    // hit test is answered here: while it is set, only the island is the bar. See SetFullscreenApp.
+    bool fullscreenApp_ = false;
     // Which card the frame loop says is up: what the cursor's hit tests are gated on. See SetCardOwner.
     CardOwner cardOwner_ = CardOwner::None;
     // The last value written to the log, so the hover trace reports changes rather than every poll.

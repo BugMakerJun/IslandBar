@@ -59,42 +59,6 @@
 
 namespace {
 
-// Whether a FULL-SCREEN APPLICATION is in front of the bar.
-//
-// OURS, and it has to be. The shell announces a full-screen application only to a bar that is REGISTERED
-// as an AppBar (ABN_FULLSCREENAPP), and this program is not one by default -- its own log says so on
-// every run ("appbar: not claimed"). So the flag the AppBar code maintains is false in the shipped
-// configuration, the bar never noticed a game, and it kept painting the island and its date-and-time
-// line over one. Reported as "现在的灵动岛一行的在玩游戏的时候也显示出来了".
-//
-// Deliberately blunt: the foreground window's rectangle against the monitor's. The exceptions are the
-// windows that cover the screen without being an application -- the desktop, the shell's taskbar, our own
-// -- and windows DWM has cloaked, which are not on screen at all (a UWP application on another virtual
-// desktop covers the monitor and nobody is looking at it).
-bool FullScreenAppInFront(HWND ownWindow, const RECT& monitor) {
-    const HWND foreground = GetForegroundWindow();
-    if (!foreground || foreground == ownWindow) return false;
-    if (!IsWindowVisible(foreground) || IsIconic(foreground)) return false;
-
-    wchar_t className[64] = {};
-    GetClassNameW(foreground, className, 64);
-    if (::_wcsicmp(className, L"Progman") == 0 || ::_wcsicmp(className, L"WorkerW") == 0 ||
-        ::_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
-        ::_wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0) {
-        return false;
-    }
-
-    int cloaked = 0;
-    if (SUCCEEDED(DwmGetWindowAttribute(foreground, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
-        cloaked != 0) {
-        return false;
-    }
-
-    RECT rect = {};
-    if (!GetWindowRect(foreground, &rect)) return false;
-    return island::WindowCoversMonitor(rect, monitor);
-}
-
 // This is a Windows-subsystem executable (see src/CMakeLists.txt), so it has no
 // console of its own: launched by double-click it shows only the bar, which is
 // the point. Diagnostics still need somewhere to go, so:
@@ -1607,9 +1571,13 @@ float musicWavePhase = 0.0f;
                 // configuration.
                 if (GetTickCount64() - lastFullscreenCheck >= kFullscreenCheckMs) {
                     lastFullscreenCheck = GetTickCount64();
-                    const bool measured = FullScreenAppInFront(window.Handle(), monitor.screen);
+                    const bool measured = island::FullScreenAppInFront(monitor.screen);
                     if (measured != fullscreenAppInFront) {
                         fullscreenAppInFront = measured;
+                        // ... and the WINDOW is told, because the hit test is answered there: while an
+                        // application has the screen only the island itself is the bar, so a pointer
+                        // crossing the top of it cannot land on an icon or a deck button that is not drawn.
+                        window.SetFullscreenApp(fullscreenAppInFront);
                         // `%s` and not `%ls`: this is the NARROW overload of LogAndPrint, whose arguments
                         // are widened a byte at a time, so a `%ls` here would read a `const char*` as a wide
                         // string -- and the CRT answers an invalid conversion by emptying the whole line,
@@ -2921,6 +2889,9 @@ float musicWavePhase = 0.0f;
                 // paid for that lesson four times, which is why this comment is this emphatic.
                 frame.outerCardUp = window.State() == island::IslandState::Expanded ||
                                     window.FromState() == island::IslandState::Expanded;
+                // ... and whether the bar is in the picture at all: with a full-screen application in front
+                // only the island is drawn (see FrameState::fullscreenApp).
+                frame.fullscreenApp = fullscreenAppInFront;
 
                 frame.systemPanelOpen = systemPanelOpen;
 

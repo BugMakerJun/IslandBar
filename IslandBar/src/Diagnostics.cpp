@@ -1331,6 +1331,53 @@ void TestRenderer(IslandWindow& window) {
                       L"nothing of the bar is painted while a full-screen application is in front",
                       pillDetail);
             }
+
+            // --- ... AND ONLY THE ISLAND IS THE BAR ----------------------------------------------
+            //
+            // Asked for after a message came up over a game: "玩游戏的时候 有通知和通话时 只要显示灵动岛就行
+            // 左右两侧的不用显示". Three readings, and the first is the one that says the other two mean
+            // something: the island's own band has ink, the strip where the application icon row would be
+            // has none, and neither has the one where the Start button sits.
+            {
+                FrameState onlyIsland;
+                onlyIsland.pill.box = BoxForState(IslandState::NoticeStrip, window.CurrentAnchor());
+                onlyIsland.pill.opacity = 1.0f;
+                onlyIsland.state = IslandState::NoticeStrip;
+                onlyIsland.restingPill = pillBox;
+                onlyIsland.contentOpacity = 1.0f;
+                onlyIsland.noticeLine = "a message while a game has the screen";
+                onlyIsland.fullscreenApp = true;
+                renderer.Render(onlyIsland);
+                renderer.Render(onlyIsland);
+
+                // The row and the deck are laid out from the shape the bar is in -- the widened strip here,
+                // through the same RowAnchorBox the renderer uses -- so the bands sampled are the bands
+                // those controls would occupy if they were drawn.
+                const RoundedBox strip = BoxForState(IslandState::NoticeStrip, window.CurrentAnchor());
+                const RectF firstIcon = TaskIconButtonAt(strip, 0, 4, -1);
+                const RectF startButton = StartButtonFor(strip);
+
+                float islandInk = -1.0f;
+                float rowInk = -1.0f;
+                float deckInk = -1.0f;
+                const bool measuredIsland = renderer.RegionLuminance(
+                    strip.rect.left + 40.0f, strip.rect.top, strip.rect.right - 40.0f,
+                    strip.rect.bottom, &islandInk);
+                const bool measuredRow = renderer.RegionLuminance(
+                    firstIcon.left, firstIcon.top, firstIcon.right, firstIcon.bottom, &rowInk);
+                const bool measuredDeck = renderer.RegionLuminance(
+                    startButton.left, startButton.top, startButton.right, startButton.bottom,
+                    &deckInk);
+
+                std::swprintf(pillDetail, 224,
+                              L"island band=%.2f, first icon=%.2f, Start button=%.2f", islandInk,
+                              rowInk, deckInk);
+                Check(measuredIsland && islandInk > 2.0f,
+                      L"the island is drawn while a full-screen application is in front", pillDetail);
+                Check(measuredRow && rowInk < 1.0f,
+                      L"the application icon row beside it is not", pillDetail);
+                Check(measuredDeck && deckInk < 1.0f, L"nor is the Start button", pillDetail);
+            }
         }
 
         // --- a card must not dim the BAR -------------------------------------------
@@ -5211,6 +5258,38 @@ void TestMusicCardLayout() {
                 Check(IslandWindow::ShouldAcceptPointer(fullMon, windowRect, onThePill,
                                                         IslandState::Collapsed, 8, 0.0f),
                       L"and the same point is the island's once the application is not full-screen", dt);
+
+                // ... AND NOTHING ELSE IS, WHILE IT IS: the icon row and the deck are not drawn, so the
+                // pointer must not be able to land on them either. "左右两侧的不用显示" is about what is on
+                // screen; this is the half that decides whether anything still ANSWERS there.
+                const RoundedBox strip = BoxForState(IslandState::NoticeStrip,
+                                                    AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
+                const RectF firstIcon = TaskIconButtonAt(strip, 0, 4, -1);
+                const RectF startButton = StartButtonFor(strip);
+                const POINT onTheFirstIcon = {
+                    static_cast<LONG>((firstIcon.left + firstIcon.right) * 0.5f),
+                    static_cast<LONG>((firstIcon.top + firstIcon.bottom) * 0.5f)};
+                const POINT onTheStartButton = {
+                    static_cast<LONG>((startButton.left + startButton.right) * 0.5f),
+                    static_cast<LONG>((startButton.top + startButton.bottom) * 0.5f)};
+                const POINT onTheStrip = {
+                    static_cast<LONG>((strip.rect.left + strip.rect.right) * 0.5f),
+                    static_cast<LONG>((strip.rect.top + strip.rect.bottom) * 0.5f)};
+
+                std::swprintf(dt, 224, L"first icon %ld,%ld, Start %ld,%ld, strip %ld,%ld",
+                              onTheFirstIcon.x, onTheFirstIcon.y, onTheStartButton.x,
+                              onTheStartButton.y, onTheStrip.x, onTheStrip.y);
+                Check(IslandWindow::ShouldAcceptPointer(fullMon, windowRect, onTheStrip,
+                                                        IslandState::NoticeStrip, 8, 0.0f, true),
+                      L"a message over a full-screen application leaves the island clickable", dt);
+                Check(!IslandWindow::ShouldAcceptPointer(fullMon, windowRect, onTheFirstIcon,
+                                                         IslandState::NoticeStrip, 8, 0.0f, true) &&
+                          !IslandWindow::ShouldAcceptPointer(fullMon, windowRect, onTheStartButton,
+                                                             IslandState::NoticeStrip, 8, 0.0f, true),
+                      L"but neither the icon row nor the Start button answers", dt);
+                Check(IslandWindow::ShouldAcceptPointer(fullMon, windowRect, onTheFirstIcon,
+                                                        IslandState::NoticeStrip, 8, 0.0f, false),
+                      L"and both answer again as soon as the application is not full-screen", dt);
             }
 
             // The rectangle test that decides whether an application has the screen. The near miss is the

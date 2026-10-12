@@ -128,6 +128,16 @@ struct FrameState {
     // the whole of both the opening and the closing animation.
     bool outerCardUp = false;
 
+    // Whether a FULL-SCREEN APPLICATION is in front of the bar: the bar is not part of the picture then,
+    // except for the island itself.
+    //
+    // Set by the frame loop, which measures it (see island::FullScreenAppInFront). What it suppresses:
+    // the deck, the application icon row and the date-and-time line -- the "left and right sides", in the
+    // words of the report: "玩游戏的时候 有通知和通话时 只要显示灵动岛就行 左右两侧的不用显示". A call or a
+    // message is still the island, in the band, because that is what the state says and this flag does not
+    // touch it.
+    bool fullscreenApp = false;
+
     // WHICH card owns the shape this frame -- held from the moment a card is asked for until the shape
     // has finished returning to the bar.
     //
