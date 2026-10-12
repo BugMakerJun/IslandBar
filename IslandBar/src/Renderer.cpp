@@ -590,7 +590,8 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 //
                 // NO SURFACE: the pill has already been filled with exactly the colour the strip paints
                 // for itself.
-                text_->DrawStatusLine(d2dContext_, lineBox, frame.contentOpacity, frame.statusWeather,
+                text_->DrawStatusLine(d2dContext_, lineBox, frame.contentOpacity, frame.statusSky,
+                                      frame.statusTemperature,
                                       D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
             }
 
@@ -620,7 +621,7 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 // words stand on the bar rather than on the wallpaper.
                 text_->DrawStatusLine(d2dContext_, island::StatusStripFor(barIsland),
                                       frame.statusStripOpacity * frame.contentOpacity,
-                                      frame.statusWeather, frame.pill.fill);
+                                      frame.statusSky, frame.statusTemperature, frame.pill.fill);
             }
 
             // The card hangs from the control that was pressed, so its LEFT edge is moved to where that

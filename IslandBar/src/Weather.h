@@ -61,6 +61,14 @@ const wchar_t* WeatherWordForCode(int code);
 // missing-code case without a network, a worker or a window.
 void WeatherLineFor(double temperatureC, int code, wchar_t* out, size_t capacity);
 
+// The same reading in the two pieces the status line draws separately.
+//
+// The line gives them their own sizes and weights and a gap between them, and puts a glyph before
+// the word -- a single joined string could not be laid out that way. Either piece may come back
+// empty, which is what the line draws when there is no reading.
+void WeatherPiecesFor(double temperatureC, int code, wchar_t* sky, size_t skyCapacity,
+                      wchar_t* temperature, size_t temperatureCapacity);
+
 // --- the wire formats -------------------------------------------------
 
 // Percent-encodes a UTF-8 string for use as a query value. Everything outside
@@ -116,6 +124,10 @@ public:
     // nothing has been fetched yet, which is how the strip knows to show the date
     // and the time without it.
     void Line(wchar_t* out, size_t capacity) const;
+
+    // The reading in the two pieces the status line sets apart: the word, and the temperature.
+    void Pieces(wchar_t* sky, size_t skyCapacity, wchar_t* temperature,
+                size_t temperatureCapacity) const;
 
     // Bumped when a reading is published, so the frame loop can redraw once.
     unsigned long long Revision() const;

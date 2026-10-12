@@ -117,20 +117,29 @@ bool TextRenderer::Initialize() {
     dateFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     dateFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-    // The status strip's line, which stands in for the clock while the island is occupied.
+    // The status line's four faces: a hierarchy rather than one sentence (see the header).
     //
-    // NO_WRAP for the reason the pill's line has it: a line that wrapped inside a 26 DIP capsule
-    // would draw its second row over the top of its first, and the strip's contents are known to
-    // fit -- the self-test measures the longest of them against the box.
-    hr = factory_->CreateTextFormat(
-        L"Segoe UI Variable Text", nullptr,
-        DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        12.5f, L"zh-CN", &statusStripFormat_);
-    if (SUCCEEDED(hr)) {
-        statusStripFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        statusStripFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        statusStripFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    }
+    // NO_WRAP on all of them, for the reason the pill's line has it: a part that wrapped inside a
+    // 26 DIP capsule would draw its second row over the top of its first, and every part is a
+    // fragment -- a weekday, a date, a clock -- that has nothing to wrap at.
+    const auto makeStatusFormat = [this](float size, DWRITE_FONT_WEIGHT weight,
+                                         IDWriteTextFormat** out) -> bool {
+        const HRESULT created = factory_->CreateTextFormat(
+            L"Segoe UI Variable Text", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, size, L"zh-CN", out);
+        if (FAILED(created) || !*out) return false;
+        (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        return true;
+    };
+    // The sizes are set by the tighter of the two boxes rather than by taste: the run is drawn
+    // inside a 220 DIP pill as well as in the 268 DIP band, and the pill's 200 usable DIP is what
+    // these four numbers have to live within. Measured by the self-test, not chosen by eye.
+    makeStatusFormat(12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusWeekdayFormat_);
+    makeStatusFormat(11.5f, DWRITE_FONT_WEIGHT_NORMAL, &statusDayFormat_);
+    makeStatusFormat(13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusTimeFormat_);
+    makeStatusFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &statusWeatherFormat_);
 
     // The music card's top row: the source name and the volume readout.
     //
@@ -318,7 +327,10 @@ void TextRenderer::Shutdown() {
     SafeRelease(&appRowFormat_);
     SafeRelease(&volumeFormat_);
     SafeRelease(&appFormat_);
-    SafeRelease(&statusStripFormat_);
+    SafeRelease(&statusWeatherFormat_);
+    SafeRelease(&statusTimeFormat_);
+    SafeRelease(&statusDayFormat_);
+    SafeRelease(&statusWeekdayFormat_);
     SafeRelease(&pillLineFormat_);
     SafeRelease(&dateFormat_);
     SafeRelease(&timeFormat_);
@@ -362,6 +374,12 @@ void TextRenderer::Refresh() {
 
         const unsigned weekday = (now.wDayOfWeek < 7) ? now.wDayOfWeek : 0;
         const unsigned month = (now.wMonth >= 1 && now.wMonth <= 12) ? now.wMonth : 1;
+
+        // The two pieces the status line sets apart, and the one string the card's own date line
+        // has always used. Built together so a change of format cannot reach one and miss another.
+        wcsncpy_s(weekdayText_, 8, kWeekdays[weekday], _TRUNCATE);
+        std::swprintf(dayText_, 24, L"%s%u\u65e5", kMonths[month - 1],
+                      static_cast<unsigned>(now.wDay));
 
         std::swprintf(dateText_, 32, L"%s%c%s%u\u65e5",
                       kWeekdays[weekday], kDateSeparator, kMonths[month - 1],
@@ -411,47 +429,267 @@ void TextRenderer::DrawClock(ID2D1DeviceContext2* context, const RoundedBox& box
     SafeRelease(&brush);
 }
 
-void TextRenderer::ComposeStatusLine(const wchar_t* time, const wchar_t* date,
-                                     const wchar_t* weather, wchar_t* out, size_t capacity) {
-    if (!out || capacity == 0) return;
-    out[0] = L'\0';
+// =====================================================================
+//  the status line's own layout
+//
+//  In an anonymous namespace beside the drawing that uses it rather than at the top of the file,
+//  because nothing else in this translation unit has any business with it: the run is built,
+//  measured and drawn by these functions alone, and that is the property the self-test leans on.
+// =====================================================================
+namespace {
 
-    // The DATE first, then the time, then the weather -- the order the request named them in
-    // ("日期时间星期天气"). The weekday is already inside the date line: that line has read
-    // "\u5468\u65e5\u300112\u670828\u65e5" since it was written, and a second copy of the weekday
-    // beside it would be the only repetition on the bar.
-    //
-    // ONE space between the parts. Two read better in the wide band, but the same line is drawn
-    // inside the 220 DIP pill, where every DIP counts: measured in the self-test, one space is the
-    // difference between "the widest line fits with room to spare" and "it fits by 4 DIP".
-    wchar_t line[192] = {};
-    if (date && date[0] != L'\0') {
-        wcsncpy_s(line, 192, date, _TRUNCATE);
+// Every number the run is laid out from, in one place, so the measuring and the drawing cannot
+// disagree about the sizes they are adding up.
+struct StatusRunStyle {
+    float tileDip       = 19.0f;   // the calendar's rounded tile (its artwork is smaller than this)
+    float glyphDip      = 16.0f;   // the weather glyph
+    float tileGapDip    = 5.0f;    // between the calendar tile and the hairline that follows it
+    float groupGapDip   = 4.0f;    // inside a group: 周一 / 10月12日, 小雨 / 17°
+    float ruleGapDip    = 4.0f;    // on each side of a hairline
+    float ruleDip       = 1.0f;
+    float ruleHeightDip = 10.0f;
+    float glyphGapDip   = 4.0f;    // between the weather glyph and the word beside it
+};
+
+constexpr StatusRunStyle kStatusRun;
+
+// One piece of the run. `widthDip` is the room it takes and `afterDip` the gap it insists on
+// leaving behind it, so the run's total is the sum of the two over all of them.
+struct StatusPiece {
+    enum class Kind { Calendar, Rule, Text, Cloud };
+    Kind kind = Kind::Text;
+    const wchar_t* text = nullptr;
+    IDWriteTextFormat* format = nullptr;
+    float widthDip = 0.0f;
+    float afterDip = 0.0f;
+    // The piece's own brightness, which is the hierarchy the reference is built on: the weekday and
+    // the time are the bright ends of the run and the date is the quiet middle.
+    float luminance = 0.93f;
+};
+
+// The four faces the run sets its words in. Passed in rather than reached for, because this file's
+// helpers are free functions and the formats belong to the TextRenderer that created them.
+struct StatusRunFormats {
+    IDWriteTextFormat* weekday = nullptr;
+    IDWriteTextFormat* day = nullptr;
+    IDWriteTextFormat* time = nullptr;
+    IDWriteTextFormat* weather = nullptr;
+};
+
+float TextWidthIn(IDWriteFactory3* factory, IDWriteTextFormat* format, const wchar_t* text) {
+    if (!factory || !format || !text || text[0] == L'\0') return 0.0f;
+
+    // The same wide, tall area TextWidth uses: the width of a piece is a property of the text and
+    // the face, not of the box it will end up in.
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(factory->CreateTextLayout(text, static_cast<UINT32>(std::wcslen(text)), format,
+                                         8192.0f, 512.0f, &layout)) ||
+        !layout) {
+        return 0.0f;
     }
-    if (time && time[0] != L'\0') {
-        if (line[0] != L'\0') wcsncat_s(line, 192, L" ", _TRUNCATE);
-        wcsncat_s(line, 192, time, _TRUNCATE);
+    DWRITE_TEXT_METRICS metrics = {};
+    const HRESULT hr = layout->GetMetrics(&metrics);
+    layout->Release();
+    return SUCCEEDED(hr) ? metrics.width : 0.0f;
+}
+
+// The run, built in one place so the measuring and the drawing walk the SAME list.
+//
+// `withGlyphs` is the whole difference between the two forms: the band draws the calendar, the
+// hairline after it and the weather glyph, and the island draws the same words with none of them --
+// 220 DIP of pill less its padding is 200, and the run with the glyphs is about 230. Nothing else
+// changes, so the island and the band can never disagree about what the line says.
+int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, const wchar_t* weekday,
+                   const wchar_t* day, const wchar_t* time, const wchar_t* sky,
+                   const wchar_t* temperature, bool withGlyphs, StatusPiece* pieces, int capacity) {
+    int count = 0;
+    const auto push = [&](const StatusPiece& piece) {
+        if (count < capacity) pieces[count++] = piece;
+    };
+    const auto pushText = [&](const wchar_t* text, IDWriteTextFormat* format, float after,
+                              float luminance) {
+        if (!text || text[0] == L'\0' || !format) return;
+        StatusPiece piece;
+        piece.kind = StatusPiece::Kind::Text;
+        piece.text = text;
+        piece.format = format;
+        piece.widthDip = TextWidthIn(factory, format, text);
+        piece.afterDip = after;
+        piece.luminance = luminance;
+        push(piece);
+    };
+    const auto pushRule = [&](float after) {
+        StatusPiece piece;
+        piece.kind = StatusPiece::Kind::Rule;
+        piece.widthDip = kStatusRun.ruleDip;
+        piece.afterDip = after;
+        push(piece);
+    };
+
+    if (withGlyphs) {
+        StatusPiece calendar;
+        calendar.kind = StatusPiece::Kind::Calendar;
+        calendar.widthDip = kStatusRun.tileDip;
+        calendar.afterDip = kStatusRun.tileGapDip;
+        push(calendar);
+        pushRule(kStatusRun.ruleGapDip);
     }
-    if (weather && weather[0] != L'\0') {
-        if (line[0] != L'\0') wcsncat_s(line, 192, L" ", _TRUNCATE);
-        wcsncat_s(line, 192, weather, _TRUNCATE);
+    pushText(weekday, formats.weekday, kStatusRun.groupGapDip, 0.95f);
+    pushText(day, formats.day, kStatusRun.ruleGapDip, 0.62f);
+    pushRule(kStatusRun.ruleGapDip);
+    pushText(time, formats.time, kStatusRun.ruleGapDip, 0.99f);
+    pushRule(kStatusRun.glyphGapDip);
+    if (withGlyphs) {
+        StatusPiece cloud;
+        cloud.kind = StatusPiece::Kind::Cloud;
+        cloud.widthDip = kStatusRun.glyphDip;
+        cloud.afterDip = kStatusRun.glyphGapDip;
+        push(cloud);
+    }
+    pushText(sky, formats.weather, kStatusRun.groupGapDip, 0.90f);
+    pushText(temperature, formats.weather, 0.0f, 0.84f);
+    return count;
+}
+
+float StatusRunWidth(const StatusPiece* pieces, int count) {
+    float total = 0.0f;
+    for (int i = 0; i < count; ++i) total += pieces[i].widthDip + pieces[i].afterDip;
+    return total;
+}
+
+// The calendar tile: a rounded square, a calendar drawn inside it, and the one coloured dot the
+// reference has on it. Drawn as geometry on purpose, for the reason the Start button's mark gives:
+// an image would be one more thing to ship and one more thing to fail to load, and this shape
+// cannot go missing.
+void DrawCalendarGlyph(ID2D1DeviceContext2* context, const D2D1_RECT_F& box, float opacity) {
+    if (!context) return;
+    const float cx = (box.left + box.right) * 0.5f;
+    const float cy = (box.top + box.bottom) * 0.5f;
+
+    ID2D1SolidColorBrush* brush = nullptr;
+
+    // The tile the calendar sits on: a wash, not a panel -- it reads as a raised key beside the
+    // words without competing with them.
+    D2D1_ROUNDED_RECT tile = {D2D1::RectF(box.left, box.top, box.right, box.bottom), 6.0f, 6.0f};
+    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f * opacity),
+                                                 &brush)) &&
+        brush) {
+        context->FillRoundedRectangle(&tile, brush);
+        brush->Release();
     }
 
-    wcsncpy_s(out, capacity, line, _TRUNCATE);
+    // The calendar itself: an outlined page, two binding nubs above it, and its grid of days.
+    const float pageWidth = 13.0f;
+    const float pageHeight = 12.0f;
+    const D2D1_RECT_F page = D2D1::RectF(cx - pageWidth * 0.5f, cy - pageHeight * 0.5f + 1.2f,
+                                         cx + pageWidth * 0.5f, cy + pageHeight * 0.5f + 1.2f);
+    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.82f * opacity),
+                                                 &brush)) &&
+        brush) {
+        const D2D1_ROUNDED_RECT outline = {page, 3.0f, 3.0f};
+        context->DrawRoundedRectangle(&outline, brush, 1.2f);
+
+        const D2D1_ROUNDED_RECT nubs[2] = {
+            {D2D1::RectF(page.left + 2.4f, page.top - 2.4f, page.left + 4.6f, page.top + 1.2f), 1.1f,
+             1.1f},
+            {D2D1::RectF(page.right - 4.6f, page.top - 2.4f, page.right - 2.4f, page.top + 1.2f), 1.1f,
+             1.1f}};
+        for (const D2D1_ROUNDED_RECT& nub : nubs) context->FillRoundedRectangle(&nub, brush);
+        brush->Release();
+    }
+
+    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.46f * opacity),
+                                                 &brush)) &&
+        brush) {
+        for (int row = 0; row < 2; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                const float x = page.left + 3.0f + column * 3.4f;
+                const float y = page.top + 4.6f + row * 3.4f;
+                const D2D1_ROUNDED_RECT dot = {D2D1::RectF(x, y, x + 1.5f, y + 1.5f), 0.7f, 0.7f};
+                context->FillRoundedRectangle(&dot, brush);
+            }
+        }
+        brush->Release();
+    }
+
+    // The one coloured thing in the run, which is what the eye lands on first in the reference.
+    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.32f, 0.62f, 1.00f, 0.95f * opacity),
+                                                 &brush)) &&
+        brush) {
+        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(page.right - 0.8f, page.bottom - 0.8f),
+                                            2.0f, 2.0f),
+                             brush);
+        brush->Release();
+    }
+}
+
+// The weather glyph: a cloud with rain under it, in the line's own blue. Flat rather than glossy --
+// the reference's rendering is beyond what geometry can do at 16 DIP, and a flat blue cloud reads
+// as the same thing without an image to ship.
+void DrawCloudGlyph(ID2D1DeviceContext2* context, const D2D1_RECT_F& box, float opacity) {
+    if (!context) return;
+    const float cx = (box.left + box.right) * 0.5f;
+    const float cy = (box.top + box.bottom) * 0.5f;
+
+    ID2D1SolidColorBrush* brush = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.46f, 0.71f, 1.00f, 0.96f * opacity),
+                                                 &brush)) &&
+        brush) {
+        // Three circles and a base, all in one colour, read as a single cloud rather than as three
+        // circles -- which is why they are drawn in one pass and never outlined.
+        context->FillEllipse(
+            D2D1::Ellipse(D2D1::Point2F(cx - 3.2f, cy - 0.2f), 3.2f, 3.0f), brush);
+        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx + 0.6f, cy - 1.6f), 3.8f, 3.6f), brush);
+        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx + 4.0f, cy - 0.4f), 2.6f, 2.4f), brush);
+        const D2D1_ROUNDED_RECT base = {D2D1::RectF(cx - 4.6f, cy - 0.6f, cx + 5.6f, cy + 2.2f),
+                                        1.4f, 1.4f};
+        context->FillRoundedRectangle(&base, brush);
+        brush->Release();
+    }
+
+    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.66f, 0.86f, 1.00f, 0.92f * opacity),
+                                                 &brush)) &&
+        brush) {
+        for (int i = 0; i < 3; ++i) {
+            const float x = cx - 2.6f + i * 2.8f;
+            context->DrawLine(D2D1::Point2F(x, cy + 3.2f), D2D1::Point2F(x - 1.4f, cy + 6.4f),
+                              brush, 1.5f);
+        }
+        brush->Release();
+    }
+}
+
+} // namespace
+
+TextRenderer::StatusLineMetrics TextRenderer::MeasureStatusLine(const wchar_t* weekday,
+                                                               const wchar_t* day,
+                                                               const wchar_t* time,
+                                                               const wchar_t* sky,
+                                                               const wchar_t* temperature) const {
+    StatusLineMetrics metrics;
+    if (!factory_) return metrics;
+
+    const StatusRunFormats formats{statusWeekdayFormat_, statusDayFormat_, statusTimeFormat_,
+                                   statusWeatherFormat_};
+    StatusPiece pieces[12] = {};
+    const int fullCount = BuildStatusRun(factory_, formats, weekday, day, time, sky, temperature,
+                                         true, pieces, 12);
+    metrics.full = StatusRunWidth(pieces, fullCount);
+
+    const int compactCount = BuildStatusRun(factory_, formats, weekday, day, time, sky, temperature,
+                                            false, pieces, 12);
+    metrics.compact = StatusRunWidth(pieces, compactCount);
+    return metrics;
 }
 
 void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box,
-                                  float opacity, const wchar_t* weather,
+                                  float opacity, const wchar_t* sky, const wchar_t* temperature,
                                   const D2D1_COLOR_F& fill) {
-    if (!context || !factory_ || !statusStripFormat_) return;
+    if (!context || !factory_) return;
     if (opacity <= 0.01f) return;
+    if (box.rect.right <= box.rect.left) return;
 
     Refresh();
-
-    wchar_t line[192] = {};
-    ComposeStatusLine(timeText_, dateText_, weather, line, 192);
-    if (line[0] == L'\0') return;
-    if (box.rect.right <= box.rect.left) return;
 
     // The surface first, when there is one. In the band it is the island's own colour -- the same
     // background the deck's buttons carry and for the same reason: without it the words sit on
@@ -459,10 +697,10 @@ void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox
     // alpha follows the strip's own fade, so the strip arrives as a shape rather than as words
     // appearing. Inside the pill the caller passes nothing, because the pill has been filled with
     // exactly this colour already.
-    const D2D1_ROUNDED_RECT rounded = {
-        D2D1::RectF(box.rect.left, box.rect.top, box.rect.right, box.rect.bottom),
-        box.radiusX, box.radiusY};
     if (fill.a > 0.001f) {
+        const D2D1_ROUNDED_RECT rounded = {
+            D2D1::RectF(box.rect.left, box.rect.top, box.rect.right, box.rect.bottom), box.radiusX,
+            box.radiusY};
         D2D1_COLOR_F background = fill;
         background.a = fill.a * opacity;
         ID2D1SolidColorBrush* brush = nullptr;
@@ -475,35 +713,95 @@ void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox
         }
     }
 
-    ID2D1SolidColorBrush* textBrush = nullptr;
-    if (SUCCEEDED(context->CreateSolidColorBrush(TextColour(opacity), &textBrush)) && textBrush) {
-        // The text is inset by the strip's padding and CENTRED inside what is left: the box is a
-        // fixed width (see kStatusStripWidthDip) and the line is not, so centring keeps the padding
-        // even whichever parts are present.
-        const D2D1_RECT_F textArea = D2D1::RectF(box.rect.left + kStatusStripPadDip, box.rect.top,
-                                                 box.rect.right - kStatusStripPadDip,
-                                                 box.rect.bottom);
-        context->DrawTextW(line, static_cast<UINT32>(std::wcslen(line)), statusStripFormat_,
-                           textArea, textBrush);
-        textBrush->Release();
+    const StatusRunFormats formats{statusWeekdayFormat_, statusDayFormat_, statusTimeFormat_,
+                                   statusWeatherFormat_};
+    if (!formats.weekday || !formats.day || !formats.time || !formats.weather) return;
+
+    // WHICH FORM, decided by measurement and not by a guess: the glyphs are the first thing to go
+    // and the only thing that goes. A box too narrow for even the words would clip them, which the
+    // self-test rules out for both boxes this is called with.
+    const float available = (box.rect.right - box.rect.left) - kStatusStripPadDip * 2.0f;
+    StatusPiece pieces[12] = {};
+    const int fullCount = BuildStatusRun(factory_, formats, weekdayText_, dayText_, timeText_, sky,
+                                         temperature, true, pieces, 12);
+    const float fullWidth = StatusRunWidth(pieces, fullCount);
+
+    const bool withGlyphs = fullWidth <= available;
+    const int count = withGlyphs
+                          ? fullCount
+                          : BuildStatusRun(factory_, formats, weekdayText_, dayText_, timeText_, sky,
+                                           temperature, false, pieces, 12);
+    if (count <= 0) return;
+    const float runWidth = withGlyphs ? fullWidth : StatusRunWidth(pieces, count);
+
+    // CENTRED in the box, because the box is a fixed width and the run is not: the island is 220
+    // whatever the date happens to be, and centring keeps its two ends even.
+    float x = box.rect.left + ((box.rect.right - box.rect.left) - runWidth) * 0.5f;
+    if (x < box.rect.left + kStatusStripPadDip) x = box.rect.left + kStatusStripPadDip;
+
+    for (int i = 0; i < count; ++i) {
+        const StatusPiece& piece = pieces[i];
+        const float centreY = (box.rect.top + box.rect.bottom) * 0.5f;
+
+        switch (piece.kind) {
+            case StatusPiece::Kind::Calendar:
+                DrawCalendarGlyph(context,
+                                  D2D1::RectF(x, centreY - piece.widthDip * 0.5f,
+                                              x + piece.widthDip, centreY + piece.widthDip * 0.5f),
+                                  opacity);
+                break;
+
+            case StatusPiece::Kind::Cloud:
+                DrawCloudGlyph(context,
+                               D2D1::RectF(x, centreY - piece.widthDip * 0.5f, x + piece.widthDip,
+                                           centreY + piece.widthDip * 0.5f),
+                               opacity);
+                break;
+
+            case StatusPiece::Kind::Rule: {
+                ID2D1SolidColorBrush* brush = nullptr;
+                if (SUCCEEDED(context->CreateSolidColorBrush(
+                        D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.26f * opacity), &brush)) &&
+                    brush) {
+                    const D2D1_ROUNDED_RECT rule = {
+                        D2D1::RectF(x, centreY - kStatusRun.ruleHeightDip * 0.5f, x + piece.widthDip,
+                                    centreY + kStatusRun.ruleHeightDip * 0.5f),
+                        piece.widthDip * 0.5f, piece.widthDip * 0.5f};
+                    context->FillRoundedRectangle(&rule, brush);
+                    brush->Release();
+                }
+                break;
+            }
+
+            case StatusPiece::Kind::Text: {
+                ID2D1SolidColorBrush* brush = nullptr;
+                const float luminance = piece.luminance;
+                if (SUCCEEDED(context->CreateSolidColorBrush(
+                        D2D1::ColorF(luminance, luminance, luminance, opacity), &brush)) &&
+                    brush) {
+                    // The piece's own box, which is exactly as wide as the text measured: the format
+                    // centres within it, so the run's arithmetic and the drawing cannot drift.
+                    context->DrawTextW(piece.text, static_cast<UINT32>(std::wcslen(piece.text)),
+                                       piece.format,
+                                       D2D1::RectF(x, box.rect.top, x + piece.widthDip,
+                                                   box.rect.bottom),
+                                       brush);
+                    brush->Release();
+                }
+                break;
+            }
+        }
+
+        x += piece.widthDip + piece.afterDip;
     }
 }
 
-float TextRenderer::StatusLineWidth(const wchar_t* line) const {
-    if (!line || !factory_ || !statusStripFormat_) return 0.0f;
-
-    // The same wide, tall area TextWidth uses: the width of a line is a property of the text and the
-    // face, not of the box it will be drawn into.
-    IDWriteTextLayout* layout = nullptr;
-    if (FAILED(factory_->CreateTextLayout(line, static_cast<UINT32>(std::wcslen(line)),
-                                          statusStripFormat_, 8192.0f, 512.0f, &layout)) ||
-        !layout) {
-        return 0.0f;
-    }
-    DWRITE_TEXT_METRICS metrics = {};
-    const HRESULT hr = layout->GetMetrics(&metrics);
-    layout->Release();
-    return SUCCEEDED(hr) ? metrics.width : 0.0f;
+void TextRenderer::CurrentDateParts(wchar_t* weekday, size_t weekdayCapacity, wchar_t* day,
+                                    size_t dayCapacity) const {
+    if (weekday && weekdayCapacity) weekday[0] = L'\0';
+    if (day && dayCapacity) day[0] = L'\0';
+    if (weekday && weekdayCapacity) wcsncpy_s(weekday, weekdayCapacity, weekdayText_, _TRUNCATE);
+    if (day && dayCapacity) wcsncpy_s(day, dayCapacity, dayText_, _TRUNCATE);
 }
 
 ID2D1Bitmap1* TextRenderer::NotificationIconBitmap(ID2D1DeviceContext2* context,

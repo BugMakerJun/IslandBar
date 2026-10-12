@@ -393,6 +393,21 @@ void WeatherLineFor(double temperatureC, int code, wchar_t* out, size_t capacity
     }
 }
 
+void WeatherPiecesFor(double temperatureC, int code, wchar_t* sky, size_t skyCapacity,
+                      wchar_t* temperature, size_t temperatureCapacity) {
+    if (sky && skyCapacity) sky[0] = L'\0';
+    if (temperature && temperatureCapacity) temperature[0] = L'\0';
+
+    const int degrees = static_cast<int>(std::lround(temperatureC));
+    const wchar_t* word = WeatherWordForCode(code);
+    // An unknown code leaves the word empty rather than inventing a sky; the line then draws the
+    // temperature on its own, which is what the joined form does too (see WeatherLineFor).
+    if (word && sky && skyCapacity) wcsncpy_s(sky, skyCapacity, word, _TRUNCATE);
+    if (temperature && temperatureCapacity) {
+        swprintf(temperature, temperatureCapacity, L"%d\u00b0", degrees);
+    }
+}
+
 size_t PercentEncodeUtf8(const char* text, char* out, size_t capacity) {
     if (!out || capacity == 0) return 0;
     out[0] = '\0';
@@ -568,6 +583,19 @@ void WeatherReader::Line(wchar_t* out, size_t capacity) const {
 
     EnterCriticalSection(&lock_);
     if (haveReading_) wcsncpy_s(out, capacity, line_, _TRUNCATE);
+    LeaveCriticalSection(&lock_);
+}
+
+void WeatherReader::Pieces(wchar_t* sky, size_t skyCapacity, wchar_t* temperature,
+                           size_t temperatureCapacity) const {
+    if (sky && skyCapacity) sky[0] = L'\0';
+    if (temperature && temperatureCapacity) temperature[0] = L'\0';
+    if (!lockReady_) return;
+
+    EnterCriticalSection(&lock_);
+    if (haveReading_) {
+        WeatherPiecesFor(temperatureC_, code_, sky, skyCapacity, temperature, temperatureCapacity);
+    }
     LeaveCriticalSection(&lock_);
 }
 

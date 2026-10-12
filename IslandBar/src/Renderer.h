@@ -172,10 +172,18 @@ struct FrameState {
     // deck. The pill's copy needs no fade: it is the pill's own content, and the pill is always
     // there.
     //
-    // `statusWeather` is "晴 19°" or null, and null is the ordinary case: the line is then the date
-    // and the time alone, which is what it is before the first reading arrives and when no city has
-    // been named. Its storage belongs to the caller and must live as long as the frame.
-    const wchar_t* statusWeather = nullptr;
+    // The reading, in the two pieces the line draws separately: the word ("小雨") and the
+    // temperature ("17°"). Either may be null, and both are null in the ordinary case -- before the
+    // first reading arrives, and when neither the machine nor weather.txt can say where it is. The
+    // line is then the weekday, the date and the time alone.
+    //
+    // Two fields rather than one string because the reference sets them apart: the glyph stands
+    // before the word, the word and the temperature are separated by a gap, and a single joined
+    // string could not be laid out that way.
+    //
+    // Storage belongs to the caller and must live as long as the frame (see main.cpp's buffers).
+    const wchar_t* statusSky = nullptr;
+    const wchar_t* statusTemperature = nullptr;
     float          statusStripOpacity = 0.0f;
 
     // 0..1 strength of the BAR's own content: the deck, the icon row, the clock, the lyric / notice /

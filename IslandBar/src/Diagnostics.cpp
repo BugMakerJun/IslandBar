@@ -1248,8 +1248,43 @@ void TestRenderer(IslandWindow& window) {
                           overGlyphs, clearOfGlyphs, overGlyphs - clearOfGlyphs);
             Check(measuredPill && clearOfGlyphs > 2.0f,
                   L"the pill is painted while a card is up", pillDetail);
-            Check(measuredPill && overGlyphs > clearOfGlyphs + 1.0f,
-                  L"the pill still shows its clock while a card is up", pillDetail);
+
+            // ... and it still has its LINE in it, which is the regression this exists for.
+            //
+            // Measured against the pill's own FILL rather than against another part of the pill. The
+            // previous version compared the pill's centre with a strip near its rounded end, because
+            // the clock was short and centred and the ends were therefore bare -- true of a clock and
+            // false of the status line, which now runs most of the width of the pill (2026-10-12,
+            // HANDOFF 8.48). What the regression is actually about is "the pill is not EMPTY while a
+            // card is up", so the comparison is with a frame whose content is switched off.
+            {
+                FrameState bare = frame;
+                bare.contentOpacity = 0.0f;   // the renderer skips the content at this strength
+                renderer.Render(bare);
+                renderer.Render(bare);
+                float fillOnly = -1.0f;
+                const bool measuredFill =
+                    renderer.RegionLuminance(pillBox.rect.left + 24.0f, pillBox.rect.top,
+                                             pillBox.rect.right - 24.0f, pillBox.rect.bottom,
+                                             &fillOnly);
+
+                // The frame with its line drawn again, because the measurement above was taken on the
+                // bare one -- and a reading repeated without redrawing measures the same picture,
+                // which is exactly what the first version of this check did.
+                renderer.Render(frame);
+                renderer.Render(frame);
+                float withLine = -1.0f;
+                const bool measuredLine =
+                    renderer.RegionLuminance(pillBox.rect.left + 24.0f, pillBox.rect.top,
+                                             pillBox.rect.right - 24.0f, pillBox.rect.bottom,
+                                             &withLine);
+                std::swprintf(pillDetail, 224, L"pill fill alone=%.2f, with its line=%.2f",
+                              fillOnly, withLine);
+                Check(measuredFill && measuredLine && fillOnly > 2.0f,
+                      L"the pill's fill is painted while a card is up", pillDetail);
+                Check(measuredFill && measuredLine && withLine > fillOnly + 2.0f,
+                      L"the pill still shows its own line while a card is up", pillDetail);
+            }
         }
 
         // --- a card must not dim the BAR -------------------------------------------
@@ -5373,54 +5408,62 @@ void TestMusicCardLayout() {
                       L"a frame of no length moves the fade nowhere", fadeDetail);
             }
 
-            // The composition, and the box it has to fit.
+            // The run is a composition, and both of the boxes it is drawn in have to hold it.
             //
-            // The BOX IS A FIXED WIDTH and the text is centred in it, so a line that outgrew the box
-            // would lose a character at each end -- and it would lose them at the moment the weather
+            // THE BOX IS A FIXED WIDTH and the run is centred in it, so a run that outgrew its box
+            // would lose a piece off each end -- and it would lose them at the moment the weather
             // reading arrived, which is the last moment anybody is looking for a rendering fault.
-            // Measured rather than eyeballed: the width of a line is a property of the face and the
+            // Measured rather than eyeballed: the width of a piece is a property of the face and the
             // text, and both can change under this code.
+            //
+            // The numbers that matter, and the reason the two forms exist at all: the band is 268
+            // wide (248 usable) and the island is 220 (200 usable), while the run WITH the two glyphs
+            // is about 230. So the island draws the compact form and the band draws the full one, and
+            // this is where that is checked rather than assumed.
             {
-                wchar_t line[192] = {};
-                // The date line the clock itself builds: weekday, separator, month, day.
-                const wchar_t* date = L"\u5468\u4e09\u300112\u670828\u65e5";
-                TextRenderer::ComposeStatusLine(L"23:59", date, L"\u6674 21\u00b0", line, 192);
-                Check(std::wcscmp(line,
-                                  L"\u5468\u4e09\u300112\u670828\u65e5 23:59 \u6674 21\u00b0") == 0,
-                      L"the status line reads date, time, then weather", line);
-
-                wchar_t withoutWeather[192] = {};
-                TextRenderer::ComposeStatusLine(L"23:59", date, nullptr, withoutWeather, 192);
-                Check(std::wcscmp(withoutWeather,
-                                  L"\u5468\u4e09\u300112\u670828\u65e5 23:59") == 0,
-                      L"with no reading the line is the date and the time alone", withoutWeather);
-
-                TextRenderer stripText;
-                if (stripText.Initialize()) {
-                    // The widest line that can occur: the longest weekday and month, a three-character
+                TextRenderer runText;
+                if (runText.Initialize()) {
+                    // The widest run that can occur: the longest weekday and month, a three-character
                     // weather word, and a negative two-digit temperature.
-                    const wchar_t* widest =
-                        L"\u5468\u4e09\u300112\u670828\u65e5 23:59 \u5f3a\u9635\u96e8 -12\u00b0";
-                    const float measured = stripText.StatusLineWidth(widest);
-                    const float available = kStatusStripWidthDip - kStatusStripPadDip * 2.0f;
+                    const wchar_t* weekday = L"\u5468\u4e09";              // 周三
+                    const wchar_t* day = L"12\u670828\u65e5";              // 12月28日
+                    const wchar_t* time = L"23:59";
+                    const wchar_t* sky = L"\u5f3a\u9635\u96e8";            // 强阵雨
+                    const wchar_t* temperature = L"-12\u00b0";
 
-                    wchar_t fitDetail[224];
-                    std::swprintf(fitDetail, 224, L"%.1f DIP drawn, %.1f DIP available, box %.0f",
-                                  measured, available, kStatusStripWidthDip);
-                    Check(measured > 0.0f && measured <= available,
-                          L"the widest status line fits the strip's own box", fitDetail);
-
-                    // AND IT HAS TO FIT THE PILL, which is the tighter of the two boxes and the reason
-                    // the line was tightened to a single space between its parts. The pill is 220 DIP
-                    // wide and the line is drawn centred in it at the same size, so a line that outgrew
-                    // it would lose a word off each end -- on the one place on the bar that is always
-                    // visible. Measured rather than eyeballed, like the strip's own fit.
+                    const TextRenderer::StatusLineMetrics widest =
+                        runText.MeasureStatusLine(weekday, day, time, sky, temperature);
+                    const float bandAvailable = kStatusStripWidthDip - kStatusStripPadDip * 2.0f;
                     const float pillAvailable = kCollapsedWidthDip - kStatusStripPadDip * 2.0f;
-                    std::swprintf(fitDetail, 224,
-                                  L"%.1f DIP drawn, %.1f DIP available in the %.0f pill", measured,
-                                  pillAvailable, kCollapsedWidthDip);
-                    Check(measured > 0.0f && measured <= pillAvailable,
-                          L"the same line fits inside the island itself", fitDetail);
+
+                    wchar_t fitDetail[256];
+                    std::swprintf(fitDetail, 256,
+                                  L"full %.1f / compact %.1f DIP; band %.1f, pill %.1f available",
+                                  widest.full, widest.compact, bandAvailable, pillAvailable);
+                    Check(widest.full > widest.compact,
+                          L"the run with the two glyphs is wider than the run without them",
+                          fitDetail);
+                    Check(widest.full > 0.0f && widest.full <= bandAvailable,
+                          L"the full run fits the band beside the deck", fitDetail);
+                    Check(widest.compact > 0.0f && widest.compact <= pillAvailable,
+                          L"the compact run fits inside the island itself", fitDetail);
+
+                    // AND THE ISLAND MUST CHOOSE THE FORM IT HAS ROOM FOR. The two boxes differ by
+                    // more than the glyphs are worth, so the pill would clip the full run -- which is
+                    // why the choice is made by this comparison and not by which caller is drawing.
+                    Check(widest.full > pillAvailable,
+                          L"the full run would NOT fit the island, so the island cannot take it",
+                          fitDetail);
+
+                    // A reading that is missing takes its word with it: with no sky the run is
+                    // shorter, which is what a machine with no position and no city shows.
+                    const TextRenderer::StatusLineMetrics noReading =
+                        runText.MeasureStatusLine(weekday, day, time, nullptr, nullptr);
+                    std::swprintf(fitDetail, 256, L"compact %.1f / without a reading %.1f DIP",
+                                  widest.compact, noReading.compact);
+                    Check(noReading.compact > 0.0f && noReading.compact <= pillAvailable &&
+                              noReading.compact < widest.compact,
+                          L"a line with no reading is shorter and still fits", fitDetail);
                 }
             }
 

@@ -979,10 +979,12 @@ bool statusStripAnimating = false;
 // The weather reader's revision as of the last draw, so a new reading is a redraw reason of its own:
 // the reading arrives on a worker, a few seconds after the bar has settled.
 unsigned long long lastWeatherRevision = 0;
-// Where the strip's weather text lives for the frame to point at. A member of this scope rather than
-// the reader's own storage, because a reading can be replaced mid-frame -- replace it and the frame
+// Where the reading lives for the frame to point at: the word and the temperature, apart, because
+// the line gives them their own sizes and a gap between them. Members of this scope rather than the
+// reader's own storage, because a reading can be replaced mid-frame -- replace it and the frame
 // would print half of one reading and half of the next.
-wchar_t statusWeatherText[64] = {};
+wchar_t statusSkyText[32] = {};
+wchar_t statusTemperatureText[32] = {};
 // One entry per window the row is drawing or fading out: an icon's membership of the row and how far
 // in it is (see TaskIconAppearStep).
 struct RowSlot {
@@ -3395,13 +3397,17 @@ float musicWavePhase = 0.0f;
                     island::StatusStripFadeStep(statusStripOpacity, placement.besideDeck, dt);
                 frame.statusStripOpacity = statusStripOpacity;
 
-                // The reading is COPIED into this scope's buffer rather than pointed at where the
+                // The reading is COPIED into this scope's buffers rather than pointed at where the
                 // worker keeps it: the worker can publish between this line and the draw, and a frame
                 // that read half of one reading and half of the next would print a temperature that
                 // never happened.
-                statusWeatherText[0] = L'\0';
-                weather.Line(statusWeatherText, 64);
-                frame.statusWeather = statusWeatherText[0] != L'\0' ? statusWeatherText : nullptr;
+                //
+                // Two pieces, not one string: the line sets the word and the temperature apart (see
+                // FrameState::statusSky).
+                weather.Pieces(statusSkyText, 32, statusTemperatureText, 32);
+                frame.statusSky = statusSkyText[0] != L'\0' ? statusSkyText : nullptr;
+                frame.statusTemperature =
+                    statusTemperatureText[0] != L'\0' ? statusTemperatureText : nullptr;
 
                 // Read by the next pass's redraw decision, like the icon row's own arrival flags.
                 statusStripAnimating = statusStripOpacity > 0.001f && statusStripOpacity < 0.999f;

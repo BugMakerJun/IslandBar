@@ -107,16 +107,35 @@ public:
     // Inside the pill while the island is idle, and in the band left of the deck while the pill's
     // own line is taken (the lyric, a message, a call). See StatusPlacementFor for the rule and
     // StatusStripFor for where the band is.
-
-    // The strip's one line, assembled from the three parts.
     //
-    // A free function over its inputs, and a STATIC one, because the self-test has to be able
-    // to measure the longest line the strip will ever print against the strip's own box -- and
-    // that measurement must not need a window, a clock or a network.
-    static void ComposeStatusLine(const wchar_t* time, const wchar_t* date, const wchar_t* weather,
-                                  wchar_t* out, size_t capacity);
+    // THE LOOK IS THE REFERENCE'S, and it is not a sentence: it is a run of pieces read left to
+    // right, each set in its own weight and colour, with hairlines between the groups and two
+    // drawn glyphs in it --
+    //
+    //     [ calendar ] | weekday day | time | [ cloud ] sky temperature
+    //
+    // asked for with a picture of exactly that ("星期 日期 时间 天气改成图片这样显示"). The pieces are
+    // measured, not guessed: the run with the two glyphs needs about 234 DIP, which the band (248)
+    // has and the 220 DIP pill (200) does not -- so the island draws the same run WITHOUT the
+    // glyphs and their hairlines, and the words, their weights and the hierarchy are identical in
+    // both. MeasureStatusLine is what says so, and the self-test calls it.
 
-    // Draws that line centred in `box`, with the text inset by kStatusStripPadDip.
+    // What the two forms are drawn at, in DIPs. Gathered so the drawing and the measuring cannot
+    // disagree about the sizes they are adding up.
+    struct StatusLineMetrics {
+        float full = 0.0f;      // the whole run, glyphs included -- what the band draws
+        float compact = 0.0f;   // the words and the hairlines -- what the island has room for
+    };
+
+    // The widths of both forms, in the formats they are drawn with. Needs Initialize().
+    //
+    // A function of the STRINGS rather than of the clock, so the self-test can ask about the
+    // widest line that can ever occur without waiting for that day to come round.
+    StatusLineMetrics MeasureStatusLine(const wchar_t* weekday, const wchar_t* day,
+                                        const wchar_t* time, const wchar_t* sky,
+                                        const wchar_t* temperature) const;
+
+    // Draws the run centred in `box`, at whichever of the two forms fits it.
     //
     // ONE function for both homes, because it is one line and the two places must not be able to
     // disagree about how it is set. What differs between them is only what it is drawn ON, and
@@ -125,13 +144,17 @@ public:
     // has already been filled with exactly that colour. (The colour is passed in rather than
     // chosen here for the reason TaskButton gives: a surface that picks its own shade drifts away
     // from the bar it belongs to.)
+    //
+    // The weekday, the day and the time come from this object's own clock; `sky` and `temperature`
+    // are the reading, and either may be null (no reading yet, or no city and no position).
     void DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity,
-                        const wchar_t* weather, const D2D1_COLOR_F& fill);
+                        const wchar_t* sky, const wchar_t* temperature,
+                        const D2D1_COLOR_F& fill);
 
-    // The drawn width of a composed status line, in DIPs. Needs Initialize(). Exists so both boxes
-    // the line is drawn into -- the pill's and the band's -- can be shown to hold the longest line
-    // they will ever print (see the assertions in the self-test) rather than being sized by eye.
-    float StatusLineWidth(const wchar_t* line) const;
+    // The date as its two pieces, because the run sets them apart with a gap and a weight change:
+    // "周一" and "10月12日". Filled by Refresh; empty before the first call.
+    void CurrentDateParts(wchar_t* weekday, size_t weekdayCapacity, wchar_t* day,
+                          size_t dayCapacity) const;
 
     // Draws a notification's sender, title and body in the lower part of `box`.
     //
@@ -585,13 +608,16 @@ private:
 
     IDWriteTextFormat*   dateFormat_  = nullptr;
     IDWriteTextFormat*   appFormat_   = nullptr;
-    // THE STATUS STRIP'S OWN LINE, and its own size for its own reason.
+    // --- the status line's four faces ------------------------------------------------------
     //
-    // 12.5 DIP: a size between the card's title and the Windows clock, because this line stands
-    // next to the deck's 30 DIP buttons rather than inside a card -- at the pill's 15 it read as a
-    // second island, and at the card's 11 the date was unreadable at a glance, which is the one
-    // thing this line is for. Semibold, matching the pill's clock: it is a reading, not a label.
-    IDWriteTextFormat*   statusStripFormat_ = nullptr;
+    // The run is a hierarchy, not a sentence, and each part gets the face the reference gives it:
+    // the weekday and the time are the bright, heavy ends of it and the date is the quiet middle.
+    // Sizes are between the card's and the Windows clock's, because this line stands beside the
+    // deck's 30 DIP buttons rather than inside a card.
+    IDWriteTextFormat*   statusWeekdayFormat_ = nullptr;  // 周一 -- 13, semibold, brightest
+    IDWriteTextFormat*   statusDayFormat_     = nullptr;  // 10月12日 -- 12, regular, dim
+    IDWriteTextFormat*   statusTimeFormat_    = nullptr;  // 17:49 -- 14.5, semibold, brightest
+    IDWriteTextFormat*   statusWeatherFormat_ = nullptr;  // 小雨 / 17° -- 12.5, regular
     // THE PILL'S OWN LINE, one weight heavier than appFormat_.
     //
     // A separate format rather than a heavier appFormat_, because appFormat_ is also what the task
@@ -621,6 +647,12 @@ private:
     SYSTEMTIME time_{};
     wchar_t timeText_[16]  = {};   // L"hh:mm"
     wchar_t dateText_[32]  = {};   // L"<weekday>, <month> <day>"
+    // The same date, in the two pieces the status line sets apart: "\u5468\u4e00" and
+    // "10\u670812\u65e5". Kept beside `dateText_` rather than derived from it at every draw, because
+    // the run needs them separately for their weight and colour, and splitting a string on a
+    // separator character at draw time is the kind of thing that works until the separator changes.
+    wchar_t weekdayText_[8] = {};
+    wchar_t dayText_[24]   = {};
     wchar_t dateKey_[16]   = {};   // L"yyyy-mm-dd", to detect a day rollover
     bool haveTime_ = false;
 
