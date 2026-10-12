@@ -44,17 +44,34 @@ inline constexpr float kMinThumbnailSideDip = 40.0f;
 // How far below the bar's own underside the preview hangs.
 inline constexpr float kThumbnailGapDip = 10.0f;
 
-// Where a preview goes: a rectangle in SCREEN PIXELS.
+// The card the picture stands in: a title row, a margin, and a rounded corner.
+//
+// The preview is a CARD rather than a bare rectangle of someone else's window, because a raw bitmap
+// floating under the bar reads as a rendering fault (reported as such: "从第七个预览框就变成这样了"
+// was a window squeezed into a strip, with nothing around it to say what it was). The card says what
+// it is: the application's icon, the window's title, and the picture inside a frame.
+inline constexpr float kThumbnailPadDip   = 8.0f;
+inline constexpr float kThumbnailTitleDip = 22.0f;
+inline constexpr float kThumbnailRadiusDip = 12.0f;
+
+// Where a preview goes, in SCREEN PIXELS: the CARD (this window's own rectangle) and the PICTURE
+// inside it (the rectangle the compositor draws the thumbnail into).
 //
 // Pure, so its placement can be asserted without a compositor, a window list or a screenshot. The
-// properties that matter are all statements about arithmetic: the source's aspect ratio is kept, the
-// box is centred under the icon it belongs to, it hangs below the bar, it never leaves the monitor,
-// and it is never degenerate.
+// properties that matter are all statements about arithmetic: the picture keeps the source's aspect
+// ratio, the card wraps it with its title row and margin, the card is centred under the icon it
+// belongs to, it hangs below the bar, it never leaves the monitor, and it is never degenerate.
 //
-// `sourceWidthPx`/`sourceHeightPx` are the source window's own size; a window that reports nothing
-// usable gets the maximum box, because a preview of the wrong shape is worse than a large one.
+// `sourceWidthPx`/`sourceHeightPx` are what the COMPOSITOR reports for the source
+// (DwmQueryThumbnailSourceSize), NOT the window's rectangle, and the difference is a defect this
+// function used to have: it took the aspect from GetWindowRect, and the compositor stretches the
+// thumbnail to fill the rectangle it is given -- so a window whose reported rectangle and whose
+// thumbnail differed came out SQUASHED into a strip (a 1226x701 window drawn into a 260x44 box,
+// reported from the user's own screen). The compositor's own answer cannot disagree with the
+// compositor's own drawing.
 struct ThumbnailPlacement {
-    RECT box = {};       // screen pixels
+    RECT card = {};      // the rounded card: what this window is
+    RECT picture = {};   // the thumbnail's destination, inside the card
     bool valid = false;
 };
 
@@ -82,12 +99,18 @@ public:
     void Destroy();
     bool Ready() const { return hwnd_ != nullptr; }
 
-    // Shows a live thumbnail of `source` in `boxPx` (screen pixels, from ThumbnailBoxFor).
+    // Points the preview at `source`: registers the thumbnail if this is a new window, and asks the
+    // compositor what the source measures.
     //
-    // Returns false when the compositor refused the registration -- the one outcome worth logging,
-    // because it is the difference between "the feature is off" and "the window cannot be previewed"
-    // (an elevated window, a window on another desktop, a window that has gone).
-    bool Show(HWND source, const RECT& boxPx);
+    // Returns that size, or {0,0} when the compositor will not preview this window (an elevated window, a
+    // window on another desktop, a window that has gone). The size is what ThumbnailBoxFor needs, which is
+    // why it is a separate call from Place: the card's shape cannot be decided before the compositor has
+    // said what it is going to draw.
+    SIZE Begin(HWND source);
+
+    // Puts the card where `placement` says and shows the thumbnail in its picture rectangle. This is the
+    // only call that moves the window, so the geometry and the window cannot drift apart.
+    bool Place(const ThumbnailPlacement& placement);
 
     // Puts it away. Safe to call when it is already hidden, and called from the frame loop every frame
     // the pointer is not resting on an icon.
@@ -101,9 +124,7 @@ public:
     // on screen (or of the registration that was refused).
     long long LastResult() const { return lastResult_; }
 
-    // What the compositor believes the source window measures, filled in by Show. Zero means it has
-    // nothing to draw, which is a different fault from a refused registration and looks the same on
-    // screen: a preview-shaped hole.
+    // What the compositor believes the source window measures, filled in by Begin.
     SIZE SourceSize() const { return sourceSize_; }
 
     // How many times a registration has been refused since the program started, so a window that
@@ -112,11 +133,19 @@ public:
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    // Paints the card: everything EXCEPT the picture, which belongs to the compositor.
+    void PaintCard(HDC dc);
 
     HWND hwnd_ = nullptr;
     HWND source_ = nullptr;
     HTHUMBNAIL thumbnail_ = nullptr;
     SIZE sourceSize_ = {0, 0};
+    RECT card_ = {};
+    RECT picture_ = {};
+    // The window's title and icon for the card's header. The icon is the window's own (borrowed, never
+    // destroyed): the same one the icon row shows, so the card and the row agree about what the window is.
+    wchar_t title_[256] = {};
+    HICON icon_ = nullptr;
     bool visible_ = false;
     long long lastResult_ = 0;
     int refusals_ = 0;

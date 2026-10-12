@@ -5646,12 +5646,14 @@ void TestMusicCardLayout() {
 
             wchar_t previewDetail[256];
             std::swprintf(previewDetail, 256,
-                          L"wide %ldx%ld, tall %ldx%ld, unknown %ldx%ld of %ldx%ld max",
-                          wide.box.right - wide.box.left, wide.box.bottom - wide.box.top,
-                          tall.box.right - tall.box.left, tall.box.bottom - tall.box.top,
-                          unknown.box.right - unknown.box.left, unknown.box.bottom - unknown.box.top,
-                          static_cast<long>(kThumbnailMaxWidthDip),
-                          static_cast<long>(kThumbnailMaxHeightDip));
+                          L"wide picture %ldx%ld in a %ldx%ld card, tall %ldx%ld, unknown %ldx%ld",
+                          wide.picture.right - wide.picture.left,
+                          wide.picture.bottom - wide.picture.top,
+                          wide.card.right - wide.card.left, wide.card.bottom - wide.card.top,
+                          tall.picture.right - tall.picture.left,
+                          tall.picture.bottom - tall.picture.top,
+                          unknown.picture.right - unknown.picture.left,
+                          unknown.picture.bottom - unknown.picture.top);
 
             const auto aspectOf = [](const RECT& box) {
                 const float w = static_cast<float>(box.right - box.left);
@@ -5660,32 +5662,43 @@ void TestMusicCardLayout() {
             };
             Check(wide.valid && tall.valid && unknown.valid && sliver.valid,
                   L"every preview box is a real rectangle", previewDetail);
-            Check(Nearly(aspectOf(wide.box), 1920.0f / 1080.0f, 0.02f) &&
-                      Nearly(aspectOf(tall.box), 0.5f, 0.02f),
-                  L"a preview keeps the shape of the window it shows", previewDetail);
-            Check(wide.box.right - wide.box.left <= static_cast<LONG>(kThumbnailMaxWidthDip) &&
-                      tall.box.bottom - tall.box.top <= static_cast<LONG>(kThumbnailMaxHeightDip),
-                  L"a preview never exceeds its maximum box", previewDetail);
-            Check(sliver.box.right - sliver.box.left >= static_cast<LONG>(kMinThumbnailSideDip) &&
-                      sliver.box.bottom - sliver.box.top >= static_cast<LONG>(kMinThumbnailSideDip),
+            Check(Nearly(aspectOf(wide.picture), 1920.0f / 1080.0f, 0.02f) &&
+                      Nearly(aspectOf(tall.picture), 0.5f, 0.02f),
+                  L"the picture keeps the shape of what the compositor will draw", previewDetail);
+            Check(wide.picture.right - wide.picture.left <= static_cast<LONG>(kThumbnailMaxWidthDip) &&
+                      tall.picture.bottom - tall.picture.top <=
+                          static_cast<LONG>(kThumbnailMaxHeightDip),
+                  L"a picture never exceeds its maximum box", previewDetail);
+            Check(sliver.picture.right - sliver.picture.left >=
+                          static_cast<LONG>(kMinThumbnailSideDip) &&
+                      sliver.picture.bottom - sliver.picture.top >=
+                          static_cast<LONG>(kMinThumbnailSideDip),
                   L"a window with an absurd shape still gets a preview", previewDetail);
 
-            // Centred under the icon it belongs to, and hanging below it. Judged on the unclamped case
-            // only, because the clamp is allowed to move it -- that is what the next check is for.
+            // The CARD WRAPS the picture: a title row above it and a margin on every side. That is what
+            // makes the preview read as a card rather than as a raw rectangle of someone else's window.
             const float iconCentre = (icon.left + icon.right) * 0.5f;
-            const float boxCentre = (wide.box.left + wide.box.right) * 0.5f;
-            std::swprintf(previewDetail, 256, L"icon centre %.0f, box centre %.0f, box top %ld",
-                          iconCentre, boxCentre, wide.box.top);
-            Check(Nearly(boxCentre, iconCentre, 1.0f) && wide.box.top >= icon.bottom,
+            const float cardCentre = (wide.card.left + wide.card.right) * 0.5f;
+            const float padAndTitle = static_cast<float>(wide.picture.top - wide.card.top);
+            const float sidePad = static_cast<float>(wide.picture.left - wide.card.left);
+            std::swprintf(previewDetail, 256,
+                          L"icon centre %.0f, card centre %.0f, header %.0f, side margin %.0f DIP",
+                          iconCentre, cardCentre, padAndTitle, sidePad);
+            Check(Nearly(padAndTitle, kThumbnailPadDip + kThumbnailTitleDip, 0.01f) &&
+                      Nearly(sidePad, kThumbnailPadDip, 0.01f) &&
+                      Nearly(static_cast<float>(wide.card.bottom - wide.picture.bottom),
+                             kThumbnailPadDip, 0.01f),
+                  L"the card wraps the picture in a header and a margin", previewDetail);
+            Check(Nearly(cardCentre, iconCentre, 1.0f) && wide.card.top >= icon.bottom,
                   L"a preview is centred under its icon and hangs below it", previewDetail);
 
             // An icon in the corner: the box is pushed back inside the monitor rather than hanging off it.
             const RECT cornerIcon = {2540, 40, 2560, 70};
             const ThumbnailPlacement corner = ThumbnailBoxFor(1920, 1080, cornerIcon, monitor, 1.0f);
             std::swprintf(previewDetail, 256, L"corner icon -> box %ld..%ld (monitor 0..2560)",
-                          corner.box.left, corner.box.right);
-            Check(corner.box.left >= monitor.left && corner.box.right <= monitor.right &&
-                      corner.box.bottom <= monitor.bottom,
+                          corner.card.left, corner.card.right);
+            Check(corner.card.left >= monitor.left && corner.card.right <= monitor.right &&
+                      corner.card.bottom <= monitor.bottom,
                   L"a preview near the edge is kept on the monitor", previewDetail);
 
             // AND THE COMPOSITOR ITSELF, on a real window: the one part of this that no amount of
@@ -5703,7 +5716,8 @@ void TestMusicCardLayout() {
                                          640, 400, nullptr, nullptr, GetModuleHandleW(nullptr),
                                          nullptr);
                 const bool shown =
-                    source != nullptr && preview.Show(source, wide.box) && preview.Visible();
+                    source != nullptr && preview.Begin(source).cx > 0 &&
+                    preview.Place(wide) && preview.Visible();
                 std::swprintf(previewDetail, 256,
                               L"source window %hs, DwmRegisterThumbnail returned 0x%08llX, shown=%d",
                               source ? "created" : "NOT created", preview.LastResult(), shown ? 1 : 0);

@@ -3219,24 +3219,26 @@ float musicWavePhase = 0.0f;
                         iconPx.bottom =
                             monitorPx.top + static_cast<LONG>(std::lround(button.bottom * scale));
 
-                        RECT sourcePx = {};
-                        GetWindowRect(wanted, &sourcePx);
+                        // THE COMPOSITOR'S OWN SIZE FIRST, then the geometry: it stretches its picture to
+                        // fill whatever rectangle it is given, so the card has to be built around the shape
+                        // IT reports. GetWindowRect is not that shape -- using it drew one window squashed
+                        // into a flat strip (see ThumbnailPreview.h).
+                        const SIZE sourceSize = preview.Begin(wanted);
                         const island::ThumbnailPlacement placement = island::ThumbnailBoxFor(
-                            sourcePx.right - sourcePx.left, sourcePx.bottom - sourcePx.top, iconPx,
-                            monitorPx, scale);
-                        shown = placement.valid && preview.Show(wanted, placement.box);
+                            sourceSize.cx, sourceSize.cy, iconPx, monitorPx, scale);
+                        shown = placement.valid && preview.Place(placement);
 
                         if (!previewReported) {
                             previewReported = true;
                             island::LogAndPrint(
-                                "  preview: hwnd %p -> box %ld,%ld %ldx%ld (window %ldx%ld, "
-                                "compositor says %ldx%ld), shown=%d, hr=0x%08llX",
-                                reinterpret_cast<void*>(wanted), placement.box.left,
-                                placement.box.top, placement.box.right - placement.box.left,
-                                placement.box.bottom - placement.box.top,
-                                sourcePx.right - sourcePx.left, sourcePx.bottom - sourcePx.top,
-                                preview.SourceSize().cx, preview.SourceSize().cy, shown ? 1 : 0,
-                                preview.LastResult());
+                                "  preview: hwnd %p -> card %ld,%ld %ldx%ld, picture %ldx%ld "
+                                "(compositor says %ldx%ld), shown=%d, hr=0x%08llX",
+                                reinterpret_cast<void*>(wanted), placement.card.left,
+                                placement.card.top, placement.card.right - placement.card.left,
+                                placement.card.bottom - placement.card.top,
+                                placement.picture.right - placement.picture.left,
+                                placement.picture.bottom - placement.picture.top, sourceSize.cx,
+                                sourceSize.cy, shown ? 1 : 0, preview.LastResult());
                             std::fflush(stdout);
                         }
                     }
