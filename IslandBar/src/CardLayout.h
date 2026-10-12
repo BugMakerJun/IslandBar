@@ -370,15 +370,179 @@ inline float CardLeftFor(float anchorLeftDip, float cardWidthDip, float windowWi
 //
 // `held` is the previous answer, so the caller feeds this back to itself exactly as it does with
 // NextCardOwner. Every row of that table is asserted in Diagnostics.
-enum class PanelLevel { Tiles, Sound, Tray };
+// `Start` is the fourth level: the user's own Start card (see StartPageFor).
+enum class PanelLevel { Tiles, Sound, Tray, Start };
 
 inline PanelLevel NextPanelLevel(PanelLevel held, bool cardUp, bool panelWanted, bool trayWanted,
-                                 bool soundWanted) {
+                                 bool soundWanted, bool startWanted) {
     if (!cardUp) return PanelLevel::Tiles;
     if (!panelWanted) return held;   // put away: the card keeps its level while it leaves the screen
     if (trayWanted) return PanelLevel::Tray;
     if (soundWanted) return PanelLevel::Sound;
+    if (startWanted) return PanelLevel::Start;
     return PanelLevel::Tiles;
+}
+
+// --- the Start card -------------------------------------------------------------------------------
+//
+// The user's own words for what this is: "创建一个空白的卡片 然后里面只有红框里的 关机键 和用户头像,
+// 上面的应该可以让用户手动添加" -- a BLANK card whose footer holds the account picture and the power
+// button, and whose upper area the user fills himself.
+//
+// So the card's upper area is a GRID OF PINS that starts empty, and the footer is the two things the
+// shell's Start menu puts in its own footer. The card itself is the SAME card as the panel's -- 520 x 250,
+// hanging from the same button, with the same open/close animation -- because a Start card is one more
+// level of a thing that already exists, not a new kind of window.
+inline constexpr int   kStartColumns    = 6;
+inline constexpr int   kStartRows       = 3;
+inline constexpr float kStartCellWidth  = 76.0f;
+// 50, not 60: three rows plus two 4 DIP gaps have to fit the 162 DIP between the card's top padding and
+// the footer (250 - 16 top - 16 bottom - 46 footer - 10 gap). Asserted, and it failed at 60 -- which is
+// what the assertion is for.
+inline constexpr float kStartCellHeight = 50.0f;
+inline constexpr float kStartCellGap    = 4.0f;
+inline constexpr float kStartFooterDip  = 46.0f;
+inline constexpr float kStartAvatarDip  = 28.0f;
+inline constexpr float kStartPowerDip   = 30.0f;   // the power button's square
+inline constexpr float kStartRowHeight  = 34.0f;   // one line of the picker or the power list
+
+struct StartPageLayout {
+    RectF grid;         // where the pinned tiles live
+    RectF footer;       // the account picture and the power button
+    RectF avatar;
+    RectF powerButton;
+    bool  valid = false;
+};
+
+// `card` is the card's own rectangle, the same one every other level is laid out in.
+inline StartPageLayout StartPageFor(const RoundedBox& card) {
+    StartPageLayout layout;
+    constexpr float pad = 16.0f;
+    if (card.rect.right - card.rect.left < pad * 2.0f + 1.0f ||
+        card.rect.bottom - card.rect.top < kStartFooterDip + pad * 2.0f + 1.0f) {
+        return layout;
+    }
+
+    layout.footer.left = card.rect.left + pad;
+    layout.footer.right = card.rect.right - pad;
+    layout.footer.bottom = card.rect.bottom - pad;
+    layout.footer.top = layout.footer.bottom - kStartFooterDip;
+
+    // The grid starts below the card's top edge and stops a gap above the footer. Its columns are spread
+    // across the card's full inner width, centred: the cell size is fixed and the leftover is split.
+    const float innerWidth = card.rect.right - card.rect.left - pad * 2.0f;
+    const float gridWidth =
+        kStartColumns * kStartCellWidth + (kStartColumns - 1) * kStartCellGap;
+    layout.grid.left = card.rect.left + pad + (innerWidth - gridWidth) * 0.5f;
+    layout.grid.right = layout.grid.left + gridWidth;
+    layout.grid.top = card.rect.top + pad;
+    layout.grid.bottom = layout.footer.top - 10.0f;
+
+    layout.avatar.right = layout.footer.left + kStartAvatarDip;
+    layout.avatar.left = layout.footer.left;
+    const float footerCentreY = (layout.footer.top + layout.footer.bottom) * 0.5f;
+    layout.avatar.top = footerCentreY - kStartAvatarDip * 0.5f;
+    layout.avatar.bottom = layout.avatar.top + kStartAvatarDip;
+
+    layout.powerButton.right = layout.footer.right;
+    layout.powerButton.left = layout.powerButton.right - kStartPowerDip;
+    layout.powerButton.top = footerCentreY - kStartPowerDip * 0.5f;
+    layout.powerButton.bottom = layout.powerButton.top + kStartPowerDip;
+
+    layout.valid = true;
+    return layout;
+}
+
+// One pinned application's cell, by index. Rows are read left to right, top to bottom, which is also the
+// order they were pinned in.
+inline RectF StartPinCellFor(const StartPageLayout& layout, int index) {
+    RectF cell;
+    if (!layout.valid || index < 0) return cell;
+    const int column = index % kStartColumns;
+    const int row = index / kStartColumns;
+    cell.left = layout.grid.left + static_cast<float>(column) * (kStartCellWidth + kStartCellGap);
+    cell.top = layout.grid.top + static_cast<float>(row) * (kStartCellHeight + kStartCellGap);
+    cell.right = cell.left + kStartCellWidth;
+    cell.bottom = cell.top + kStartCellHeight;
+    return cell;
+}
+
+// How many pins the grid can hold, which is what says whether a pin has to wait for a second page.
+inline int StartPinCapacity() { return kStartColumns * kStartRows; }
+
+// One row of the picker, counting from the top of the grid area: `rowOnScreen` is after the scroll.
+inline RectF StartPickerRowFor(const RoundedBox& card, int rowOnScreen) {
+    const StartPageLayout layout = StartPageFor(card);
+    RectF row;
+    if (!layout.valid || rowOnScreen < 0) return row;
+    row.left = layout.grid.left;
+    row.right = layout.grid.right;
+    row.top = layout.grid.top + static_cast<float>(rowOnScreen) * kStartRowHeight;
+    row.bottom = row.top + kStartRowHeight;
+    if (row.bottom > layout.grid.bottom + kStartRowHeight * 0.5f) {
+        // Past the bottom of the grid area: not on screen, and the caller skips it.
+        return row;
+    }
+    return row;
+}
+
+// One row of the power list, which stands ABOVE the power button and is right-aligned to it -- the
+// placement the shell's own Start uses, so the menu reads as belonging to the button it came from.
+inline constexpr float kStartPowerRowWidth = 168.0f;
+inline RectF StartPowerRowFor(const RoundedBox& card, int index) {
+    const StartPageLayout layout = StartPageFor(card);
+    RectF row;
+    if (!layout.valid || index < 0) return row;
+    row.right = layout.powerButton.right;
+    row.left = row.right - kStartPowerRowWidth;
+    row.bottom = layout.footer.top - 8.0f - static_cast<float>(index) * kStartRowHeight;
+    row.top = row.bottom - kStartRowHeight;
+    return row;
+}
+
+// The rectangles for the tiles that get a wash. Kept here with the geometry so the hit tests and the
+// drawing cannot disagree about where a cell is.
+inline bool StartRectHasPoint(const RectF& rect, float x, float y) {
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+inline int StartPinCellAt(const StartPageLayout& layout, int count, float x, float y) {
+    if (!layout.valid) return -1;
+    if (!StartRectHasPoint(layout.grid, x, y)) return -1;
+    // By ARITHMETIC rather than by testing each cell: the cells are separated by a 4 DIP gap, and a click
+    // two pixels off a tile landing in that gap and doing nothing is a dead zone in a grid the user is
+    // meant to fill by hand. Dividing the offset by the pitch makes the whole area belong to some tile.
+    const float pitchX = kStartCellWidth + kStartCellGap;
+    const float pitchY = kStartCellHeight + kStartCellGap;
+    const int column = static_cast<int>((x - layout.grid.left) / pitchX);
+    const int row = static_cast<int>((y - layout.grid.top) / pitchY);
+    if (column < 0 || column >= kStartColumns || row < 0 || row >= kStartRows) return -1;
+    const int index = row * kStartColumns + column;
+    const int capacity = StartPinCapacity();
+    const int limit = count < capacity ? count : capacity;
+    return index < limit ? index : -1;
+}
+
+inline int StartPickerRowAt(const RoundedBox& card, int scrollRow, int count, float x, float y) {
+    const StartPageLayout layout = StartPageFor(card);
+    if (!layout.valid) return -1;
+    const int rowsOnScreen =
+        static_cast<int>((layout.grid.bottom - layout.grid.top) / kStartRowHeight);
+    for (int visible = 0; visible <= rowsOnScreen; ++visible) {
+        const int index = scrollRow + visible;
+        if (index < 0 || index >= count) break;
+        const RectF row = StartPickerRowFor(card, visible);
+        if (row.bottom > layout.grid.bottom) break;
+        if (StartRectHasPoint(row, x, y)) return index;
+    }
+    return -1;
+}
+
+inline int StartPowerRowAt(const RoundedBox& card, float x, float y) {
+    for (int i = 0; i < 5; ++i) {
+        if (StartRectHasPoint(StartPowerRowFor(card, i), x, y)) return i;
+    }
+    return -1;
 }
 
 // --- the system panel --------------------------------------------------------------

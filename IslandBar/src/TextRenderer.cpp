@@ -172,6 +172,28 @@ bool TextRenderer::Initialize() {
         volumeFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
 
+    // The Start card's two faces.
+    //
+    // The label under a pinned tile is centred and one size smaller than a list row: it is read at a
+    // glance under a 32 DIP picture, and it is the NAME of the thing above it rather than a line of text
+    // to be read. `startRowFormat_` is left-aligned because every list in this bar is.
+    hr = factory_->CreateTextFormat(
+        L"Segoe UI Variable Text", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL, 10.5f, L"zh-CN", &startLabelFormat_);
+    if (SUCCEEDED(hr)) {
+        startLabelFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        startLabelFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        startLabelFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
+    hr = factory_->CreateTextFormat(
+        L"Segoe UI Variable Text", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL, 12.5f, L"zh-CN", &startRowFormat_);
+    if (SUCCEEDED(hr)) {
+        startRowFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        startRowFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        startRowFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
+
     // Notification text: a small sender line, a bold title, and a body that is
     // allowed to wrap onto several lines.
     hr = factory_->CreateTextFormat(
@@ -333,6 +355,8 @@ void TextRenderer::Shutdown() {
     SafeRelease(&appRowFormat_);
     SafeRelease(&volumeFormat_);
     SafeRelease(&appFormat_);
+    SafeRelease(&startLabelFormat_);
+    SafeRelease(&startRowFormat_);
     SafeRelease(&statusWeatherFormat_);
     SafeRelease(&statusTimeFormat_);
     SafeRelease(&statusDayFormat_);
@@ -3366,4 +3390,327 @@ void TextRenderer::CurrentTimeText(wchar_t* out, size_t capacity) const {
     wcsncpy_s(out, capacity, timeText_, _TRUNCATE);
 }
 
+ID2D1Bitmap1* TextRenderer::StartBitmapFor(ID2D1DeviceContext2* context, StartBitmap* slot,
+                                           const uint8_t* png, size_t size) {
+    if (!context || !slot || !png || size == 0) return nullptr;
+    if (slot->bitmap && slot->png == png && slot->size == size) return slot->bitmap;
+
+    ID2D1Bitmap1* bitmap = nullptr;
+    DecodedImage decoded;
+    if (DecodeImage(png, size, &decoded) && decoded.pixels) {
+        const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+        const UINT32 stride = static_cast<UINT32>(decoded.width) * 4;
+        context->CreateBitmap(
+            D2D1::SizeU(static_cast<UINT32>(decoded.width), static_cast<UINT32>(decoded.height)),
+            decoded.pixels, stride, &properties, &bitmap);
+    }
+    SafeRelease(&slot->bitmap);
+    slot->bitmap = bitmap;
+    slot->png = png;
+    slot->size = size;
+    return bitmap;
+}
+
+void TextRenderer::DrawStartPage(ID2D1DeviceContext2* context, const RoundedBox& card,
+                                 const StartCardText& text, float opacity) {
+    if (!context || opacity <= 0.01f) return;
+    const island::StartPageLayout layout = island::StartPageFor(card);
+    if (!layout.valid) return;
+
+    FillCardSurface(context, card, opacity);
+
+    const D2D1_COLOR_F ink = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f * opacity);
+    const D2D1_COLOR_F dim = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.50f * opacity);
+    const D2D1_COLOR_F warm = D2D1::ColorF(1.0f, 0.72f, 0.35f, 0.95f * opacity);
+
+    ID2D1SolidColorBrush* inkBrush = nullptr;
+    ID2D1SolidColorBrush* dimBrush = nullptr;
+    ID2D1SolidColorBrush* warmBrush = nullptr;
+    ID2D1SolidColorBrush* washBrush = nullptr;
+    ID2D1SolidColorBrush* lineBrush = nullptr;
+    context->CreateSolidColorBrush(ink, &inkBrush);
+    context->CreateSolidColorBrush(dim, &dimBrush);
+    context->CreateSolidColorBrush(warm, &warmBrush);
+    context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f * opacity), &washBrush);
+    context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.07f * opacity), &lineBrush);
+
+    const auto fillRounded = [&](const RectF& rect, float radius, ID2D1SolidColorBrush* brush) {
+        if (!brush) return;
+        const D2D1_ROUNDED_RECT rounded = {
+            D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom), radius, radius};
+        context->FillRoundedRectangle(&rounded, brush);
+    };
+    const auto drawGlyph = [&](const wchar_t* glyph, const RectF& rect, ID2D1Brush* brush,
+                               IDWriteTextFormat* format) {
+        if (!brush || !format) return;
+        const D2D1_RECT_F target = D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
+        context->DrawTextW(glyph, 1, format, target, brush);
+    };
+
+    if (text.page == 2) {
+        // --- the power list, standing above the button it came from --------------------------------
+        static const wchar_t* const kLabels[5] = {L"锁定", L"睡眠", L"注销", L"重启", L"关机"};
+        for (int i = 0; i < 5; ++i) {
+            const RectF row = island::StartPowerRowFor(card, i);
+            if (row.right <= row.left) continue;
+            if (i == text.hoveredPowerRow) fillRounded(row, 8.0f, washBrush);
+            // The three that lose work are ARMED rather than acted on: a mis-click on a list that appears
+            // above a button the user was already reaching for must not sign him out.
+            const bool armed = (text.powerConfirmRow == i);
+            const wchar_t* label = armed ? L"再点一次确认" : kLabels[i];
+            ID2D1SolidColorBrush* brush = armed ? warmBrush : inkBrush;
+            if (brush && startRowFormat_) {
+                const D2D1_RECT_F target = D2D1::RectF(row.left + 10.0f, row.top, row.right - 10.0f,
+                                                       row.bottom);
+                context->DrawTextW(label, static_cast<UINT32>(std::wcslen(label)), startRowFormat_,
+                                   target, brush);
+            }
+        }
+    } else if (text.page == 1) {
+        // --- the picker: every application the shell offers, one per row ---------------------------
+        const int rowsOnScreen =
+            static_cast<int>((layout.grid.bottom - layout.grid.top) / island::kStartRowHeight);
+        for (int visible = 0; visible <= rowsOnScreen; ++visible) {
+            const int index = text.pickerScrollRow + visible;
+            if (index < 0 || index >= text.listCount) break;
+            const RectF row = island::StartPickerRowFor(card, visible);
+            if (row.bottom > layout.grid.bottom) break;
+            if (index == text.hoveredPickerRow) fillRounded(row, 8.0f, washBrush);
+            const island::StartApp& app = text.list[index];
+            if (startRowFormat_ && inkBrush) {
+                const D2D1_RECT_F target =
+                    D2D1::RectF(row.left + 10.0f, row.top, row.right - 84.0f, row.bottom);
+                context->DrawTextW(app.name, static_cast<UINT32>(std::wcslen(app.name)),
+                                   startRowFormat_, target, inkBrush);
+            }
+            // Already pinned: said on the row rather than left to be discovered by pinning it twice.
+            if (dimBrush && startLabelFormat_) {
+                const wchar_t* mark = L"";
+                for (int p = 0; p < text.pinCount; ++p) {
+                    if (text.pins && _wcsicmp(text.pins[p].target, app.target) == 0) {
+                        mark = L"已固定";
+                        break;
+                    }
+                }
+                if (mark[0] != L'\0') {
+                    const D2D1_RECT_F target =
+                        D2D1::RectF(row.right - 74.0f, row.top, row.right - 10.0f, row.bottom);
+                    context->DrawTextW(mark, static_cast<UINT32>(std::wcslen(mark)), startLabelFormat_,
+                                       target, dimBrush);
+                }
+            }
+        }
+        // A scroll bar on the right of the list, so "there is more" is visible without trying the wheel.
+        if (text.listCount > 0 && lineBrush) {
+            const float gridHeight = layout.grid.bottom - layout.grid.top;
+            const float visibleFraction =
+                static_cast<float>(rowsOnScreen + 1) / static_cast<float>(text.listCount);
+            const float barHeight = std::max(24.0f, gridHeight * visibleFraction);
+            const float maxRow =
+                static_cast<float>(std::max(1, text.listCount - (rowsOnScreen + 1)));
+            const float travelled =
+                layout.grid.top + (gridHeight - barHeight) * (static_cast<float>(text.pickerScrollRow) /
+                                                              maxRow);
+            const RectF bar = {layout.grid.right + 6.0f, travelled, layout.grid.right + 9.0f,
+                               travelled + barHeight};
+            fillRounded(bar, 1.5f, lineBrush);
+        }
+    } else {
+        // --- the pins, which start empty -----------------------------------------------------------
+        const int capacity = island::StartPinCapacity();
+        const int shown = text.pinCount < capacity ? text.pinCount : capacity;
+        for (int i = 0; i < shown; ++i) {
+            const RectF cell = island::StartPinCellFor(layout, i);
+            if (i == text.hoveredPin) fillRounded(cell, 10.0f, washBrush);
+
+            const uint8_t* png = (text.pinIcons && i < static_cast<int>(sizeof(startPinBitmaps_) /
+                                                                       sizeof(startPinBitmaps_[0])))
+                                     ? text.pinIcons[i]
+                                     : nullptr;
+            const size_t pngSize = text.pinIconSizes ? text.pinIconSizes[i] : 0;
+            ID2D1Bitmap1* icon =
+                StartBitmapFor(context, &startPinBitmaps_[i], png, pngSize);
+            // 28 in a 50 DIP cell, with the label under it: the cell has to hold a picture and one line of
+            // 10.5 pixel text, and three of them plus gaps have to fit the grid (see kStartCellHeight).
+            const float iconSide = 28.0f;
+            const float centreX = (cell.left + cell.right) * 0.5f;
+            const float iconTop = cell.top + 5.0f;
+            if (icon && washBrush) {
+                const D2D1_RECT_F target =
+                    D2D1::RectF(centreX - iconSide * 0.5f, iconTop, centreX + iconSide * 0.5f,
+                                iconTop + iconSide);
+                context->DrawBitmap(icon, &target, opacity,
+                                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            } else if (washBrush) {
+                // No icon YET (it is resolved on a worker) or none at all: a quiet square holds the place,
+                // so a pin never appears as a name floating in space.
+                const RectF placeholder = {centreX - iconSide * 0.5f, iconTop, centreX + iconSide * 0.5f,
+                                           iconTop + iconSide};
+                fillRounded(placeholder, 6.0f, lineBrush);
+            }
+            if (startLabelFormat_ && inkBrush && text.pins) {
+                const D2D1_RECT_F target =
+                    D2D1::RectF(cell.left + 2.0f, iconTop + iconSide + 1.0f, cell.right - 2.0f,
+                                cell.bottom);
+                context->DrawTextW(text.pins[i].name,
+                                   static_cast<UINT32>(std::wcslen(text.pins[i].name)),
+                                   startLabelFormat_, target, inkBrush);
+            }
+        }
+        if (shown == 0) {
+            // THE EMPTY CARD, which is what the user asked for: nothing pinned yet, and the whole upper
+            // area is the thing to press to change that.
+            const float centreX = (layout.grid.left + layout.grid.right) * 0.5f;
+            const float centreY = (layout.grid.top + layout.grid.bottom) * 0.5f;
+            if (warmBrush) {
+                const RectF plus = {centreX - 12.0f, centreY - 34.0f, centreX + 12.0f, centreY - 10.0f};
+                drawGlyph(L"+", plus, warmBrush, glyphFormat_);
+            }
+            // CENTRED, with the label format: the hint belongs to the middle of the area it is inviting the
+            // user to use. Written first with the row format, which is left-aligned -- the text then started
+            // at the grid's left edge and ran off the side of the card, which the second photograph of this
+            // card showed as one character at the card's edge.
+            if (dimBrush && startLabelFormat_) {
+                const wchar_t* hint = L"点这里添加应用";
+                const D2D1_RECT_F target =
+                    D2D1::RectF(layout.grid.left, centreY - 4.0f, layout.grid.right, centreY + 24.0f);
+                context->DrawTextW(hint, static_cast<UINT32>(std::wcslen(hint)), startLabelFormat_, target,
+                                   dimBrush);
+            }
+        }
+    }
+
+    // --- the footer: the account picture, the name, and the power button --------------------------
+    if (lineBrush) {
+        const RectF hair = {layout.footer.left, layout.footer.top, layout.footer.right,
+                            layout.footer.top + 1.0f};
+        context->FillRectangle(D2D1::RectF(hair.left, hair.top, hair.right, hair.bottom), lineBrush);
+    }
+    if (text.page == 1) {
+        // While picking, the footer says what picking means and offers the way out, and the account
+        // picture steps aside: the card has one line at the bottom and this is the more useful one.
+        if (dimBrush && startRowFormat_) {
+            wchar_t hint[128] = {};
+            std::swprintf(hint, 128, L"全部应用 %d 个 · 滚轮翻页 · 点一个固定", text.listCount);
+            const D2D1_RECT_F target = D2D1::RectF(layout.footer.left, layout.footer.top,
+                                                   layout.footer.right - 40.0f, layout.footer.bottom);
+            context->DrawTextW(hint, static_cast<UINT32>(std::wcslen(hint)), startRowFormat_, target,
+                               dimBrush);
+        }
+    } else {
+        ID2D1Bitmap1* avatar =
+            StartBitmapFor(context, &startAvatarBitmap_, text.avatarPng, text.avatarPngSize);
+        if (avatar) {
+            // Round, like the shell's own footer, and for the same reason the notification's avatar is
+            // round: a square picture beside a name reads as two unrelated things.
+            ID2D1Factory* factory = nullptr;
+            context->GetFactory(&factory);
+            ID2D1EllipseGeometry* circle = nullptr;
+            if (factory) {
+                factory->CreateEllipseGeometry(
+                    D2D1::Ellipse(D2D1::Point2F((layout.avatar.left + layout.avatar.right) * 0.5f,
+                                                (layout.avatar.top + layout.avatar.bottom) * 0.5f),
+                                  (layout.avatar.right - layout.avatar.left) * 0.5f,
+                                  (layout.avatar.bottom - layout.avatar.top) * 0.5f),
+                    &circle);
+            }
+            if (circle) {
+                context->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), circle,
+                                                          D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),
+                                   nullptr);
+            }
+            const D2D1_RECT_F target =
+                D2D1::RectF(layout.avatar.left, layout.avatar.top, layout.avatar.right, layout.avatar.bottom);
+            context->DrawBitmap(avatar, &target, opacity,
+                                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            if (circle) {
+                context->PopLayer();
+                circle->Release();
+            }
+            if (factory) factory->Release();
+        } else if (lineBrush) {
+            const D2D1_ROUNDED_RECT rounded = {
+                D2D1::RectF(layout.avatar.left, layout.avatar.top, layout.avatar.right, layout.avatar.bottom),
+                (layout.avatar.right - layout.avatar.left) * 0.5f,
+                (layout.avatar.bottom - layout.avatar.top) * 0.5f};
+            context->FillRoundedRectangle(&rounded, lineBrush);
+        }
+        if (startRowFormat_ && inkBrush && text.accountName && text.accountName[0] != L'\0') {
+            const D2D1_RECT_F target =
+                D2D1::RectF(layout.avatar.right + 10.0f, layout.footer.top,
+                            layout.powerButton.left - 10.0f, layout.footer.bottom);
+            context->DrawTextW(text.accountName, static_cast<UINT32>(std::wcslen(text.accountName)),
+                               startRowFormat_, target, inkBrush);
+        }
+    }
+
+    // The power button: a wash while the pointer is on it (or while its own list is up), and the power
+    // rune -- the glyph the shell's own Start uses, from the icon font the bar already draws with. With the
+    // picker up the same slot is the way out, so it draws a multiplication sign instead.
+    {
+        if (washBrush && (text.powerButtonHovered || text.page == 2)) {
+            fillRounded(layout.powerButton, 8.0f, washBrush);
+        }
+        if (text.page == 1) {
+            // The way out of the picker: a multiplication sign, in the text font, where the power button
+            // is. Two marks in one place, chosen by the page -- which is what the slot means.
+            drawGlyph(L"×", layout.powerButton, inkBrush, startRowFormat_);
+        } else {
+            // THE POWER MARK, DRAWN AS GEOMETRY, for the reason the Start button's mark is: no glyph to get
+            // wrong and nothing to fail to load. That rule was earned here again -- the icon font's power
+            // codepoint (E7E8) came out as an empty box on this machine, photographed, and a symbol that is
+            // the whole meaning of a button cannot be a thing that might not be there.
+            const float cx = (layout.powerButton.left + layout.powerButton.right) * 0.5f;
+            const float cy = (layout.powerButton.top + layout.powerButton.bottom) * 0.5f;
+            const float radius = 6.5f;
+            ID2D1Factory* factory = nullptr;
+            context->GetFactory(&factory);
+            if (factory && dimBrush) {
+                ID2D1EllipseGeometry* ring = nullptr;
+                factory->CreateEllipseGeometry(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius),
+                                               &ring);
+                if (ring) {
+                    // A ring with a gap at the top, and a stem through the gap: the power symbol. Drawn as
+                    // an arc rather than a full circle so the gap is real rather than a second stroke in the
+                    // card's own colour.
+                    ID2D1PathGeometry* arc = nullptr;
+                    ID2D1GeometrySink* sink = nullptr;
+                    if (SUCCEEDED(factory->CreatePathGeometry(&arc)) && arc &&
+                        SUCCEEDED(arc->Open(&sink)) && sink) {
+                        const float start = -1.15f;   // radians, just right of the top
+                        const float end = start + 5.42f;   // all the way round, back to just left of it
+                        sink->BeginFigure(D2D1::Point2F(cx + radius * std::sin(start),
+                                                        cy - radius * std::cos(start)),
+                                          D2D1_FIGURE_BEGIN_HOLLOW);
+                        const int steps = 24;
+                        for (int i = 1; i <= steps; ++i) {
+                            const float t = start + (end - start) * static_cast<float>(i) / steps;
+                            sink->AddLine(D2D1::Point2F(cx + radius * std::sin(t),
+                                                        cy - radius * std::cos(t)));
+                        }
+                        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                        sink->Close();
+                        sink->Release();
+                        context->DrawGeometry(arc, dimBrush, 1.6f);
+                    }
+                    if (arc) arc->Release();
+                    ring->Release();
+                }
+                context->DrawLine(D2D1::Point2F(cx, cy - radius - 1.5f), D2D1::Point2F(cx, cy - 1.0f),
+                                  dimBrush, 1.8f);
+            }
+            if (factory) factory->Release();
+        }
+    }
+
+    if (inkBrush) inkBrush->Release();
+    if (dimBrush) dimBrush->Release();
+    if (warmBrush) warmBrush->Release();
+    if (washBrush) washBrush->Release();
+    if (lineBrush) lineBrush->Release();
+}
+
 } // namespace island
+

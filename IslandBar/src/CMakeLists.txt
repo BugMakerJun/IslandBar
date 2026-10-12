@@ -35,6 +35,7 @@ add_executable(island_bar
     ToastStore.cpp
     TrayIcons.cpp
     TrayPress.cpp
+    StartApps.cpp
     Weather.cpp
     WeChatWatch.cpp
     WicImage.cpp

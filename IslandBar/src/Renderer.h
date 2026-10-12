@@ -324,6 +324,14 @@ static constexpr int kMaxTaskButtons = 32;
     // own (see SoundPageText, which is here for the same reason). Empty means no heading.
     const wchar_t*  trayPageTitle = nullptr;
 
+    // --- the Start card -------------------------------------------------------------------------------
+    //
+    // The same card, one level further: the user's own pins, the shell's full list behind the picker, and
+    // the footer's two things. See TextRenderer::StartCardText, which this fills in one place so the
+    // drawing and the hit tests cannot be given different answers.
+    TextRenderer::StartCardText startCard = {};
+    bool startPageOpen = false;
+
     // Whether the pointer is on the Start button, which lives on the other side of the
     // island from the application icons.
     bool startHovered = false;

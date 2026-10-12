@@ -24,6 +24,7 @@
 #include "CardLayout.h"    // where the card's controls go
 #include "TaskStripLayout.h"  // where the tray sits, and how many icons fit
 #include "TrayIcons.h"     // the icons themselves
+#include "StartApps.h"     // the Start card's applications
 
 namespace island {
 
@@ -116,6 +117,43 @@ public:
     // state rather than something the pointer is doing.
     void DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box, float wash, bool open,
                         const D2D1_COLOR_F& fill, float opacity);
+
+    // --- the Start card -------------------------------------------------------------------------------
+    //
+    // Everything that card shows, assembled by the frame loop: the user's own pins with their icons, the
+    // shell's full list for the picker, and the two things in its footer. Pointers rather than copies,
+    // because the shell's list is 121 applications and a frame is rebuilt every frame -- the same
+    // arrangement the tray page uses.
+    struct StartCardText {
+        const StartApp* pins = nullptr;
+        int pinCount = 0;
+        // One PNG per pin, resolved when the pin was added. A null entry is an icon that has not arrived
+        // yet, which happens for a few frames and must not stop the tile being drawn.
+        const uint8_t* const* pinIcons = nullptr;
+        const size_t* pinIconSizes = nullptr;
+
+        const StartApp* list = nullptr;
+        int listCount = 0;
+        int pickerScrollRow = 0;
+
+        // 0 = the pins, 1 = the picker, 2 = the power list. A page rather than three flags, because only
+        // one of them can be showing and the hit tests have to ask the same question the drawing did.
+        int page = 0;
+        int hoveredPin = -1;
+        int hoveredPickerRow = -1;
+        int hoveredPowerRow = -1;
+        bool powerButtonHovered = false;
+        // The power row waiting for a second press (see the click handler): the three that lose unsaved
+        // work do not act on the first click, and this is which one is armed.
+        int powerConfirmRow = -1;
+
+        const wchar_t* accountName = nullptr;
+        const uint8_t* avatarPng = nullptr;
+        size_t avatarPngSize = 0;
+    };
+
+    void DrawStartPage(ID2D1DeviceContext2* context, const RoundedBox& card, const StartCardText& text,
+                       float opacity);
 
     // The card's tray page: the icons in a wrapping grid, each with the wash the other buttons get.
     //
@@ -644,6 +682,22 @@ private:
     ID2D1Bitmap1* TrayIconBitmap(ID2D1DeviceContext2* context, int index, const TrayIcon& icon,
                                  unsigned long long revision);
 
+    // The Start card's own bitmaps: one per pinned tile and one for the account picture.
+    //
+    // Keyed by the PNG's ADDRESS rather than by a revision, because the pins' icons arrive one at a time
+    // from a worker (see StartApps::ResolveIconAsync): a revision would be bumped once per icon and every
+    // bump would throw away every decoded bitmap. The address of a resolved icon is stable for as long as
+    // it is that icon, which is exactly the lifetime wanted here.
+    struct StartBitmap {
+        ID2D1Bitmap1* bitmap = nullptr;
+        const uint8_t* png = nullptr;
+        size_t size = 0;
+    };
+    ID2D1Bitmap1* StartBitmapFor(ID2D1DeviceContext2* context, StartBitmap* slot, const uint8_t* png,
+                                 size_t size);
+    StartBitmap startPinBitmaps_[24];   // as many as can be on screen at once, and then some
+    StartBitmap startAvatarBitmap_;
+
     IDWriteTextFormat*   dateFormat_  = nullptr;
     IDWriteTextFormat*   appFormat_   = nullptr;
     // --- the status line's four faces ------------------------------------------------------
@@ -662,6 +716,9 @@ private:
     // buttons, the card's app line and the track times are drawn with -- bolding it would bold all of
     // them, which is not what "字体加粗" was about. Asked for as "现在可以了 美化美化就行了 比如字体加粗".
     IDWriteTextFormat*   pillLineFormat_ = nullptr;
+    // The Start card's two faces: the label under a pinned tile (centred, small) and one line of a list.
+    IDWriteTextFormat*   startLabelFormat_ = nullptr;
+    IDWriteTextFormat*   startRowFormat_ = nullptr;
     // The music card's top row, which needs a different size and alignment from the notification
     // header that appFormat_ serves: the source name is left aligned beside the icon, and the
     // volume readout is right aligned at the far end of the same row.
@@ -701,3 +758,4 @@ private:
 };
 
 } // namespace island
+

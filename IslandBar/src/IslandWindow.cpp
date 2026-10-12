@@ -281,6 +281,79 @@ bool IslandWindow::TakeRightClick() {
     return true;
 }
 
+void IslandWindow::SetStartState(bool pageOpen, int page, int pinCount, int listCount,
+                                 int pickerScrollRow) {
+    startPageOpen_ = pageOpen;
+    startPage_ = page;
+    startPinCount_ = pinCount > 0 ? pinCount : 0;
+    startListCount_ = listCount > 0 ? listCount : 0;
+    startPickerScroll_ = pickerScrollRow > 0 ? pickerScrollRow : 0;
+}
+
+void IslandWindow::ScrollStartPicker(int notches) {
+    if (notches == 0) return;
+    int moved = startPickerScroll_ - notches;
+    if (moved < 0) moved = 0;
+
+    // How many rows fit: the same layout the drawing and the hit test use, from the card this window is
+    // told the position of.
+    int rowsOnScreen = 1;
+    if (cardLeftDip_ > 0.0f) {
+        const RoundedBox card =
+            PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
+        const island::StartPageLayout layout = island::StartPageFor(card);
+        if (layout.valid) {
+            rowsOnScreen =
+                static_cast<int>((layout.grid.bottom - layout.grid.top) / island::kStartRowHeight);
+        }
+    }
+    const int lastFirstRow = startListCount_ - (rowsOnScreen + 1);
+    if (lastFirstRow > 0 && moved > lastFirstRow) moved = lastFirstRow;
+    if (startListCount_ <= rowsOnScreen + 1) moved = 0;
+    startPickerScroll_ = moved;
+}
+
+IslandWindow::StartHit IslandWindow::StartHitAtScreen(POINT screenPoint) const {
+    if (!hwnd_ || !startPageOpen_ || cardLeftDip_ <= 0.0f) return {};
+
+    float localX = 0.0f;
+    float localY = 0.0f;
+    ToLocalDip(screenPoint, &localX, &localY);
+    const RoundedBox card =
+        PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
+    const island::StartPageLayout layout = island::StartPageFor(card);
+    StartHit hit;
+    if (island::StartRectHasPoint(layout.powerButton, localX, localY)) {
+        hit.target = StartHitTarget::PowerButton;
+        return hit;
+    }
+    if (startPage_ == 2) {
+        const int row = island::StartPowerRowAt(card, localX, localY);
+        if (row >= 0) {
+            hit.target = StartHitTarget::PowerRow;
+            hit.index = row;
+        }
+        return hit;
+    }
+    if (startPage_ == 1) {
+        const int row =
+            island::StartPickerRowAt(card, startPickerScroll_, startListCount_, localX, localY);
+        if (row >= 0) {
+            hit.target = StartHitTarget::PickerRow;
+            hit.index = row;
+        }
+        return hit;
+    }
+    const int pin = island::StartPinCellAt(layout, startPinCount_, localX, localY);
+    if (pin >= 0) {
+        hit.target = StartHitTarget::Pin;
+        hit.index = pin;
+    } else if (island::StartRectHasPoint(layout.grid, localX, localY)) {
+        hit.target = StartHitTarget::EmptyGrid;
+    }
+    return hit;
+}
+
 bool IslandWindow::TakePress(POINT* screenPoint) {
     if (pendingPresses_ <= 0) return false;
     --pendingPresses_;
@@ -1114,6 +1187,39 @@ void IslandWindow::UpdatePointerState() {
             trayCellHovered_ = TrayPageCellAt(card, trayIconCount_, localX, localY);
         }
 
+        // ... and the same question for the Start card, which is laid out by the same rule.
+        startHit_ = {};
+        if (startPageOpen_ && cardLeftDip_ > 0.0f) {
+            const RoundedBox card =
+                PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
+            const island::StartPageLayout layout = island::StartPageFor(card);
+            if (island::StartRectHasPoint(layout.powerButton, localX, localY)) {
+                startHit_.target = StartHitTarget::PowerButton;
+            } else if (startPage_ == 2) {
+                const int row = island::StartPowerRowAt(card, localX, localY);
+                if (row >= 0) {
+                    startHit_.target = StartHitTarget::PowerRow;
+                    startHit_.index = row;
+                }
+            } else if (startPage_ == 1) {
+                const int row = island::StartPickerRowAt(card, startPickerScroll_, startListCount_,
+                                                         localX, localY);
+                if (row >= 0) {
+                    startHit_.target = StartHitTarget::PickerRow;
+                    startHit_.index = row;
+                }
+            } else {
+                const int pin = island::StartPinCellAt(layout, startPinCount_, localX, localY);
+                if (pin >= 0) {
+                    startHit_.target = StartHitTarget::Pin;
+                    startHit_.index = pin;
+                } else if (island::StartRectHasPoint(layout.grid, localX, localY)) {
+                    // The empty upper area itself: what the user presses to add something.
+                    startHit_.target = StartHitTarget::EmptyGrid;
+                }
+            }
+        }
+
         // The Start button is on the other end, from the same island box.
         startHovered_ = StartButtonHit(island, localX, localY);
 
@@ -1383,7 +1489,11 @@ LRESULT IslandWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         // SetSoundPage() wrote its (unchanged) offset straight back over it: the page could not be
         // scrolled at all, which is what "声音输出的位置应该可以用鼠标滚轮控制" asked for.
         case WM_MOUSEWHEEL: {
-            if (!soundPageOpen_) break;
+            // The two card levels that scroll: the 声音输出 page's list and the Start card's picker. The
+            // wheel is counted for whichever of them is up -- the frame loop decides what the notches move,
+            // because it owns the offsets.
+            const bool startPickerUp = startPageOpen_ && startPage_ == 1;
+            if (!soundPageOpen_ && !startPickerUp) break;
 
             // Only over the card. The window spans the whole bar strip at the top of the screen, and
             // swallowing the wheel anywhere in it would be stealing input from whatever is underneath.

@@ -196,6 +196,28 @@ public:
     // the drawing agree.
     int  TrayCellHovered() const { return trayCellHovered_; }
 
+    // --- the Start card -------------------------------------------------------------------------------
+    //
+    // What the pointer is on while the Start card is the level that is up. The page, the two counts and
+    // the picker's scroll offset are TOLD to the window, the way the tray's count is: the window owns no
+    // application list, but it is the only place that knows where the pointer is -- and a hit test against
+    // geometry the drawing did not use is the defect this project has paid for more often than any other.
+    enum class StartHitTarget { None, Pin, PickerRow, PowerRow, PowerButton, EmptyGrid };
+    struct StartHit {
+        StartHitTarget target = StartHitTarget::None;
+        int index = -1;
+    };
+
+    // `pageOpen` false means the Start card is not the level that is up, and every hit test answers None.
+    void SetStartState(bool pageOpen, int page, int pinCount, int listCount, int pickerScrollRow);
+    // Moves the picker's first visible row by `notches` and CLAMPS it, which is the window's job for the
+    // same reason the sound page's scroll is: it is the one that knows the card's geometry, so the offset
+    // the frame loop reads back cannot leave the list.
+    void ScrollStartPicker(int notches);
+    int  StartPickerScroll() const { return startPickerScroll_; }
+    StartHit StartHitAtScreen(POINT screenPoint) const;
+    StartHit StartHitHovered() const { return startHit_; }
+
     // Tells the window how many application icons are on screen.
     //
     // The window needs this to decide whether the pointer is on one, and only the frame loop knows
@@ -544,6 +566,15 @@ private:
     int trayIconCount_ = 0;
     bool trayButtonHovered_ = false;
     int trayCellHovered_ = -1;
+    // The Start card, told the same way: whether it is the level that is up, which page of it, and the two
+    // counts and the scroll offset the hit tests are measured against. The lists themselves stay in the
+    // frame loop -- this window owns no application list, exactly as it owns no tray icon list.
+    bool startPageOpen_ = false;
+    int  startPage_ = 0;
+    int  startPinCount_ = 0;
+    int  startListCount_ = 0;
+    int  startPickerScroll_ = 0;
+    StartHit startHit_ = {};
     // Which card the frame loop says is up: what the cursor's hit tests are gated on. See SetCardOwner.
     CardOwner cardOwner_ = CardOwner::None;
     // The last value written to the log, so the hover trace reports changes rather than every poll.
@@ -580,3 +611,4 @@ private:
 };
 
 } // namespace island
+

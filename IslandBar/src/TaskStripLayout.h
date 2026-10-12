@@ -845,20 +845,29 @@ inline RoundedBox RowAnchorWithTray(const RoundedBox& island, bool trayButtonSho
 
 // WHERE AN OUTER CARD HANGS FROM: the centre of the control that opened it.
 //
-// The panel hangs from the system button and the tray page from the tray button -- one card, one rule,
-// two controls. And the two controls are at OPPOSITE ENDS of the island:
+// One card, one rule, and three controls: the panel hangs from the system button, the tray page from the
+// tray button, and the Start card from the START button. They are spread across the whole bar --
 //
 //     [ system ][ Start ]   island   [ tray ]  [ icon ] ...
 //
-// so an answer taken from the wrong one puts the card about 300 DIP away from the button that was
-// pressed. Reported exactly that way: "点击托盘按钮 弹出的卡片不在这个按钮下面" -- the tray page is
-// opened by the tray button and its card was still being centred on the system button, because the two
-// share the card and the owner that places it.
+// so an answer taken from the wrong one puts the card a few hundred DIP away from the button that was
+// pressed. Reported twice, once for each wrong answer: "点击托盘按钮 弹出的卡片不在这个按钮下面" (the tray
+// page, centred on the system button) and, photographed rather than reported, the Start card appearing
+// under the system button at 853..1373 when the Start button is at 1132..1162.
 //
-// A function rather than two lines in the frame loop, because the frame loop is where the answer was
-// wrong and the assertion that has to catch it lives beside these controls (see Diagnostics).
-inline float DeckCardAnchorCentre(const RoundedBox& island, bool trayPage) {
-    const RectF button = trayPage ? TrayButtonFor(island) : SystemButtonFor(island);
+// An enum rather than a bool, so a fourth level cannot be added by somebody who reads `trayPage ? tray :
+// system` and assumes the two cases exhaust it -- which is exactly how the Start card got the panel's
+// position.
+enum class CardHang { SystemButton, StartButton, TrayButton };
+
+inline float DeckCardAnchorCentre(const RoundedBox& island, CardHang hang) {
+    RectF button = {};
+    switch (hang) {
+        case CardHang::StartButton: button = StartButtonFor(island); break;
+        case CardHang::TrayButton: button = TrayButtonFor(island); break;
+        case CardHang::SystemButton:
+        default: button = SystemButtonFor(island); break;
+    }
     return (button.left + button.right) * 0.5f;
 }
 

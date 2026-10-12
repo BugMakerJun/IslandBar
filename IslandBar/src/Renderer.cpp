@@ -852,6 +852,10 @@ void Renderer::RenderFrame(const FrameState& frame) {
                     } else if (frame.soundPageOpen) {
                         text_->DrawSoundPage(d2dContext_, panelCard, frame.soundPage,
                                              frame.cardOpacity);
+                    } else if (frame.startPageOpen) {
+                        // The Start card, which is a LEVEL of this card rather than a card of its own: the
+                        // same rectangle, the same animation, and the same dismiss rules.
+                        text_->DrawStartPage(d2dContext_, panelCard, frame.startCard, frame.cardOpacity);
                     } else {
                         text_->DrawSystemPanel(d2dContext_, panelCard, frame.systemPanel,
                                                frame.cardOpacity);

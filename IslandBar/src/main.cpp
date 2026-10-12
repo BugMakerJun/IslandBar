@@ -35,6 +35,12 @@
 #include "Monitor.h"
 #include <dwmapi.h>
 #include <thread>
+#include <powrprof.h>   // SetSuspendState, for the Start card's power list
+// `security.h` refuses to be included without one of its targets defined (its own #error says so), and
+// SECURITY_WIN32 is the one for a user-mode application.
+#define SECURITY_WIN32
+#include <security.h>   // GetUserNameExW, for the name in that card's footer
+#include <sddl.h>       // ConvertSidToStringSidW, to find the account picture
 #include "Motion.h"
 #include "MusicSession.h"
 #include "NativeTaskbar.h"
@@ -59,6 +65,9 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "secur32.lib")   // GetUserNameExW, for the Start card's footer
+#pragma comment(lib, "advapi32.lib")  // ConvertSidToStringSidW, to find the account picture
+#pragma comment(lib, "powrprof.lib")  // SetSuspendState, for 睡眠
 
 namespace {
 
@@ -67,6 +76,20 @@ namespace {
 // Defined further down with the other tray commands, where the reason for the copy is written out.
 island::TrayPressRequest MakeTrayPressRequest(const island::TrayIcon& icon, const wchar_t* exePath);
 void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick);
+
+// --- the Start card's power list -------------------------------------------------------------------
+//
+// The five things the shell's own Start offers behind its power button, in the order the card draws them.
+// The three that can lose unsaved work are marked as needing a second press: the list appears where the
+// user was already reaching for the power button, and signing him out on the way past is not a reasonable
+// reading of a mis-click.
+enum class PowerAction { Lock = 0, Sleep = 1, SignOut = 2, Restart = 3, ShutDown = 4 };
+
+const wchar_t* PowerActionName(PowerAction action);
+bool PowerActionLosesWork(PowerAction action);
+// Does it. False when Windows refused -- a refusal is reported with the error, because "nothing happened"
+// from a power menu is otherwise indistinguishable from a click that never arrived.
+bool RunPowerAction(PowerAction action);
 
 // ... and an icon's name with its line breaks flattened, for a log line: five of the sixteen names on this
 // machine are multi-line tooltips, and printing one raw puts the rest of the line on a line of its own.
@@ -1030,6 +1053,125 @@ unsigned long long lastMusicMeterMs = 0;
                         trayAtStart, trayIcons.Examined(), trayIcons.ProcessesSeen());
     std::fflush(stdout);
 
+    // --- the Start card's own state -------------------------------------------------------------------
+    //
+    // The shell's application list is read on a WORKER: measured, 121 items cost about 600 ms, and the
+    // frame loop cannot spend that. Until it arrives the card has no applications to offer, which is a
+    // state the drawing handles (nothing to add yet) rather than something to wait for.
+    //
+    // The pins are the user's, in a text file beside the bar (see StartApps). The account picture and the
+    // name are read once: they are the two things in the card's footer and they change about as often as
+    // the user changes his picture.
+    island::StartApps startApps;
+    bool startPageOpen = false;
+    int startPageState = 0;        // 0 = the pins, 1 = the picker, 2 = the power list
+    int startPickerScroll = 0;
+    int startPowerConfirm = -1;
+    std::vector<uint8_t> accountAvatarPng;
+    wchar_t accountName[64] = {};
+    // Rebuilt per frame for the frame's icon pointers (see below), and kept here so the storage outlives
+    // the frame that points into it.
+    std::vector<const uint8_t*> startIconPointers;
+    std::vector<size_t> startIconSizes;
+    int startPinCount = 0;
+    int startAppCount = 0;
+    std::thread([&startApps]() {
+        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        startApps.RefreshList();
+        if (SUCCEEDED(comHr)) CoUninitialize();
+    }).detach();
+    {
+        // The account picture: the registry entry the shell itself uses, largest first so a scaled-down
+        // draw has something to work with, with the generic picture as the fallback every account has.
+        wchar_t user[128] = {};
+        DWORD userSize = sizeof(user);
+        if (GetUserNameW(user, &userSize)) {
+            wcsncpy_s(accountName, 64, user, _TRUNCATE);
+        }
+        // GetUserNameEx(NameDisplay) is the full name the shell shows in its own footer, which on this
+        // machine is not the account name at all; the account name is the fallback.
+        wchar_t display[128] = {};
+        ULONG displaySize = 128;
+        if (GetUserNameExW(NameDisplay, display, &displaySize) && display[0] != L'\0') {
+            wcsncpy_s(accountName, 64, display, _TRUNCATE);
+        }
+        wchar_t sidText[128] = {};
+        HANDLE token = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            DWORD size = 0;
+            GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+            std::vector<uint8_t> buffer(size);
+            if (size > 0 && GetTokenInformation(token, TokenUser, buffer.data(), size, &size)) {
+                const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+                LPWSTR sidString = nullptr;
+                if (ConvertSidToStringSidW(tokenUser->User.Sid, &sidString) && sidString) {
+                    wcsncpy_s(sidText, 128, sidString, _TRUNCATE);
+                    LocalFree(sidString);
+                }
+            }
+            CloseHandle(token);
+        }
+        wchar_t picture[512] = {};
+        if (sidText[0] != L'\0') {
+            const std::wstring key =
+                std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AccountPicture\\Users\\") +
+                sidText;
+            for (const wchar_t* value : {L"Image240", L"Image192", L"Image96"}) {
+                HKEY handle = nullptr;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.c_str(), 0, KEY_QUERY_VALUE, &handle) !=
+                    ERROR_SUCCESS) {
+                    break;
+                }
+                DWORD type = 0;
+                DWORD bytes = sizeof(picture);
+                const LONG read = RegQueryValueExW(handle, value, nullptr, &type,
+                                                  reinterpret_cast<BYTE*>(picture), &bytes);
+                RegCloseKey(handle);
+                if (read == ERROR_SUCCESS && type == REG_SZ && picture[0] != L'\0') break;
+                picture[0] = L'\0';
+            }
+        }
+        // The generic picture if the account has none: a blank circle would be worse than a silhouette.
+        if (picture[0] == L'\0') {
+            wcsncpy_s(picture, 512, L"C:\\ProgramData\\Microsoft\\User Account Pictures\\user-192.png",
+                      _TRUNCATE);
+        }
+        // DECODED AS AN IMAGE, not asked for as a file's icon.
+        //
+        // The first version went through the notification-icon loader, which answers with the SHELL's icon
+        // for a path when it cannot read it as a picture -- and the footer then showed a generic
+        // image-file icon (a little photograph) where the account picture belongs. Photographed, which is
+        // how it was caught. WIC reads the JPEG the account picture actually is.
+        std::vector<uint8_t> fileBytes;
+        if (FILE* file = nullptr; _wfopen_s(&file, picture, L"rb") == 0 && file) {
+            std::fseek(file, 0, SEEK_END);
+            const long length = std::ftell(file);
+            std::fseek(file, 0, SEEK_SET);
+            if (length > 0 && length < 32 * 1024 * 1024) {
+                fileBytes.resize(static_cast<size_t>(length));
+                const size_t read = std::fread(fileBytes.data(), 1, fileBytes.size(), file);
+                fileBytes.resize(read);
+            }
+            std::fclose(file);
+        }
+        island::DecodedImage avatar;
+        if (!fileBytes.empty() && island::DecodeImage(fileBytes.data(), fileBytes.size(), &avatar) &&
+            avatar.pixels && avatar.width > 0) {
+            accountAvatarPng.resize(512 * 1024);
+            const size_t size = island::EncodeBgraToPng(avatar.pixels, avatar.width, avatar.height,
+                                                       accountAvatarPng.data(),
+                                                       accountAvatarPng.size());
+            accountAvatarPng.resize(size);
+            island::LogAndPrint("  start: account picture %dx%d -> %zu byte PNG from %ls", avatar.width,
+                                avatar.height, size, picture);
+        } else {
+            island::LogAndPrint("  start: no account picture (%ls)", picture);
+        }
+        island::LogAndPrint("  start: footer name '%ls'", accountName);
+        startApps.LoadPins();
+        std::fflush(stdout);
+    }
+
     // --- the taskbar's window list ---
     //
     // Refreshed from the frame loop rather than polled here, because it is only needed while the
@@ -1257,6 +1399,16 @@ float musicWavePhase = 0.0f;
                 trayPageOpen = wcstol(setting, nullptr, 10) != 0;
                 systemPanelOpen = trayPageOpen;
                 island::LogAndPrint("  diagnostic: the tray page is opened at startup\n");
+                std::fflush(stdout);
+            }
+            // ... and the Start card's own page, for the same reason: the card is behind a click on a
+            // control this machine's scripting cannot press, so without this there is no way to photograph
+            // it. The value IS the page: 0 the pins, 1 the picker, 2 the power list.
+            if (GetEnvironmentVariableW(L"ISLANDBAR_START_PAGE", setting, 32) > 0) {
+                startPageState = static_cast<int>(wcstol(setting, nullptr, 10));
+                startPageOpen = true;
+                systemPanelOpen = true;
+                island::LogAndPrint("  diagnostic: the Start card is opened on page %d\n", startPageState);
                 std::fflush(stdout);
             }
             if (GetEnvironmentVariableW(L"ISLANDBAR_SOUND_SCROLL", setting, 32) > 0) {
@@ -1732,6 +1884,9 @@ float musicWavePhase = 0.0f;
             const auto dismissPanel = [&]() {
                 systemPanelOpen = false;
                 soundPageOpen = false;
+                // ... and the Start card, which is the fourth level of the same card and has to go with it
+                // for the same reason (see the note above about every level being cleared).
+                startPageOpen = false;
                 // ... AND the tray's page, which is the third level of the same card. It used to be left
                 // set, which was harmless while the level was read from the request and is not now: a card
                 // put away by a click outside must take every level with it, exactly as a click on the
@@ -1827,6 +1982,16 @@ float musicWavePhase = 0.0f;
                     soundPageScroll = window.SoundPageScroll();
                     island::LogAndPrint("  sound page: wheel %d -> scroll %.0f\n", wheelNotches,
                                         soundPageScroll);
+                    std::fflush(stdout);
+                } else if (startPageOpen && startPageState == 1 &&
+                           window.TakeSoundWheel(&wheelNotches)) {
+                    // The picker scrolls one NOTCH per row, not in pixels: 121 applications at 34 DIP a row
+                    // is 4,114 DIP of list, and a pixel-per-notch wheel would take a minute to reach the
+                    // end alphabetically. Clamped so the last screenful is the last thing reachable.
+                    window.ScrollStartPicker(wheelNotches);
+                    startPickerScroll = window.StartPickerScroll();
+                    island::LogAndPrint("  start: picker wheel %d -> row %d of %d\n", wheelNotches,
+                                        startPickerScroll, startAppCount);
                     std::fflush(stdout);
                 }
             }
@@ -1930,24 +2095,19 @@ float musicWavePhase = 0.0f;
                 // ways that leave no trace afterwards, and "the button did nothing" is the same symptom
                 // for every one of them.
                 if (window.StartAtScreen(cursor)) {
-                    const island::StartMenuResult startResult = island::ToggleStartMenu();
-                    island::LogAndPrint("  start click: %ls", island::StartMenuResultName(startResult));
-
-                    // A keystroke the shell will not act on has a reason, and the one that can be read from
-                    // here is the common one on this machine: UIPI discards synthetic input aimed at a
-                    // process of a HIGHER integrity level, and the Explorer that answers Ctrl+Esc sits
-                    // above a bar started from a restricted launcher, an IDE, or a terminal opened by
-                    // another application. Reported at the moment it matters rather than only in the
-                    // startup banner, because the symptom is a button that does nothing, with no error
-                    // anywhere to explain it.
-                    taskbar.Locate();
-                    if (taskbar.IsBlockedByIntegrity()) {
-                        island::LogAndPrint(
-                            "  start click: this process is BELOW the shell's integrity level, and the shell "
-                            "discards synthetic input from below it. Start the bar from your own shell "
-                            "(Win+R, or a shortcut), not from a sandbox, an IDE, or a terminal opened by "
-                            "another application.\n");
-                    }
+                    // THE BAR'S OWN START CARD, which is what was asked for: "能不能也自己画 而不是使用系统
+                    // 的". The system menu is not gone -- the Windows key and Ctrl+Esc still open it -- it is
+                    // simply no longer what THIS button does, and that is one line in the log rather than a
+                    // silent change of behaviour: "start click: the bar's own card".
+                    startPageOpen = !startPageOpen;
+                    systemPanelOpen = startPageOpen;
+                    startPageState = 0;
+                    startPickerScroll = 0;
+                    startPowerConfirm = -1;
+                    trayPageOpen = false;
+                    soundPageOpen = false;
+                    island::LogAndPrint("  start click: the bar's own card %ls\n",
+                                        startPageOpen ? L"open" : L"closed");
                     std::fflush(stdout);
                 } else if (trayIcons.Count() > 0 && window.TrayButtonAtScreen(cursor)) {
                     // THE TRAY BUTTON, at the other end of the bar from the system button, and a toggle
@@ -1966,6 +2126,83 @@ float musicWavePhase = 0.0f;
                     mixerSliderDragRow = -1;
                     mixerSliderDragPid = 0;
                     island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
+                    std::fflush(stdout);
+                } else if (startPageOpen && systemPanelOpen &&
+                           window.StartHitHovered().target !=
+                               island::IslandWindow::StartHitTarget::None) {
+                    // --- A PRESS ON THE START CARD -----------------------------------------------------
+                    //
+                    // Reached before the panel's own controls, because the Start card IS the level that is
+                    // up: a press at the position of a tile would otherwise be read as a tile.
+                    //
+                    // Every branch logs what it did: a launcher whose click does nothing is the hardest
+                    // thing on this bar to tell from a click that never arrived.
+                    const island::IslandWindow::StartHit startHit = window.StartHitHovered();
+                    switch (startHit.target) {
+                        case island::IslandWindow::StartHitTarget::Pin: {
+                            if (startHit.index >= 0 && startHit.index < startPinCount) {
+                                const island::StartApp& app = startApps.PinAt(startHit.index);
+                                island::LogAndPrint("  start: launching pinned '%ls'\n", app.name);
+                                island::LaunchStartApp(app.target);
+                            }
+                            dismissPanel();
+                            break;
+                        }
+                        case island::IslandWindow::StartHitTarget::PickerRow: {
+                            if (startHit.index >= 0 && startHit.index < startAppCount) {
+                                const island::StartApp& app = startApps.ListAt(startHit.index);
+                                const bool added = startApps.Pin(app.target);
+                                island::LogAndPrint("  start: %ls '%ls' (%d pinned now)\n",
+                                                    added ? "pinned" : "already pinned", app.name,
+                                                    startApps.PinCount());
+                                // Back to the pins, which is where the new one just appeared: staying in a
+                                // list of 121 with no sign of what happened is how a click reads as a dud.
+                                startPageState = 0;
+                                startPowerConfirm = -1;
+                            }
+                            break;
+                        }
+                        case island::IslandWindow::StartHitTarget::PowerRow: {
+                            const int row = startHit.index;
+                            if (row >= 0 && row <= 4) {
+                                const PowerAction action = static_cast<PowerAction>(row);
+                                if (PowerActionLosesWork(action) && startPowerConfirm != row) {
+                                    // Armed, not done: the list appears above a button the user was already
+                                    // reaching for, and a mis-click there must not sign him out.
+                                    startPowerConfirm = row;
+                                    island::LogAndPrint("  power: '%ls' armed (a second press does it)\n",
+                                                        PowerActionName(action));
+                                } else {
+                                    island::LogAndPrint("  power: '%ls' pressed\n",
+                                                        PowerActionName(action));
+                                    startPowerConfirm = -1;
+                                    dismissPanel();
+                                    RunPowerAction(action);
+                                }
+                            }
+                            break;
+                        }
+                        case island::IslandWindow::StartHitTarget::PowerButton: {
+                            if (startPageState == 1) {
+                                startPageState = 0;   // the × on the picker: back to the pins
+                            } else {
+                                startPageState = startPageState == 2 ? 0 : 2;
+                            }
+                            startPowerConfirm = -1;
+                            break;
+                        }
+                        case island::IslandWindow::StartHitTarget::EmptyGrid: {
+                            // The empty upper area is the way to fill it, which is what "上面的应该可以让用户
+                            // 手动添加" asks for: the card itself is the control.
+                            startPageState = 1;
+                            startPickerScroll = 0;
+                            island::LogAndPrint("  start: picker open (%d application(s))\n",
+                                                startAppCount);
+                            break;
+                        }
+                        case island::IslandWindow::StartHitTarget::None:
+                            break;
+                    }
                     std::fflush(stdout);
                 } else if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0) {
                     // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
@@ -2403,7 +2640,19 @@ float musicWavePhase = 0.0f;
             while (window.TakeRightClick()) {
                 POINT rightCursor = {};
                 GetCursorPos(&rightCursor);
-                if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0 &&
+                const island::IslandWindow::StartHit startHit = window.StartHitHovered();
+                if (startPageOpen && systemPanelOpen &&
+                    startHit.target == island::IslandWindow::StartHitTarget::Pin) {
+                    // A pinned tile, right-clicked: that is how it comes off again. Unpinning from the
+                    // CARD rather than from a settings file is the whole point of the card being the
+                    // user's own -- he said the upper area should be his to fill.
+                    if (startHit.index >= 0 && startHit.index < startPinCount) {
+                        const island::StartApp& app = startApps.PinAt(startHit.index);
+                        island::LogAndPrint("  start: unpinning '%ls'\n", app.name);
+                        startApps.Unpin(startHit.index);
+                        startPowerConfirm = -1;
+                    }
+                } else if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0 &&
                     window.TrayCellHovered() < trayIcons.Count()) {
                     StartTrayPress(trayIcons, window.TrayCellHovered(), true);
                     dismissPanel();
@@ -3036,9 +3285,10 @@ float musicWavePhase = 0.0f;
                 // `outerCardUp` is: a field set after the thing that reads it is a field one frame stale
                 // (see the note below, and the four times this project has paid for that lesson).
                 panelLevel = island::NextPanelLevel(panelLevel, frame.outerCardUp, systemPanelOpen,
-                                                    trayPageOpen, soundPageOpen);
+                                                    trayPageOpen, soundPageOpen, startPageOpen);
                 const bool trayPageShown = panelLevel == island::PanelLevel::Tray;
                 const bool soundPageShown = panelLevel == island::PanelLevel::Sound;
+                const bool startPageShown = panelLevel == island::PanelLevel::Start;
                 // ... and whether the bar is in the picture at all: with a full-screen application in front
                 // only the island is drawn (see FrameState::fullscreenApp).
                 frame.fullscreenApp = fullscreenAppInFront;
@@ -3091,6 +3341,61 @@ float musicWavePhase = 0.0f;
                 window.SetTrayIconCount(frame.trayIconCount);
 
                 frame.systemPanelOpen = systemPanelOpen;
+
+                // --- the Start card, told to the frame and to the window --------------------------
+                //
+                // One place fills this in, so the drawing and the hit tests cannot be given different
+                // answers -- the arrangement the tray page already uses. The window is told the counts and
+                // the page rather than the lists: it owns no application list, and the hit tests are pure
+                // functions of the same geometry the drawing uses.
+                frame.startPageOpen = startPageShown;
+                {
+                    // The module's counts are read here rather than cached at startup: the list arrives
+                    // from a worker, and the pins change whenever the user adds one.
+                    startPinCount = startApps.PinCount();
+                    startAppCount = startApps.ListCount();
+                    const island::IslandWindow::StartHit startHit = window.StartHitHovered();
+                    island::TextRenderer::StartCardText& card = frame.startCard;
+                    card.pins = startPinCount > 0 ? &startApps.PinAt(0) : nullptr;
+                    card.pinCount = startPinCount;
+                    card.list = startAppCount > 0 ? &startApps.ListAt(0) : nullptr;
+                    card.listCount = startAppCount;
+                    card.pickerScrollRow = startPickerScroll;
+                    card.page = startPageState;
+                    card.hoveredPin =
+                        startHit.target == island::IslandWindow::StartHitTarget::Pin ? startHit.index : -1;
+                    card.hoveredPickerRow =
+                        startHit.target == island::IslandWindow::StartHitTarget::PickerRow
+                            ? startHit.index
+                            : -1;
+                    card.hoveredPowerRow =
+                        startHit.target == island::IslandWindow::StartHitTarget::PowerRow
+                            ? startHit.index
+                            : -1;
+                    card.powerButtonHovered =
+                        startHit.target == island::IslandWindow::StartHitTarget::PowerButton;
+                    card.powerConfirmRow = startPowerConfirm;
+                    card.accountName = accountName;
+                    card.avatarPng = accountAvatarPng.empty() ? nullptr : accountAvatarPng.data();
+                    card.avatarPngSize = accountAvatarPng.size();
+
+                    // One array of icon pointers, rebuilt here because the frame carries pointers and must
+                    // not carry a vector of them: the renderer walks `pinIcons[i]` against `pins[i]`, and
+                    // the two have to be the same length in the same order.
+                    startIconPointers.clear();
+                    startIconSizes.clear();
+                    for (int i = 0; i < startPinCount; ++i) {
+                        size_t size = 0;
+                        const uint8_t* png = startApps.PinIconPng(i, &size);
+                        startIconPointers.push_back(png);
+                        startIconSizes.push_back(size);
+                    }
+                    card.pinIcons = startIconPointers.empty() ? nullptr : startIconPointers.data();
+                    card.pinIconSizes = startIconSizes.empty() ? nullptr : startIconSizes.data();
+                }
+                // ... and the window, which answers "what is the pointer on" with the same geometry.
+                window.SetStartState(startPageShown, startPageState, startPinCount, startAppCount,
+                                     startPickerScroll);
 
                 // Who owns the card for this frame. The panel keeps it until the card is gone.
                 //
@@ -3218,12 +3523,15 @@ float musicWavePhase = 0.0f;
                     // The anchor comes from the RESTING island, so the position does not move while the
                     // card's own width is animating.
                     const island::RoundedBox anchorIsland = window.LayoutIslandFor();
-                    // The centre of the control that opened the card -- the tray button for the tray page,
-                    // the system button for the panel. See DeckCardAnchorCentre for why this is one
-                    // function and not two lines: getting it from the wrong control is a card under the
-                    // wrong end of the bar, which is what "点击托盘按钮 弹出的卡片不在这个按钮下面" was.
-                    const float buttonCentre =
-                        island::DeckCardAnchorCentre(anchorIsland, trayPageShown);
+                    // The centre of the control that opened the card: the system button for the panel, the
+                    // tray button for the tray page, the START button for the Start card. See
+                    // DeckCardAnchorCentre -- and its note about how the Start card came to be drawn under
+                    // the system button, 200 DIP from the control that opened it, until the card was
+                    // photographed.
+                    const island::CardHang hang = trayPageShown  ? island::CardHang::TrayButton
+                                                  : startPageShown ? island::CardHang::StartButton
+                                                                   : island::CardHang::SystemButton;
+                    const float buttonCentre = island::DeckCardAnchorCentre(anchorIsland, hang);
                     // WHICH THING THE CARD HANGS FROM DEPENDS ON WHICH CARD IT IS.
                     //
                     // The system panel hangs from the control that opened it: the user chose that
@@ -4396,6 +4704,83 @@ void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
         std::fflush(stdout);
         if (SUCCEEDED(comHr)) CoUninitialize();
     }).detach();
+}
+
+const wchar_t* PowerActionName(PowerAction action) {
+    switch (action) {
+        case PowerAction::Lock: return L"锁定";
+        case PowerAction::Sleep: return L"睡眠";
+        case PowerAction::SignOut: return L"注销";
+        case PowerAction::Restart: return L"重启";
+        case PowerAction::ShutDown: return L"关机";
+    }
+    return L"?";
+}
+
+bool PowerActionLosesWork(PowerAction action) {
+    return action == PowerAction::SignOut || action == PowerAction::Restart ||
+           action == PowerAction::ShutDown;
+}
+
+bool RunPowerAction(PowerAction action) {
+    // SHUTTING DOWN AND RESTARTING NEED A PRIVILEGE THAT IS HELD BUT DISABLED.
+    //
+    // `ExitWindowsEx` fails with ERROR_PRIVILEGE_NOT_HELD unless the process's token has
+    // SE_SHUTDOWN_NAME ENABLED -- a normal user session holds it, so this is an enable and not an
+    // elevation, and without it the menu item does nothing at all with no visible reason.
+    const auto enableShutdownPrivilege = []() {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+            return false;
+        }
+        LUID id = {};
+        if (!LookupPrivilegeValueW(nullptr, SE_SHUTDOWN_NAME, &id)) {
+            CloseHandle(token);
+            return false;
+        }
+        TOKEN_PRIVILEGES privileges = {};
+        privileges.PrivilegeCount = 1;
+        privileges.Privileges[0].Luid = id;
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        const BOOL ok = AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr);
+        CloseHandle(token);
+        return ok != FALSE;
+    };
+
+    switch (action) {
+        case PowerAction::Lock: {
+            const BOOL locked = LockWorkStation();
+            island::LogAndPrint("  power: lock -> %s\n", locked ? "ok" : "FAILED");
+            return locked != FALSE;
+        }
+        case PowerAction::Sleep: {
+            // Asynchronous: this returns as the machine is going to sleep.
+            const BOOLEAN slept = SetSuspendState(FALSE, TRUE, FALSE);
+            island::LogAndPrint("  power: sleep -> %s\n", slept ? "ok" : "FAILED");
+            return slept != FALSE;
+        }
+        case PowerAction::SignOut: {
+            const BOOL done = ExitWindowsEx(EWX_LOGOFF | EWX_FORCEIFHUNG, 0);
+            island::LogAndPrint("  power: sign out -> %s (error %lu)\n", done ? "ok" : "FAILED",
+                                done ? 0UL : GetLastError());
+            return done != FALSE;
+        }
+        case PowerAction::Restart: {
+            enableShutdownPrivilege();
+            const BOOL done = ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, 0);
+            island::LogAndPrint("  power: restart -> %s (error %lu)\n", done ? "ok" : "FAILED",
+                                done ? 0UL : GetLastError());
+            return done != FALSE;
+        }
+        case PowerAction::ShutDown: {
+            enableShutdownPrivilege();
+            const BOOL done = ExitWindowsEx(EWX_POWEROFF | EWX_FORCEIFHUNG, 0);
+            island::LogAndPrint("  power: shut down -> %s (error %lu)\n", done ? "ok" : "FAILED",
+                                done ? 0UL : GetLastError());
+            return done != FALSE;
+        }
+    }
+    return false;
 }
 
 // Asks the shell where each of those icons is, which is the question a press depends on -- and the one

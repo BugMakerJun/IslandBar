@@ -6173,8 +6173,8 @@ void TestMusicCardLayout() {
             // Asserted as the two things a user would notice: the answer names the button that was pressed,
             // and the card that follows from it contains that button's centre and not the other's.
             {
-                const float trayCentre = DeckCardAnchorCentre(trayIsland, true);
-                const float systemCentre = DeckCardAnchorCentre(trayIsland, false);
+                const float trayCentre = DeckCardAnchorCentre(trayIsland, CardHang::TrayButton);
+                const float systemCentre = DeckCardAnchorCentre(trayIsland, CardHang::SystemButton);
                 const RectF trayButton = TrayButtonFor(trayIsland);
                 const RectF systemButton = SystemButtonFor(trayIsland);
                 const float trayButtonCentre = (trayButton.left + trayButton.right) * 0.5f;
@@ -6190,8 +6190,12 @@ void TestMusicCardLayout() {
                               L"%.0f..%.0f",
                               trayCentre, trayButtonCentre, systemCentre, systemButtonCentre, cardLeft,
                               cardRight);
+                const float startCentre = DeckCardAnchorCentre(trayIsland, CardHang::StartButton);
+                const float startButtonCentre =
+                    (StartButtonFor(trayIsland).left + StartButtonFor(trayIsland).right) * 0.5f;
                 Check(Nearly(trayCentre, trayButtonCentre, 0.01f) &&
-                          Nearly(systemCentre, systemButtonCentre, 0.01f),
+                          Nearly(systemCentre, systemButtonCentre, 0.01f) &&
+                          Nearly(startCentre, startButtonCentre, 0.01f),
                       L"each page's card is centred on the button that opened it", trayDetail);
                 Check(std::fabs(trayCentre - systemCentre) > 200.0f,
                       L"... and those two buttons are far enough apart for a wrong answer to show",
@@ -6212,27 +6216,130 @@ void TestMusicCardLayout() {
             // the tiles appear under a shrinking tray page ("点击展开 再点击收回去 会显示出系统卡片的东西"),
             // and the card would also slide 296 DIP back to the other end of the bar.
             {
-                const PanelLevel panelOpen = NextPanelLevel(PanelLevel::Tiles, true, true, false, false);
-                const PanelLevel trayOpen = NextPanelLevel(PanelLevel::Tiles, true, true, true, false);
-                const PanelLevel soundOpen = NextPanelLevel(PanelLevel::Tiles, true, true, false, true);
-                const PanelLevel back = NextPanelLevel(PanelLevel::Sound, true, true, false, false);
-                const PanelLevel trayClosing = NextPanelLevel(PanelLevel::Tray, true, false, true, false);
-                const PanelLevel soundClosing = NextPanelLevel(PanelLevel::Sound, true, false, false, false);
-                const PanelLevel gone = NextPanelLevel(PanelLevel::Tray, false, false, false, false);
+                const PanelLevel panelOpen =
+                    NextPanelLevel(PanelLevel::Tiles, true, true, false, false, false);
+                const PanelLevel trayOpen =
+                    NextPanelLevel(PanelLevel::Tiles, true, true, true, false, false);
+                const PanelLevel soundOpen =
+                    NextPanelLevel(PanelLevel::Tiles, true, true, false, true, false);
+                const PanelLevel startOpen =
+                    NextPanelLevel(PanelLevel::Tiles, true, true, false, false, true);
+                const PanelLevel back =
+                    NextPanelLevel(PanelLevel::Sound, true, true, false, false, false);
+                const PanelLevel trayClosing =
+                    NextPanelLevel(PanelLevel::Tray, true, false, true, false, false);
+                const PanelLevel soundClosing =
+                    NextPanelLevel(PanelLevel::Sound, true, false, false, false, false);
+                const PanelLevel startClosing =
+                    NextPanelLevel(PanelLevel::Start, true, false, false, false, false);
+                const PanelLevel gone =
+                    NextPanelLevel(PanelLevel::Tray, false, false, false, false, false);
                 std::swprintf(trayDetail, 256,
-                              L"tiles=%d tray=%d sound=%d back=%d trayClosing=%d soundClosing=%d gone=%d",
+                              L"tiles=%d tray=%d sound=%d start=%d back=%d trayClosing=%d "
+                              L"soundClosing=%d startClosing=%d gone=%d",
                               static_cast<int>(panelOpen), static_cast<int>(trayOpen),
-                              static_cast<int>(soundOpen), static_cast<int>(back),
-                              static_cast<int>(trayClosing), static_cast<int>(soundClosing),
+                              static_cast<int>(soundOpen), static_cast<int>(startOpen),
+                              static_cast<int>(back), static_cast<int>(trayClosing),
+                              static_cast<int>(soundClosing), static_cast<int>(startClosing),
                               static_cast<int>(gone));
                 Check(panelOpen == PanelLevel::Tiles && trayOpen == PanelLevel::Tray &&
-                          soundOpen == PanelLevel::Sound && back == PanelLevel::Tiles,
+                          soundOpen == PanelLevel::Sound && startOpen == PanelLevel::Start &&
+                          back == PanelLevel::Tiles,
                       L"a page that is asked for is the level the card shows", trayDetail);
-                Check(trayClosing == PanelLevel::Tray && soundClosing == PanelLevel::Sound,
+                Check(trayClosing == PanelLevel::Tray && soundClosing == PanelLevel::Sound &&
+                          startClosing == PanelLevel::Start,
                       L"... and the panel being put away holds that level for the whole exit", trayDetail);
                 Check(gone == PanelLevel::Tiles && trayOpen != panelOpen,
                       L"... released only when the card is gone, so the next open decides afresh",
                       trayDetail);
+            }
+
+            // THE START CARD'S OWN GEOMETRY, which is the whole of its layout: a grid that starts empty,
+            // a footer with the account picture and the power button, and the two lists that can take the
+            // grid's place. Every one of these is a pure function shared by the drawing and the hit tests,
+            // so what is asserted here is what a click is routed against.
+            {
+                const RoundedBox card =
+                    BoxForState(IslandState::Expanded, AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
+                const StartPageLayout layout = StartPageFor(card);
+                std::swprintf(trayDetail, 256,
+                              L"card x[%.0f,%.0f] y[%.0f,%.0f]; grid x[%.0f,%.0f] y[%.0f,%.0f]; "
+                              L"footer top %.0f; avatar x[%.0f,%.0f]; power x[%.0f,%.0f]",
+                              card.rect.left, card.rect.right, card.rect.top, card.rect.bottom,
+                              layout.grid.left, layout.grid.right, layout.grid.top, layout.grid.bottom,
+                              layout.footer.top, layout.avatar.left, layout.avatar.right,
+                              layout.powerButton.left, layout.powerButton.right);
+                Check(layout.valid, L"the Start card has a layout", trayDetail);
+                Check(layout.grid.bottom < layout.footer.top &&
+                          layout.footer.bottom <= card.rect.bottom &&
+                          layout.grid.top > card.rect.top,
+                      L"the pins area sits above the footer, inside the card", trayDetail);
+                Check(layout.avatar.right < layout.powerButton.left &&
+                          layout.footer.left <= layout.avatar.left &&
+                          layout.powerButton.right <= layout.footer.right,
+                      L"the account picture and the power button share the footer without overlapping",
+                      trayDetail);
+                Check(layout.grid.left >= card.rect.left && layout.grid.right <= card.rect.right,
+                      L"... and the grid is inside the card's width", trayDetail);
+
+                // The cells: six across, reading order, and every one of them inside the grid.
+                Check((StartPinCellFor(layout, 0).left == layout.grid.left),
+                      L"the first pinned tile starts at the grid's own corner", trayDetail);
+                Check(Nearly(StartPinCellFor(layout, 5).left - StartPinCellFor(layout, 0).left,
+                             5.0f * (kStartCellWidth + kStartCellGap), 0.01f),
+                      L"six tiles fill the first row at one pitch each", trayDetail);
+                Check(StartPinCellFor(layout, 6).left == layout.grid.left &&
+                          StartPinCellFor(layout, 6).top > StartPinCellFor(layout, 0).top,
+                      L"the seventh tile starts the second row", trayDetail);
+                bool cellsInside = true;
+                for (int i = 0; i < StartPinCapacity(); ++i) {
+                    const RectF cell = StartPinCellFor(layout, i);
+                    if (cell.right > layout.grid.right + 0.01f || cell.bottom > layout.grid.bottom + 0.01f) {
+                        cellsInside = false;
+                    }
+                }
+                Check(cellsInside, L"every cell of a full grid is inside the pins area", trayDetail);
+                Check(StartPinCapacity() >= 12,
+                      L"the grid holds enough tiles to be worth filling by hand", trayDetail);
+
+                // The hit tests, at the points a user would press.
+                const RectF third = StartPinCellFor(layout, 3);
+                const float pinCentreY = (third.top + third.bottom) * 0.5f;
+                Check(StartPinCellAt(layout, 6, (third.left + third.right) * 0.5f, pinCentreY) == 3,
+                      L"a point on the fourth tile answers the fourth tile", trayDetail);
+                Check(StartPinCellAt(layout, 6, third.left - 2.0f, pinCentreY) == 2,
+                      L"... and the gap before it belongs to the tile before", trayDetail);
+                Check(StartPinCellAt(layout, 0, (layout.grid.left + layout.grid.right) * 0.5f,
+                                     (layout.grid.top + layout.grid.bottom) * 0.5f) == -1 &&
+                          StartRectHasPoint(layout.grid, (layout.grid.left + layout.grid.right) * 0.5f,
+                                            (layout.grid.top + layout.grid.bottom) * 0.5f),
+                      L"with nothing pinned, the middle of the area is the area and not a tile",
+                      trayDetail);
+                Check(StartRectHasPoint(layout.powerButton,
+                                        (layout.powerButton.left + layout.powerButton.right) * 0.5f,
+                                        (layout.powerButton.top + layout.powerButton.bottom) * 0.5f),
+                      L"the power button is under its own centre", trayDetail);
+
+                const RectF powerRow = StartPowerRowFor(card, 0);
+                Check(StartPowerRowAt(card, (powerRow.left + powerRow.right) * 0.5f,
+                                      (powerRow.top + powerRow.bottom) * 0.5f) == 0,
+                      L"the first power row answers zero", trayDetail);
+                Check(StartPowerRowFor(card, 4).bottom < layout.footer.top,
+                      L"... and the fifth stands above the footer, not on it", trayDetail);
+
+                // The picker: rows from the grid's top, one per application, and the scroll offset is part
+                // of the answer.
+                const RectF pickerRow = StartPickerRowFor(card, 1);
+                Check(StartPickerRowAt(card, 0, 40, (pickerRow.left + pickerRow.right) * 0.5f,
+                                       (pickerRow.top + pickerRow.bottom) * 0.5f) == 1,
+                      L"the second visible row answers the second application", trayDetail);
+                Check(StartPickerRowAt(card, 7, 40, (pickerRow.left + pickerRow.right) * 0.5f,
+                                       (pickerRow.top + pickerRow.bottom) * 0.5f) == 8,
+                      L"... and with the list scrolled by seven, the second row is the ninth application",
+                      trayDetail);
+                Check(StartPickerRowAt(card, 0, 40, layout.grid.left + 4.0f, layout.footer.top - 2.0f) ==
+                          -1,
+                      L"the footer's edge is not a row", trayDetail);
             }
 
             // THE ROW GIVES WAY, AND THAT IS THE POINT OF THE RESERVATION.
