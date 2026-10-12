@@ -5374,9 +5374,9 @@ redraws: animating=0 clock=4 notify=0 music=0 lyrics=0 progress=0 strip=0 first=
 #### 证据
 
 ```
-start: shortcut 'written' -> C:\Users\18340\IslandBar\Start\CC Switch.lnk   （×14）
-start: migrated 14 pin(s) from start_pins.txt into C:\Users\18340\IslandBar\Start
-start: 14 pinned application(s) from C:\Users\18340\IslandBar\Start
+start: shortcut 'written' -> %USERPROFILE%\IslandBar\Start\CC Switch.lnk   （×14）
+start: migrated 14 pin(s) from start_pins.txt into %USERPROFILE%\IslandBar\Start
+start: 14 pinned application(s) from %USERPROFILE%\IslandBar\Start
 start: 121 application(s) in shell:AppsFolder
 ```
 
