@@ -5002,6 +5002,27 @@ void TestMusicCardLayout() {
                           static_cast<LONG>((cardLeftDip + kExpandedWidthDip) * scale),
                   L"the input region with the panel open covers the card's full width", dt);
 
+            // THE SAME QUESTION FOR THE CARD AT THE OTHER END OF THE BAR, which is the case the check
+            // above cannot see: its `cardLeftDip` is near the island's left, where the icon row reaches
+            // past the card's right edge anyway, so the region covered the card by accident.
+            //
+            // The tray button is at the right end of the bar, its card is the same 520 DIP wide, and the
+            // row is measured from the tray button onwards -- so with a single application window open the
+            // row ends 82 DIP short of the card. Measured on screen with the tray page open: region
+            // 670..1568 against a card of 1130..1650, and the card was clipped to a square right edge.
+            {
+                const float trayCardLeftDip = 1130.0f;
+                const RECT trayRegion = IslandWindow::InputRegionFor(
+                    mon, IslandState::Expanded, regionAnchor, settledExpanded, trayCardLeftDip, 1);
+                std::swprintf(dt, 192,
+                              L"tray card x %.0f..%.0f, region right %ld, one window open",
+                              trayCardLeftDip, trayCardLeftDip + kExpandedWidthDip,
+                              trayRegion.right);
+                Check(trayRegion.right >=
+                          static_cast<LONG>((trayCardLeftDip + kExpandedWidthDip) * scale),
+                      L"the region covers the card that hangs at the tray end of the bar too", dt);
+            }
+
             // And it must NOT move while the card opens.
             //
             // The region used to be derived from the animating box, so every frame of the transition

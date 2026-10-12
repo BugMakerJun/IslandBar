@@ -467,6 +467,27 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
         if (cardLeft < left) left = cardLeft;
     }
 
+    // ... AND THE CARD'S RIGHT EDGE, which is the same defect at the other end of the bar -- and the one
+    // that took a photograph of the tray page to find.
+    //
+    // The right edge above came from `shape`, and `shape` is not the card: the card is PINNED to the
+    // control that was pressed, while the shape is the island's own animated box. For the system panel,
+    // which hangs under the button at the LEFT end, the card's right edge happens to fall inside the icon
+    // row and nothing showed. The tray button is at the RIGHT end, its card is the same 520 DIP wide, and
+    // with a single application window open the row ends before the card does.
+    //
+    // Measured on screen with the tray page open: the region was 670..1568 while the card ran from 1130
+    // to 1650 -- 82 DIP of the card outside the region. The region clips PAINTING as well as input, so
+    // the card came out with a hard square right edge, no rounded corner, and the rightmost tray icons
+    // could not be clicked either. Reported as a screenshot of the tray page with "有个bug".
+    //
+    // The card's own rectangle is the only correct answer while a card is up, and this is the sixth time
+    // that sentence has had to be written in this file.
+    if (cardLeftDip > 0.0f) {
+        const float cardRight = cardLeftDip + island::kExpandedWidthDip;
+        if (cardRight > right) right = cardRight;
+    }
+
     // The LEFT deck: the Start button and the system panel's toggle, which sit immediately to the left
     // of the island. Both have to be inside the region or they cannot be clicked at all -- and the
     // region is what decides that, not the hit test.
