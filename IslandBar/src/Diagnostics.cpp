@@ -6324,6 +6324,14 @@ void TestMusicCardLayout() {
                 int answered = 0;
                 int firstAnswered = -1;
                 RECT firstRect = {};
+                // THE STAGE, because a rectangle only means something once the shell has laid its tray
+                // out: an icon in the overflow flyout has none until that flyout has been opened, and
+                // until then every query answers the chevron's own slot (2416,0 24x32 -- measured for all
+                // sixteen). Without this the numbers below would be a plausible lie. It is opened
+                // invisibly and put back by the stage's destructor.
+                TrayStage stage;
+                wchar_t stageNote[160] = {};
+                const bool staged = stage.Begin(stageNote, 160);
                 for (int i = 0; i < count; ++i) {
                     const TrayIcon& icon = live.At(i);
                     if (icon.hasUid || icon.hasGuid) ++withIdentity;
@@ -6334,7 +6342,7 @@ void TestMusicCardLayout() {
                     request.guid = icon.guid;
                     wcsncpy_s(request.exePath, 260, live.ExePathAt(i), _TRUNCATE);
                     RECT rect = {};
-                    if (ShellRectForTrayIcon(request, &rect)) {
+                    if (staged && stage.IconRect(request, &rect)) {
                         ++answered;
                         if (firstAnswered < 0) {
                             firstAnswered = i;

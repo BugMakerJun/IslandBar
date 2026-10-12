@@ -32,6 +32,11 @@ namespace {
 // See TrayPressInFlight. Set for the whole of PressTrayIcon, by whichever thread is running it.
 std::atomic<bool> g_pressInFlight{false};
 
+// The taskbar a right click left shown-but-invisible, and the extended style it had before: see
+// TrayPressCleanupPending. Written by the press thread, read and cleared by the frame loop.
+std::atomic<HWND> g_cleanupTaskbar{nullptr};
+std::atomic<LONG_PTR> g_cleanupStyle{0};
+
 // Marks the press for the frame loop, and clears it whatever way the function returns.
 class PressInFlight {
 public:
@@ -365,34 +370,206 @@ IUIAutomationElement* FindOverflowFlyout(IUIAutomation* automation) {
 
 bool TrayPressInFlight() { return g_pressInFlight.load(); }
 
-int IndexOfRectNear(const RECT* rects, int count, const RECT& wanted, int tolerancePx) {
-    if (!rects) return -1;
-    for (int i = 0; i < count; ++i) {
-        const RECT& other = rects[i];
-        if (std::abs(other.left - wanted.left) <= tolerancePx &&
-            std::abs(other.top - wanted.top) <= tolerancePx &&
-            std::abs(other.right - wanted.right) <= tolerancePx &&
-            std::abs(other.bottom - wanted.bottom) <= tolerancePx) {
-            return i;
+bool TrayPressCleanupPending() { return g_cleanupTaskbar.load() != nullptr; }
+
+void TrayPressFinishCleanup() {
+    const HWND taskbar = g_cleanupTaskbar.exchange(nullptr);
+    if (!taskbar) return;
+    const LONG_PTR style = g_cleanupStyle.load();
+    ShowWindow(taskbar, SW_HIDE);
+    SetWindowLongPtrW(taskbar, GWL_EXSTYLE, style);
+    SetLayeredWindowAttributes(taskbar, 0, 255, LWA_ALPHA);
+}
+
+TrayStage::~TrayStage() { Reset(); }
+
+void TrayStage::Reset() {
+    // THE PANEL FIRST, because hiding the taskbar does not take it down: measured, the overflow panel was
+    // still on the screen -- still painted -- after the taskbar had been hidden, so the next act of this
+    // function (removing the layering, which restores the alpha it was given) put it back in front of the
+    // user, and a screenshot of a right click showed the shell's whole icon grid where the application's
+    // menu should have been. The chevron is a toggle, and it is only pressed when this stage is the one
+    // that opened the panel.
+    //
+    // ... AND NOT AFTER A RIGHT CLICK. The menu that a right click opens is the SHELL's own (Win11 offers
+    // 退出 <application> there, which is the item the user asked for), it is attached to this panel, and
+    // pressing the chevron takes it down with it -- measured: the menu was up and vanished the instant the
+    // panel closed. So after a right click the panel is left to the shell, which closes it when the user
+    // picks an item or clicks away, and only the taskbar is put back here.
+    if (weOpenedFlyout_ && chevron_ && !rightClicked_) {
+        // A moment for what the press opened to be up first -- longer for a menu, which the application
+        // creates just after the click is delivered and which is dismissed if the panel it was opened from
+        // disappears underneath it; a window does not care.
+        Sleep(50);
+        InvokeElement(static_cast<IUIAutomationElement*>(chevron_));
+        Sleep(120);
+    }
+    if (chevron_) static_cast<IUIAutomationElement*>(chevron_)->Release();
+    if (flyoutElement_) static_cast<IUIAutomationElement*>(flyoutElement_)->Release();
+    if (automation_) static_cast<IUIAutomation*>(automation_)->Release();
+    if (comInitialized_) {
+        CoUninitialize();
+        comInitialized_ = false;
+    }
+    chevron_ = nullptr;
+    flyoutElement_ = nullptr;
+    automation_ = nullptr;
+    if (flyoutWindow_) {
+        // Back where the shell had it, so the panel is where the shell thinks it is the next time somebody
+        // opens it by hand.
+        SetWindowPos(flyoutWindow_, nullptr, flyoutHome_.left, flyoutHome_.top, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        flyoutWindow_ = nullptr;
+    }
+    if (taskbar_) {
+        if (!wasVisible_) ShowWindow(taskbar_, SW_HIDE);
+        if (rightClicked_ && weOpenedFlyout_) {
+            // LEFT ALPHA-0 UNTIL THE BAR'S WATCHDOG RUNS, and the reason is measured: while the shell's
+            // panel and its menu are up, the SHELL re-shows its own taskbar -- and removing the layering
+            // here put it on the user's screen, opaque, for the seconds until the bar hid it again. So the
+            // style is handed over instead of restored (TrayPressFinishCleanup), and a re-show in the
+            // meantime is invisible.
+            g_cleanupStyle.store(style_);
+            g_cleanupTaskbar.store(taskbar_);
+        } else {
+            // Hidden again first: the bar owns that state, and it re-hides on its own timer anyway.
+            if (layered_) SetWindowLongPtrW(taskbar_, GWL_EXSTYLE, style_);
+            SetLayeredWindowAttributes(taskbar_, 0, 255, LWA_ALPHA);
+        }
+        taskbar_ = nullptr;
+        layered_ = false;
+    }
+    flyoutRect_ = {};
+}
+
+bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
+    const auto say = [note, noteCapacity](const wchar_t* text) {
+        if (note && noteCapacity > 0) wcsncpy_s(note, noteCapacity, text, _TRUNCATE);
+    };
+    say(L"");
+
+    taskbar_ = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!taskbar_) {
+        say(L"no taskbar");
+        return false;
+    }
+
+    // Shown painted with nothing, for the whole of the stage: UI Automation needs the shell's tray to
+    // exist, and the user must not see it. See the header for the measurement behind alpha 0.
+    style_ = GetWindowLongPtrW(taskbar_, GWL_EXSTYLE);
+    wasVisible_ = IsWindowVisible(taskbar_) != FALSE;
+    if ((style_ & WS_EX_LAYERED) == 0) {
+        SetWindowLongPtrW(taskbar_, GWL_EXSTYLE, style_ | WS_EX_LAYERED);
+        layered_ = true;
+    }
+    SetLayeredWindowAttributes(taskbar_, 0, 0, LWA_ALPHA);
+    // SW_SHOWNA: shown, not activated. Activating another process's window would take the focus away from
+    // whatever the user is typing in.
+    ShowWindow(taskbar_, SW_SHOWNA);
+
+    IUIAutomation* automation = nullptr;
+    // COM, because UI Automation is a COM object and this may be a thread that never asked for an
+    // apartment: `--tray-surface` runs on a bare main thread, and without this the whole stage reports
+    // "UI Automation could not be created" (which is exactly what it did the first time it was asked).
+    // RPC_E_CHANGED_MODE means somebody else already initialized this thread into another apartment, which
+    // is fine -- COM is up either way, and it is not ours to uninitialize.
+    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool weInitializedCom = SUCCEEDED(comHr);
+    comInitialized_ = weInitializedCom;
+    if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&automation))) ||
+        !automation) {
+        if (weInitializedCom) CoUninitialize();
+        say(L"UI Automation could not be created");
+        return false;
+    }
+    automation_ = automation;
+
+    // The tray's own subtree takes a moment to be published after the window is shown; measured at about
+    // 300 ms, which is why this is a poll and not a sleep.
+    IUIAutomationElement* taskbarElement = nullptr;
+    IUIAutomationElement* chevron = nullptr;
+    RECT chevronRect = {};
+    for (int attempt = 0; attempt < 60 && !chevron; ++attempt) {
+        if (!taskbarElement) automation->ElementFromHandle(taskbar_, &taskbarElement);
+        if (taskbarElement) chevron = FindOverflowChevron(automation, taskbarElement, &chevronRect);
+        if (!chevron) Sleep(40);
+    }
+    if (taskbarElement) taskbarElement->Release();
+    if (!chevron) {
+        say(L"the tray never published its buttons");
+        return false;
+    }
+    chevron_ = chevron;
+
+    // THE FLYOUT FIRST, because the icons have no rectangles until the shell has laid them out -- until
+    // then every query answers the chevron's own slot (see the header). It is a toggle, so it is only
+    // pressed when it is not already showing.
+    IUIAutomationElement* flyout = FindOverflowFlyout(automation);
+    if (!flyout) {
+        InvokeElement(chevron);
+        weOpenedFlyout_ = true;
+        // 5 ms steps: the flyout is visible from the moment the shell paints it until this loop catches it
+        // and makes it invisible, and that interval is the only part of the sequence a user could see.
+        for (int attempt = 0; attempt < 300 && !flyout; ++attempt) {
+            Sleep(5);
+            flyout = FindOverflowFlyout(automation);
         }
     }
-    return -1;
-}
-
-const wchar_t* TrayPressResultName(TrayPressResult result) {
-    switch (result) {
-        case TrayPressResult::Pressed: return L"pressed";
-        case TrayPressResult::Found: return L"found it, and was asked not to press";
-        case TrayPressResult::NotInShell: return L"the shell has no rectangle for it";
-        case TrayPressResult::NoWindow: return L"no window of that application answered";
-        case TrayPressResult::NoElement: return L"nothing sits on that rectangle";
-        case TrayPressResult::NoTaskbar: return L"no taskbar";
-        case TrayPressResult::Refused: return L"refused";
+    if (!flyout) {
+        say(L"the overflow flyout did not open");
+        return false;
     }
-    return L"?";
+    flyoutElement_ = flyout;
+
+    // THE PANEL ITSELF CANNOT BE HIDDEN, and that is measured rather than assumed:
+    //
+    //   * `WS_EX_LAYERED` + alpha 0 works on the TASKBAR (its band photographs as wallpaper, twice) and
+    //     does nothing to this window -- it stays fully painted, because it is a XAML island drawn through
+    //     DirectComposition, which ignores the layered attributes;
+    //   * moving its window moves the ICONS' rectangles with it (-1632,89 for the WeChat icon, 4000 px to
+    //     the left) and leaves the pixels on the screen where they were -- so the panel is painted by some
+    //     other window of the shell's, which probe-tray-panel-windows.ps1 went looking for among every
+    //     window overlapping that rectangle.
+    //
+    // So the panel is visible for the length of a press -- a few hundred milliseconds, and the press is
+    // the user's own action -- and what this stage does is keep that as short as the shell allows: the
+    // panel is opened, the button is pressed, and the chevron is pressed again to put it away (see Reset,
+    // which is also the only thing that takes it down at all).
+    UIA_HWND native = nullptr;
+    if (SUCCEEDED(flyout->get_CurrentNativeWindowHandle(&native)) && native) {
+        flyoutWindow_ = reinterpret_cast<HWND>(native);
+    }
+    LogAndPrint("  tray stage: taskbar %p shown invisibly, overflow %p (%ls)\n",
+                reinterpret_cast<void*>(taskbar_), reinterpret_cast<void*>(flyoutWindow_),
+                flyoutWindow_ ? L"found" : L"not found by UI Automation");
+
+    // ... AND LET IT STOP MOVING. The panel slides into place, and a rectangle read while it is moving is
+    // a rectangle the button is about to leave: measured, the first row's icons were at y 33, 38, 40, 42
+    // and 44 within one pass, because each query caught the panel a little further down.
+    const ULONGLONG flyoutSeen = GetTickCount64();
+    RECT previous = {};
+    RECT current = {};
+    int stableReads = 0;
+    for (int attempt = 0; attempt < 60 && stableReads < 3; ++attempt) {
+        if (FAILED(flyout->get_CurrentBoundingRectangle(&current))) break;
+        const bool same = current.left == previous.left && current.top == previous.top &&
+                          current.right == previous.right && current.bottom == previous.bottom;
+        stableReads = same ? stableReads + 1 : 0;
+        previous = current;
+        // THREE reads and a minimum age, not two: the slide's last frames move about a pixel per 25 ms,
+        // which two reads in a row can easily agree on by accident -- measured, the first row of icons came
+        // back at y 43, 45, 47, 48 with the panel nominally "settled", and a rectangle read mid-slide does
+        // not match the button that ends up there.
+        if (stableReads < 3 || GetTickCount64() - flyoutSeen < 150) Sleep(25);
+    }
+    // Already the panel's NEW place: it was moved off the screen before this loop started, and the icons
+    // move with their window.
+    flyoutRect_ = current;
+    return true;
 }
 
-bool ShellRectForTrayIcon(const TrayPressRequest& request, RECT* out) {
+bool TrayStage::IconRect(const TrayPressRequest& request, RECT* out) const {
     if (!out) return false;
     if (request.hasGuid) {
         NOTIFYICONIDENTIFIER identifier = {};
@@ -445,15 +622,102 @@ bool ShellRectForTrayIcon(const TrayPressRequest& request, RECT* out) {
     return false;
 }
 
-TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press) {
+TrayPressResult TrayStage::PressOnRect(const RECT& rect, bool press, bool rightClick, wchar_t* shellName,
+                                      size_t shellNameCapacity) {
+    IUIAutomation* automation = static_cast<IUIAutomation*>(automation_);
+    IUIAutomationElement* flyout = static_cast<IUIAutomationElement*>(flyoutElement_);
+    if (!automation || !flyout) return TrayPressResult::NoElement;
+
+    IUIAutomationElement* button =
+        ElementOnRect(automation, flyout, rect, 4, !rightClick, shellName, shellNameCapacity, nullptr);
+    if (!button) {
+        // The right-click path does not need an Invoke pattern, so the element is looked for without one
+        // and its absence is then the honest answer.
+        return TrayPressResult::NoElement;
+    }
+
+    TrayPressResult result = TrayPressResult::Found;
+    rightClicked_ = press && rightClick;
+    if (press && !rightClick) {
+        result = InvokeElement(button) ? TrayPressResult::Pressed : TrayPressResult::Refused;
+    } else if (press) {
+        // THE APPLICATION'S OWN MENU -- the menu with 退出 in it -- and this is the one place the bar
+        // synthesises real input.
+        //
+        // Three routes were measured. UI Automation has no right-click pattern at all. A POSTED right
+        // button message leaves the application silent: the panel's icons are not driven from window
+        // messages, so nothing opens and nothing complains. What does work is a real right click AT THE
+        // ICON'S OWN POSITION, which is what a user's right click is -- so the pointer is moved there,
+        // clicked, and put straight back where it was found, and the only thing that stays on screen is the
+        // menu that was asked for.
+        POINT saved = {};
+        if (!GetCursorPos(&saved)) {
+            result = TrayPressResult::Refused;
+        } else {
+            const POINT centre = {(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+            SetCursorPos(centre.x, centre.y);
+            // No click without the pointer actually being there, and no click without a moment for the
+            // move to land: a right click is routed by position, so a click that arrives before the move
+            // is a click on whatever the pointer used to be over.
+            Sleep(30);
+            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+            Sleep(30);
+            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            // Back at once: the menu belongs to the application and does not follow the pointer, so this
+            // does not close it -- and the user's hand is where they left it.
+            Sleep(60);
+            SetCursorPos(saved.x, saved.y);
+            result = TrayPressResult::Pressed;
+        }
+    }
+    button->Release();
+    return result;
+}
+
+int IndexOfRectNear(const RECT* rects, int count, const RECT& wanted, int tolerancePx) {
+    if (!rects) return -1;
+    for (int i = 0; i < count; ++i) {
+        const RECT& other = rects[i];
+        if (std::abs(other.left - wanted.left) <= tolerancePx &&
+            std::abs(other.top - wanted.top) <= tolerancePx &&
+            std::abs(other.right - wanted.right) <= tolerancePx &&
+            std::abs(other.bottom - wanted.bottom) <= tolerancePx) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const wchar_t* TrayPressResultName(TrayPressResult result) {
+    switch (result) {
+        case TrayPressResult::Pressed: return L"pressed";
+        case TrayPressResult::Found: return L"found it, and was asked not to press";
+        case TrayPressResult::NotInShell: return L"the shell has no rectangle for it";
+        case TrayPressResult::NoWindow: return L"no window of that application answered";
+        case TrayPressResult::NoElement: return L"nothing sits on that rectangle";
+        case TrayPressResult::NoTaskbar: return L"no taskbar";
+        case TrayPressResult::Refused: return L"refused";
+    }
+    return L"?";
+}
+
+// Presses one icon: the stage first (the shell's tray laid out and its flyout open, invisibly), then the
+// shell's own answer for where the icon is, then the button that sits there.
+TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press, bool rightClick) {
     TrayPressOutcome outcome;
     // Before the taskbar is touched: the bar's watchdog must not hide it in the middle of this.
     PressInFlight inFlight;
 
-    // 1. WHERE THE ICON IS, which needs no taskbar and no window of ours -- measured with the taskbar
-    // hidden, and with it shown but invisible.
+    TrayStage stage;
+    wchar_t note[160] = {};
+    if (!stage.Begin(note, 160)) {
+        outcome.result = (std::wcscmp(note, L"no taskbar") == 0) ? TrayPressResult::NoTaskbar
+                                                                : TrayPressResult::NoElement;
+        return outcome;
+    }
+
     const ULONGLONG lookupStart = GetTickCount64();
-    const bool haveRect = ShellRectForTrayIcon(request, &outcome.rect);
+    const bool haveRect = stage.IconRect(request, &outcome.rect);
     outcome.lookupMs = MillisSince(lookupStart);
     if (!haveRect) {
         // A registered icon the shell is not displaying: four of the sixteen on this machine answer
@@ -464,96 +728,13 @@ TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press) {
         return outcome;
     }
 
-    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!taskbar) {
-        outcome.result = TrayPressResult::NoTaskbar;
-        return outcome;
-    }
-
     const ULONGLONG pressStart = GetTickCount64();
-    VisibleButInvisible taskbarState(taskbar);
-    InvisibleWindow flyoutState;
-
-    IUIAutomation* automation = nullptr;
-    if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&automation))) ||
-        !automation) {
-        outcome.result = TrayPressResult::Refused;
-        return outcome;
-    }
-    // The tray's own subtree takes a moment to be published after the window is shown; measured at about
-    // 300 ms, which is why this is a poll and not a sleep.
-    IUIAutomationElement* taskbarElement = nullptr;
-    IUIAutomationElement* chevron = nullptr;
-    RECT chevronRect = {};
-    for (int attempt = 0; attempt < 25 && !chevron; ++attempt) {
-        if (!taskbarElement) automation->ElementFromHandle(taskbar, &taskbarElement);
-        if (taskbarElement) chevron = FindOverflowChevron(automation, taskbarElement, &chevronRect);
-        if (!chevron) Sleep(40);
-    }
-
-    // The icon's rectangle tells us which of the shell's two trays holds it: the taskbar band (y under
-    // the bar) is the tray proper, below it is the overflow flyout. Only the flyout's icons are
-    // published as buttons.
-    RECT taskbarRect = {};
-    GetWindowRect(taskbar, &taskbarRect);
-    const bool inOverflow = outcome.rect.top >= taskbarRect.bottom - 2;
-
-    if (!chevron) {
-        outcome.result = TrayPressResult::NoElement;
-    } else if (!inOverflow) {
-        // The tray PROPER: the shell publishes its six system buttons there and nothing else, so an
-        // application icon in it cannot be pressed through UI Automation. Reported, not guessed at.
-        outcome.result = TrayPressResult::NoElement;
-    } else {
-        // The flyout has to be UP for its buttons to exist at all, and the chevron is a toggle -- so it is
-        // only pressed when the flyout is not already showing.
-        IUIAutomationElement* flyout = FindOverflowFlyout(automation);
-        if (!flyout) {
-            InvokeElement(chevron);
-            // 5 ms steps, not 40: the flyout is on the screen from the moment the shell paints it until
-            // this loop catches it and makes it invisible, and that interval is the only part of this
-            // whole sequence a user could see. Measured at 40 ms steps: the panel's own opening animation
-            // was still being caught late enough to be noticeable.
-            for (int attempt = 0; attempt < 200 && !flyout; ++attempt) {
-                Sleep(5);
-                flyout = FindOverflowFlyout(automation);
-            }
-        }
-        if (!flyout) {
-            outcome.result = TrayPressResult::NoElement;
-        } else {
-            // Invisible BEFORE anything is pressed in it: the user asked for an icon to be pressed, not to
-            // watch the shell's panel open on the way there.
-            UIA_HWND native = nullptr;
-            if (SUCCEEDED(flyout->get_CurrentNativeWindowHandle(&native)) && native) {
-                flyoutState.Apply(reinterpret_cast<HWND>(native));
-            }
-            IUIAutomationElement* button = ElementOnRect(
-                automation, flyout, outcome.rect, 4, true, outcome.shellName,
-                sizeof(outcome.shellName) / sizeof(wchar_t), nullptr);
-            if (button) {
-                if (!press) {
-                    outcome.result = TrayPressResult::Found;
-                } else {
-                    outcome.result =
-                        InvokeElement(button) ? TrayPressResult::Pressed : TrayPressResult::Refused;
-                }
-                button->Release();
-            } else {
-                outcome.result = TrayPressResult::NoElement;
-            }
-            flyout->Release();
-            // The flyout and the taskbar go away together when this function returns: the taskbar state
-            // hides it again, and the application's own window or menu is not a child of the shell's
-            // (measured: the overflow panel is a top-level window of the shell's, and what a press opens
-            // belongs to the application).
-        }
-    }
-
-    if (chevron) chevron->Release();
-    if (taskbarElement) taskbarElement->Release();
-    automation->Release();
+    // No separate "is it in the band or the flyout" test: a button either sits on the rectangle or it does
+    // not, and that is the same question asked with the better answer. An icon in the tray PROPER is not a
+    // UI Automation button at all (the taskbar's own tree holds its six system buttons and nothing else),
+    // so it comes back as "nothing sits on that rectangle" -- which is the truth about it.
+    outcome.result = stage.PressOnRect(outcome.rect, press, rightClick, outcome.shellName,
+                                       sizeof(outcome.shellName) / sizeof(wchar_t));
     outcome.pressMs = MillisSince(pressStart);
     return outcome;
 }

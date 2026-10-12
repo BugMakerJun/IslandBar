@@ -31,6 +31,18 @@
 //  is the shell's, and the press is a UI Automation Invoke on the button that sits on that position --
 //  no names involved at all.
 //
+//  ... AND ONLY WHEN THE SHELL HAS LAID THE TRAY OUT, which is the trap in the paragraph above. An icon
+//  that lives in the overflow flyout has NO rectangle until that flyout has been opened: until then the
+//  shell answers 2416,0 24x32 -- the chevron's slot -- for EVERY icon, hiding its ignorance behind a
+//  plausible rectangle. Measured: all sixteen, identical, with the taskbar hidden for a while.
+//
+//  That is why the first version of this worked from the command line and not from the bar: every
+//  command-line run followed a probe that had just opened the flyout to look inside it, so the rectangles
+//  happened to be current. A measurement taken after somebody else has already done the thing being
+//  measured is not a measurement. Hence TrayStage: the flyout is opened FIRST, invisibly, and only then is
+//  the icon asked for -- see scripts/probe-tray-rect-after-flyout.ps1, which asks the same question both
+//  ways.
+//
 //  THE TASKBAR IS NEVER SEEN. The shell only publishes its tray while the taskbar is VISIBLE, and this
 //  bar exists to hide it, so the press shows it for the length of the operation with
 //  `WS_EX_LAYERED + SetLayeredWindowAttributes(alpha 0)`: present and fully functional for UI
@@ -48,6 +60,8 @@
 #pragma once
 
 #include <windows.h>
+
+#include <cstddef>
 
 namespace island {
 
@@ -89,7 +103,11 @@ struct TrayPressOutcome {
 // With `press` false the whole sequence runs -- the taskbar made invisible, the overflow flyout opened,
 // the button found on the shell's rectangle -- and only the final Invoke is left out, which is what makes
 // the route checkable without opening somebody's application. The result is then `Found`.
-TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press);
+//
+// `rightClick` asks for the application's own menu instead of its default action, which is what a right
+// click means in the shell's tray -- and it is the only route to a menu item like "退出": UI Automation
+// publishes no right-click pattern, so that half is a posted right button message (see TrayStage).
+TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press, bool rightClick);
 
 // Whether a press is in flight right now.
 //
@@ -100,9 +118,74 @@ TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press);
 // this short.
 bool TrayPressInFlight();
 
-// Whether the shell says this icon is on screen, and where. False means "registered but not displayed",
-// which is also what tells the card's list that an icon it draws has no shell icon behind it.
-bool ShellRectForTrayIcon(const TrayPressRequest& request, RECT* out);
+// The cleanup a right click leaves behind, finished by the bar's own watchdog.
+//
+// A right click leaves the shell's panel open on purpose (its menu is attached to it -- see TrayPress.cpp),
+// and the shell re-shows its taskbar while that menu is up. So the taskbar is left SHOWN BUT INVISIBLE for
+// as long as that lasts, and this is how it gets put back: the frame loop asks this once per watchdog tick,
+// and only then is the layering removed and the taskbar hidden again. Doing it at the end of the press
+// instead was measured: the shell brought the taskbar back, visible, seconds after the menu opened.
+bool TrayPressCleanupPending();
+void TrayPressFinishCleanup();
+
+// THE SHELL'S TRAY, LAID OUT AND OPEN, INVISIBLY -- everything a press needs that is not the icon itself.
+//
+// RAII, because every path out has to put the desktop back: the taskbar hidden again, its extended style
+// as it was, and the flyout gone with it. A press that returned early without this would leave the shell's
+// taskbar over the bar, which is the one thing this project must never do.
+//
+// `Begin` shows the taskbar painted with nothing (`WS_EX_LAYERED` + alpha 0 -- present and fully functional
+// for UI Automation, as measured), opens the overflow flyout (also made invisible the moment it appears,
+// on a 5 ms poll) and waits for the panel to stop moving. `IconRect` may only be asked AFTER that: see the
+// note at the top of this file about the chevron's slot.
+class TrayStage {
+public:
+    TrayStage() = default;
+    ~TrayStage();
+    TrayStage(const TrayStage&) = delete;
+    TrayStage& operator=(const TrayStage&) = delete;
+
+    // False when the shell will not cooperate; `note` then says which part was missing.
+    bool Begin(wchar_t* note, size_t noteCapacity);
+
+    // The icon's rectangle as the shell reports it NOW. False means "registered but not displayed", which
+    // is also what tells the card which of its cells has no shell icon behind it.
+    bool IconRect(const TrayPressRequest& request, RECT* out) const;
+
+    RECT FlyoutRect() const { return flyoutRect_; }
+
+    // Presses the button that sits on `rect`, inside the flyout. With `press` false it is found and not
+    // pressed (the dry run). `rightClick` asks for the application's own menu instead of its default
+    // action -- a POSTED right button message, because UI Automation has no pattern for one.
+    TrayPressResult PressOnRect(const RECT& rect, bool press, bool rightClick, wchar_t* shellName,
+                               size_t shellNameCapacity);
+
+private:
+    void Reset();
+
+    HWND taskbar_ = nullptr;
+    bool wasVisible_ = false;
+    bool layered_ = false;
+    LONG_PTR style_ = 0;
+    HWND flyoutWindow_ = nullptr;
+    // Where the shell had the panel before this stage moved it out of sight, so it can be put back.
+    RECT flyoutHome_ = {};
+    // IUIAutomation / IUIAutomationElement, kept as void* so this header does not have to drag in the
+    // UI Automation and COM headers for every file that asks what a press result is.
+    void* automation_ = nullptr;
+    void* chevron_ = nullptr;
+    void* flyoutElement_ = nullptr;
+    // Whether Begin had to initialize COM itself, and therefore has to put it back.
+    bool comInitialized_ = false;
+    // Whether the overflow panel is up because THIS stage opened it: it is a toggle, and pressing it again
+    // is the only way to put it away -- hiding the taskbar does NOT close it (measured: the panel stayed on
+    // the screen, still painted, after the taskbar was hidden and even after the layering was removed).
+    bool weOpenedFlyout_ = false;
+    // Whether the press was a right click, which is the one kind whose result (a menu) needs a moment
+    // before the panel it came from is taken down. See Reset.
+    bool rightClicked_ = false;
+    RECT flyoutRect_ = {};
+};
 
 // Which of `count` rectangles is the one the shell named, by exact position: the same rectangle within
 // `tolerancePx` on every edge. This is the identity test that replaces matching names, and it is a plain

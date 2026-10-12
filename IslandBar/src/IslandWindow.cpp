@@ -275,6 +275,12 @@ bool IslandWindow::TakeClick() {
     return true;
 }
 
+bool IslandWindow::TakeRightClick() {
+    if (pendingRightClicks_ <= 0) return false;
+    --pendingRightClicks_;
+    return true;
+}
+
 bool IslandWindow::TakePress(POINT* screenPoint) {
     if (pendingPresses_ <= 0) return false;
     --pendingPresses_;
@@ -1341,6 +1347,24 @@ LRESULT IslandWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // Released on the button-up, and only if this window is the one holding it.
             leftDown_ = true;
             SetCapture(hwnd_);
+            return 0;
+        }
+
+        // A RIGHT CLICK, counted rather than acted on, like the left one: what it means is policy and
+        // belongs in the frame loop. It exists for the tray page's cells -- right-clicking one of the
+        // shell's tray icons is how its application's own menu opens, which is the only way to reach an
+        // item like 退出 -- and the window is the only thing that hears the click.
+        case WM_RBUTTONUP: {
+            POINT where = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ClientToScreen(hwnd_, &where);
+            float localX = 0.0f;
+            float localY = 0.0f;
+            ToLocalDip(where, &localX, &localY);
+            wchar_t local[96] = {};
+            std::swprintf(local, 96, L"right click at screen (%ld,%ld) = local (%.0f,%.0f) DIP",
+                          where.x, where.y, localX, localY);
+            LogAndPrint("  %ls", local);
+            ++pendingRightClicks_;
             return 0;
         }
 

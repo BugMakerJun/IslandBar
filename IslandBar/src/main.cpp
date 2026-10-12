@@ -66,6 +66,7 @@ namespace {
 // a press to a worker thread, and the request is a COPY of what the icon list said (see TrayPressRequest).
 // Defined further down with the other tray commands, where the reason for the copy is written out.
 island::TrayPressRequest MakeTrayPressRequest(const island::TrayIcon& icon, const wchar_t* exePath);
+void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick);
 
 // ... and an icon's name with its line breaks flattened, for a log line: five of the sixteen names on this
 // machine are multi-line tooltips, and printing one raw puts the rest of the line on a line of its own.
@@ -1429,7 +1430,14 @@ float musicWavePhase = 0.0f;
                 // ... unless a tray press is showing it this instant: the press needs the shell's taskbar
                 // to exist for about a fifth of a second, and re-hiding it in the middle of that would
                 // make roughly one press in twenty-five do nothing at all. See TrayPressInFlight.
-                if (!island::TrayPressInFlight() && taskbar.EnsureHidden()) {
+                if (island::TrayPressCleanupPending()) {
+                    // A right click left the shell's panel (and its menu) up, and the shell re-shows its
+                    // taskbar while that menu is there -- so the taskbar was left invisible rather than
+                    // un-layered, and this is where it is finally put away. See TrayPressFinishCleanup.
+                    island::TrayPressFinishCleanup();
+                    island::LogAndPrint("  native taskbar: put away after a tray right click\n");
+                    std::fflush(stdout);
+                } else if (!island::TrayPressInFlight() && taskbar.EnsureHidden()) {
                     island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
                 }
@@ -1962,26 +1970,7 @@ float musicWavePhase = 0.0f;
                     // at the compositor's rate on this thread.
                     const int cell = window.TrayCellHovered();
                     if (cell < trayIcons.Count()) {
-                        const island::TrayPressRequest request =
-                            MakeTrayPressRequest(trayIcons.At(cell), trayIcons.ExePathAt(cell));
-                        wchar_t flat[128] = {};
-                        island::LogAndPrint("  tray press: cell %d '%ls'\n", cell,
-                                            FlatName(trayIcons.At(cell).name, flat, 128));
-                        std::thread([request]() {
-                            const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-                            const island::TrayPressOutcome outcome =
-                                island::PressTrayIcon(request, true);
-                            island::LogAndPrint(
-                                "  tray press: '%ls' -> %ls (the shell calls it '%ls', rect %ld,%ld "
-                                "%ldx%ld), lookup %lld ms, press %lld ms\n",
-                                request.name, island::TrayPressResultName(outcome.result),
-                                outcome.shellName, outcome.rect.left, outcome.rect.top,
-                                outcome.rect.right - outcome.rect.left,
-                                outcome.rect.bottom - outcome.rect.top, outcome.lookupMs,
-                                outcome.pressMs);
-                            std::fflush(stdout);
-                            if (SUCCEEDED(comHr)) CoUninitialize();
-                        }).detach();
+                        StartTrayPress(trayIcons, cell, false);
                     }
                     // The card goes with the press, which is what the shell does with its own flyout: the
                     // application's window or menu is what the user is waiting for.
@@ -2389,6 +2378,30 @@ float musicWavePhase = 0.0f;
                                             : resting);
                     }
                 }
+                }
+            }
+
+            // --- a RIGHT click, which so far means one thing -------------------------------------------
+            //
+            // A cell of the tray page: right-clicking one of the shell's tray icons opens the
+            // APPLICATION'S OWN MENU -- the menu with 退出 in it -- and there is no other way to reach it
+            // from here. UI Automation publishes no right-click pattern, so the press is a posted right
+            // button message to the shell's own panel (see TrayPress). The request is the same one the left
+            // click builds; only the message differs, which is why both go through StartTrayPress.
+            //
+            // Everywhere else on the bar a right click is still nothing: a control that quietly did
+            // something different on the other button would be worse than one that does nothing.
+            while (window.TakeRightClick()) {
+                POINT rightCursor = {};
+                GetCursorPos(&rightCursor);
+                if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0 &&
+                    window.TrayCellHovered() < trayIcons.Count()) {
+                    StartTrayPress(trayIcons, window.TrayCellHovered(), true);
+                    dismissPanel();
+                } else {
+                    island::LogAndPrint("  right click: no tray cell under the pointer (%d,%d)\n",
+                                        rightCursor.x, rightCursor.y);
+                    std::fflush(stdout);
                 }
             }
 
@@ -4337,6 +4350,32 @@ const wchar_t* FlatName(const wchar_t* name, wchar_t* buffer, size_t capacity) {
     return buffer;
 }
 
+// Hands one icon to a worker thread: the press shows the shell's tray for about a fifth of a second and
+// walks its overflow, which is not something the bar's own frame loop can spend time on. The request is a
+// copy, because the list refreshes under it.
+void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
+    if (cell < 0 || cell >= icons.Count()) return;
+    const island::TrayPressRequest request =
+        MakeTrayPressRequest(icons.At(cell), icons.ExePathAt(cell));
+    wchar_t flat[128] = {};
+    island::LogAndPrint("  tray press: cell %d '%ls'%ls\n", cell,
+                        FlatName(icons.At(cell).name, flat, 128),
+                        rightClick ? " (right click)" : "");
+    std::fflush(stdout);
+    std::thread([request, rightClick]() {
+        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const island::TrayPressOutcome outcome = island::PressTrayIcon(request, true, rightClick);
+        island::LogAndPrint(
+            "  tray press: '%ls' -> %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), lookup %lld "
+            "ms, press %lld ms\n",
+            request.name, island::TrayPressResultName(outcome.result), outcome.shellName,
+            outcome.rect.left, outcome.rect.top, outcome.rect.right - outcome.rect.left,
+            outcome.rect.bottom - outcome.rect.top, outcome.lookupMs, outcome.pressMs);
+        std::fflush(stdout);
+        if (SUCCEEDED(comHr)) CoUninitialize();
+    }).detach();
+}
+
 // Asks the shell where each of those icons is, which is the question a press depends on -- and the one
 // that says whether the card is drawing an icon the shell has at all.
 //
@@ -4347,28 +4386,43 @@ const wchar_t* FlatName(const wchar_t* name, wchar_t* buffer, size_t capacity) {
 int RunTraySurface() {
     island::TrayIcons icons;
     const int count = icons.Refresh();
-    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    RECT band = {};
-    if (taskbar) GetWindowRect(taskbar, &band);
-    island::LogAndPrint(L"tray surface: %d icon(s); taskbar %ls (band %ld..%ld)\n", count,
-                        taskbar ? L"present" : L"MISSING", band.top, band.bottom);
+    // THE STAGE FIRST. Asking the shell where an icon is only means something once its tray has been laid
+    // out, and an icon in the overflow flyout has no rectangle at all until that flyout has been opened:
+    // until then the shell answers the chevron's slot -- 2416,0 24x32 -- for every icon, which is a
+    // plausible-looking rectangle and a completely wrong one. Measured both ways in
+    // scripts/probe-tray-rect-after-flyout.ps1.
+    island::TrayStage stage;
+    wchar_t note[160] = {};
+    const bool staged = stage.Begin(note, 160);
+    const RECT flyout = stage.FlyoutRect();
+    island::LogAndPrint(L"tray surface: %d icon(s); the shell's tray %ls", count,
+                        staged ? L"is laid out (its overflow is open, invisibly)\n"
+                               : L"could not be laid out\n");
+    if (!staged) island::LogAndPrint(L"  (%ls)\n", note);
+    if (staged) {
+        island::LogAndPrint(L"  the overflow flyout is at %ld,%ld %ldx%ld\n", flyout.left, flyout.top,
+                            flyout.right - flyout.left, flyout.bottom - flyout.top);
+    }
 
     int answered = 0;
     for (int i = 0; i < count; ++i) {
         const island::TrayIcon& icon = icons.At(i);
         const island::TrayPressRequest request = MakeTrayPressRequest(icon, icons.ExePathAt(i));
         RECT rect = {};
-        const bool have = island::ShellRectForTrayIcon(request, &rect);
+        const bool have = staged && stage.IconRect(request, &rect);
         if (have) ++answered;
         wchar_t flat[128] = {};
         wchar_t identity[64] = {};
         std::swprintf(identity, 64, L"uid %u", icon.uid);
         if (have) {
+            const bool inFlyout = rect.left >= flyout.left - 4 && rect.right <= flyout.right + 4 &&
+                                  rect.top >= flyout.top - 4 && rect.bottom <= flyout.bottom + 4;
             island::LogAndPrint(L"  [%d] %ls (%ls) -- %ld,%ld %ldx%ld %ls\n", i,
                                 FlatName(icon.name, flat, 128),
                                 icon.hasGuid ? L"GUID" : identity, rect.left, rect.top,
                                 rect.right - rect.left, rect.bottom - rect.top,
-                                rect.top >= band.bottom - 2 ? L"(overflow)" : L"(tray proper)");
+                                inFlyout ? L"(overflow)" : L"(tray proper: the shell publishes no button "
+                                                          L"there)");
         } else {
             island::LogAndPrint(L"  [%d] %ls (%ls) -- the shell has no rectangle for it\n", i,
                                 FlatName(icon.name, flat, 128),
@@ -4384,7 +4438,7 @@ int RunTraySurface() {
 // here. Everything the live click does is done, including the walk through the shell's tray, so what this
 // prints is what a click produces -- the difference being `--fire`, without which the button is found and
 // reported but not pressed.
-int RunTrayPress(int index, bool fire) {
+int RunTrayPress(int index, bool fire, bool rightClick) {
     island::TrayIcons icons;
     const int count = icons.Refresh();
     if (index < 0 || index >= count) {
@@ -4396,23 +4450,18 @@ int RunTrayPress(int index, bool fire) {
     island::LogAndPrint(L"tray press: [%d] '%ls' (%ls)\n", index, icon.name,
                         icon.hasGuid ? L"registered by GUID" : L"registered by UID");
 
-    RECT rect = {};
-    if (!island::ShellRectForTrayIcon(request, &rect)) {
-        island::LogAndPrint(L"  the shell has no rectangle for it: registered, not displayed. Nothing "
-                            L"to press.\n");
-        return 1;
-    }
-    island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", rect.left, rect.top,
-                        rect.right - rect.left, rect.bottom - rect.top);
-
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     // Without --fire the whole route still runs -- the tray made invisible, the overflow flyout opened,
     // the button found on the shell's rectangle -- and only the Invoke is left out.
-    const island::TrayPressOutcome outcome = island::PressTrayIcon(request, fire);
+    const island::TrayPressOutcome outcome = island::PressTrayIcon(request, fire, rightClick);
     if (SUCCEEDED(comHr)) CoUninitialize();
-    island::LogAndPrint(L"  -> %ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
-                        island::TrayPressResultName(outcome.result), outcome.shellName,
-                        outcome.lookupMs, outcome.pressMs);
+    island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", outcome.rect.left,
+                        outcome.rect.top, outcome.rect.right - outcome.rect.left,
+                        outcome.rect.bottom - outcome.rect.top);
+    island::LogAndPrint(L"  -> %ls%ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
+                        island::TrayPressResultName(outcome.result),
+                        rightClick ? L" [right click]" : L"", outcome.shellName, outcome.lookupMs,
+                        outcome.pressMs);
     if (outcome.result == island::TrayPressResult::Pressed || outcome.result == island::TrayPressResult::Found) {
         return 0;
     }
@@ -5264,7 +5313,8 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--tray-press") == 0 && i + 1 < argc) {
             const int wanted = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
             const bool fire = (i + 1 < argc) && std::strcmp(argv[i + 1], "--fire") == 0;
-            const int pressResult = RunTrayPress(wanted, fire);
+            const bool right = (i + 2 < argc) && std::strcmp(argv[i + 2], "--right") == 0;
+            const int pressResult = RunTrayPress(wanted, fire, right);
             island::CloseLog();
             return pressResult;
         }
