@@ -5279,6 +5279,29 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
 | **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
 | **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
+### 8.66 **胶囊左端缺了一角：输入区域比画的短 4 DIP** ✅
+
+用户拍了张照片：「**看一下 这个地方缺了一角**」（红框圈在 deck 左下角）。
+
+#### 病根
+
+胶囊（8.63 的 `BarClusterFor`）比系统键**再往左 4 DIP**（一圈 pad），而 `InputRegionFor` 的最左边只取到 `SystemButtonFor(island).left` —— **区域是裁剪窗口的东西**，于是画出来的胶囊被切掉 4 DIP：一个圆头变成一个方角。那条注释就在旁边（"a capsule with a hard bite taken out of its left end"，原本是写给状态条的），这次被自己的 pad 撞上了。
+
+#### 改法
+
+`InputRegionFor` 的左侧改成取**那块面本身**：`BarClusterFor(island, trayIconCount > 0).left`（它天然也盖住 system/Start 两个键）。
+
+#### 证据
+
+新断言，读数直接把病根写在脸上：
+
+```
+[ OK ] the region covers the one surface the deck, the island and the tray stand on
+       surface left 1094, region left 1094 px; surface y [6,42], region y [0,44]
+```
+
+改之前区域左边界是 **1098**（= 系统键左边缘），面是 **1094** → 断言当场红；改完两边都是 1094 ✓。放大对比：`captures/corner-after-zoom.png`（左端是完整的圆头）。自检 885 → **886**。
+
 ### 8.65 **自绘开始卡片：空白卡片 + 头像/关机键 + 自己添加应用** ✅（待用户点）
 
 用户看图（Win11 原生开始菜单，红框圈住底部）说：「**我有个想法 你可以创建一个空白的卡片 然后里面只有红框里的 关机键 和用户头像，上面的应该可以让用户手动添加**」。

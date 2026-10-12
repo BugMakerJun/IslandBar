@@ -6492,6 +6492,24 @@ void TestMusicCardLayout() {
                           withTray.right >= static_cast<LONG>(rowRight),
                       L"the region covers the tray button and the row beside it", trayDetail);
 
+                // ... AND THE WHOLE SURFACE THE FIXED CONTROLS STAND ON, on the LEFT as well.
+                //
+                // That surface reaches a pad further left than the system button, and the region is what
+                // CLIPS the window: measured from the system button, the region stopped 4 DIP short of what
+                // is painted and the left end of the capsule came out with a square bite out of it, where the
+                // round end should be. Reported with a photograph: "看一下 这个地方缺了一角".
+                const RoundedBox surface = BarClusterFor(restPill, true);
+                std::swprintf(trayDetail, 256,
+                              L"surface left %.0f, region left %ld px; surface y [%.0f,%.0f], region y "
+                              L"[%ld,%ld]",
+                              surface.rect.left, withTray.left, surface.rect.top, surface.rect.bottom,
+                              withTray.top, withTray.bottom);
+                Check(withTray.left <= static_cast<LONG>(surface.rect.left) &&
+                          withTray.top <= static_cast<LONG>(surface.rect.top) &&
+                          withTray.bottom >= static_cast<LONG>(surface.rect.bottom),
+                      L"the region covers the one surface the deck, the island and the tray stand on",
+                      trayDetail);
+
                 // NOT asserted any more: that asking for the tray WIDENS the region. It did while the button
                 // stood at the window's right margin -- the region then had to be pushed out to reach it.
                 // Beside the ISLAND the button is between two things the region already covers, and the

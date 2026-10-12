@@ -449,9 +449,16 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     // The LEFT deck: the Start button and the system panel's toggle, which sit immediately to the left
     // of the island. Both have to be inside the region or they cannot be clicked at all -- and the
     // region is what decides that, not the hit test.
+    //
+    // FROM THE SURFACE THEY STAND ON, not from the system button: that surface is one capsule covering the
+    // deck, the island and the tray button, and it reaches a pad FURTHER LEFT than the system button does
+    // (see BarClusterFor). Measured here instead, the region stopped 4 DIP short of what is painted -- and
+    // the region CLIPS, so the left end of the capsule came out with a square bite taken out of it where the
+    // round end should be. Reported as a photograph of the bar with "看一下 这个地方缺了一角" round the
+    // bottom-left of the deck.
     {
-        const RectF system = SystemButtonFor(island);
-        if (system.left < left) left = system.left;
+        const RoundedBox cluster = BarClusterFor(island, trayIconCount > 0);
+        if (cluster.rect.left < left) left = cluster.rect.left;
     }
 
     // The STATUS STRIP reaches further left still, while it is up.
