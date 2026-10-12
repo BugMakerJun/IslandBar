@@ -117,6 +117,21 @@ bool TextRenderer::Initialize() {
     dateFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     dateFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
+    // The status strip's line, which stands in for the clock while the island is occupied.
+    //
+    // NO_WRAP for the reason the pill's line has it: a line that wrapped inside a 26 DIP capsule
+    // would draw its second row over the top of its first, and the strip's contents are known to
+    // fit -- the self-test measures the longest of them against the box.
+    hr = factory_->CreateTextFormat(
+        L"Segoe UI Variable Text", nullptr,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        12.5f, L"zh-CN", &statusStripFormat_);
+    if (SUCCEEDED(hr)) {
+        statusStripFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        statusStripFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        statusStripFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
+
     // The music card's top row: the source name and the volume readout.
     //
     // Its own format rather than reusing appFormat_, which the notification header uses and which
@@ -303,6 +318,7 @@ void TextRenderer::Shutdown() {
     SafeRelease(&appRowFormat_);
     SafeRelease(&volumeFormat_);
     SafeRelease(&appFormat_);
+    SafeRelease(&statusStripFormat_);
     SafeRelease(&pillLineFormat_);
     SafeRelease(&dateFormat_);
     SafeRelease(&timeFormat_);
@@ -393,6 +409,99 @@ void TextRenderer::DrawClock(ID2D1DeviceContext2* context, const RoundedBox& box
     }
 
     SafeRelease(&brush);
+}
+
+void TextRenderer::ComposeStatusLine(const wchar_t* time, const wchar_t* date,
+                                     const wchar_t* weather, wchar_t* out, size_t capacity) {
+    if (!out || capacity == 0) return;
+    out[0] = L'\0';
+
+    // The DATE first, then the time, then the weather -- the order the request named them in
+    // ("日期时间星期天气"). The weekday is already inside the date line: that line has read
+    // "\u5468\u65e5\u300112\u670828\u65e5" since it was written, and a second copy of the weekday
+    // beside it would be the only repetition on the bar.
+    //
+    // TWO spaces between the parts, not one: at 12.5 DIP a single space between two groups of
+    // digits reads as a separator and the three parts run together into one number.
+    wchar_t line[192] = {};
+    if (date && date[0] != L'\0') {
+        wcsncpy_s(line, 192, date, _TRUNCATE);
+    }
+    if (time && time[0] != L'\0') {
+        if (line[0] != L'\0') wcsncat_s(line, 192, L"  ", _TRUNCATE);
+        wcsncat_s(line, 192, time, _TRUNCATE);
+    }
+    if (weather && weather[0] != L'\0') {
+        if (line[0] != L'\0') wcsncat_s(line, 192, L"  ", _TRUNCATE);
+        wcsncat_s(line, 192, weather, _TRUNCATE);
+    }
+
+    wcsncpy_s(out, capacity, line, _TRUNCATE);
+}
+
+void TextRenderer::DrawStatusStrip(ID2D1DeviceContext2* context, const RoundedBox& island,
+                                   float opacity, const wchar_t* weather,
+                                   const D2D1_COLOR_F& fill) {
+    if (!context || !factory_ || !statusStripFormat_) return;
+    if (opacity <= 0.01f) return;
+
+    Refresh();
+
+    wchar_t line[192] = {};
+    ComposeStatusLine(timeText_, dateText_, weather, line, 192);
+    if (line[0] == L'\0') return;
+
+    const RectF box = StatusStripFor(island);
+    if (box.right <= box.left) return;
+
+    // The capsule first, in the island's own colour: the same background the deck's buttons carry
+    // and for the same reason -- without it the words would sit on whatever the wallpaper happens
+    // to be under them, which is unreadable against a bright photograph. Its alpha follows the
+    // strip's own fade, so the strip fades in as a shape rather than as text appearing.
+    const float radius = (box.bottom - box.top) * 0.5f;
+    const D2D1_ROUNDED_RECT rounded = {
+        D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
+    if (fill.a > 0.001f) {
+        D2D1_COLOR_F background = fill;
+        background.a = fill.a * opacity;
+        ID2D1SolidColorBrush* brush = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(background, &brush)) && brush) {
+            context->FillRoundedRectangle(&rounded, brush);
+            // The hairline stroke in the same colour covers the antialiased fringe, exactly as the
+            // island's own fill does -- without it a pale seam shows along the capsule's curve.
+            context->DrawRoundedRectangle(&rounded, brush, 1.0f);
+            brush->Release();
+        }
+    }
+
+    ID2D1SolidColorBrush* textBrush = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(TextColour(opacity), &textBrush)) && textBrush) {
+        // The text is inset by the strip's padding and CENTRED inside what is left: the box is a
+        // fixed width (see kStatusStripWidthDip) and the line is not, so centring keeps the padding
+        // even whichever parts are present.
+        const D2D1_RECT_F textArea = D2D1::RectF(box.left + kStatusStripPadDip, box.top,
+                                                 box.right - kStatusStripPadDip, box.bottom);
+        context->DrawTextW(line, static_cast<UINT32>(std::wcslen(line)), statusStripFormat_,
+                           textArea, textBrush);
+        textBrush->Release();
+    }
+}
+
+float TextRenderer::StatusLineWidth(const wchar_t* line) const {
+    if (!line || !factory_ || !statusStripFormat_) return 0.0f;
+
+    // The same wide, tall area TextWidth uses: the width of a line is a property of the text and the
+    // face, not of the box it will be drawn into.
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(factory_->CreateTextLayout(line, static_cast<UINT32>(std::wcslen(line)),
+                                          statusStripFormat_, 8192.0f, 512.0f, &layout)) ||
+        !layout) {
+        return 0.0f;
+    }
+    DWRITE_TEXT_METRICS metrics = {};
+    const HRESULT hr = layout->GetMetrics(&metrics);
+    layout->Release();
+    return SUCCEEDED(hr) ? metrics.width : 0.0f;
 }
 
 ID2D1Bitmap1* TextRenderer::NotificationIconBitmap(ID2D1DeviceContext2* context,

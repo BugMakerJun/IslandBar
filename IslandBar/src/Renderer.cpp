@@ -602,6 +602,32 @@ void Renderer::RenderFrame(const FrameState& frame) {
             }
 
 
+            // THE STATUS STRIP, while the island is occupied: the date, the weekday, the time and the
+            // weather, standing in the band left of the deck.
+            //
+            // THE ANCHOR BOX, not `box`. In the card states `box` is a 520x250 rectangle, and while
+            // the notice strip is up the island is 200 DIP wider than the pill -- and the strip stands
+            // beside the deck, which is laid out from this same box. RowAnchorBox and the deck's own
+            // note below say which shape that is and why; the part that matters here is that the strip
+            // and the button it stands beside cannot drift apart, because both are measured from one
+            // rectangle (this is why `barIsland` is computed here and reused by the decks below).
+            //
+            // Drawn with the bar's own content rather than with the decks at the end of the function.
+            // The decks are drawn last because a card would otherwise cover them (see DrawDecks), and
+            // this band is not one a card reaches -- every card's top is moved to just under the bar --
+            // so the strip belongs to the bar's own layer, where its fade follows the bar's strength.
+            const RoundedBox barIsland =
+                (frame.restingPill.rect.right > frame.restingPill.rect.left)
+                    ? island::RowAnchorBox(box, frame.restingPill)
+                    : box;
+            if (frame.statusStripOpacity > 0.01f) {
+                // Multiplied by the BAR's own strength, so a card opening beneath the strip cannot
+                // dim it -- the same rule the deck is drawn under.
+                text_->DrawStatusStrip(d2dContext_, barIsland,
+                                       frame.statusStripOpacity * frame.contentOpacity,
+                                       frame.statusWeather, frame.pill.fill);
+            }
+
             // The card hangs from the control that was pressed, so its LEFT edge is moved to where that
             // control is before anything is composed into it. The height and width stay the animated
             // ones, so only the horizontal position is pinned -- the grow-downward motion is untouched.
@@ -855,10 +881,10 @@ void Renderer::RenderFrame(const FrameState& frame) {
         // tests had already been moved to RowAnchorBox (so those icons were clickable where they were no
         // longer drawn), and a row that is drawn in one place and pressed in another is the one thing this
         // project has paid for most often.
-        const RoundedBox deckIsland =
-            (frame.restingPill.rect.right > frame.restingPill.rect.left)
-                ? island::RowAnchorBox(box, frame.restingPill)
-                : box;
+        //
+        // `barIsland`, computed once above, is exactly that box -- the status strip stands beside this deck
+        // and is measured from the same rectangle, so the two are the same shape by construction.
+        const RoundedBox& deckIsland = barIsland;
         if (frame.contentOpacity > 0.01f) {
             DrawDecks(deckIsland, frame);
         }

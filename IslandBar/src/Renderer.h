@@ -160,6 +160,27 @@ struct FrameState {
     IslandState    restingState = IslandState::Collapsed;
 
     ClockStyle     clock = ClockStyle::Compact;
+
+    // --- the status strip: what stands in for the clock while the island is occupied ----
+    //
+    // The island's one line holds the clock when the bar is idle and the lyric / the message when it
+    // is not, so for as long as the island is OCCUPIED there is no time on the bar at all. The strip
+    // in the band left of the system button is where it goes: the date, the weekday, the time, and the
+    // weather when there is a reading. See StatusStripFor.
+    //
+    // Both fields are set by the frame loop, which owns both answers: whether the island is occupied
+    // (the same condition the pill's own line is chosen by) and the weather last published by the
+    // reader's worker.
+    //
+    // `statusWeather` is "晴 19°" or null, and null is the ordinary case: the strip is then drawn with
+    // the date and the time alone, which is what it does before the first reading arrives and when no
+    // city has been named. Its storage belongs to the caller and must live as long as the frame.
+    const wchar_t* statusWeather = nullptr;
+
+    // 0 at rest, 1 while the island is occupied, and the frames in between are the strip's fade --
+    // nothing on this bar appears in one frame. See StatusStripFadeStep.
+    float          statusStripOpacity = 0.0f;
+
     // 0..1 strength of the BAR's own content: the deck, the icon row, the clock, the lyric / notice /
     // call line. 1.0 unless something deliberately holds the bar back -- see ContentStrengthsFor, which
     // is the one place that answers "how strong is anything this frame" for both halves.

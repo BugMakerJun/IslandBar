@@ -585,4 +585,73 @@ inline int TaskIconsThatFit(float monitorWidthDip, int wanted) {
     return fit < wanted ? fit : wanted;
 }
 
+// --- the status strip: the date, the weekday, the time and the weather --------
+//
+// WHY IT IS HERE. The island's one line holds the clock when the bar is idle and
+// something else -- the lyric, a message, a call -- when it is not, so for as long as
+// the island is OCCUPIED the bar carries no time at all. Asked for with a photograph of
+// the empty band left of the system button: "当放音乐或者灵动岛被占用的时候 就在我红框处显示日期
+// 时间星期天气".
+//
+// ANCHORED TO THE SYSTEM BUTTON, like the deck it stands beside, and for the same
+// reason: that band belongs to the bar's left cluster rather than floating out at the
+// window's margin, and the island's own position must not depend on it. The strip's
+// right edge is a fixed gap left of the system button, so the two never touch and the
+// strip reads as one more control of the same group.
+//
+// A FIXED WIDTH, deliberately. The strip's contents change -- the weather arrives late,
+// the date rolls over at midnight, a longer weekday comes round -- and a box that
+// resized for each of them would make the bar twitch at midnight and again when the
+// first reading lands. The text is centred in the fixed box instead, and the self-test
+// measures the longest line the strip can print against that box, so a font or a wording
+// that outgrew it fails the build instead of clipping a word.
+inline constexpr float kStatusStripWidthDip  = 268.0f;
+inline constexpr float kStatusStripHeightDip = 26.0f;
+inline constexpr float kStatusStripGapDip    = 10.0f;   // between the strip and the system button
+inline constexpr float kStatusStripPadDip    = 12.0f;   // the text's own padding inside the box
+
+// The strip's rectangle, in window-local DIPs. Vertically centred on the island, like
+// the deck buttons, so the whole left cluster shares one line.
+inline RectF StatusStripFor(const RoundedBox& island) {
+    const RectF system = SystemButtonFor(island);
+
+    RectF box;
+    box.right = system.left - kStatusStripGapDip;
+    box.left = box.right - kStatusStripWidthDip;
+
+    const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
+    box.top = centreY - kStatusStripHeightDip * 0.5f;
+    box.bottom = box.top + kStatusStripHeightDip;
+    return box;
+}
+
+// How long the strip takes to come and go.
+//
+// The strip is the newest of the things that appear and disappear on this bar (with the
+// icon row and the card), and the standing request on all of them is the same: nothing
+// here may appear in a single frame. 0.2 s is short enough that the strip is up by the
+// time the eye has moved to it, and long enough to read as a fade rather than a blit.
+inline constexpr float kStatusStripFadeSeconds = 0.20f;
+
+// One step of the strip's fade, from the same family as TaskIconAppearStep: `amount`
+// moves towards 1 while the island is occupied and towards 0 while it is not, at a fixed
+// rate, so appearing and disappearing take the same time.
+//
+// Pure, because "it pops in" and "it fades in" are the same picture once the fade is
+// over -- the only place the difference can be checked is in the arithmetic.
+inline float StatusStripFadeStep(float amount, bool occupied, float dtSeconds) {
+    const float dt = dtSeconds > 0.1f ? 0.1f : (dtSeconds < 0.0f ? 0.0f : dtSeconds);
+    const float step = dt / kStatusStripFadeSeconds;
+    const float target = occupied ? 1.0f : 0.0f;
+    if (amount < target) {
+        const float next = amount + step;
+        return next > target ? target : next;
+    }
+    if (amount > target) {
+        const float next = amount - step;
+        return next < target ? target : next;
+    }
+    return amount;
+}
+
 } // namespace island

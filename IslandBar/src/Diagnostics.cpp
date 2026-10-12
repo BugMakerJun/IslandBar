@@ -19,6 +19,8 @@
 
 #include <cstdio>
 #include <cmath>
+#include <cstring>
+#include <cwchar>
 #include <string>
 
 #include "Geometry.h"
@@ -36,6 +38,7 @@
 #include "NotificationIcon.h"
 #include "ToastStore.h"
 #include "WeChatWatch.h"
+#include "Weather.h"
 #include "IslandWindow.h"
 #include "Monitor.h"
 #include "Motion.h"
@@ -5267,6 +5270,256 @@ void TestMusicCardLayout() {
                           deckRowLeft);
             Check(deckRowLeft > pill.rect.right,
                   L"the icon row starts to the right of the island", dt4);
+        }
+
+        // The status strip: the date, the weekday, the time and the weather, in the band to the
+        // left of the system button while the island is occupied.
+        //
+        // WHY IT EXISTS. The island's own line is the clock when the bar is idle and the lyric or
+        // the message when it is not, so for as long as the island is occupied the bar carries no
+        // time at all. Asked for with a photograph of that empty band: "当放音乐或者灵动岛被占用的时候
+        // 就在我红框处显示日期时间星期天气".
+        //
+        // The assertions are the three things a photograph of an empty band cannot say: that the
+        // strip cannot collide with the deck or leave the screen, that the LONGEST line it can be
+        // asked to print fits the fixed box it is drawn in, and that the input region covers it --
+        // the region is what decides which pixels this window owns, so a region that stopped at the
+        // deck would clip the strip's left end, on screen, with nothing in the log to explain it.
+        {
+            const float stripMonitorWidth = 2560.0f;
+            const RoundedBox stripIsland =
+                IslandBoxFor(stripMonitorWidth, kCollapsedWidthDip, kCollapsedHeightDip);
+            const RectF box = StatusStripFor(stripIsland);
+            const RectF systemButton = SystemButtonFor(stripIsland);
+            const float midY = (stripIsland.rect.top + stripIsland.rect.bottom) * 0.5f;
+
+            wchar_t stripDetail[256];
+            std::swprintf(stripDetail, 256,
+                          L"strip [%.0f..%.0f] y [%.0f..%.0f], system button [%.0f..%.0f], island "
+                          L"left %.0f",
+                          box.left, box.right, box.top, box.bottom, systemButton.left,
+                          systemButton.right, stripIsland.rect.left);
+            Check(box.right <= systemButton.left - 1.0f,
+                  L"the status strip ends clear of the system button", stripDetail);
+            Check(box.left > 0.0f, L"the status strip starts on the screen", stripDetail);
+            Check(box.right < stripIsland.rect.left,
+                  L"the status strip stands left of the island", stripDetail);
+            Check(Nearly(box.right - box.left, kStatusStripWidthDip, 0.01f),
+                  L"the status strip is the width its own constant says", stripDetail);
+            Check(box.top < midY && box.bottom > midY,
+                  L"the status strip is vertically centred on the island", stripDetail);
+            Check(box.top >= 0.0f && box.bottom <= kWindowHeightDip,
+                  L"the status strip is inside the window", stripDetail);
+
+            // The fade. "It pops in" and "it fades in" are the same picture once the fade is over,
+            // so the arithmetic is the only place the difference can be seen: it has to move by the
+            // elapsed time, arrive, stop at its ends, and take the same time in both directions.
+            {
+                float amount = 0.0f;
+                int frames = 0;
+                while (amount < 1.0f && frames < 1000) {
+                    amount = StatusStripFadeStep(amount, true, 1.0f / 60.0f);
+                    ++frames;
+                }
+                const float appearSeconds = static_cast<float>(frames) / 60.0f;
+                int backFrames = 0;
+                while (amount > 0.0f && backFrames < 1000) {
+                    amount = StatusStripFadeStep(amount, false, 1.0f / 60.0f);
+                    ++backFrames;
+                }
+                const float leaveSeconds = static_cast<float>(backFrames) / 60.0f;
+
+                wchar_t fadeDetail[224];
+                std::swprintf(fadeDetail, 224,
+                              L"%.0f ms in over %d frames, %.0f ms out over %d",
+                              appearSeconds * 1000.0f, frames, leaveSeconds * 1000.0f, backFrames);
+                Check(appearSeconds > 0.08f && appearSeconds < 0.45f,
+                      L"the status strip fades in rather than appearing", fadeDetail);
+                Check(Nearly(appearSeconds, leaveSeconds, 0.02f),
+                      L"the strip takes the same time to come and to go", fadeDetail);
+                Check(Nearly(StatusStripFadeStep(0.5f, true, 0.05f), 0.75f, 0.001f) &&
+                          Nearly(StatusStripFadeStep(0.5f, false, 0.05f), 0.25f, 0.001f),
+                      L"one step moves the strip's fade by the elapsed time", fadeDetail);
+                Check(Nearly(StatusStripFadeStep(1.0f, true, 0.5f), 1.0f, 0.001f) &&
+                          Nearly(StatusStripFadeStep(0.0f, false, 0.5f), 0.0f, 0.001f),
+                      L"the fade stops at its ends", fadeDetail);
+                Check(Nearly(StatusStripFadeStep(0.0f, true, 0.0f), 0.0f, 0.001f),
+                      L"a frame of no length moves the fade nowhere", fadeDetail);
+            }
+
+            // The composition, and the box it has to fit.
+            //
+            // The BOX IS A FIXED WIDTH and the text is centred in it, so a line that outgrew the box
+            // would lose a character at each end -- and it would lose them at the moment the weather
+            // reading arrived, which is the last moment anybody is looking for a rendering fault.
+            // Measured rather than eyeballed: the width of a line is a property of the face and the
+            // text, and both can change under this code.
+            {
+                wchar_t line[192] = {};
+                // The date line the clock itself builds: weekday, separator, month, day.
+                const wchar_t* date = L"\u5468\u4e09\u300112\u670828\u65e5";
+                TextRenderer::ComposeStatusLine(L"23:59", date, L"\u6674 21\u00b0", line, 192);
+                Check(std::wcscmp(line,
+                                  L"\u5468\u4e09\u300112\u670828\u65e5  23:59  \u6674 21\u00b0") == 0,
+                      L"the status line reads date, time, then weather", line);
+
+                wchar_t withoutWeather[192] = {};
+                TextRenderer::ComposeStatusLine(L"23:59", date, nullptr, withoutWeather, 192);
+                Check(std::wcscmp(withoutWeather,
+                                  L"\u5468\u4e09\u300112\u670828\u65e5  23:59") == 0,
+                      L"with no reading the line is the date and the time alone", withoutWeather);
+
+                TextRenderer stripText;
+                if (stripText.Initialize()) {
+                    // The widest line that can occur: the longest weekday and month, a three-character
+                    // weather word, and a negative two-digit temperature.
+                    const wchar_t* widest =
+                        L"\u5468\u4e09\u300112\u670828\u65e5  23:59  \u5f3a\u9635\u96e8 -12\u00b0";
+                    const float measured = stripText.StatusLineWidth(widest);
+                    const float available = kStatusStripWidthDip - kStatusStripPadDip * 2.0f;
+
+                    wchar_t fitDetail[224];
+                    std::swprintf(fitDetail, 224, L"%.1f DIP drawn, %.1f DIP available, box %.0f",
+                                  measured, available, kStatusStripWidthDip);
+                    Check(measured > 0.0f && measured <= available,
+                          L"the widest status line fits the strip's own box", fitDetail);
+                }
+            }
+
+            // The input region covers the band the strip stands in -- and only while it is asked for.
+            //
+            // A region wider than the drawing costs nothing: a point inside it but off the bar is
+            // answered HTTRANSPARENT by WM_NCHITTEST, so the click passes through to whatever is
+            // underneath. A region narrower than the drawing is the defect, and it is invisible in
+            // every assertion about the strip's own geometry.
+            {
+                MonitorGeometry stripMonitor;
+                stripMonitor.screen = {0, 0, 2560, 1440};
+                stripMonitor.work = {0, 0, 2560, 1408};
+                stripMonitor.dpi = 96;
+                stripMonitor.dpiY = 96;
+                const IslandAnchor stripAnchor =
+                    AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f);
+
+                const RECT withStrip = IslandWindow::InputRegionFor(
+                    stripMonitor, IslandState::Collapsed, stripAnchor, RoundedBox{}, 0.0f, 8,
+                    kStatusStripWidthDip);
+                const RECT withoutStrip = IslandWindow::InputRegionFor(
+                    stripMonitor, IslandState::Collapsed, stripAnchor, RoundedBox{}, 0.0f, 8, 0.0f);
+
+                wchar_t regionDetail[256];
+                std::swprintf(regionDetail, 256,
+                              L"with the strip the region starts at %ld px, without it at %ld px; "
+                              L"the strip's box starts at %.0f DIP",
+                              withStrip.left, withoutStrip.left, box.left);
+                Check(withoutStrip.left > withStrip.left,
+                      L"the strip widens the input region to cover its band", regionDetail);
+                Check(static_cast<float>(withStrip.left) <= box.left + 1.0f,
+                      L"the region covers the strip's own left edge", regionDetail);
+                Check(withStrip.bottom == withoutStrip.bottom,
+                      L"the strip does not make the region taller", regionDetail);
+            }
+        }
+
+        // The weather's own arithmetic: the code table, the rounding, and the two wire formats.
+        //
+        // All three are pure functions of text and numbers, and all three fail QUIETLY. A code that
+        // fell out of the table shows a temperature with no word; a rounding that went the wrong way
+        // is one degree out for the rest of the day; a parser that reads the wrong field prints the
+        // weather code as the temperature. The two documents below are COPIES OF REAL ANSWERS from the
+        // two services (Beijing, 2026-10-12), kept verbatim so the parsers are tested against the
+        // format they actually receive rather than the one they were written expecting.
+        {
+            Check(WeatherWordForCode(0) != nullptr &&
+                      std::wcscmp(WeatherWordForCode(0), L"\u6674") == 0,
+                  L"code 0 reads as clear");
+            Check(WeatherWordForCode(95) != nullptr &&
+                      std::wcscmp(WeatherWordForCode(95), L"\u96f7\u9635\u96e8") == 0,
+                  L"a thunderstorm reads as a thunderstorm");
+            Check(WeatherWordForCode(-1) == nullptr && WeatherWordForCode(1000) == nullptr,
+                  L"a code the table does not know has no word");
+
+            {
+                wchar_t weatherLine[64] = {};
+                WeatherLineFor(19.4, 3, weatherLine, 64);
+                Check(std::wcscmp(weatherLine, L"\u9634 19\u00b0") == 0,
+                      L"a reading is the word and the rounded temperature", weatherLine);
+                WeatherLineFor(-12.6, 999, weatherLine, 64);
+                Check(std::wcscmp(weatherLine, L"-13\u00b0") == 0,
+                      L"an unknown code leaves the temperature alone", weatherLine);
+                WeatherLineFor(19.5, 0, weatherLine, 64);
+                Check(std::wcscmp(weatherLine, L"\u6674 20\u00b0") == 0,
+                      L"half a degree rounds up rather than down", weatherLine);
+            }
+
+            // The forecast answer, as Open-Meteo sends it: a header block with the coordinates, a
+            // blank line, a header naming the columns, and the reading LAST.
+            const char* forecast =
+                "latitude,longitude,elevation,utc_offset_seconds,timezone,timezone_abbreviation\n"
+                "39.89455,116.35983,47.0,28800,Asia/Shanghai,GMT+8\n"
+                "\n"
+                "time,temperature_2m,weather_code\n"
+                "2026-10-12T17:15,19.4,3\n";
+
+            double temperature = 0.0;
+            int code = -1;
+            {
+                // The values are read AFTER the parse so the detail describes what was actually
+                // read: a detail formatted before the call reports the parser's zeros next to a
+                // failed check, which is the one case the detail exists for.
+                const bool readForecast = ParseCurrentCsv(forecast, &temperature, &code);
+                wchar_t csvDetail[160];
+                std::swprintf(csvDetail, 160, L"parsed %.1f C, code %d", temperature, code);
+                Check(readForecast &&
+                          Nearly(static_cast<float>(temperature), 19.4f, 0.001f) && code == 3,
+                      L"the forecast CSV's last line is the reading", csvDetail);
+                Check(!ParseCurrentCsv(nullptr, &temperature, &code),
+                      L"a null document is not a reading");
+                Check(!ParseCurrentCsv("", &temperature, &code) &&
+                          !ParseCurrentCsv("latitude,longitude\n", &temperature, &code),
+                      L"a document with no reading is not read as one", csvDetail);
+                Check(!ParseCurrentCsv("2026-10-12T17:15,19.4\n", &temperature, &code),
+                      L"a line missing the weather code is not a reading", csvDetail);
+            }
+
+            // The geocoder's answer, as Open-Meteo sends it: the wanted coordinates are the first
+            // ones inside the FIRST entry of the results array.
+            const char* geocode =
+                "{\"results\":[{\"id\":1816670,\"name\":\"\u5317\u4eac\",\"latitude\":39.9075,"
+                "\"longitude\":116.39723,\"elevation\":49.0,\"country\":\"\u4e2d\u56fd\"}],"
+                "\"generationtime_ms\":0.119}";
+            double latitude = 0.0;
+            double longitude = 0.0;
+            {
+                const bool readPlace = ParseGeocodeJson(geocode, &latitude, &longitude);
+                wchar_t geocodeDetail[192];
+                std::swprintf(geocodeDetail, 192, L"read %.4f, %.4f", latitude, longitude);
+                Check(readPlace &&
+                          Nearly(static_cast<float>(latitude), 39.9075f, 0.0001f) &&
+                          Nearly(static_cast<float>(longitude), 116.39723f, 0.0001f),
+                      L"the geocoder's first result is the place that was asked for", geocodeDetail);
+                Check(!ParseGeocodeJson("{}", &latitude, &longitude) &&
+                          !ParseGeocodeJson("{\"results\":[]}", &latitude, &longitude),
+                      L"a search that matched nothing is not a place", geocodeDetail);
+            }
+
+            // A Chinese city name has to become a legal query value, or the request is rejected.
+            // The bytes are the UTF-8 encoding: \u5317 is E5 8C 97 and \u4EAC is E4 BA AC.
+            {
+                char encoded[128] = {};
+                PercentEncodeUtf8("\u5317\u4eac", encoded, sizeof(encoded));
+                wchar_t encodedDetail[160] = {};
+                std::swprintf(encodedDetail, 160, L"encoded as %hs", encoded);
+                Check(std::strcmp(encoded, "%E5%8C%97%E4%BA%AC") == 0,
+                      L"a Chinese city name is percent-encoded", encodedDetail);
+
+                char numbers[128] = {};
+                PercentEncodeUtf8("39.9042,116.4074", numbers, sizeof(numbers));
+                wchar_t numberDetail[160] = {};
+                std::swprintf(numberDetail, 160, L"encoded as %hs", numbers);
+                Check(std::strcmp(numbers, "39.9042%2C116.4074") == 0,
+                      L"coordinates are escaped and their digits are not", numberDetail);
+            }
         }
 
         // The input region must be as tall as the shape that is DRAWN, including the card.

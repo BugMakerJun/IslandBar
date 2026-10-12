@@ -273,7 +273,8 @@ bool IslandWindow::TakePress(POINT* screenPoint) {
 
 RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState state,
                                   const IslandAnchor& anchor, const RoundedBox& current,
-                                  float cardLeftDip, int taskIconCount) {
+                                  float cardLeftDip, int taskIconCount,
+                                  float statusStripWidthDip) {
     // The bounding box of what the bar actually DRAWS, in window pixels.
     //
     // Horizontally it runs from the left of the state's own shape to the right of the longest icon row
@@ -363,6 +364,25 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
         if (system.left < left) left = system.left;
     }
 
+    // The STATUS STRIP reaches further left still, while it is up.
+    //
+    // It stands in the band to the left of the system button -- the date, the weekday, the time and the
+    // weather, shown while the island is occupied (see StatusStripFor). It is drawn on the island's own
+    // colour, so a strip outside the region is not a strip that is half missing, it is a capsule with a
+    // hard bite taken out of its left end.
+    //
+    // Only while it is up: a zero width is "the island is idle" and leaves the band to the desktop
+    // exactly as it was before this existed. Nothing is lost by covering it either way -- a point inside
+    // the region but off the bar is still answered HTTRANSPARENT by WM_NCHITTEST, so clicks pass through
+    // to whatever is underneath (see the note on the card's region below).
+    if (statusStripWidthDip > 0.0f) {
+        const RectF strip = StatusStripFor(island);
+        if (strip.left < left) left = strip.left;
+    }
+    // A strip that would start left of the screen is cut by the display anyway; keeping the region on
+    // screen keeps its arithmetic honest.
+    if (left < 0.0f) left = 0.0f;
+
     // The icon row starts past the system panel's card when one is open, and at the resting pill's right
     // edge otherwise -- the same rule the renderer lays the row out with, so the two agree by
     // construction rather than by margin.
@@ -444,7 +464,7 @@ void IslandWindow::ApplyInputRegion() {
     // only the renderer knows about is a plan the clickable area cannot keep up with.
     const RECT region =
         InputRegionFor(monitor_, motion_.Target(), anchor, motion_.Current(), cardLeftDip_,
-                       taskButtonCount_);
+                       taskButtonCount_, statusStripWidthDip_);
 
     // Skipped when it is the same rectangle as last time.
     //
@@ -567,6 +587,16 @@ bool IslandWindow::HitTestScreen(POINT screenPoint) const {
 void IslandWindow::SetSystemPanel(const TextRenderer::SystemPanelText& panel, float cardLeftDip) {
     systemPanel_ = panel;
     cardLeftDip_ = cardLeftDip;
+}
+
+void IslandWindow::SetStatusStripWidth(float widthDip) {
+    if (widthDip < 0.0f) widthDip = 0.0f;
+    if (widthDip == statusStripWidthDip_) return;
+    statusStripWidthDip_ = widthDip;
+    // Applied here rather than left to the frame loop's own call, because the region only changes when
+    // the answer changes and this is where the answer changed. The frame loop calls it too; the second
+    // call returns immediately when the rectangle is the same (see ApplyInputRegion).
+    ApplyInputRegion();
 }
 
 int IslandWindow::SystemTileAtScreen(POINT screenPoint) const {

@@ -1,0 +1,146 @@
+// =====================================================================
+//  Weather.h
+//  One reading for one city: the temperature and the sky, in the words the
+//  status strip prints.
+//
+//  WHY IT EXISTS. The island's own line is the clock when the bar is idle, and
+//  something else -- the lyric, a message -- when it is not. So for as long as
+//  music plays or a message is up, the bar shows no time at all, and the request
+//  was that the date, the weekday, the time and the weather move into the empty
+//  band to the left of the system button while that is the case.
+//
+//  WHERE THE READING COMES FROM, in two steps. Open-Meteo's forecast API is
+//  keyless but takes COORDINATES, so a city name has to become a latitude and a
+//  longitude first; Open-Meteo's own geocoder does that, also keyless. Both are
+//  plain HTTPS GETs, and the forecast is asked for as CSV so its numbers arrive
+//  on a line of their own and no JSON reader is needed for them.
+//
+//  IP GEOLOCATION IS DELIBERATELY NOT USED. Measured on this machine: the
+//  keyless IP services answer "Tokyo" while the same machine's clock runs on
+//  Asia/Shanghai, because the traffic leaves through a proxy. Wrong weather at
+//  the right time is worse than no weather, so the city is a setting --
+//  %USERPROFILE%\IslandBar\weather.txt, one line, either a city name or
+//  "lat,lon"; the file is described at ReadSettings.
+//
+//  NOTHING HERE TOUCHES THE FRAME. The fetch runs on a worker and the frame loop
+//  only reads the last published reading -- the same split the lyrics take, and
+//  for the same reason: a slow or unreachable service must not be able to stall
+//  the animation. A reading that has stopped being refreshed is still shown,
+//  which is what a weather widget does.
+// =====================================================================
+#pragma once
+
+#include <windows.h>
+
+#include <cstddef>
+
+namespace island {
+
+// The WMO weather code, as the one word the strip has room for.
+//
+// A pure function of the code, so the mapping can be asserted: Open-Meteo
+// answers in WMO codes (0 clear, 61 rain, 95 thunderstorm ...), and a strip that
+// printed "code 61" would be a strip nobody reads. An unknown code prints the
+// temperature without a word rather than inventing one.
+//
+// Chinese characters are \u escapes for the reason TextRenderer's weekday table
+// gives: they survive any editor and any code page.
+const wchar_t* WeatherWordForCode(int code);
+
+// The reading as it is printed: the word, then the temperature, e.g. "\u6674 21\u00b0".
+//
+// A free function over its inputs so the self-test can check the rounding and the
+// missing-code case without a network, a worker or a window.
+void WeatherLineFor(double temperatureC, int code, wchar_t* out, size_t capacity);
+
+// --- the wire formats -------------------------------------------------
+
+// Percent-encodes a UTF-8 string for use as a query value. Everything outside
+// [A-Za-z0-9-._~] is escaped, which is what makes a Chinese city name a legal URL.
+// Returns the number of bytes written, excluding the terminator.
+size_t PercentEncodeUtf8(const char* text, char* out, size_t capacity);
+
+// The reading out of Open-Meteo's CSV answer to
+// `...&current=temperature_2m,weather_code&format=csv`.
+//
+// The document is three or four lines: a header block with the coordinates, a
+// blank line, a header naming the columns, and the reading. The LAST non-empty
+// line is the reading, and it is "time,temperature,code" -- by position, not by
+// the header text, because the header carries units in parentheses and is not
+// worth parsing.
+bool ParseCurrentCsv(const char* csv, double* temperatureC, int* weatherCode);
+
+// The first result's coordinates out of Open-Meteo's geocoding answer.
+//
+// Scanned rather than parsed: the document is
+// `{"results":[{"name":...,"latitude":39.9,"longitude":116.4,...}],...}`, the
+// values wanted are the first `latitude`/`longitude` in it, and a nested-object
+// JSON reader is a larger thing than this needs. A search that matched nothing
+// answers `{}`, which has neither field, and is reported as "no such city".
+bool ParseGeocodeJson(const char* json, double* latitude, double* longitude);
+
+// --- the worker -------------------------------------------------------
+
+// Polls for one city's weather and holds the last reading.
+//
+// Polling rather than being asked: the reading changes on the weather's own
+// schedule (Open-Meteo publishes a current block every 15 minutes), so there is
+// nothing for a caller to trigger it with.
+class WeatherReader {
+public:
+    WeatherReader() = default;
+    ~WeatherReader();
+
+    WeatherReader(const WeatherReader&) = delete;
+    WeatherReader& operator=(const WeatherReader&) = delete;
+
+    // Starts the worker. False only when the thread cannot be created; a missing
+    // or unreadable settings file is not a failure, it is a city nobody named
+    // yet, and it is logged as such.
+    bool Start();
+    void Stop();
+
+    // The last published reading, or false when there is none. A copy, taken
+    // under the worker's lock, because the reading is two numbers and a string.
+    bool Get(double* temperatureC, int* code) const;
+
+    // The reading as the strip prints it, e.g. "\u6674 21\u00b0". Empty when
+    // nothing has been fetched yet, which is how the strip knows to show the date
+    // and the time without it.
+    void Line(wchar_t* out, size_t capacity) const;
+
+    // Bumped when a reading is published, so the frame loop can redraw once.
+    unsigned long long Revision() const;
+
+    // How often the worker asks again. 15 minutes matches the interval
+    // Open-Meteo republishes the current block at; a failure is retried sooner,
+    // because an unreachable service is usually a moment rather than an hour.
+    static constexpr unsigned kPollMs  = 15u * 60u * 1000u;
+    static constexpr unsigned kRetryMs = 60u * 1000u;
+
+private:
+    static unsigned long __stdcall ThreadEntry(void* self);
+    void Run();
+
+    // One cycle: read the settings, resolve the city if it changed, fetch, publish.
+    // Returns how long to wait before the next one. `resolvedCity`/`latitude`/
+    // `longitude` are the worker's own cache of the geocoding step -- a city is
+    // geocoded once, not once per poll.
+    unsigned Refresh(char* resolvedCity, size_t resolvedCapacity, double* latitude,
+                     double* longitude);
+
+    HANDLE        stopEvent_ = nullptr;
+    HANDLE        thread_ = nullptr;
+    volatile bool running_ = false;
+
+    mutable CRITICAL_SECTION lock_{};
+    bool lockReady_ = false;
+
+    bool           haveReading_ = false;
+    double         temperatureC_ = 0.0;
+    int            code_ = -1;
+    wchar_t        line_[64] = {};
+    volatile long  revision_ = 0;
+};
+
+} // namespace island

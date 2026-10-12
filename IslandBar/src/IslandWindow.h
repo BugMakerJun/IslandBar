@@ -325,7 +325,8 @@ public:
     static RECT InputRegionFor(const MonitorGeometry& monitor, IslandState state,
                                const IslandAnchor& anchor,
                                const RoundedBox& current = RoundedBox{},
-                               float cardLeftDip = 0.0f, int taskIconCount = -1);
+                               float cardLeftDip = 0.0f, int taskIconCount = -1,
+                               float statusStripWidthDip = 0.0f);
 
     // The anchor the current box geometry is derived from.
     IslandAnchor CurrentAnchor() const;
@@ -363,6 +364,18 @@ public:
     // The tiles currently shown, and where the card is placed. Both are set by the frame loop, which is
     // the only place that knows the machine's state and the pressed control.
     void SetSystemPanel(const TextRenderer::SystemPanelText& panel, float cardLeftDip);
+
+    // Whether the status strip is up, told to the window so the input region can cover it.
+    //
+    // The width rather than a flag, because the region's arithmetic is in DIPs and the strip's own box
+    // comes from StatusStripFor -- so the caller passes the constant while the strip is showing and zero
+    // while it is not, and a non-zero width means exactly "the strip is up".
+    //
+    // It has to reach the window at all for the reason every other shape does: the region is what decides
+    // which pixels belong to this window, and a region narrower than the drawing CLIPS it -- the strip
+    // would be a capsule with its left end cut off. The region is re-applied here when the answer changes,
+    // so nothing has to remember to do it.
+    void SetStatusStripWidth(float widthDip);
 
     // The tiles currently shown, for the click handler to read an action from. Const because the
     // handler decides what to DO; it does not get to change what is displayed.
@@ -488,6 +501,9 @@ private:
     // ("the system panel's card left") is part of why the music card's controls were hit-tested against
     // the wrong rectangle -- see PlacedCardFor.
     float cardLeftDip_ = 0.0f;
+    // Non-zero while the status strip (the date, the time and the weather) is up, in DIPs. Held here so
+    // the input region can cover it; see SetStatusStripWidth.
+    float statusStripWidthDip_ = 0.0f;
     // Which card the frame loop says is up: what the cursor's hit tests are gated on. See SetCardOwner.
     CardOwner cardOwner_ = CardOwner::None;
     // The last value written to the log, so the hover trace reports changes rather than every poll.

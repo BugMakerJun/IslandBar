@@ -32,6 +32,7 @@ add_executable(island_bar
     SoundOutput.cpp
     TextRenderer.cpp
     ToastStore.cpp
+    Weather.cpp
     WeChatWatch.cpp
     WicImage.cpp
     WindowList.cpp

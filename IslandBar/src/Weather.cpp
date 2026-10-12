@@ -1,0 +1,638 @@
+// =====================================================================
+//  Weather.cpp
+//
+//  NOTE ON CHINESE IN THIS FILE: every non-ASCII character is written as a
+//  \u escape, and the comments are English. A PowerShell round trip through
+//  `Get-Content -Raw` / `Set-Content` rewrote this file in the console's code
+//  page once, which produced invalid UTF-8 (MSVC C4828) and swallowed line
+//  breaks inside comments -- one of them inside the code table below. Escapes
+//  and ASCII comments cannot be damaged that way. See the encoding rules in
+//  START-HERE.txt and HANDOFF 6.1.
+// =====================================================================
+#include "Weather.h"
+
+#include "Log.h"
+
+#include <winhttp.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cwchar>
+
+#pragma comment(lib, "winhttp.lib")
+
+namespace island {
+namespace {
+
+// The two services, both keyless. Named here rather than at the call sites so that
+// "which service answered" is one thing to look at when the reading stops.
+constexpr wchar_t kGeocodeHost[] = L"geocoding-api.open-meteo.com";
+constexpr wchar_t kForecastHost[] = L"api.open-meteo.com";
+
+// Ten seconds: long enough for a slow connection, short enough that a poll cannot
+// sit in one request for the rest of the session.
+constexpr int kTimeoutMs = 10000;
+
+// One GET over TLS, returning the body as bytes and the HTTP status.
+//
+// WinHTTP rather than WinINet for the reason the lyric fetcher gives: this runs on a
+// worker with no message pump, and WinINet's callbacks need one.
+bool HttpGet(const wchar_t* host, const wchar_t* path, char* out, size_t capacity,
+             size_t* outLength, DWORD* outStatus) {
+    if (outLength) *outLength = 0;
+    if (outStatus) *outStatus = 0;
+    if (!host || !path || !out || capacity == 0) return false;
+    out[0] = '\0';
+
+    HINTERNET session = WinHttpOpen(
+        L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        L"Chrome/122.0.0.0 Safari/537.36",
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return false;
+
+    WinHttpSetTimeouts(session, kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
+
+    HINTERNET connection = WinHttpConnect(session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!connection) {
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    HINTERNET request = WinHttpOpenRequest(connection, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+                                           WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!request) {
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    bool ok = false;
+    if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
+                           0) &&
+        WinHttpReceiveResponse(request, nullptr)) {
+        DWORD status = 0;
+        DWORD statusSize = sizeof(status);
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
+                            WINHTTP_NO_HEADER_INDEX);
+        if (outStatus) *outStatus = status;
+
+        if (status == 200) {
+            size_t total = 0;
+            DWORD available = 0;
+            ok = true;
+            do {
+                available = 0;
+                if (!WinHttpQueryDataAvailable(request, &available)) {
+                    ok = false;
+                    break;
+                }
+                if (available == 0) break;
+
+                // Never read past the caller's buffer, and always leave a terminator: an
+                // unexpected answer must not be able to overrun it.
+                DWORD chunk = available;
+                if (total + chunk >= capacity) chunk = static_cast<DWORD>(capacity - total - 1);
+                if (chunk == 0) break;
+
+                DWORD read = 0;
+                if (!WinHttpReadData(request, out + total, chunk, &read)) {
+                    ok = false;
+                    break;
+                }
+                if (read == 0) break;
+                total += read;
+            } while (available > 0);
+
+            out[total] = '\0';
+            if (outLength) *outLength = total;
+        }
+    }
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return ok;
+}
+
+// Where the city is read from: a file beside the executable, which is where the bar
+// itself lives (%USERPROFILE%\IslandBar). Beside the executable rather than in the
+// working tree, for the reason the log gives -- running the bar must not dirty the
+// repository -- and rather than in the registry, because a text file is something the
+// user can open, read and correct without a tool.
+void SettingsPath(wchar_t* out, size_t capacity) {
+    if (!out || capacity == 0) return;
+    out[0] = L'\0';
+
+    wchar_t module[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameW(nullptr, module, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return;
+
+    wchar_t* lastSlash = wcsrchr(module, L'\\');
+    if (!lastSlash) return;
+    *(lastSlash + 1) = L'\0';
+
+    swprintf(out, capacity, L"%lsweather.txt", module);
+}
+
+// Reads the settings file and answers the one line that names the city.
+//
+// The format, in full:
+//
+//   * the file is UTF-8, and the first line that is neither empty nor a comment is
+//     the city;
+//   * a line beginning with '#' is a comment, so the file can explain itself;
+//   * the line is either a CITY NAME (e.g. "\u5317\u4eac" for Beijing) or a pair of
+//     coordinates ("39.9042,116.4074"), which skips the geocoding step.
+//
+// A missing file is not an error: it means no city has been named yet. The strip then
+// shows the date and the time without a reading, and the log says where the file goes.
+bool ReadSettings(wchar_t* out, size_t capacity, bool* outIsCoordinates) {
+    if (outIsCoordinates) *outIsCoordinates = false;
+    if (!out || capacity == 0) return false;
+    out[0] = L'\0';
+
+    wchar_t path[MAX_PATH] = {};
+    SettingsPath(path, MAX_PATH);
+    if (path[0] == L'\0') return false;
+
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path, L"rb") != 0 || !file) return false;
+
+    char buffer[1024] = {};
+    const size_t read = std::fread(buffer, 1, sizeof(buffer) - 1, file);
+    std::fclose(file);
+    buffer[read] = '\0';
+
+    // UTF-8 -> UTF-16 once, and then the lines are walked as wide text: the city can be
+    // Chinese, and a byte-wise trim would cut a multi-byte character in half.
+    wchar_t wide[1024] = {};
+    if (MultiByteToWideChar(CP_UTF8, 0, buffer, -1, wide, 1024) <= 0) return false;
+
+    wchar_t* cursor = wide;
+    if (cursor[0] == L'\ufeff') ++cursor;   // a BOM is not part of the first line
+
+    while (*cursor != L'\0') {
+        wchar_t* lineEnd = wcschr(cursor, L'\n');
+        if (lineEnd) *lineEnd = L'\0';
+
+        // Trimmed, so a line written with trailing spaces -- or with CRLF line endings --
+        // still reads.
+        wchar_t* start = cursor;
+        while (*start == L' ' || *start == L'\t' || *start == L'\r') ++start;
+        wchar_t* end = start + wcslen(start);
+        while (end > start && (end[-1] == L' ' || end[-1] == L'\t' || end[-1] == L'\r')) --end;
+        *end = L'\0';
+
+        if (start[0] != L'\0' && start[0] != L'#') {
+            wcsncpy_s(out, capacity, start, _TRUNCATE);
+
+            // Coordinates, when the line holds exactly two numbers around a comma.
+            double latitude = 0.0;
+            double longitude = 0.0;
+            const wchar_t* comma = wcschr(out, L',');
+            if (comma) {
+                wchar_t first[64] = {};
+                wcsncpy_s(first, 64, out, static_cast<size_t>(comma - out));
+                wchar_t* stopA = nullptr;
+                wchar_t* stopB = nullptr;
+                latitude = wcstod(first, &stopA);
+                longitude = wcstod(comma + 1, &stopB);
+                const bool bothNumbers = (stopA != first) && (stopB != comma + 1);
+                if (bothNumbers && *stopA == L'\0' && std::fabs(latitude) <= 90.0 &&
+                    std::fabs(longitude) <= 180.0) {
+                    if (outIsCoordinates) *outIsCoordinates = true;
+                }
+            }
+            return true;
+        }
+
+        if (!lineEnd) break;
+        cursor = lineEnd + 1;
+    }
+
+    return false;
+}
+
+// One field of a comma-separated line, trimmed. False when the field is empty or the
+// line has no such field.
+bool CsvField(const char* line, int index, char* out, size_t capacity) {
+    if (!line || !out || capacity == 0) return false;
+    out[0] = '\0';
+
+    const char* cursor = line;
+    for (int i = 0; i < index; ++i) {
+        const char* comma = std::strchr(cursor, ',');
+        if (!comma) return false;
+        cursor = comma + 1;
+    }
+
+    const char* end = std::strchr(cursor, ',');
+    size_t length = end ? static_cast<size_t>(end - cursor) : std::strlen(cursor);
+    while (length > 0 && (cursor[0] == ' ' || cursor[0] == '\t')) {
+        ++cursor;
+        --length;
+    }
+    while (length > 0 && (cursor[length - 1] == ' ' || cursor[length - 1] == '\t' ||
+                          cursor[length - 1] == '\r' || cursor[length - 1] == '\n')) {
+        --length;
+    }
+    if (length == 0 || length + 1 > capacity) return false;
+
+    std::memcpy(out, cursor, length);
+    out[length] = '\0';
+    return true;
+}
+
+// Whether a line is worth reading as a reading: not blank, and not a comment.
+bool IsDataLine(const char* line) {
+    return line != nullptr && line[0] != '\0' && line[0] != '#';
+}
+
+} // namespace
+
+// --- the pure pieces --------------------------------------------------
+
+const wchar_t* WeatherWordForCode(int code) {
+    // The WMO codes Open-Meteo answers with, in the one word the strip has room for.
+    // The Chinese is \u-escaped, one whole statement per line, for the reason the file's
+    // header gives. The comment after each line says what the code means.
+    switch (code) {
+        case 0:  return L"\u6674";              // clear
+        case 1:  return L"\u6674";              // mainly clear
+        case 2:  return L"\u591a\u4e91";        // partly cloudy
+        case 3:  return L"\u9634";              // overcast
+        case 45: return L"\u96fe";              // fog
+        case 48: return L"\u96fe";              // depositing rime fog
+        case 51: return L"\u5c0f\u96e8";        // drizzle, light
+        case 53: return L"\u5c0f\u96e8";        // drizzle, moderate
+        case 55: return L"\u4e2d\u96e8";        // drizzle, dense
+        case 56: return L"\u51bb\u96e8";        // freezing drizzle, light
+        case 57: return L"\u51bb\u96e8";        // freezing drizzle, dense
+        case 61: return L"\u5c0f\u96e8";        // rain, slight
+        case 63: return L"\u4e2d\u96e8";        // rain, moderate
+        case 65: return L"\u5927\u96e8";        // rain, heavy
+        case 66: return L"\u51bb\u96e8";        // freezing rain, light
+        case 67: return L"\u51bb\u96e8";        // freezing rain, heavy
+        case 71: return L"\u5c0f\u96ea";        // snow, slight
+        case 73: return L"\u4e2d\u96ea";        // snow, moderate
+        case 75: return L"\u5927\u96ea";        // snow, heavy
+        case 77: return L"\u7c73\u96ea";        // snow grains
+        case 80: return L"\u9635\u96e8";        // rain showers, slight
+        case 81: return L"\u9635\u96e8";        // rain showers, moderate
+        case 82: return L"\u5f3a\u9635\u96e8";  // rain showers, violent
+        case 85: return L"\u9635\u96ea";        // snow showers, slight
+        case 86: return L"\u9635\u96ea";        // snow showers, heavy
+        case 95: return L"\u96f7\u9635\u96e8";  // thunderstorm
+        case 96: return L"\u51b0\u96f9";        // thunderstorm with slight hail
+        case 99: return L"\u51b0\u96f9";        // thunderstorm with heavy hail
+        default: return nullptr;
+    }
+}
+
+void WeatherLineFor(double temperatureC, int code, wchar_t* out, size_t capacity) {
+    if (!out || capacity == 0) return;
+    out[0] = L'\0';
+
+    // Rounded to the nearest degree: that is what the strip's few characters can hold, and
+    // what every weather readout on this desktop shows.
+    const int degrees = static_cast<int>(std::lround(temperatureC));
+    const wchar_t* word = WeatherWordForCode(code);
+    if (word) {
+        swprintf(out, capacity, L"%ls %d\u00b0", word, degrees);
+    } else {
+        // An unknown code prints the temperature on its own rather than inventing a sky.
+        swprintf(out, capacity, L"%d\u00b0", degrees);
+    }
+}
+
+size_t PercentEncodeUtf8(const char* text, char* out, size_t capacity) {
+    if (!out || capacity == 0) return 0;
+    out[0] = '\0';
+    if (!text) return 0;
+
+    size_t written = 0;
+    for (size_t i = 0; text[i] != '\0'; ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+                                c == '~';
+        if (written + 4 >= capacity) break;   // room for the escape and the terminator
+
+        if (unreserved) {
+            out[written++] = static_cast<char>(c);
+        } else {
+            std::snprintf(out + written, 4, "%%%02X", static_cast<unsigned>(c));
+            written += 3;
+        }
+    }
+    out[written] = '\0';
+    return written;
+}
+
+bool ParseCurrentCsv(const char* csv, double* temperatureC, int* weatherCode) {
+    if (!csv) return false;
+
+    // The LAST data line, walked line by line rather than taken as "line two": a service
+    // that adds a header line must not turn the reading into the columns' names.
+    char lastLine[256] = {};
+    bool haveLastLine = false;
+    const char* cursor = csv;
+    while (*cursor != '\0') {
+        const char* lineEnd = std::strchr(cursor, '\n');
+        const size_t length = lineEnd ? static_cast<size_t>(lineEnd - cursor) : std::strlen(cursor);
+
+        bool blank = true;
+        for (size_t i = 0; i < length; ++i) {
+            if (cursor[i] != ' ' && cursor[i] != '\t' && cursor[i] != '\r') {
+                blank = false;
+                break;
+            }
+        }
+        // COPIED, not pointed at: CsvField reads a field up to the next comma, and the last
+        // field of the document's last line has no comma after it -- it has the end of the
+        // buffer, so the line has to end here as well.
+        if (!blank && length < sizeof(lastLine)) {
+            std::memcpy(lastLine, cursor, length);
+            lastLine[length] = '\0';
+            haveLastLine = true;
+        }
+
+        if (!lineEnd) break;
+        cursor = lineEnd + 1;
+    }
+
+    if (!haveLastLine || !IsDataLine(lastLine)) return false;
+
+    char temperature[32] = {};
+    char code[32] = {};
+    if (!CsvField(lastLine, 1, temperature, sizeof(temperature))) return false;
+    if (!CsvField(lastLine, 2, code, sizeof(code))) return false;
+
+    // Field 0 is the reading's own timestamp and is not needed: the value is whatever the
+    // service last published, and the run's log carries the time it arrived.
+    char* stopTemp = nullptr;
+    char* stopCode = nullptr;
+    const double t = std::strtod(temperature, &stopTemp);
+    const long c = std::strtol(code, &stopCode, 10);
+    if (stopTemp == temperature || stopCode == code) return false;
+
+    if (temperatureC) *temperatureC = t;
+    if (weatherCode) *weatherCode = static_cast<int>(c);
+    return true;
+}
+
+bool ParseGeocodeJson(const char* json, double* latitude, double* longitude) {
+    if (!json) return false;
+
+    // "results" first: a search that matched nothing answers "{}", and this must not read a
+    // latitude out of some other part of a document that has none.
+    const char* results = std::strstr(json, "\"results\"");
+    if (!results) return false;
+
+    const char* latKey = std::strstr(results, "\"latitude\"");
+    const char* lonKey = std::strstr(results, "\"longitude\"");
+    if (!latKey || !lonKey) return false;
+
+    const char* latValue = std::strchr(latKey, ':');
+    const char* lonValue = std::strchr(lonKey, ':');
+    if (!latValue || !lonValue) return false;
+
+    char* stopLat = nullptr;
+    char* stopLon = nullptr;
+    const double lat = std::strtod(latValue + 1, &stopLat);
+    const double lon = std::strtod(lonValue + 1, &stopLon);
+    if (stopLat == latValue + 1 || stopLon == lonValue + 1) return false;
+
+    if (latitude) *latitude = lat;
+    if (longitude) *longitude = lon;
+    return true;
+}
+
+// --- the worker -------------------------------------------------------
+
+WeatherReader::~WeatherReader() {
+    Stop();
+}
+
+bool WeatherReader::Start() {
+    if (running_) return true;
+
+    InitializeCriticalSection(&lock_);
+    lockReady_ = true;
+
+    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!stopEvent_) {
+        DeleteCriticalSection(&lock_);
+        lockReady_ = false;
+        return false;
+    }
+
+    thread_ = CreateThread(nullptr, 0, &WeatherReader::ThreadEntry, this, 0, nullptr);
+    if (!thread_) {
+        CloseHandle(stopEvent_);
+        stopEvent_ = nullptr;
+        DeleteCriticalSection(&lock_);
+        lockReady_ = false;
+        return false;
+    }
+
+    running_ = true;
+    return true;
+}
+
+void WeatherReader::Stop() {
+    if (!running_ && !thread_) return;
+
+    if (stopEvent_) SetEvent(stopEvent_);
+    if (thread_) {
+        WaitForSingleObject(thread_, 5000);
+        CloseHandle(thread_);
+        thread_ = nullptr;
+    }
+    if (stopEvent_) {
+        CloseHandle(stopEvent_);
+        stopEvent_ = nullptr;
+    }
+    if (lockReady_) {
+        DeleteCriticalSection(&lock_);
+        lockReady_ = false;
+    }
+    running_ = false;
+}
+
+bool WeatherReader::Get(double* temperatureC, int* code) const {
+    if (!lockReady_ || !haveReading_) return false;
+
+    EnterCriticalSection(&lock_);
+    const bool have = haveReading_;
+    if (have) {
+        if (temperatureC) *temperatureC = temperatureC_;
+        if (code) *code = code_;
+    }
+    LeaveCriticalSection(&lock_);
+    return have;
+}
+
+void WeatherReader::Line(wchar_t* out, size_t capacity) const {
+    if (!out || capacity == 0) return;
+    out[0] = L'\0';
+    if (!lockReady_) return;
+
+    EnterCriticalSection(&lock_);
+    if (haveReading_) wcsncpy_s(out, capacity, line_, _TRUNCATE);
+    LeaveCriticalSection(&lock_);
+}
+
+unsigned long long WeatherReader::Revision() const {
+    return static_cast<unsigned long long>(revision_);
+}
+
+unsigned long __stdcall WeatherReader::ThreadEntry(void* self) {
+    static_cast<WeatherReader*>(self)->Run();
+    return 0;
+}
+
+void WeatherReader::Run() {
+    char resolvedCity[128] = {};
+    double latitude = 0.0;
+    double longitude = 0.0;
+
+    // The first pass runs immediately -- starting the bar must not mean waiting fifteen
+    // minutes for the weather to appear -- and each pass says how long to wait for the next.
+    unsigned waitMs = 0;
+    while (true) {
+        if (waitMs > 0) {
+            if (WaitForSingleObject(stopEvent_, static_cast<DWORD>(waitMs)) == WAIT_OBJECT_0) break;
+        }
+        if (WaitForSingleObject(stopEvent_, 0) == WAIT_OBJECT_0) break;
+
+        waitMs = Refresh(resolvedCity, sizeof(resolvedCity), &latitude, &longitude);
+    }
+}
+
+unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, double* latitude,
+                                double* longitude) {
+    wchar_t city[128] = {};
+    bool coordinatesGiven = false;
+    const bool haveSetting = ReadSettings(city, 128, &coordinatesGiven);
+
+    if (!haveSetting) {
+        // Reported ONCE per run rather than once per poll: the file can be written while the
+        // bar is running, and a line every minute about a file nobody has written yet is noise
+        // in a log that is read for the faults.
+        static bool reportedMissing = false;
+        if (!reportedMissing) {
+            reportedMissing = true;
+            wchar_t path[MAX_PATH] = {};
+            SettingsPath(path, MAX_PATH);
+            LogAndPrint(L"  weather: no city yet -- %ls would name one "
+                        L"(one line: a city name, or \"lat,lon\")\n",
+                        path);
+            std::fflush(stdout);
+        }
+        return kRetryMs;
+    }
+
+    // Reported once per CHANGE of city rather than once per poll: a city is a fact about the
+    // session, and a line every fifteen minutes would be noise.
+    static wchar_t reportedCity[128] = {};
+    if (wcscmp(city, reportedCity) != 0) {
+        wcsncpy_s(reportedCity, 128, city, _TRUNCATE);
+        wchar_t path[MAX_PATH] = {};
+        SettingsPath(path, MAX_PATH);
+        LogAndPrint(L"  weather: city '%ls' from %ls\n", city, path);
+        std::fflush(stdout);
+    }
+
+    // Resolve the city to coordinates once per city, not once per poll.
+    char cityUtf8[256] = {};
+    if (!coordinatesGiven) {
+        if (WideCharToMultiByte(CP_UTF8, 0, city, -1, cityUtf8, sizeof(cityUtf8), nullptr,
+                                nullptr) <= 0) {
+            return kRetryMs;
+        }
+        cityUtf8[sizeof(cityUtf8) - 1] = '\0';
+
+        if (std::strcmp(cityUtf8, resolvedCity) != 0) {
+            char encoded[768] = {};
+            PercentEncodeUtf8(cityUtf8, encoded, sizeof(encoded));
+
+            wchar_t path[900] = {};
+            swprintf(path, 900, L"/v1/search?name=%hs&count=1&language=zh&format=json", encoded);
+
+            char body[8192] = {};
+            size_t length = 0;
+            DWORD status = 0;
+            if (!HttpGet(kGeocodeHost, path, body, sizeof(body), &length, &status)) {
+                LogAndPrint(L"  weather: geocode failed (http %lu, %zu bytes)\n",
+                            static_cast<unsigned long>(status), length);
+                std::fflush(stdout);
+                return kRetryMs;
+            }
+            if (!ParseGeocodeJson(body, latitude, longitude)) {
+                LogAndPrint(L"  weather: no place called '%ls'\n", city);
+                std::fflush(stdout);
+                // Remembered as attempted, so a misspelt city is not asked for once a minute
+                // for the rest of the session.
+                strncpy_s(resolvedCity, resolvedCapacity, cityUtf8, _TRUNCATE);
+                return kPollMs;
+            }
+
+            strncpy_s(resolvedCity, resolvedCapacity, cityUtf8, _TRUNCATE);
+            LogAndPrint(L"  weather: %ls -> %.4f, %.4f\n", city, *latitude, *longitude);
+            std::fflush(stdout);
+        }
+    } else {
+        // "lat,lon" in the file. ReadSettings has already established that both halves are
+        // numbers and that both are in range.
+        const wchar_t* comma = wcschr(city, L',');
+        if (!comma) return kRetryMs;
+        *latitude = wcstod(city, nullptr);
+        *longitude = wcstod(comma + 1, nullptr);
+        strncpy_s(resolvedCity, resolvedCapacity, "<lat,lon>", _TRUNCATE);
+    }
+
+    wchar_t path[512] = {};
+    swprintf(path, 512,
+             L"/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code"
+             L"&format=csv&timezone=auto",
+             *latitude, *longitude);
+
+    char body[4096] = {};
+    size_t length = 0;
+    DWORD status = 0;
+    if (!HttpGet(kForecastHost, path, body, sizeof(body), &length, &status)) {
+        LogAndPrint(L"  weather: forecast failed (http %lu, %zu bytes)\n",
+                    static_cast<unsigned long>(status), length);
+        std::fflush(stdout);
+        return kRetryMs;
+    }
+
+    double temperature = 0.0;
+    int code = -1;
+    if (!ParseCurrentCsv(body, &temperature, &code)) {
+        LogAndPrint(L"  weather: the forecast answer held no reading (%zu bytes)\n", length);
+        std::fflush(stdout);
+        return kRetryMs;
+    }
+
+    wchar_t line[64] = {};
+    WeatherLineFor(temperature, code, line, 64);
+
+    EnterCriticalSection(&lock_);
+    temperatureC_ = temperature;
+    code_ = code;
+    wcsncpy_s(line_, 64, line, _TRUNCATE);
+    haveReading_ = true;
+    LeaveCriticalSection(&lock_);
+    InterlockedIncrement(&revision_);
+
+    LogAndPrint(L"  weather: %.1f C, code %d -> %ls\n", temperature, code, line);
+    std::fflush(stdout);
+    return kPollMs;
+}
+
+} // namespace island

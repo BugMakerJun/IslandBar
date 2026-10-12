@@ -102,6 +102,34 @@ public:
     void DrawClock(ID2D1DeviceContext2* context, const RoundedBox& box,
                    ClockStyle style, float opacity);
 
+    // --- the status strip: what stands in for the clock while the island is busy ----
+    //
+    // The date, the weekday, the time and -- when there is a reading -- the weather, in the
+    // band to the left of the system button. See StatusStripFor for why it exists and where
+    // it stands.
+
+    // The strip's one line, assembled from the three parts.
+    //
+    // A free function over its inputs, and a STATIC one, because the self-test has to be able
+    // to measure the longest line the strip will ever print against the strip's own box -- and
+    // that measurement must not need a window, a clock or a network.
+    static void ComposeStatusLine(const wchar_t* time, const wchar_t* date, const wchar_t* weather,
+                                  wchar_t* out, size_t capacity);
+
+    // Draws the strip on the island's own line: an island-coloured capsule, so the words are
+    // legible over any wallpaper, with the line centred inside it.
+    //
+    // `opacity` is the strip's own fade (0 -> 1 as the island becomes occupied), and `fill` is
+    // the island's fill colour -- passed in rather than chosen here, for the reason TaskButton
+    // gives: a surface that picks its own shade drifts away from the bar it belongs to.
+    void DrawStatusStrip(ID2D1DeviceContext2* context, const RoundedBox& island, float opacity,
+                         const wchar_t* weather, const D2D1_COLOR_F& fill);
+
+    // The drawn width of a composed status line, in DIPs. Needs Initialize(). Exists so the
+    // strip's fixed box can be shown to hold the longest line it will ever print (see the
+    // assertion in the self-test) rather than being sized by eye.
+    float StatusLineWidth(const wchar_t* line) const;
+
     // Draws a notification's sender, title and body in the lower part of `box`.
     //
     // Empty fields are skipped rather than drawn blank, so a notification with only
@@ -554,6 +582,13 @@ private:
 
     IDWriteTextFormat*   dateFormat_  = nullptr;
     IDWriteTextFormat*   appFormat_   = nullptr;
+    // THE STATUS STRIP'S OWN LINE, and its own size for its own reason.
+    //
+    // 12.5 DIP: a size between the card's title and the Windows clock, because this line stands
+    // next to the deck's 30 DIP buttons rather than inside a card -- at the pill's 15 it read as a
+    // second island, and at the card's 11 the date was unreadable at a glance, which is the one
+    // thing this line is for. Semibold, matching the pill's clock: it is a reading, not a label.
+    IDWriteTextFormat*   statusStripFormat_ = nullptr;
     // THE PILL'S OWN LINE, one weight heavier than appFormat_.
     //
     // A separate format rather than a heavier appFormat_, because appFormat_ is also what the task

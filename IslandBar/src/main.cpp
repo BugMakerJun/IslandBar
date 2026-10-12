@@ -46,6 +46,7 @@
 #include "SoundOutput.h"
 #include "SystemStatus.h"
 #include "WicImage.h"
+#include "Weather.h"
 #include "Renderer.h"
 
 #pragma comment(lib, "user32.lib")
@@ -915,6 +916,21 @@ unsigned long long lastMusicMeterMs = 0;
                             : "  lyrics: DISABLED (the worker could not start)");
     std::fflush(stdout);
 
+    // --- the weather on the status strip ----------------------------------
+    //
+    // Polled on a worker, like the lyrics and for the same reason: it is a network call, and a
+    // slow or unreachable service must not be able to stall the animation.
+    //
+    // Started unconditionally. A machine with no weather.txt (or no network) is the ordinary
+    // case for a first run: the reader logs where the city goes and the strip shows the date and
+    // the time without a reading, which is what it is designed to do.
+    island::WeatherReader weather;
+    const bool weatherAvailable = weather.Start();
+    island::LogAndPrint(weatherAvailable
+                            ? "  weather: polling Open-Meteo for the city in weather.txt"
+                            : "  weather: DISABLED (the worker could not start)");
+    std::fflush(stdout);
+
     // --- the taskbar's window list ---
     //
     // Refreshed from the frame loop rather than polled here, because it is only needed while the
@@ -936,6 +952,27 @@ unsigned long long lastMusicMeterMs = 0;
 // Whether any icon in the row is still arriving or leaving. Set inside the draw (where the row is
 // updated) and read by the next frame's redraw decision, so the arrival animation keeps running.
 bool rowAppearAnimating = false;
+
+// --- the status strip ----------------------------------------------------
+//
+// How far its fade has run, 0 to 1, held across frames because it is an animation and not a state:
+// the strip fades in when the island becomes OCCUPIED (music resting, or a message / call up, which
+// is exactly when the pill's own line stops being the clock) and fades out when it stops being. See
+// StatusStripFadeStep and StatusStripFor.
+float statusStripOpacity = 0.0f;
+// Whether the strip is asked for by this frame's state. Read by the window's own region call, which
+// runs outside the draw block.
+bool statusStripUp = false;
+// True while that fade is in flight, which is what asks for the next frame. Set inside the draw and
+// read by the next pass, like the two arrival flags above.
+bool statusStripAnimating = false;
+// The weather reader's revision as of the last draw, so a new reading is a redraw reason of its own:
+// the reading arrives on a worker, a few seconds after the bar has settled.
+unsigned long long lastWeatherRevision = 0;
+// Where the strip's weather text lives for the frame to point at. A member of this scope rather than
+// the reader's own storage, because a reading can be replaced mid-frame -- replace it and the frame
+// would print half of one reading and half of the next.
+wchar_t statusWeatherText[64] = {};
 // One entry per window the row is drawing or fading out: an icon's membership of the row and how far
 // in it is (see TaskIconAppearStep).
 struct RowSlot {
@@ -1031,7 +1068,7 @@ float musicWavePhase = 0.0f;
         bool haveNotificationShown = false;
         DWORD lastStartTogglePhase = 0xFFFFFFFFul;   // no toggle has happened yet
         int whyAnimating = 0, whyClock = 0, whyNotification = 0, whyMusic = 0;
-        int whyLyrics = 0, whyProgress = 0, whyFirst = 0;
+        int whyLyrics = 0, whyProgress = 0, whyFirst = 0, whyStatusStrip = 0;
         FrameStats liveStats;
         liveStats.Start();
         unsigned long long lastMusicRevision = music.Revision();
@@ -2686,6 +2723,14 @@ float musicWavePhase = 0.0f;
                 volumeChanged = true;
             }
 
+            // A new weather reading is the same kind of reason: it arrives on its own schedule, and
+            // nothing else about the frame has to move for the strip to have something new to say.
+            bool weatherChanged = false;
+            if (weather.Revision() != lastWeatherRevision) {
+                lastWeatherRevision = weather.Revision();
+                weatherChanged = true;
+            }
+
             const bool progressChanged = (shownPosition / 1000) != (lastShownSecond);
             lastShownSecond = shownPosition / 1000;
 
@@ -2719,7 +2764,8 @@ float musicWavePhase = 0.0f;
                                   musicChanged || lyricsScrolling || lyricLineChanged ||
                                   lyricLineAnimating || progressChanged || musicMeterDue ||
                                   iconAnimating || rowAppearAnimating || soundPageChanged ||
-                                  callMeterDue || !haveDrawn;
+                                  callMeterDue || statusStripAnimating || weatherChanged ||
+                                  !haveDrawn;
             if (needDraw) {
                 // Which condition forced this redraw, counted per report interval.
                 //
@@ -2736,6 +2782,7 @@ float musicWavePhase = 0.0f;
                 if (lyricsScrolling || lyricLineChanged || lyricLineAnimating) ++whyLyrics;
                 if (musicMeterDue) ++whyMusic;
                 if (progressChanged) ++whyProgress;
+                if (statusStripAnimating || weatherChanged) ++whyStatusStrip;
                 if (!haveDrawn) ++whyFirst;
 
                 haveDrawn = true;
@@ -3153,6 +3200,15 @@ float musicWavePhase = 0.0f;
                 // region applied one frame late keeps the CARD clipped to the pill's height for as long
                 // as the panel is open -- which is what "the panel is open but I only see its top edge"
                 // was. Harmless to call again: it returns immediately when the rectangle is unchanged.
+                // The status strip's own telling, before the region is applied: the width while it is
+                // up, zero while it is not. The window needs it because the region DECIDES which pixels
+                // belong to this window, so a strip outside it is clipped -- see SetStatusStripWidth.
+                // `statusStripOpacity` as well as the flag, because the strip is still on screen for the
+                // length of its fade out, after the island has stopped being occupied.
+                window.SetStatusStripWidth(statusStripUp || statusStripOpacity > 0.001f
+                                               ? island::kStatusStripWidthDip
+                                               : 0.0f);
+
                 window.ApplyInputRegion();
 
                 // HOW STRONG, and for WHOM. The card's own content follows the reveal; the BAR's does
@@ -3305,6 +3361,38 @@ float musicWavePhase = 0.0f;
                     frame.callStrip.iconRevision = callIconRevision;
                 }
                 frame.lyricScrollDip = lyricsScrollDip;
+
+                // --- the STATUS STRIP: the date, the weekday, the time and the weather -------
+                //
+                // IS THE ISLAND OCCUPIED? That is the whole question, and it is exactly "the pill's
+                // own line is not the clock" -- because that is the situation the strip exists for:
+                // while the pill says the lyric or the message, the bar carries no time at all.
+                //
+                // Written as that comparison and from the SAME three values the renderer chooses the
+                // pill's line from (the resting state with a line to show, the notice strip with a
+                // message or a call), so the strip cannot appear in a state where the pill is still
+                // showing the time. That would be the same clock printed twice on one bar.
+                const bool islandOccupied =
+                    (frame.restingState == island::IslandState::MusicStrip &&
+                     (frame.lyricLine || frame.fallbackLine)) ||
+                    (frame.state == island::IslandState::NoticeStrip &&
+                     (frame.callUp || (frame.noticeLine && frame.noticeLine[0] != '\0')));
+
+                statusStripOpacity =
+                    island::StatusStripFadeStep(statusStripOpacity, islandOccupied, dt);
+                frame.statusStripOpacity = statusStripOpacity;
+
+                // The reading is COPIED into this scope's buffer rather than pointed at where the
+                // worker keeps it: the worker can publish between this line and the draw, and a frame
+                // that read half of one reading and half of the next would print a temperature that
+                // never happened.
+                statusWeatherText[0] = L'\0';
+                weather.Line(statusWeatherText, 64);
+                frame.statusWeather = statusWeatherText[0] != L'\0' ? statusWeatherText : nullptr;
+
+                // Read by the next pass's redraw decision, like the icon row's own arrival flags.
+                statusStripAnimating = statusStripOpacity > 0.001f && statusStripOpacity < 0.999f;
+                statusStripUp = islandOccupied;
 
                 // Progress, advanced locally between polls.
                 //
@@ -3538,9 +3626,9 @@ float musicWavePhase = 0.0f;
                 island::LogAndPrint("  interval [%ls] %ls", island::StateName(window.State()),
                                     intervalSummary);
                 island::LogAndPrint("  redraws: animating=%d clock=%d notify=%d music=%d "
-                                    "lyrics=%d progress=%d first=%d",
+                                    "lyrics=%d progress=%d strip=%d first=%d",
                                     whyAnimating, whyClock, whyNotification, whyMusic,
-                                    whyLyrics, whyProgress, whyFirst);
+                                    whyLyrics, whyProgress, whyStatusStrip, whyFirst);
                 // Reported beside the frame intervals because the two are the same question: a region
                 // re-applied per frame is a window-manager call inside the animation's own loop. A
                 // hundred of them in a 4 s window containing one 0.36 s transition means the transition
@@ -3554,7 +3642,7 @@ float musicWavePhase = 0.0f;
                 std::fflush(stdout);
                 liveStats.Reset();
                 whyAnimating = whyClock = whyNotification = whyMusic = 0;
-                whyLyrics = whyProgress = whyFirst = 0;
+                whyLyrics = whyProgress = whyFirst = whyStatusStrip = 0;
             }
 
             // --- pace ---
@@ -3583,6 +3671,7 @@ float musicWavePhase = 0.0f;
     // finished with, not left holding a pipe that is about to disappear.
     notificationServer.Stop();
     lyrics.Stop();
+    weather.Stop();
     volume.Stop();
     music.Stop();
 
