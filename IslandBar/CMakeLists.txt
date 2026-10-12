@@ -95,3 +95,10 @@ endif()
 
 # The real bar: the DComp/D2D window foundation plus the phase 0-d self-test.
 add_subdirectory(src)
+
+# The installer: carries the bar inside itself, installs it for the current user, and
+# uninstalls it again. It needs the bar, so it comes after it.
+option(ISLANDBAR_BUILD_SETUP "Build the per-user installer" ON)
+if(ISLANDBAR_BUILD_SETUP)
+    add_subdirectory(setup)
+endif()

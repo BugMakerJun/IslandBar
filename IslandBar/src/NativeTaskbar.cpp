@@ -103,7 +103,25 @@ void NativeTaskbar::Restore() {
 }
 
 bool NativeTaskbar::EnsureHidden() {
-    if (!weHidIt_) return false;
+    // NOTHING WAS EVER HIDDEN BY US. Two situations produce that, and they want opposite answers.
+    //
+    // The taskbar did not exist when this process started -- which is the ordinary case for a bar that
+    // starts at LOGON, because the process and the shell are woken at the same moment and nothing orders
+    // them. This used to be final: `Hide()` at startup returned false, the caller noted "not found", and
+    // the periodic check was gated on that note, so the native taskbar stayed on screen under our bar for
+    // the rest of the session with nothing in the log to say why. A bar that is installed to start at
+    // logon is exactly the case that has to survive this, so the window is looked for again here.
+    //
+    // ... or the window is there and INVISIBLE, which is the user's own choice (auto-hide, or hidden by
+    // hand). That is not ours to override, and it is the reason this is a visibility test rather than an
+    // unconditional hide.
+    if (!weHidIt_) {
+        if (!trayWnd_ || !IsWindow(trayWnd_)) {
+            if (!Locate()) return false;      // still nothing: the shell is not up yet either
+        }
+        if (!IsWindowVisible(trayWnd_)) return false;
+        return Hide();                        // it is there and it is visible, and that is the job
+    }
 
     // A stale handle means Explorer restarted and built a new taskbar, which
     // starts out visible. That is exactly the case worth catching: without this

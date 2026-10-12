@@ -1612,7 +1612,10 @@ float musicWavePhase = 0.0f;
         while (true) {
             if (!window.PumpMessages()) break;
 
-            if (hideNativeTaskbar && haveTaskbar && --taskbarCheckCountdown <= 0) {
+            // ... and NOT gated on `haveTaskbar`. That flag is "the taskbar was there when this process
+            // started", and a bar that starts at logon can easily start first -- see the note in
+            // NativeTaskbar::EnsureHidden, which is where the second look happens.
+            if (hideNativeTaskbar && --taskbarCheckCountdown <= 0) {
                 taskbarCheckCountdown = 50;   // roughly every 5 s at an 8 ms tick
                 // ... unless a tray press is showing it this instant: the press needs the shell's taskbar
                 // to exist for about a fifth of a second, and re-hiding it in the middle of that would
@@ -4515,7 +4518,10 @@ float musicWavePhase = 0.0f;
     // path -- the window closing, WM_QUIT, or the loop breaking for any other
     // reason. Only a hard kill skips it, which is why the recovery command is
     // documented in the startup message.
-    if (hideNativeTaskbar && haveTaskbar) {
+    // Un-gated for the same reason the check above is: a session whose taskbar appeared late is a session
+    // where this object owns a hide that the flag never saw. `Restore()` is a no-op when nothing was
+    // hidden, so the wider condition costs nothing.
+    if (hideNativeTaskbar) {
         taskbar.Restore();
         island::LogAndPrint("  native taskbar: restored\n");
         std::fflush(stdout);

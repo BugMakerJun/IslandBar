@@ -5279,6 +5279,96 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
 | **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
 | **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
+### 8.69 **打包成可安装的 exe + 默认开机自启** ✅（待用户装上试）
+
+用户：「**把应用打包成可以安装的exe文件 默认开机自启 我安装上测测**」。
+
+#### 交付物
+
+`IslandBarSetup.exe`（3.6 MB，单文件，**自带 island_bar.exe** 作为资源）。双击即装，装
+**当前用户**，**不需要管理员**：
+
+| 动作 | 位置 |
+|---|---|
+| 程序 | `%USERPROFILE%\IslandBar\island_bar.exe`（**默认目录，见下**） |
+| 开机自启 | `…\Start Menu\Programs\Startup\IslandBar.lnk`（**默认开启**） |
+| 开始菜单 | `…\Start Menu\Programs\IslandBar.lnk` |
+| 卸载登记 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\IslandBar`（设置→应用里可见） |
+| 卸载程序 | `<安装目录>\IslandBarUninstall.exe`（安装程序自己的副本） |
+
+开关：`/uninstall`、`/remove-settings`（连设置一起删）、`/dir=PATH`、`/no-autostart`、
+`/no-launch`、`/silent`（不弹框，日志照写）、`/?`。日志：`%TEMP%\IslandBarSetup.log`
+（写不进去时退回安装程序旁边）。
+
+#### 为什么装到 `%USERPROFILE%\IslandBar` 而不是 Program Files
+
+`weather.txt`、`start_folder.txt`、日志**都是"在 exe 旁边"读的**（`Weather.cpp`、`StartApps.cpp`、
+`Log.cpp`），所以**程序所在目录就是用户的设置目录**，固定区的快捷方式文件夹也在里面。
+装到别处=看起来像把他攒的东西弄丢了。这也正是开发脚本部署的位置，测试版和安装版落在一起，
+不会变成两条栏抢屏幕。
+
+#### 为什么不用 Inno Setup / NSIS / WiX
+
+本机三个都没有；而"一个 exe + 两个快捷方式 + 一条 HKCU 卸载项"的每用户安装不需要框架 —— 要框架
+代劳的正是卸载登记和快捷方式，各是几行 API（`WriteUninstallEntry`、`CreateShortcut`）。
+构建接线在 `setup/CMakeLists.txt`：`island_bar.exe` 先被复制到固定路径，`payload.rc.in` 用
+`configure_file` 把该**绝对路径**写进资源脚本（相对路径会取决于 RC 的工作目录，那里看不见也验不了）。
+
+#### 顺手修掉"开机自启"真正的前提：**自启会比 Explorer 早**
+
+**这不是安装程序的问题，是自启才暴露的问题。** `main.cpp` 启动时只看一次
+`taskbar.Locate()`，把结果记在 `haveTaskbar`，而**周期性检查是 `&& haveTaskbar`**；更要命的是
+`EnsureHidden()` 第一行是 `if (!weHidIt_) return false;`。所以**如果本进程先于 shell 建好任务栏启动**
+（登录时正是如此），`Hide()` 返回 false、`weHidIt_` 从没置位 → **系统任务栏整个会话都不会被隐藏**，
+而且日志里什么都不会说。改法：`EnsureHidden()` 在"没藏过"时**重新找一次**，找到且可见就接管；
+`main.cpp` 的周期检查和退出时的 `Restore()` **不再被 `haveTaskbar` 挡住**（`Restore()` 本来在
+没藏过时就是空操作）。
+
+#### 拿真实安装试出来的两个 bug（都记在代码注释里）
+
+1. **安装程序写不出日志 = 看起来像"根本没运行"。** 日志原来只在最后一次性写出，任何早退/崩溃都
+   不留文件。第一版跑完是"退出码 1 + 完全没有痕迹"。改成**第一行就开文件、逐行 flush**；并且
+   **%TEMP% 写不进去就退回安装程序旁边**（这正是我踩到的：见下）。
+2. **`ERROR_ACCESS_DENIED(5)` 建不了目录 —— 是"在项目树里运行"被降权。** 从这个仓库目录里启动的
+   exe 会被本开发环境降成 **LOW 完整性**（HANDOFF 7.84 同一个坑），那个令牌**连 %TEMP% 都写不了**。
+   用 `Start-Process` 还会**直接挂住、进程根本不出现**（项目里早有记录）；`Start-Process -Wait` 那次
+   报的 `exit=1` 是假的。改用 **.NET `Process.Start`（`UseShellExecute=false`）+ 亲手写标记文件**
+   才定位到。**结论：从项目树外运行安装程序**，这也正是用户会做的事（Downloads 里双击）。
+
+#### 另外两处（真机上会咬人，测的时候一起修了）
+
+* **安装时要把系统任务栏"还回来"**：结束旧栏用的是 `TerminateProcess`，跳过了它的 `Restore()`；
+  新栏起来时看到任务栏**已经是隐藏的**→ 它不会"接管这次隐藏"→ **它自己正常退出时任务栏就永远不回来了**。
+  所以安装杀掉旧栏之后、启动新栏之前，显式 `RestoreShellTaskbar()`（只 `ShowWindow` 当前不可见的
+  那几个窗口，用户自己隐藏的不动）。代价是安装时闪一下原生任务栏，换来这一整族状态不存在。
+* **卸载时也只结束"这个安装装的"那一份**（按映像路径匹配），别的目录里跑的栏不归它管；
+  `/remove-settings` 删固定区用的是 **`SHFileOperation` 送进回收站**，不是永久删除 ——
+  那是用户一个个固定出来的快捷方式。
+
+#### 实测（安装到临时目录，全流程）
+
+```
+install   exit=0   → island_bar.exe 2480128 字节（与 payload 一致）、IslandBarUninstall.exe、
+                     Startup\IslandBar.lnk、Programs\IslandBar.lnk、HKCU 两个键
+shortcut  target = <dir>\island_bar.exe   args=''          ← 不带 --keep-taskbar，默认就是要隐藏系统栏
+uninstall exit=0   → 两个快捷方式没了、两个注册表键没了、island_bar.exe 没了、
+                     用户正在跑的那份栏 PID 3352 全程没被动过
+```
+
+自检 **891 项**仍全绿（这次没动几何；`NativeTaskbar` 的改动没有自检能覆盖 —— 它要动真的任务栏，
+只能靠用户登录时验）。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"没日志"被当成"没运行"** | 日志只写一次，早退就没文件 | 安装/部署类程序的日志要**从第一行开始落盘**，并**准备第二个位置** |
+| **`Start-Process` 在这台机器上会挂** | 进程不出现、退出码是假的 | 本项目一律用 .NET `Process.Start`（`UseShellExecute=$false`，见 `capture-card.ps1`）；**"退出码"要跟旁证一起看** |
+| **项目树里的 exe 是低完整性** | 连 %TEMP% 都建不了目录（错误 5） | 交付物要**在项目树外运行**验证；错误码 5 先怀疑降权，再怀疑代码 |
+| **杀进程会跳过收尾** | 旧栏被终结 → 隐藏状态没人认领 → 新栏退出后系统栏再也不回来 | 凡是要终结另一个进程，先问**它没跑完的收尾谁来跑** |
+| **"自启"是新的运行环境** | 进程和 shell 同时被唤醒，没有顺序 | 启动时"找不到"的东西，**运行期要能重新找**；一次性判断 + 记标志位是自启的头号杀手 |
+
+
 ### 8.68 **开始卡片跟着手走：指针和滚动没被算进"要不要重画"** ✅（待用户手感）
 
 用户：「**现在开始菜单卡片里 鼠标移上去 卡卡的 添加应用滚动也卡卡的**」。
