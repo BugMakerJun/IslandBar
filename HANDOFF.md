@@ -1,0 +1,7838 @@
+# IslandBar 项目交接文档
+
+> 生成时间：2026-10-09
+> 用途：跨会话交接。改名或重开会话后，先读这一份。
+> **注意**：本文档含中文，仅供人阅读；**所有 `.ps1` / `.bat` 脚本必须保持纯 ASCII**（原因见 6.1）。
+> **已脱敏**：文中路径里的 `%USERPROFILE%` 指你自己的用户目录（例如 `C:\Users\<你>`）；`<pid>` / `<window>` / `<mac>` / `<device-name>` 是占位符 —— 原来的进程号、窗口句柄、蓝牙 MAC 与设备名已移除。文中保留的曲名是定位问题时用到的实例，不含播放历史。
+
+> **本文档曾于 2026-10-09 22:23 被一次 PowerShell `Get-Content -Raw` / `Set-Content` 往返损坏编码**（UTF-8 被按 GBK 解读后再存为 UTF-8，约 10% 的中文字符不可恢复），随后按恢复出的文本重写。技术内容完整；若发现个别措辞与早期版本不同，以本版为准。**教训见 6.7。**
+
+---
+
+## 1. 项目目标
+
+给 Windows 11 做一个**替代原生任务栏**的工具：
+
+- **闲置时**：屏幕顶部收拢成一个类似苹果灵动岛的胶囊（置顶浮层）。
+- **鼠标移上去**：左右摊开成完整任务栏。
+- **联动音乐**：通过 SMTC 显示曲名/封面/控制播放，并显示在线歌词。
+- **联动微信等通知**：拦截系统 Toast 通知。
+- **联动 Codex / DSH 等工具的通知**：本机主动推送通道。
+
+### 已确认的范围决策（用户拍板）
+
+| 决策项 | 选择 |
+|---|---|
+| 替代程度 | **隐藏原生任务栏，自绘岛体**（不做完整 shell 替换） |
+| 通知通道 | **两条都做**：读 `wpndatabase.db` + 本机主动推送接口 |
+| 技术栈 | **C++ / Direct2D + DirectComposition** |
+| 工具链位置 | 编译器相关放 `C:\TOOL` |
+
+### 已确认的关键约束
+
+- **`uiAccess=true` 暂不做**。没有它，自绘任务栏点不动管理员权限的窗口，而启用它需要真证书 + 装到「Program Files」。此决定推迟到阶段 4 再评估。
+- **Windows SDK 无法装到 `C:\TOOL`**：其路径由注册表 `KitsRoot10` 绑定，强制落在 `C:\Program Files (x86)\Windows Kits\10`。已接受。
+
+---
+
+## 2. 当前环境现状（已验证）
+
+| 组件 | 版本 / 位置 | 状态 |
+|---|---|---|
+| MSVC 工具集 | `14.44.35207` | ✅ |
+| VS Build Tools | `C:\TOOL\VSBuildTools` | ✅ |
+| Windows SDK | `10.0.26100.0` @ `C:\Program Files (x86)\Windows Kits\10` | ✅ |
+| CMake | `C:\TOOL\VSBuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`（**不在 PATH**） | ✅ |
+| Ninja | 未安装 | ⚠️ 不阻塞，用 MSBuild 生成器代替 |
+| 系统 | Windows 11 build `26220`（Insider） | ⚠️ 比稳定版更早遇到 shell 变更 |
+| 显示器 | 2560x1440 @ 100% 缩放，任务栏厚 **32px** | 实测 |
+| 网络 | **开发沙箱无外网**（`curl https://example.com` TLS 失败，exit 35） | ⚠️ 影响歌词验证，见 7.11 |
+
+---
+
+## 3. 目录结构
+
+```
+C:\PROJECT\Taskbar\                   ← 已改名完成（阶段 0-c ✅）
+├─ HANDOFF.md                        ← 本文档
+├─ START-HERE.txt                    英文速查 + 三条铁律
+├─ setup-toolchain.ps1               工具链安装（已完成，正常不用再跑）
+├─ verify-toolchain.ps1              环境验证（只读，随时可跑）
+└─ IslandBar\                        ← C++ 主项目
+   ├─ CMakeLists.txt                 顶层工程（C++20、/W4、UNICODE）
+   ├─ README.md                      项目说明（英文）
+   ├─ docs\                          验证截图
+   ├─ src\                           ← 真正的程序
+   │   ├─ CMakeLists.txt             island_bar 目标 + manifest 嵌入
+   │   ├─ island_bar.manifest        PerMonitorV2 DPI 声明（**必须**）
+   │   ├─ Geometry.h                 度量常量 + 唯一的圆角矩形命中判定
+   │   ├─ CardLayout.h               卡片控件位置（通知卡 / 音乐卡），三处共用
+   │   ├─ WicImage.h / .cpp          WIC 图片编解码（专辑封面 + 模糊背景）
+   │   ├─ Lyrics.h / .cpp            LRC 解析 + 行查找 + 网易云抓取（工作线程 + WinHTTP）
+   │   ├─ Log.h / .cpp               日志（所有控制台写都过的守卫）
+   │   ├─ MiniJson.h / .cpp          手写 JSON 读取（只为通知协议）
+   │   ├─ Monitor.h / .cpp           工作区、DPI、任务栏厚度的推导
+   │   ├─ Motion.h / .cpp            四态几何 + 插值 + 缓动曲线
+   │   ├─ MusicSession.h / .cpp      SMTC 现在播放（Windows.Media.Control + C++/WinRT）
+   │   ├─ NativeTaskbar.h / .cpp     隐藏/恢复原生任务栏（含 UIPI 检测）
+   │   ├─ Notification.h / .cpp      通知模型 + 有界存储
+   │   ├─ NotificationPipe.h/.cpp    命名管道服务器与客户端
+   │   ├─ IslandWindow.h / .cpp      窗口：置顶、不抢焦点、区域级穿透、悬停
+   │   ├─ Renderer.h / .cpp          D3D11 + D2D + DComp 合成器 + 像素回读
+   │   ├─ TextRenderer.h / .cpp      DirectWrite 时钟与卡片文字
+   │   ├─ Diagnostics.h / .cpp       运行时自检（283 项）+ 任务栏诊断
+   │   └─ main.cpp                   入口：自检 / 演示 / 常驻 / 任务栏诊断 / 歌词测试
+   ├─ tools\smoke\                   工具链冒烟测试
+   ├─ tools\jsonprobe\               独立 JSON+通知解析 harness
+   ├─ scripts\
+   │   ├─ env.ps1                    dot-source 后获得 MSVC 环境变量
+   │   └─ build.ps1                  配置 + 编译 + 运行冒烟测试
+   └─ build\Debug\                   构建产物（可删，删不掉时见 4.1）
+```
+
+---
+
+## 4. 改名与清理（阶段 0-c，已完成）
+
+项目路径已是 `C:\PROJECT\Taskbar`（纯 ASCII）。以下**已做过**，留档仅供回溯：
+
+1. 项目改名 + 重开 DSH 会话（沙箱权限绑定会话工作区，改名后必须重开会话）。
+2. **删掉 junction 机制**：`scripts\env.ps1` 与 `scripts\build.ps1` 里的 `New-AsciiJunction`、`$LinkRoot = 'C:\IslandBar'` 代码已整体移除，改用 `Split-Path -Parent (Split-Path -Parent $PSCommandPath)` 直接推导。构建输出里的 `[build] junction could not be created; ...` 随之消失。
+3. **删除 `DynamicIsland\`**（作废的 WPF 骨架）。
+4. 清掉 `setup-toolchain.ps1` 注释里的旧中文路径（`pwsh` 一并改成 `powershell.exe`，本机没有 pwsh）。
+5. 清理残留的旧「任务栏」字样（允许出现在 `.md` 文档，脚本内不允许）。
+
+### 4.1 删目录时踩到的沙箱坑（重要）
+
+`Remove-Item -Recurse` 报「对路径的访问被拒绝」，**不是文件被占用**：沙箱给工作区各层目录加了 `Everyone: Deny DeleteSubdirectoriesAndFiles`，且部分目录缺少当前用户的 `WRITE_OWNER`。
+
+判定与修复（不要手工改权限）：
+
+- 症状：能在任意子目录里建/改文件，但删不掉子目录；逐层删文件也失败。
+- 原因：目录缺少 `WRITE_OWNER`，沙箱无法为它完成工作区授权。
+- 做法：用 `diagnose-windows-sandbox-acl` 技能里那条**一次调用即诊断且修复**的命令，`-Path` 传失败的目录、`-AllowRoot 'C:\PROJECT\Taskbar'`、`-Out` 传一个持久目录（如 `C:\PROJECT\acl-recovery`）。该命令需要写权限，必须在**完全访问（full access）**下运行并经用户批准。
+- 已为 `DynamicIsland`、`IslandBar`、`IslandBar\build` 各补了一次 `WRITE_OWNER`，删除随即成功。
+- **推论**：用 C++ 工程在 `build\` 下新建子目录时若出现同类拒绝，按同一办法处理，不要反复重试删除。
+
+---
+
+## 5. 构建与验证命令
+
+**跑冒烟测试**（配置 + 编译 + 运行，一条命令）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\IslandBar\scripts\build.ps1" -Config Debug -RunSmoke
+```
+
+**跑自检**（编译 + 283 项运行时断言，退出码 = 失败数）：
+
+```powershell
+# 先编译（会顺带编译 island_bar.exe）
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\IslandBar\scripts\build.ps1" -Config Debug
+
+# 再自检；退出码 0 = 全绿
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test
+```
+
+**真的把岛体挂到屏幕上**：
+
+```powershell
+# 常驻：移动鼠标到胶囊上会摊开；退出时恢复任务栏
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe"
+
+# 保留原生任务栏（开发时对比用）
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --keep-taskbar
+
+# 三态循环演示（不需要鼠标，适合截图/肉眼验证）
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --demo
+
+# 用示例数据轮播三个音乐状态（歌词条 / 悬停 / 卡片），各 4 秒，适合截图
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --music-preview
+
+# 验证在线歌词抓取（沙箱无外网，必须你在普通 shell 里跑）
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --lyrics-test "一直很安静" "阿桑"
+
+# 探测能不能隐藏任务栏，不启动主程序
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+
+# 发一条通知给正在运行的岛体（推送通道的客户端）
+& "..." --notify "Build finished" --body "0 errors, 3 warnings" --app DSH
+# 可选：--urgency low|normal|high   --sticky（不自动消失）
+```
+
+> **`&` 是 PowerShell 的调用运算符，在 cmd.exe 里不能用。**
+> 在 cmd 里 `&` 是命令分隔符，写成 `& "path"` 会直接报
+> `& was unexpected at this time.`，**程序根本不会执行**（这点踩过两次）。
+> cmd 里要么直接引号调用，要么 `start /wait`：
+>
+> ```bat
+> "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+> start /wait "" "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test
+> ```
+>
+> **要保存输出，一律用 `cmd /c "... > file 2>&1"`。**
+> 这是 GUI 子系统的必然结果：程序用 `AttachConsole(ATTACH_PARENT_PROCESS)`
+> 借用父控制台，写的是**控制台缓冲区**，不是继承的管道/文件句柄。
+> 所以在 PowerShell 里写 `& .\island_bar.exe --self-test > log.txt` 会得到
+> **0 字节的空文件**（实测），必须走 cmd：
+>
+> ```bat
+> cmd /c "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test > log.txt 2>&1
+> ```
+>
+> 另外 `--probe-taskbar` 的**退出码有含义**：0 = 能隐藏任务栏，1 = 被 UIPI 挡住，
+> 2 = 任务栏没能恢复（这个更严重）。可以直接用来写判断。
+
+其他用法：
+
+```powershell
+# 只编译不运行
+... -File "...\build.ps1" -Config Debug
+
+# Release
+... -File "...\build.ps1" -Config Release -RunSmoke
+
+# 干净重建
+... -File "...\build.ps1" -Clean -Config Debug -RunSmoke
+```
+
+> **不要给 `build.ps1` 加回 `--parallel`**：本机 MSBuild 的 `/m`（多节点）必然返回退出码 1，
+> 且报 0 错 0 警，看起来像工程坏了。脚本内固定 `--parallel 1`，并行编译由 `/MP` 负责（详见 6.5）。
+
+**手动获取 MSVC 环境**（需要直接调 `cl.exe` 时）：
+
+```powershell
+. C:\PROJECT\Taskbar\IslandBar\scripts\env.ps1
+cl
+```
+
+**验证环境完好**（只读，不改任何东西）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\verify-toolchain.ps1"
+```
+
+> 注意：`dotnet` 相关命令在这台机器上**不可用**（只有不成对的 dotnet 宿主，没有 SDK）。C++ 构建不依赖它。
+
+---
+
+## 6. 关键教训（务必遵守，都是踩过的坑）
+
+### 6.1 编码：脚本必须纯 ASCII
+
+**Windows PowerShell 5.1 用系统 ANSI 代码页（GBK）读 `.ps1`，除非文件带 UTF-8 BOM。**
+
+踩坑记录：
+
+- 在脚本里写中文，落盘后部分字符被替换成 `?` 或 `€`（U+FFE5），其中一处把
+  `管理员权限已开启` → `($identity.Name)` 的 `$` 吃掉，解析器把 `[OK]` 当成数组索引，
+  报 6 个语法错误。
+- 在脚本里**硬编码含中文的路径** `C:\PROJECT\任务栏\IslandBar`，被 GBK 解码成
+  `C:\PROJECT\浠姟鏍廫IslandBar`，CMake 报「源目录不存在」。
+
+**规则**：
+
+1. 所有 `.ps1` 脚本**纯 ASCII**，中文只放在 `.md` 文档里。
+2. 路径**不要硬编码**，用 `Split-Path $PSCommandPath` 从脚本自身推导。
+3. 这台机器**没有安装 `pwsh`**（PowerShell 7），只有 `powershell.exe`（5.1）。
+   所写脚本必须兼容 5.1：避免 `??`、三元运算符、`-Parallel`、
+   `[System.IO.Directory]::CreateDirectory($path, $target)` 等。
+
+### 6.2 VS 安装器的命令行参数（连错三次）
+
+`vs_BuildTools.exe`（引导程序）和 `setup.exe`（真安装器）**参数表不同**，引导程序会把参数原样转发给 `setup.exe`。
+
+| 参数 | 真相 |
+|---|---|
+| `--log` | ⚠️ `setup.exe` **没有**这个选项。引导程序接受并转发，`setup.exe` 解析失败 → **退出码 87**。VS 安装器会写 `%TEMP%\dd_*.log`，无需此参数。 |
+| `--cache` | ⚠️ **布尔开关，不是路径**「是否保留包」。写成 `--cache C:\path` 会把 `C:\path` 变成野位置参数。 |
+| `--nocache` | ⚠️ 与 `--cache` **互斥**。 |
+| `--path install=<dir>` | ✅ 指定安装目录的官方 token 写法，等价于 `--installPath`。**用等号形式**，因为引导程序转发时**空格分隔且不加引号**，含空格的路径会被拆开。 |
+| `--path cache=<path>` | ⚠️ 官方文档两种说法矛盾；移动缓存的**可靠**办法是前置 `CachePath` 注册表策略。本项目改用 `--nocache` 绕开。 |
+
+**排错入口**：退出码 87 看不出原因，直接看 `%TEMP%\dd_installer_*.log`，里面
+`Raw Command line` 与 `Command line errors` 两行直接给出答案。
+
+### 6.3 C++ / DirectComposition API 事实（冒烟测试实测）
+
+| 事实 | 影响 |
+|---|---|
+| `DCompositionCreateDevice` 返回**一代** `IDCompositionDevice` | 它创建的 visual **不支持** `IDCompositionVisual3`（`QueryInterface` 返回 `E_NOINTERFACE`），所以 `Visual3::SetOpacity` **不可用**。 |
+| `SetOpacity` 只在 `IDCompositionVisual3`（dcomp.h:1608）和 `IDCompositionEffectGroup`（dcomp.h:800/805）上 | **淡入淡出必须用 `IDCompositionEffectGroup`**：`visual->SetEffect(group)`。 |
+| `EffectGroup::SetOpacity` 有两个重载：`float` 与 `IDCompositionAnimation*` | 好消息：淡入淡出可以是 **GPU 原生动画**，不必每帧从 CPU 推进。 |
+| `IDCompositionVisual2::SetOpacity` 不存在，但有 `SetOpacityMode` | 查头文件时注意区别。 |
+| 任务栏厚度实测 **32px** @100% 缩放，且等于 `screen 高 - work 区高` | **不要硬编码 48px**。用 `GetMonitorInfo` 的 `rcMonitor` 与 `rcWork` 实时算。 |
+| `ABM_GETTASKBARPOS` 在本机返回失败 | 不依赖它；实现用 `ABM_NEW`/`ABM_SETPOS`。 |
+| `FindWindow("Shell_TrayWnd")` 可用 | 实测返回 `2560x32 at (0,0)`。 |
+
+### 6.4 COM 生命周期
+
+冒烟测试早期版本崩溃 `0xC0000005`（访问冲突）：`SafeRelease(&dxgiDevice)` 把指针置空后，
+又把它传给后续的 `DCompositionCreateDevice` → 空指针解引用。
+**规则**：指针只在所属作用域结束时释放一次，且绝不早于最后一次使用。
+
+### 6.5 C++ 侧新增的坑（阶段 0-d 编译/运行实测）
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| `ID2D1RenderTarget::FillRoundedRectangle` / `DrawRoundedRectangle` 的重载 | 它们要的是 **`ID2D1Brush*`**，不是 `D2D1_COLOR_F`。传颜色会报 C2665「没有重载函数可以转换所有参数类型」。 | 先 `CreateSolidColorBrush` 再画；填充色将来要做动画，所以画笔按帧创建、不缓存。 |
+| `D2D1::RoundedRect` 的第二个参数 | 是 `D2D1_SIZE_F`（两个半径相等），**不是**两个 float。写 `RoundedRect(rect, 1.0f, 2.0f)` 会编译解析失败。 | 要不同 radiusX/radiusY 时手工填 `D2D1_ROUNDED_RECT` 三个字段。 |
+| `std::swprintf` | 在 MSVC 上是 `swprintf(wchar_t*, size_t, const wchar_t*, ...)`，**必须**带缓冲区大小参数。 | 排错时别把 C2664/C2665 当成参数类型写错，先看头文件原型。 |
+| `setvbuf(stdout, nullptr, _IOLBF, 0)` | **直接触发 CRT 断言**：`2 <= buffer_size_in_bytes`（`setvbuf.cpp` 第 57 行），弹「Debug Assertion Failed」对话框，退出码 `0x80000003`。 | 指定缓冲模式时必须给真实缓冲区；而且**重定向到文件时 `_IOLBF` 会退化成全缓冲**，所以关键输出要么 `fflush(stdout)`，要么别指望它及时落盘。 |
+| 用 `SetCursorPos` + `GetCursorPos` 做自动化测试 | 光标移动与程序自己的指针轮询**互相竞争**，断言结果取决于谁后跑；连续三次断言还会出现「前两次失败、第三次假通过」。 | 把判定逻辑抽成**纯函数**（`IslandWindow::ShouldAcceptPointer`）直接测；物理光标只用来验证「轮询结果与判定一致」这一条不变量。 |
+| 圆角矩形的角部测试 | `(圆心.x, 圆心.y - r)` 这点与圆心 **x 相同**，`dx = 0`，判定恒为真——测了等于没测。 | 角部要用 45° 精确边界点：`圆心 ± r/√2`，两侧各加 ±eps，四个角都测。 |
+| **MSBuild 多节点并行在这台机器上直接坏掉** | `cmake --build ... --parallel`（即 MSBuild `/m`）**必然失败**：只打印 MSBuild 版本头，报 0 错 0 警，退出码 1。绕开脚本直接跑可复现：`MSBuild.exe IslandBar.sln /t:Build /p:Configuration=Debug /m:2` → 退出码 1；`/m:1` → 退出码 0。**不是工程的问题，是这台机器的 `/m` 不可用。** | `build.ps1` 固定用 `--parallel 1`。源码仍并行编译，靠顶层 `CMakeLists.txt` 里的 `/MP`（单进程内部并行）。若将来换 Ninja，这条就自然绕开了。 |
+| `add_custom_command(TARGET ... POST_BUILD COMMAND cmake -E echo "...")` | 会让整个 MSBuild 构建失败**却报 0 错 0 警**；MSBuild 重写命令行后引号与内嵌分号丢失，`cmake -E echo` 返回 1。 | 不要在 POST_BUILD 里放带引号/分号的 `cmake -E echo`。真要后置步骤，写成脚本文件再调用。 |
+| **`Clear` / 所有绘制调用必须在 `BeginDraw`/`EndDraw` 之间** | 这是**最贵的坑**：`d2dContext->Clear(...)` 写在 `BeginDraw` **之前**会被 D2D **静默丢弃**（头文件原话：*"Draw calls can only be issued between a BeginDraw and EndDraw call"*），结果每一帧都是透明，而所有 HRESULT 都返回成功——`Present` S_OK、`EndDraw` S_OK、`Commit` S_OK。窗口挂上去，屏幕上什么都没有，任何 API 都不报错。 | 绘制代码全部放进这一对调用里，**`Clear` 也算绘制**；`BeginDraw` 里不要留空分支。 |
+| **「45 项自检全绿」≠「屏幕上有东西」** | 上面那个坑存在时，自检 45 项**全部通过**，因为那时只覆盖了「API 调用成功」。是肉眼对比（采样胶囊中心像素 `rgb(93,83,91)` 而不是预期的 `rgb(16,16,19)`）才发现的。 | **渲染类改动必须回读像素**。`Renderer::ReadBackFrame()` 从 GPU 拷回一帧，用「胶囊内 alpha>200、胶囊外 alpha==0」这类断言，才是把「API 成功」和「真的画出来了」分开的东西。 |
+
+### 6.6 阶段 0-d 已确认的窗口/合成事实
+
+| 事实 | 实测值 / 影响 |
+|---|---|
+| `WS_EX_NOREDIRECTIONBITMAP` + `CreateSwapChainForComposition` | 可行；窗口无需 layered。 |
+| 交换链 `AlphaMode` | 必须 `DXGI_ALPHA_MODE_PREMULTIPLIED`，否则胶囊外的区域不是透明而是黑色。 |
+| `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL` | 要求 `SampleDesc.Count == 1`。 |
+| `DCompositionWaitForCompositorClock(count, handles, timeoutMs)` | 是**直接导出的函数**（`dcomp.h:231`），不必 GetProcAddress；传 `count=0` 即纯等一帧。本机可用的节拍来源，实测 `compositor clock`。 |
+| `DCompositionCreateTargetForHwnd(hwnd, TRUE, ...)` | 每个 target 只能 `SetRoot` 一次，重复会失败；visual 只创建一次，DPI 变化靠改 transform。 |
+| D2D 上下文 DPI | 固定 96，即 1 DIP = 1 交换链像素；缩放交给 composition visual 的 transform。 |
+| `GetDpiForWindow` | 可用，实测返回 96，与 `GetDpiForMonitor` 一致（manifest 的 PerMonitorV2 已生效）。 |
+| 窗口不抢焦点 | `WS_EX_NOACTIVATE` + `WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE`，两者都要。 |
+| 区域级穿透 | 静息时整体挂 `WS_EX_TRANSPARENT`，指针进入胶囊区域才摘掉；`WM_NCHITTEST` 用**同一个圆角判定**返回 `HTCLIENT` / `HTTRANSPARENT`。 |
+| 窗口尺寸 | **创建后永不 resize**（2560x240 @100%），胶囊/卡片在其内部移动。 |
+
+### 6.7 编码事故：不要用 PowerShell 往返改这个仓库的文本文件
+
+**2026-10-09 22:23，`HANDOFF.md` 被以下三段代码损坏**：
+
+```powershell
+$c = Get-Content $f -Raw      # 按 ANSI(GBK) 读 UTF-8 文件 → 中文变乱码
+$c = $c.Replace(...)
+Set-Content $f -Value $c      # 又把乱码写成 UTF-8 → 原始字节永久丢失
+```
+
+后果：约 10% 的中文字符不可恢复（顿号、冒号等标点被吃成 `?`）。
+修复只能靠「把乱码按 GBK 反向编码再按 UTF-8 解码」救回大部分，剩下的靠人工重写。
+
+**规则**：
+
+1. **改这个仓库里的文本文件，用编辑工具（`edit` / `write`），不要用 PowerShell 的
+   `Get-Content -Raw` + `Set-Content` 组合。** 同一条规则也适用于 `-replace`（它曾把
+   `Notification.cpp` 里的 `s` 替换成 `t`，产出 `windowt.h`、`cttdio`、`MiniJton.h`）。
+2. 若非要用脚本处理，必须显式指定编码：Python 用 `encoding='utf-8'`；
+   PowerShell 用 `[System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)`
+   与 `WriteAllText`，绝不用 `Get-Content -Raw`。
+3. 改完 `HANDOFF.md` / `README.md` 后**立刻验证**：文件应含中文、不应含 `U+FFFD`。
+   一行检查：
+
+   ```powershell
+   python -c "d=open(r'C:\PROJECT\Taskbar\HANDOFF.md',encoding='utf-8').read(); print('FFFD:', d.count(chr(0xFFFD)))"
+   ```
+
+---
+
+## 7. 已完成的工作与证据
+
+### 7.1 工具链安装与验证 ✅
+
+`verify-toolchain.ps1` 全绿：MSVC `14.44.35207`、SDK `10.0.26100.0`、头文件与库全部就位。
+
+### 7.2 冒烟测试通过 ✅
+
+编译 + 链接 + **运行时真实调用**全部成功：
+
+```
+[graphics]   D3D11CreateDevice(hardware) / ID3D11Device5 / IDXGIDevice
+             D2D1CreateFactory(1.3) / ID2D1Device2 / ID2D1DeviceContext2
+[composition] DCompositionCreateDevice / CreateVisual / CreateAnimation / AddCubic
+             CreateEffectGroup / SetOpacity(float) / SetOpacity(anim) / SetEffect
+[text]       DWriteCreateFactory(3) / CreateTextFormat("zh-CN") / CreateFontFallbackBuilder
+[desktop]    APPBARDATA / DPI API / GetDpiForMonitor(96x96)
+             FindWindow(Shell_TrayWnd) / GetMonitorInfo / DwmIsCompositionEnabled
+             CoCreateInstance(CUIAutomation)
+
+RESULT: PASS - compile, link and runtime all good
+```
+
+### 7.3 环境事实
+
+- 显示器 2560x1440 @ 100% 缩放
+- 工作区 2560x1408，任务栏厚 32px
+- DWM 合成已开启
+- 微信 4.0 架构（`xwechat` + `RadiumWMPF`），走系统 Toast
+- `wpndatabase.db` 存在（约 5MB + 856KB WAL）→ 通知拦截无需 MSIX 包身份
+
+### 7.4 阶段 0-d：DComp/D2D 窗口地基 ✅
+
+`src\` 下新增 8 个文件，`island_bar.exe` 编译零 warning（`/W4`），自检全绿、退出码 0；
+常驻模式实测**连续 25 秒以上稳定**，胶囊像素恒定 `rgb(20,19,23)`，胶囊外像素与壁纸完全一致
+（真透明，穿透生效），节拍走 `compositor clock`。
+
+> **子系统已改为 WINDOWS**（`WIN32_EXECUTABLE TRUE` + `/ENTRY:mainCRTStartup`）。
+> 之前是 console 子系统，运行时会在胶囊旁边多一个黑色控制台窗口，作为桌面工具不能接受。
+> 现在双击只出胶囊；从终端运行时经 `AttachConsole(ATTACH_PARENT_PROCESS)` 借用父控制台，
+> 输出照旧能看到；单独跑 `--self-test` 在没有父控制台时会 `AllocConsole`。
+> **注意**：`--self-test` 从终端跑时输出并不走管道，**要落盘必须用重定向**：
+> `cmd /c "island_bar.exe --self-test > log.txt 2>&1"`。若改成 `freopen("CONOUT$")` 会
+> 把重定向一起改掉，日志文件变成 0 字节（踩过）。
+
+**那一轮抓出的问题**（当时 47 项里有 2 项失败）：
+
+1. **角部测试写错了（测试 bug，代码没错）**：断言用的「圆心正上方」的点
+   `(圆心x, 圆心y - r)` 与圆心 x 相同（`dx = 0`），且实际取 `0.999r + 0.01`
+   得到 `dy = 17.992 < r = 18`，其实**在弧内**，却被断言要求判为「弧外」，所以失败。
+   已改成 45° 精确边界点（`圆心 ± r/√2 ± eps`），四个角各测一次。
+2. **穿透判定当时无法覆盖到位（测试手法问题）**：原来用 `SetCursorPos` + `GetCursorPos`
+   驱动实时轮询，光标移动与程序的 50ms 轮询互相竞争，同一组三次断言会出现
+   「前两次失败、第三次假通过」。已把判定抽成纯函数直接测，
+   物理光标只保留一条「轮询结果与判定一致」的不变量检查。
+
+**肉眼验证才发现的大坑**：`Renderer::Render` 里 `Clear()` 写在 `BeginDraw()` **之前**，
+D2D 静默丢弃，于是每一帧都是透明。`Present`、`EndDraw`、`Commit` **全部返回成功**，
+自检 **45 项全绿**——因为那时的断言只覆盖了「API 调用成功」。
+修复之后补了 `Renderer::ReadBackFrame()`，直接从 GPU 拷回一帧来检查像素。
+**结论：渲染类改动必须回读像素，不能只看 HRESULT。**
+
+- **未验证**：多显示器混合 DPI。本机单显示器 100%，`per-monitor` 处理
+  （`WM_DPICHANGED` 后更新 transform）在 150% 缩放下可能偏。
+
+### 7.5 阶段 1：三态动效 + 时钟 ✅
+
+自检全绿（退出码 0），`/W4` 零 warning。`--demo` 三态循环截图实测：
+
+| 状态 | 目标 (DIP) | 屏幕上实测 (px @100%) |
+|---|---|---|
+| 收拢 | 220x36 | **220x37**，居中 x=[1170,1389] |
+| 悬停 | 720x36 | **718x37**，居中 x=[921,1638] |
+| 展开卡片 | 560x132 | **561x133**，居中 x=[1000,1560] |
+
+（宽度差 1~2px 是 `DrawRoundedRectangle` 那圈 1px 描边 + 抗锯齿边缘，不是几何误差。）
+
+卡片内实测渲染出 `20:09` 与中文日期 `周五，10月9日`。
+**阶段 1 新增文件**：`Motion.h/.cpp`（三态 + 插值 + 缓动）、`TextRenderer.h/.cpp`（DirectWrite 时钟）。
+
+#### 被断言挡下来的严重布局错误（值得记住）
+
+早期版本把胶囊**按中心**锚定，想让卡片上下对称膨胀——**做不到**，而且错得很隐蔽：
+
+- 静息胶囊必须贴着工作区上沿（任务栏正下方）；卡片高 132 DIP，中心锚定意味着
+  它还要向上伸出 66 DIP。
+- 工作区上沿之上只有任务栏和屏幕顶端，所以卡片**顶部会被显示器裁掉**。
+- 断言「card fits inside the window」直接失败（`pill y [-26,10]`），暴露了它。
+
+更糟的是同一处还有个**双重偏移**：窗口上沿已经等于工作区上沿，锚点却又减了一次
+`originY`，把胶囊放到了窗口顶部之上 26 DIP——屏幕上完全看不出来，只有断言能发现。
+
+最终改成**按上沿锚定**：所有状态共用同一条顶边，卡片向下张开（像通知从任务栏掉下来）。
+窗口顶边 = 工作区顶边，窗口高 240 DIP（232 卡片 + 余量），每个状态都落在窗口内。
+
+#### 阶段 1 新增的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **无控制台时写 stdout 会直接崩（不是安静输出）** | GUI 子系统程序在没有控制台时，CRT 给的 `stdout` 文件描述符是 **-1**。写它不会安静失败：`fputws`/`fputwc` 会触发 **CRT 断言**（`lowio\isatty.cpp:29`，表达式 `fh >= 0 && (unsigned)fh < (unsigned)_nhandle`），弹出「Debug Assertion Failed」对话框，进程挂住。**这就是前几次「什么都没打印」的真正原因**——不是被吞了，是崩了。 | 每一次控制台写都必须先判断 `_fileno(stdout) >= 0`。本项目全部收敛到 `Log.cpp` 的 `LogAndPrint()` / `PrintLine()`，**不要再直接调用 `std::printf` / `std::wprintf`**。用 `--no-console` 可复现这条断言。 |
+| **日志文件位置** | 曾用 `%LOCALAPPDATA%\IslandBar\`，创建目录被拒时**静默失败**——一个打不开文件的日志比没有日志更糟，因为调用方以为写进去了。 | 改用 `%TEMP%\island_bar.log`（一定可写，无需建目录）。每次运行截断重写，带毫秒时间戳，**每行立即 flush**（这程序会藏掉任务栏，日志不能丢）。 |
+| **低完整性进程动不了任务栏（UIPI）** | DSH 沙箱把 `island_bar.exe` 限制在 **Low 完整性**（0x1000），而 `explorer.exe` 的任务栏是 **Medium**（0x2000）。Windows 的 UIPI **静默丢弃**从低完整性发往高完整性的窗口消息——`ShowWindow`/`SetWindowPos` 返回 0 且什么都不做，`SHAppBarMessage` 返回 0，**没有任何错误码**。 | 隐藏任务栏的代码本身没问题，**必须在普通（中完整性）shell 里运行才能真正生效**。程序启动时会检测并明确报告这一点，不再让人误以为是代码 bug。诊断命令：`--probe-taskbar`（退出码 0 = 能藏，1 = 被 UIPI 挡，2 = 任务栏没恢复）。 |
+| 源码里写宽字符字面量 | 这个文件被 UTF-8 感知的工具反复改写后变成**乱码**，`月` 甚至被替换成 `?`，导致字符串不合法、编译失败。 | 含中文的 **C++** 字面量一律写成 `\uXXXX` 转义（纯 ASCII），这样任何编码、任何编辑器都不会破坏它。`.ps1` 仍然必须纯 ASCII。 |
+| 用窗口坐标充当「工作区相对坐标」 | 窗口上沿从「工作区上方 6 DIP」改成「等于工作区上沿」之后，锚点的 `- originY` 就成了双重偏移。 | 几何量一律标明是**屏幕坐标**还是**窗口内部坐标**；`AnchorForWindow` 现在只接收窗口内部量。 |
+| 只返回 bool 的诊断函数 | `ReadBackFrame` 一度只回答「成功/失败」，失败时每个 HRESULT 都是 S_OK，完全无法定位。 | 诊断函数要报告**具体**失败点（哪个 HRESULT/数值），`ReadBackFrameVerbose` 就是为此加的。 |
+| 把壁纸当成被测对象 | 全屏搜索「深色像素」找胶囊时，壁纸下方的暗带被当成了胶囊，量出 696px 的假宽度。 | 探测/测量要约束到**已知属于被测对象**的范围（要求暗色像素段跨越 x=1280 岛屿中心）。 |
+
+### 7.6 隐藏原生任务栏（默认行为）✅ 代码完成 / ⚠️ 当前会话无法验证
+
+新增 `NativeTaskbar.h/.cpp`：
+
+- 启动时隐藏 `Shell_TrayWnd`（主任务栏）+ 所有 `Shell_SecondaryTrayWnd`（多显示器）+ `TrayNotifyWnd`。
+- 退出时**必然恢复**。`Restore()` 只在「确实是我们隐藏的、且原本是可见的」时才恢复，
+  用户自己设置了自动隐藏或手动隐藏的，不会被我们强行打开。
+- 主循环每约 5 秒 `EnsureHidden()` 一次：Explorer 重启、显示器变化、按 Win 键都会让
+  任务栏重新出现，这里会再隐藏一次，并打一行日志。
+- `--keep-taskbar` 保留原生任务栏（开发时对比用）。
+
+#### ⚠️ 关键环境事实：DSH 会话里启动的一切都是 Low 完整性
+
+**实测（可复现）**：从这个 DSH 会话启动的任何子进程都是 **Low 完整性**，
+包括 `cmd.exe /c` 分离启动的进程。explorer 的任务栏是 **Medium**：
+
+```
+integrity: island_bar = low (0x1000), taskbar = medium (0x2000)
+```
+
+UIPI 因此**静默丢弃**全部五种隐藏方法（`ShowWindow` / `SetWindowPos(SWP_HIDEWINDOW)` /
+移到屏幕外 / `WS_EX_LAYERED` alpha=0 / `ABM_SETSTATE`），五个都返回 0，**没有任何错误码**。
+低完整性连 `GetPixel` 都拿不到屏幕（回读全是无意义残留）。
+
+**所以在会话降权的环境（本会话、任何沙箱、某些 IDE）里，这一项永远验不了。**
+必须在**会话外**的普通 shell 里跑——例如 Win+R，或从开始菜单打开 PowerShell/cmd，
+**不是**在 DSH 里再起一个 cmd（那样一样继承 Low）。
+
+诊断命令（退出码有意义：0 = 能藏，1 = 被 UIPI 挡，2 = 任务栏没恢复）：
+
+```powershell
+# PowerShell：必须用调用运算符
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+```
+
+```bat
+REM cmd.exe：不能写 &，直接引号调用
+"C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+```
+
+**万一把任务栏弄没了**（被强杀、崩溃）：
+
+```bat
+taskkill /f /im explorer.exe && start explorer.exe
+```
+
+### 7.7 阶段 2a：通知推送通道 ✅
+
+新增 `Notification.h/.cpp`（模型 + 有界存储）、`NotificationPipe.h/.cpp`（管道服务器/客户端）、
+`MiniJson.h/.cpp`（手写 JSON 读取）。
+
+**协议**（完整定义）：`uint32 小端长度` + `length` 字节 UTF-8 JSON；响应同格式。
+用长度前缀而不是按行分帧，因为正文里可以有换行。
+
+**实测证据**（跨进程，两个 island_bar 实例）：
+
+```
+bar  : notifications: listening on \\.\pipe\IslandBar.Notify
+send : island_bar.exe --notify "Build finished" --body "0 errors, 3 warnings" --app DSH
+reply: {"ok":1,"received":1}
+bar  : notification: [DSH] Build finished
+```
+
+屏幕上卡片长高并渲染出「10:57 / 周五，10月9日 / DSH / Build finished /
+0 errors, 3 warnings」（截图 `docs/notification-card2.png`）。
+
+**未读与点击**：通知到达时卡片打开并保持显示 6 秒（`kNotificationDisplayMs`）；
+`--sticky` 的通知一直留着。**点一下胶囊即标记全部已读**并收起卡片——
+窗口除胶囊外全是穿透的，所以点得到就说明点在岛上。实测：
+
+```
+send : island_bar.exe --notify "Click me" --body "sticky until read" --app Test --sticky
+bar  : notification: [Test] Click me
+click: (post WM_LBUTTONUP to the island window)
+bar  : notifications: 1 marked read (click)
+```
+
+**卡片文字确实画出来了（GPU 回读断言）**：同一帧内比较「卡片中央（有通知文字）」
+与「卡片左侧条带（同填充、无文字）」的平均亮度：
+
+```
+sample geometry   card x=[1000..1560] text x=[1150..1410] blank x=[1018..1070]
+centre(text)=25.47  left strip(no text)=12.46  delta=+13.02      ← 文字被画出来了
+without notification: centre=12.46 left=12.46 delta=+0.00        ← 对照组回到纯填充
+```
+
+### 7.8 阶段 3 第一轮：专辑封面 + 播放控制 + 进度条 ✅
+
+新增 `WicImage.h/.cpp`（WIC 编解码）与 `CardLayout.h`（控件位置）。
+
+**`CardLayout.h` 存在的理由**：同一个矩形有**三处**要一致——渲染器画按钮、窗口判命中、
+主循环判「这一击是按钮还是别处」。任何一处对不上，症状都像渲染 bug。所以只有一份定义，
+和 `Geometry.h` 那条「只有一个圆角判定」是同一个原则。
+
+**专辑封面**：SMTC 的缩略图流 → 读全 → **重新编码成 ≤128px 的小 PNG**（体积从几百 KB 降到几 KB）
+→ 交给渲染器解码成 BGRA 画上去。缩图在**轮询线程**做，UI 线程只拿小图；
+解码按 `artworkRevision` 缓存，只在换曲时做一次。非正方形封面按长边等比缩放再居中裁切，
+不拉伸。
+
+### 7.9 阶段 3 第二轮：三态 + 在线歌词 ✅
+
+按用户确认的设计重做音乐交互，**三态**：
+
+| 状态 | 何时 | 形状 | 显示 |
+|---|---|---|---|
+| `Collapsed` | 没放歌 | 220×36 | 时间 + 日期 |
+| `MusicStrip` | **放歌中、鼠标没移上去** | **520×36**（同高、加宽） | 当前歌词，**单行滚动**；没歌词就显示歌名 |
+| `Hover` → `Expanded` | 鼠标移上去 | 720×36 → 卡片 | 见 7.10 |
+
+**歌词来源**：网易云公开接口两步——`/api/search/get` 搜索取 `songs[0].id`，再
+`/api/song/lyric` 取 `lyric` 字段（LRC）。**全程在 `LyricsProvider` 的工作线程用 WinHTTP 抓**，
+UI 线程只读 `Current()` 指针。抓不到（没歌词／搜索无结果／超时／接口变了）一律当「没有歌词」，
+退回显示歌名——这是正常结果，不是错误。
+
+**本轮最重要的设计教训：`LyricNeedsScroll()` 只有一份。**
+渲染器用它决定「居中还是滚动」，主循环用它决定「要不要继续推进滚动量」。
+这两处以前各算各的、阈值还不一样（`- 24` vs `- 16`），结果**渲染器居中、循环却在滚**——
+文字会莫名横跳。**同一个判断出现在两处，就一定会漂移。**
+
+自检新增 `[lyrics (LRC parse and line lookup)]`（26 项）与歌词条的 GPU 像素断言
+（滚动时前缘亮度 71.23 → 59.62、短行不移动、圆角内只有填充色）。
+
+### 7.10 阶段 3 第三轮：卡片按 Windows 媒体弹窗重做 ✅
+
+用户发来 Windows 11 媒体弹窗的截图，要求「鼠标移上去跟图片一样」。卡片完全照该弹窗重做：
+
+```
++--------------------------------------------------+
+| ● QQ音乐                              Playing     |  应用行
+|  +--------+  东大街                                |
+|  |  封面  |  张超洋 · 东大街                        |  封面 + 标题
+|  +--------+                                       |
+|  01:33  [=====================]           05:40   |  时间 + 进度条（时间在上方）
+|            [⏮]      ( ⏸ )      [⏭]                |  三颗控制按钮
++--------------------------------------------------+
+```
+
+**卡片尺寸 560×132 → 400×232。** 旧的 132 DIP 高只能装下封面或文字，装不下两者，
+更装不下弹窗的五层结构。窗口本身仍是 240 DIP 固定高度、**永不 resize**——这一点是新尺寸的
+硬约束，`TestMusicCardLayout` 就在断言这条。
+
+**背景是模糊的专辑封面。** 做法是把封面用 WIC **降采样 12 倍再升采样**回来（Fant 插值），
+这是一次廉价的高斯近似；再叠一层 0.62 的深色 scrim 保证文字对比度。真正的像素着色器高斯
+在这个尺度下没人看得出区别。有背景时卡片填充改为 0.55 半透明，否则会把背景盖住。
+
+**播放/暂停改用几何图形绘制，不用字形。** 文本字体里的 `⏸`/`▶` 带侧边距、坐在基线上，
+放进小圆里**明显偏心**，看起来像字符而不像控件。三角形和两根竖条是精确的。
+上一首/下一首仍用 `⏮`/`⏭`（这个尺寸下正常）。
+
+新增 `musicTitleFormat_` / `musicSubtitleFormat_` / `glyphFormat_`：卡片文字是**左对齐**的，
+而 `appFormat_` 是居中的（通知卡片所有行都居中），复用会让曲名漂到自己那一列的中间。
+
+自检新增 `[music card layout]`（22 项）。它当场抓到三个真 bug：
+
+1. 封面和进度条那一行**重叠**（`01:33` 被画在封面底下，就是用户会看到的「显示有问题」）。
+2. 控制按钮行高 40 DIP 而声明的点击目标只有 38——**点圆盘外面一点也会被接受**。
+3. 时间标签放在进度条下方时会被卡片下边缘挤掉（参考图是时间在上）。
+
+### 7.85 **「鼠标移上去有的显示不全」—— 窗口区域按静止那排算，少了 102 DIP** ✅
+
+用户原话（附两张截图，第二张用红框圈出最右边那个被撑开的按钮）：
+
+> **灵动岛 右侧的应用图标 鼠标移上去有的显示不全**
+
+#### 根因：把"最坏情况"写进了一处几何，没写进另一处
+
+按钮静止时 30 DIP，指针移上去会撑开到 **132** 露出窗口标题，并把**它后面的按钮一起推右**。而窗口区域的
+右边界是这样算的：
+
+```cpp
+rowRight += fitting * kTaskIconButtonDip + (fitting - 1) * kTaskIconGapDip;   // 全按静止的 30 算
+```
+
+于是撑开多出来的 **102 DIP 落在窗口区域之外**，被 `SetWindowRgn` 的**硬边**切掉 —— 切掉的正是被撑开
+那个按钮**自己的标题**。**命中判定**那一侧其实早就算上了撑开宽度（`TaskRowContains` 用的是
+`..., amount = 1.0f`），所以是"画"这一侧少了，症状只出现在视觉上。
+
+自检把差值量了出来：
+
+```
+8 icons: the resting row ends at 1666 DIP, the opened one at 1768 DIP (+102); the region ends at 1768 DIP
+```
+
+修前区域停在 **1666**（= 静止那排）✓ 与"硬边切在标题中间"完全吻合。
+
+#### 修法
+
+区域右边界改成**问同一个函数**：`TaskIconButtonAt(restingIsland, 最后一个, 数量, 最后一个, 1.0f)` ——
+与命中判定用的是同一个式子，两边不可能再不一致。规矩不变：**画在哪儿 / 盖到哪儿 / 点到哪儿是同一句话。**
+
+#### 新增诊断：`ISLANDBAR_HOVER_ICON=n`
+
+`-1` 表示"最后一个图标"。这台机器的脚本**动不了指针**，而这条症状只存在于"指针停上去"的那一刻 ——
+所以加了这个：不动指针，直接把指定按钮撑开并拍照。
+
+证据：`docs/icon-row-opened-title.png`（最后一个图标撑开：标题 `检索文件夹并继…` 完整、按钮圆角完整，
+没有硬边）。
+
+自检 559 → **561** 项全绿（新增：撑开的按钮确实比静止宽；区域盖得住"最后一个撑开"的那一排）。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| 一个方向上"最坏情况"要写进**每一处**几何推导 | 命中判定算了撑开宽度、区域没算，于是两边对不上 | 同一句话的三处里只要有一处用了不同的量，症状就出现在**画**或**点**的一侧 —— 这次是画 |
+| 用同一个函数问，别复制算式 | 区域里原本是把 `n*30+(n-1)*4` 抄了一遍 | "最右能到哪"这类问题只能有一个实现，否则下次改常量又会漏一处 |
+
+### 7.84 **「开始菜单按钮不好用了」—— 合成按键打不开开始菜单（四次实测），原因指向进程完整性级别** ⚠️→已记录
+
+用户原话：
+
+> **现在点击开始菜单的按钮不好用了**（截图：红框圈住岛左侧的 ⊞ 按钮）
+
+这是 FEATURES 五之二里用户明确"先记录、最后再改"的那一项，现在回来处理。**结论是"这条路本身不通"，
+不是"参数没调对"** —— 下面是测出来的，不是推的。
+
+#### 一、先确认点击链路没坏
+
+日志（用户 01:53 那次运行）：
+
+```
+start menu: modifiers before -- ctrl=0 shift=0 alt=0 win=0 lmb=0
+start menu: Ctrl+Esc was sent
+start click: sent
+```
+
+点击**命中了按钮**（`start button: ... button x [1132, 1162] y [9, 39]`），修饰键**全为 0** ——
+当年最可疑的 `lmb=1`（鼠标键还按着）**已排除**。所以"点了没反应"发生在**更下游**。
+
+#### 二、**真正的原因：这个环境把「项目目录里的进程」降级到低完整性级别**
+
+这一条是整件事的答案，而且它**推翻了我上一轮的结论**（我当时说"合成按键这条路本身不通" —— 错）。
+
+实测（同一份 exe，同一台机器，同一个 shell）：
+
+| 从哪里启动 | 进程的完整性级别 | 依据 |
+|---|---|---|
+| `C:\PROJECT\Taskbar\IslandBar\build\…\island_bar.exe` | **LOW** | bar 自己打印 `integrity: LOWER than the shell's`；用 PowerShell 读它自己的 token 也是 LOW |
+| 同一份 exe **复制到 `%TEMP%` 或 `C:\Users\<用户>\IslandBar\`** | **MEDIUM** | bar 自己打印 `integrity: same as the shell's` |
+| 用**任务计划程序**启动的 `cmd.exe`（对照） | MEDIUM | `whoami /groups` |
+| Explorer / 本 PowerShell | MEDIUM | 同上 |
+
+所以降级**不是**代码的问题、**不是**启动方式的问题（双击、Win+R、任务计划程序我都试过，全是 LOW），
+而是**镜像所在的目录**决定的：这个环境对项目目录里的可执行文件一律沙箱化降级。
+
+而低完整性级别下 UIPI 会丢弃发往 Explorer 的**窗口消息与合成输入** —— 正好同时解释了两件事：
+`native taskbar: CANNOT BE HIDDEN`（隐藏任务栏失败）和开始按钮点了没反应。**用户无论怎么启动都没用**，
+因为问题不在启动方式。这也是为什么"还是不好用"。
+
+#### 三、在正常级别下实测：开始菜单**确实打开了**
+
+把副本放到项目目录外（MEDIUM）后重跑全部五条路线：
+
+| 路线 | 结果（前台窗口来自 shell 的观察） |
+|---|---|
+| 1 `SendInput` Ctrl+Esc，四事件**连发**（当时的默认） | **什么都没有** —— 零长度的一次"按键"不被当作组合键 |
+| 2 `SendInput` Ctrl+Esc，按下**保持 40ms** | 前台出现 UWP 宿主窗口 ✓ |
+| 3 `keybd_event` Ctrl+Esc，保持 40ms | 同上 ✓ |
+| 4 `keybd_event` Win，保持 40ms | 同上 ✓ |
+| 5 激活 StartMenuExperienceHost | `ShellExecute` 返回 42（成功），但前台是 `ApplicationFrameWindow`，不是开始菜单 |
+
+并且**截图为证**：`docs/start-menu-opened.png` 是"bar 自己按下 ⊞ 之后 1 秒"的屏幕 ——
+Windows 11 开始菜单（已固定/推荐、用户头像）**完整地开着**。
+
+顺带证实同一堵墙也被推倒：`island_bar.exe --probe-taskbar` 在项目目录外返回 **0**（"可以隐藏任务栏"），
+而在项目目录里历次都是 1（被 UIPI 拦下）。
+
+#### 四、这一轮的交付
+
+* **默认路线改成"按下保持 40ms"**（`SendInputHeld`）：实测里只有保持住的组合键能让开始菜单出现，
+  连发的那条什么也不做。仍保留 `ISLANDBAR_START_ROUTE=1..5` 可切换。
+* **完整性级别写进日志**：启动时一行 `integrity: …`（`--keep-taskbar` 时以前是完全没有信号的），
+  点击失败时再写一次并说明原因 —— 被降级的副本现在会**自己说**自己是被降级的。
+* **可用的副本**：`%USERPROFILE%\IslandBar\`（exe + 两个快捷方式：保留任务栏 / 替换任务栏）。
+  它跑在中完整性级别，开始菜单与任务栏能力都可用。
+* **一条操作规则**（已同时写进 START-HERE）：**要从项目目录外运行这个 exe**，否则它会被降级，
+  不能隐藏任务栏、不能打开开始菜单 —— 而且现场没有报错。
+
+#### 五、我上一轮错在哪
+
+我把"在 *我的* 环境里五条路线全部失败"当成了"这条路本身不通"，还写进了 FEATURES。
+实际上我的环境里 **bar 进程一直是 LOW**（我量过 shell 是 MEDIUM，就想当然地以为子进程也是）。
+**教训：当"多个不同做法全部失败"时，先怀疑共同前提，而不是逐个否定做法** —— 这次共同前提就是
+进程的完整性级别，量一行日志就能看出来。已在下面留了断言与日志，避免下次再犯。
+
+#### 六、仍未做
+
+* **真人在正常级别下手点一次 ⊞**：本轮的证据是"bar 自己按"（走的是同一个函数），
+  缺少最后一步人手点击的确认。
+* **`uiAccess`**（FEATURES 的 C 项）仍然需要，用途不变：点击**管理员权限**窗口。
+
+### 7.83 **「点击收回的时候 停一会再消失」—— 揭示的算术多算了 36 DIP** ✅
+
+用户原话（第二次同一条症状，但描述更准了）：
+
+> **还是有这个问题 点击收回的时候 停一会再消失**（截图：栏下挂着一条磁贴顶部的带子）
+
+7.77～7.82 六轮都在这个动画上：布局、曲线、时长、赋值顺序、卡片生命周期。**这一轮是算术。**
+
+#### 根因：裁剪高度用了"动画盒子的高度"，而那个盒子从 36 起跳
+
+```cpp
+const float animatedHeight = card.rect.bottom - card.rect.top;   // 36 .. 250
+card.rect.bottom = cardTop + animatedHeight;                      // 裁剪就用它
+```
+
+盒子在近端**就是胶囊**（36 DIP），远端才是卡片（250）。所以：
+
+| | 后果 |
+|---|---|
+| **近端留了 36 DIP 的底** | 收起到最后，可见高度是 36 而不是 0 —— 也就是**面板顶部内边距 + 第一行磁贴的上沿**一直挂在栏下 |
+| **ease-out 的尾巴几乎不走** | 0.24s 的收回里，最后 70ms 只走 6 DIP；那条 36 DIP 的带子**看上去完全静止** |
+| **安顿后锁存解开** | 带子**一帧消失** |
+
+三件事合起来正是用户那句话，而截图里那条带子的高度**正好是胶囊的 36 DIP**。
+
+#### 修法
+
+`揭示量 = 卡片高度 × (盒高 − 胶囊高) / (卡片高 − 胶囊高)`，两端分别落到 **0** 和 **250**；
+并且**揭示为 0 时必须跳过绘制** —— 空矩形不是裁剪：D2D `CreateRectangleGeometry` 会失败、
+没有 layer 被压入，面板反而会以**全尺寸**画出来。映射抽成 `OuterCardRevealDip()`（有断言）。
+
+#### 实测（慢放 6×，逐帧裁到栏下 48 DIP，`docs/panel-retraction-tail.png` / `panel-open-tail.png`）
+
+```
+收回尾巴: frame20 半行磁贴 → 22 只剩瓦片上沿 → 24 细条 → 25 更细 → 26 一两像素 → 27 极淡 → 28 无
+展开起点: frame0-6 栏下什么都没有 → 8 一丝 → 10 瓦片背景出现 → 12/16 继续长
+```
+
+两端都成了**从无到有 / 从有到无**，不再有"卡住不动然后消失"。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **动画的"行程"不是"可见量"** | 盒高区间 [36, 250]，卡片可见量区间 [0, 250]，差一个 36 的底。 | 把动画量映射成画面量时，**先把两端的值写出来**：两端必须正好是"全无"和"全有"，中间再谈曲线。 |
+| **缓动的尾巴决定"停"** | ease-out 的尾端只走几个 DIP；可见量再带一个地板，那段就是**严格静止**。 | "看起来停住了"要查**可见量的变化率**，不是查帧率（帧率这几轮一直是干净的 6.1ms）。 |
+| **空裁剪不是裁剪** | 高度 0 的矩形 → 创建失败 → 没有 layer → 全尺寸画出来。 | 要"什么都不画"就**显式跳过绘制**，别让裁剪去表达"没有"。 |
+
+自检 **559 项全绿**（新增 4 条揭示断言）。快照：`backups/…-outer-card-reveal`。
+
+### 7.82 **「第一次顺滑，再点就没有动画」+「时间不见了」—— 又是「意图 vs 事实」，两处** ✅
+
+用户原话：
+
+> **只有第一点击的时候顺滑，再点击收回去和展开就没有动画了 而且点击弹窗后 灵动岛里的时间没有了**
+
+三个独立缺陷，两个症状各有各的根因。**注意：都不是上一轮引入的**，是读了代码 + 实测定位的。
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| **a** | 收起来是**一帧消失**（读作"没有动画"） | 绘制条件 `frame.systemPanelOpen && frame.state == Expanded`。`systemPanelOpen` 是**请求**，按下第二次时立刻变 false；`frame.state` 是**目标**，收起一开始就已经是 resting 状态。两个都为假 → **整个收起动画期间面板根本不画** | 新增 `FrameState::panelCardUp`：**锁存**，从按下到卡片收完一直为真；绘制改用它 |
+| **b** | 再点开/再收起**连状态都没变**，所以没有过渡可动 | 指针就停在刚点的那个按钮上 → `pointerInside=true`。请求撤销后，策略里**没有任何规则匹配 `Expanded` + 指针在内**（`ShouldPromoteToTaskbar` 只从 Collapsed/MusicStrip 提升，`ShouldReturnToResting` 又要求指针在外）→ 状态永远停在卡片上 | `ShouldPromoteToTaskbar` 把 `Expanded` 也算作来源（通知仍然优先，由 `notificationActive` 挡在上一条） |
+| **c** | 打开面板后**灵动岛里没有时间** | 时钟在卡片状态下被**整块跳过**——那是当年治"屏幕中间浮着一个时钟"的手段——可胶囊在**每种状态**下都会按静止矩形画出来，于是胶囊里留了一个洞 | 卡片状态下把时钟画进**胶囊自己的盒子**，并用 **Compact** 样式 |
+| **d** | 收起之后**岛下面留一条面板残影**（用户第二次报告，附截图：一排磁贴的顶部悬在栏下） | `Motion::FromState()` 无条件返回"上一个目标"，**过渡结束后它永远是 Expanded**。于是调用方那句"这次过渡涉及卡片吗"（`state == Expanded \|\| FromState() == Expanded`）**在第一次开卡片之后永远为真**。这个陈旧标志一直存在，只是以前没人依赖它的"假"；本轮的锁存（a）依赖了 → 面板在收起完成后**继续被画**，裁剪高度只有 36 DIP，正是那条残影 | `FromState()` 只在**过渡进行中**返回来处，安顿下来后返回"现在所在的状态" |
+
+#### c 的第二层：样式也要换
+
+第一版只换了盒子，实测**日期和时间叠在一起**：`ClockStyle::Card` 是两行（时间 + 日期），而它的排版是
+按传入盒子推的（`DrawClock` 里写得很清楚），给它一个 36 DIP 的胶囊就把两行挤进三分之一高度。
+卡片上现在**没有任何地方**显示日期，所以胶囊显示**时间单行**。
+
+#### c 的第三层：又一次 `state` 是"目标"
+
+把判断写成 `state == IslandState::Expanded` 之后，**收起过程中的每一帧**都掉进另一个分支：
+`state` 已经是 resting，于是时钟被画进 `box`——**动画中的、卡片大小的盒子**——浮在屏幕中间，
+而胶囊又空了。改成 `frame.outerCardUp`（本文件自己对"现在这个矩形是不是卡片"的叫法）才对。
+**同一个坑，一轮里踩了两次。**
+
+#### d 的来历：我的锁存把它暴露出来，而它比我的锁存更早
+
+缺陷 a 的锁存写的是"面板归我，直到**没有卡片在场**"（`!frame.outerCardUp`），而 `outerCardUp` 用的正是
+那句被 `FromState()` 污染的判断 —— 于是锁存**永远解不开**，面板收完之后继续被画：裁剪高度留在最小
+（= 胶囊的 36 DIP），画出来就是**栏下一条磁贴残影**。用户截图里正是它。
+
+真正的缺陷是"事实"这个概念的失效，不是锁存：`FromState()` 回答的是"上一个目标"，
+**它没有"过渡结束"这个状态**。修在源头（`FromState()` 在安顿后返回当前状态）之后，
+`outerCardUp` 才第一次成为它注释里宣称的那个东西 —— 一个**能变回假**的问题。
+
+实测（新构建，自动开→关→开→关，逐帧存图）：
+
+```
+收起过程中（frame-027）: 磁贴行可见、底边被裁 —— 正在收回
+收起之后  （frame-040）: 只有壁纸，没有任何残影
+第二次收起之后（frame-091）: 同上
+```
+
+对照图：`docs/panel-strip-left-behind.png`（上：收起中，下：收起后）。
+
+#### 实测（慢放 6×，自动开→关→开→关四段，指针在栏外）
+
+```
+open : h 36.9 → 101 → 151 → 188 → 215 → 232 → 243 → 248 → 250   opacity 0.35 → 1.00
+close: h 237 → 150 → 93 → 59 → 42 → 36     且 panel=1 —— 面板在收起过程中确实被画（474 帧）
+```
+
+指针停在栏上时的那条路径（缺陷 b）**无法在本机实测**：那需要把指针钉在按钮上，而这台机器是用户
+正在使用的 —— 我第一次试着移动指针就与用户的鼠标打架了（日志里能看到坐标乱跳），所以停手。
+那条路径由**自检的策略断言**覆盖：`NextShape` 是帧循环调用的同一个纯函数。
+
+#### 自检 551 项全绿，新增
+
+* 策略（表格两条）：卡片失去理由后，**即使指针在栏上**也要放掉 → `Hover`
+* 策略（`PointerContext` 三条）：面板开着时握住卡片 / 面板请求撤销后放掉 / 通知仍然握住
+* **像素**：卡片在场时胶囊**仍画着时钟**（中心 27.95 vs 空白 12.46）——这条在"一行时钟都没有"的
+  坏代码上会失败
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"请求"和"事实"这一轮又栽两次** | `systemPanelOpen` 是请求；`state` 是目标；`outerCardUp` / `panelCardUp` 才是事实。 | 问"屏幕上现在是什么"只能用事实量。**这条已经写进本文件第 5 次了，仍是本轮最大的时间开销。** |
+| **一个锁存省掉两个 bug** | 面板的"收起没动画"和"再点没动画"是同一个缺失概念的两次表现：**卡片归属者**（谁开的、谁负责收）。 | 有"请求 + 生命周期"的地方就显式记一个归属者，不要让两个布尔去推。 |
+| **跳过绘制 ≠ 回到原样** | 去掉时钟治好了"第二个盒子"，代价是胶囊里空了一块 —— 而胶囊一直都在画。 | 关掉一个绘制前先问：**它原来占的地方现在归谁？** |
+| **跨权限启动的进程要在同权限下收回** | 我用 `[Process]::Start` 起的那次运行没被杀掉：屏幕上留了 6 分钟 bar，而且**没带 `--keep-taskbar`**（因为那次是沙箱内运行的，参数和环境都没传进去），还试图隐藏任务栏（被 UIPI 拦下）。 | 跑完**每次**都 `Get-Process island_bar` 确认；用 `scripts/capture-card.ps1`（自带 finally 收尾）而不是手写启动。 |
+
+#### 本轮未做
+
+* **通知卡与音乐卡在收起时同样是"一帧消失"**：它们的绘制条件也用 `state == Expanded`，根因同类。
+  要一并修需要把"卡片归属者"变成显式概念（本次只给面板加了锁存），改动面比本轮该有的更大。
+* 真人鼠标操作下的收放观感仍需用户确认。
+
+自检 **555 项全绿**（含缺陷 d 的 4 条 `FromState` 断言）。快照：`backups/…-panel-lifecycle-and-pill-clock`
+（缺陷 a–c）、`backups/…-fromstate-and-strip`（缺陷 d）。
+
+### 7.81 **「弹出动画卡卡的」—— 四个独立缺陷，全部量出来** ✅
+
+用户原话：
+
+> **这个弹出动画 卡卡的 解决一下**（附面板打开后的截图一张）
+
+7.77～7.80 四轮改的是「每帧重排 → 固定矩形」「曲线换成 quintic」「时长 0.26→0.36」
+「`outerCardUp` 赋值顺序」，**都没解决**。这一轮换了做法：先把「过渡」本身变成可测的，
+再动手。
+
+#### 一、先造工具（这是本轮真正的进展）
+
+沙箱动不了指针，所以过渡没法手工触发。现在的三个环境变量把这件事变成可复现的：
+
+| 变量 | 作用 |
+|---|---|
+| `ISLANDBAR_PANEL_MS` / `ISLANDBAR_PANEL_CLOSE_MS` | 定时开、定时关系统面板 —— 不需要任何输入 |
+| `ISLANDBAR_SLOWMO` | 把所有过渡**时长**乘一个系数（**不是**改帧间隔，见 7.78） |
+| `ISLANDBAR_TRACE_CARD` | 卡片过渡期间**逐帧**打印：帧间隔、缓动值、卡片矩形、内容不透明度、窗口区域 |
+
+配套脚本 `scripts/capture-card.ps1`：连续截屏 + 拼成一张接触表（一张图看完整个过渡）。
+两个沙箱外的坑也一并记下：
+
+* `Start-Process` 在这个环境里报 *"cannot be run completely because the system cannot find all the
+  information required"*，**不说是哪个文件**。改用 .NET `ProcessStartInfo` +
+  `UseShellExecute=$false` + 显式 `WorkingDirectory` 就好了。
+* 逐帧**存盘**比采样间隔还慢：第一版每 25ms 采一帧、实际 ~100ms 一帧，2.16s 的过渡只拍到 4 张。
+  改成**先存内存、最后拼图**，实测 49.8ms/帧 → 与设定一致。
+
+#### 二、先排除「掉帧」
+
+放慢 20 倍跑一次，把 1188 帧的间隔统计出来：
+
+```
+frames=1188  span=7.38s
+delta: min=3 max=188 avg=6.21
+    5 ms : 115      6 ms : 872      7 ms : 187      其余个位数
+non-monotonic height steps: 0   (h: 36 → 250)
+```
+
+**帧间隔均匀（~6.2ms ≈ 161fps），高度单调递增，只出现一次 188ms 的尖峰。**
+所以"卡"**不是**掉帧。前四轮一直在这一层找，方向就错了。
+
+#### 三、真正的四个缺陷
+
+| # | 现象 | 证据（都是量出来的） | 修法 |
+|---|---|---|---|
+| **a** | 面板**底部被硬切 42 DIP**、齿轮按钮根本没画 | 用户静图：面板 x853..1372 **y50..257**；渲染器画的是 y50..**300**。区域底边 = `shape.rect.bottom + 2` = **258**，因为 `shape` 是**动画中的岛盒**（底边永远比卡片高 42） | 区域改从**静止胶囊**底边推卡片顶边，并按**整张卡片**取高度 |
+| **b** | 揭示是「从**左上角**斜着擦进来」 | 裁剪矩形直接取自动画盒，**宽度也在动**（220→520）。20% 处只露出左边 280px × 顶部 79px，磁贴被斜着切 | 裁剪宽度**钉死**面板最终宽度，只留底边一条线往下走 |
+| **c** | 整段动画面板**半透明**，最后一帧「啪」一下变实 | `contentOpacity = IsAnimating() ? 0.35 : 1.0`。面板底色 alpha = 0.97×该值 → 全程 34%，结束帧跳到 97% | 跟随动画自己的缓动值：`0.35 + 0.65 × eased` |
+| **d** | 「生硬」——曲线的**形状** | 164fps / 0.36s / 214 DIP 下逐段每帧位移：`EaseInOutQuint` = 前 30% 只走 **1.4 DIP**，中间三段 **12.2 DIP/帧**，尾部又停死 → **停-窜-停** | 卡片过渡全部改 **EaseOutCubic**（首帧最快、单调减速），**删掉** `EaseInOutQuint` |
+
+#### 四、顺带发现：同一句话的另外两遍
+
+「画在哪儿 / 区域盖到哪儿 / 点到哪儿算」是同一件事的三个说法 —— 这次**三处都不一致**：
+
+| # | 现象 | 证据 | 修法 |
+|---|---|---|---|
+| **e** | 窗口区域盖不住面板（= a） | 区域底 258 vs 卡片底 300 | 见 a。顺带 `SetWindowRgn` 从**每次过渡 ~300 次**降到 **3 次**（实测 `window region: 3 applied in total`） |
+| **f** | 点瓦片**点错行** | `SystemTileAtScreen` 用 `motion_.Current()` 的顶边（**6**）当卡片顶边，实际卡片顶边是 **50** → 整体高 44 DIP：点第一行报第二行 | 用渲染器同一个矩形（静止胶囊底边 + gap，520×250） |
+| **g** | 面板**最左一列瓦片 + 整条底边点不动** | 穿透判定只测 Expanded 状态自己的**居中盒** x1020..1540 y6..256，而卡片在 x**853**..1373 → 左列完全在外 | 穿透判定增加「卡片矩形」这一支（`ShouldAcceptPointer(..., cardLeftDip)`） |
+
+**修好后的静图**（`docs/panel-open-fixed.png`）：面板底部有圆角、齿轮按钮在，
+区域覆盖 x853..1373 y50..300，与渲染器一致。
+**过程图**：`docs/panel-open-animation.png`（48 帧接触表）；修前用户的截图存为
+`docs/panel-open-before.png` 作为对照。
+
+#### 五、自检新增（538 → 546 项，全绿）
+
+* 打开时区域必须**盖到卡片底边**（旧断言写的是 `kPillTopMarginDip + kExpandedHeightDip`
+  ——**那正是有 bug 的那条线**，所以旧断言在坏代码上是过的；新断言按渲染器的矩形算）
+* 打开时区域必须覆盖卡片**整宽**
+* **过渡期间区域不得移动**（半开的卡片与全开的卡片必须给出同一个区域）—— 这条直接锁住 e
+* 每块瓦片「画出来的中心」必须被穿透判定**接受**（`ShouldAcceptPointer`）—— 锁住 g
+* 卡片瓦片确实**落在** Expanded 居中盒之外 —— 把"为什么必须单独加卡片"写进测试
+* 卡片过渡的曲线**不得加速**、且**最长的一帧在开头**（对 `CurveFor` 采样 60 步）—— 锁住 d
+
+#### 六、教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **「卡」有三种，先分清** | 掉帧 / 每帧内容都在变 / **动画的形状本身**（曲线）。前四轮都在改时长，而问题在形状。 | 用户说「卡」时先问：帧没跟上？内容在抖？还是**它本来就这么动**？三者修法完全不同。 |
+| **对称 S 曲线天生就是「停-窜-停」** | quintic 峰值斜率 3.75，两端几乎不动、中间几帧走完。**把时长调长只会把停和窜都拉长。** | 弹出/滑入用**减速**曲线（首帧最快）。S 曲线适合"循环往复"，不适合"出现"。 |
+| **阶跃的不透明度 = 一次肉眼可见的「啪」** | 0.97×0.35=0.34 → 0.97 在同一帧内完成。 | 凡是和动画**同时**存在的变化量（不透明度、颜色、缩放），都要跟同一个缓动值走。 |
+| **「画在哪儿/盖到哪儿/点到哪儿」是一句话的三遍** | 本次三处都不一致：区域 258、瓦片高 44、穿透判定漏掉卡片。 | 加任何"卡片在哪"的推导时，**同时检查这三处**；只改渲染器等于埋雷。 |
+| **旧断言可能把 bug 写进去了** | `openRegion.bottom >= kPillTopMarginDip + kExpandedHeightDip` —— 这条线本身就是 bug 的产物，所以坏代码能过。 | 断言要**从渲染器的矩形推**，不要从"当前常数"推。 |
+| **逐帧存盘会偷走采样间隔** | 要 25ms 一帧，实际 100ms —— 过渡只拍到 4 张。 | 测量的开销必须**小于采样间隔**，否则间隔是假的。 |
+
+自检 **546 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存
+（`backups/20261011-012351-panel-animation-fixed`）。
+
+#### 七、本轮未做（记录，别忘）
+
+* **音乐卡的控件命中测试同样用的是"居中盒"**：卡片被钉到 `cardLeftDip`（左边缘 = 系统按钮中心
+  − 260）后，`MusicControlAtScreen` 仍按 `motion_.Current()`（居中）算 → 横向差 167 DIP。
+  这属于"卡片到底该挂在哪"的设计问题（是否也该跟随按钮），**不在本轮范围内**，未动。
+* **系统面板的齿轮按钮**画出来了，但**没有点击行为**（`PanelAction` 里没有它的分支）。
+* 未在真机上验证：本次所有验证都是我在会话内**自动开面板 + 慢放 + 截屏**完成的，
+  **真人鼠标操作下的观感**仍需用户确认。
+
+### 7.80 **真凶：`outerCardUp` 算得太晚（第四次栽在同一个坑里）** ✅
+
+用户报告两件事，**都是我上一轮引入的 bug**：
+
+> **弹窗的位置不对了** / **还是点击完等一会 然后立马出现 没有动画**
+
+#### 一次测量同时暴露了两个 bug
+
+我用环境变量做了定时自动打开，逐帧打出卡片矩形：
+
+```
++0 ms  h=36  w=220  tiles=0  left=0     ← 卡片
++47 ms h=37  w=221  tiles=0  left=0
++94 ms h=47  w=235  tiles=0  left=0
+```
+
+**两个数字一眼就是错的：**
+
+| 数字 | 应该 | 实际 | 说明 |
+|---|---|---|---|
+| `w` | 520 | **220** | `cardLeftDip=0` → 卡片没被钉到按钮位置 |
+| `tiles` | 6 | **0** | 面板内容根本没构建 |
+
+#### 根因：`frame.outerCardUp` 在**用了它之后**才赋值
+
+上一轮我把 `outerCardUp` 写在"其它 frame 字段旁边"，
+但那一段在**面板内容和位置已经从它推导出来之后**。
+
+于是整个展开动画期间 `outerCardUp` **永远是上一帧的 false**：
+- `frame.cardLeftDip` 保持 0 → **卡片是 220 宽的胶囊在原地长大，不是 520 宽的面板滑出**
+- `BuildSystemPanel` 不执行 → **tiles=0，面板里什么都没有**
+
+**修法：把 `outerCardUp` 移到所有使用者之前。**
+
+修好后：
+
+```
++0 ms  h=36  w=220  tiles=6  left=853    ← 内容有了，位置有了
++47 ms h=36  w=221  tiles=6  left=853
++94 ms h=47  w=235  tiles=6  left=853
+```
+
+#### 并且**第一次真正看到了揭示动画**
+
+用 `ScaleCardDurations(14)` 把**动画时长**放慢 14 倍（不是放慢帧间隔 —— 那个会自我反馈），
+然后连拍：第 1 张是**面板刚露出一排磁贴的顶部**，第 6 张是**完整面板**。
+
+**揭示机制本身一直是对的** —— 之前看不到，是因为位置和内容都没算出来。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **同一个坑第四次** | `systemPanelOpen`（7.66）、`contentOpacity`（7.63）、`pill.box`（7.70）、现在 `outerCardUp`。 | **给 frame 加字段时，第一件事是把它放在所有使用者【之前】。** 这个项目里"字段设太晚"已经四次伪装成"渲染坏了"。 |
+| **两个错数字并排就无处可藏** | `w=220` 和 `tiles=0` 各自看都像"还没到时候"，并排看就是 bug。 | **诊断输出要把相关的量放在同一行**。 |
+| **要放慢就改时长，不要改帧间隔** | 改 `dt` 会反馈到下一帧的 `dt`。 | **被测量的量不能拿来当控制量。** |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.79 **两个问题的真正原因：用「意图」而不是「事实」驱动布局** ✅
+
+用户给了两条**具体到可以查**的描述：
+
+> **点击后 大约不到1秒没有反应 然后突然出现**
+> **点击完后 鼠标移开 弹窗会 出现消失的跟着鼠标移动**
+
+#### 第二个问题：确认并修复 —— 关闭动画期间卡片不再被钉住
+
+```cpp
+frame.cardLeftDip = ...;   // 只在 if (systemPanelOpen) 里算
+```
+
+**面板一开始关闭，`systemPanelOpen` 立刻变 false，但卡片还在屏幕上动 0.24 秒。**
+这期间卡片**没有自己的位置**，就按"岛的位置"画 —— 而**岛跟着鼠标** →
+**面板一边消失一边跟着鼠标飘**。用户描述完全准确。
+
+修法是**用动画事实而不是意图**：
+
+```cpp
+frame.outerCardUp = window.State() == Expanded || window.FromState() == Expanded;
+```
+
+新增 `Motion::FromState()` —— 问动画"**这次过渡涉及卡片吗**"，
+而不是问"卡片是打开的吗"。**这两者不是同一个问题**，混为一谈就是这两个 bug 的共同根源。
+
+顺带：这次修复也让**绘制和输入区域在整个过渡期间保持一致**（此前它们会在中途分歧）。
+
+#### 第一个问题：**没有延迟**，是动画太快
+
+我用环境变量做了定时自动打开（沙箱动不了指针），逐帧测：
+
+```
+AUTOOPEN: flag set at 43982390 ms
+LATENCY start: dt of this frame = 14.8 ms     ← 同一帧就开始
+LATENCY draw 1 at +0 ms
+draw 2 at +15 ms ... draw 28 at +172 ms
+```
+
+**零延迟、28 帧、172 ms。**
+
+再逐帧看卡片矩形：
+
+```
+REVEAL card y[50,86]  h=36   panel y[50,300]
+       card y[50,142] h=92   panel y[50,300]
+       card y[50,300] h=250  panel y[50,300]   ← 内容矩形【每帧完全一样】
+```
+
+**揭示机制是对的**：面板内容一动不动，卡片从 36 高长到 250 —— **从栏后滑出**。
+
+**所以"1 秒没反应然后突然出现"是观感**：
+**172 ms 太快，而且最先露出来的是最上面一排磁贴**，视觉上就像"啪一下出现"。
+
+**改法：展开时长 0.30 → 0.36 s**（上一轮已经从 0.26 提到 0.30）。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"意图"和"事实"是两个问题** | `systemPanelOpen` 是意图；关闭动画期间卡片仍在。 | **凡是描述"屏幕上正在发生什么"的判断，都要从动画状态取，不能从用户的意图标志取。** 这一条同时解释了两个 bug。 |
+| **"没反应"要先量延迟，再谈观感** | 我以为是循环卡住，量出来是**零延迟**。 | **区分"慢"和"延迟"**：慢是时长问题，延迟是响应问题，两者的修法相反。**量之前不要猜是哪一种。** |
+| **动画太快也会像"突然出现"** | 172 ms 的平滑动画读起来和"瞬间出现"一样。 | **"突然"不一定是"没有动画"** —— 也可能是动画短到读不出来。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.78 **"还是卡卡的" —— 我修错了地方，并换成更柔的曲线** ⚠️
+
+用户第二次说卡。**我上一轮的修复本身有 bug**，而且**我无法在这个沙箱里复现真实过渡**。
+
+#### 我上一轮引入的 bug：揭示动画被自己钳死了
+
+```cpp
+card.rect.top = revealTop > cardTop ? revealTop : cardTop;   // revealTop ≤ cardTop 恒成立
+```
+
+**所以 `top` 永远是 50，卡片每帧都是完整的 250 高** —— 揭示**完全没生效**，
+十张跨过渡的截图**字节完全相同**，我却以为"动画在跑"。
+
+#### 试了三种复现方法，全部失败（记录下来，免得下次再试）
+
+| 方法 | 结果 |
+|---|---|
+| 循环里 `Sleep(dt*9)` 放慢 | **`dt` 是"距上一帧"，Sleep 会喂回下一帧的 `dt`** → 正反馈，3 帧就跑完（36→46→177） |
+| `--system-panel` 启动 | 面板**第一帧就是开的**，根本没有过渡可动 |
+| `--state hover --system-panel` | `--state` 是**钉住**状态，按设计跳过动画 |
+
+**加上沙箱里 `SetCursorPos` 失败（无法真的动指针），我无法触发一次真实过渡。**
+**这一条必须写下来：这个功能在当前环境里我验证不了。**
+
+#### 所以改成直接针对"生硬"的成因
+
+用户说的是**生硬**（stiff），那是**曲线形状**问题，不是掉帧：
+
+| | 峰值斜率 | 表现 |
+|---|---|---|
+| `EaseInOutCubic`（原来） | 3.0 | 中段几帧走完 250 DIP（约 12 DIP/帧），首尾不到 2 DIP/帧 → **一顿一顿** |
+| `EaseInOutQuint`（现在） | 3.75 | 峰值更尖，但**大部分时间更平**、首尾更缓 → 运动摊到更多帧上 |
+
+同时把展开时长 **0.26 → 0.30s**（关闭 0.20 → 0.22s，收起来该干脆）。
+
+**这是基于"生硬"这个词的判断，不是我测出来的。所以我必须说清楚：这一轮改的是我认为最可能的原因，不是已确认的原因。**
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **修复本身可以有 bug，而且更难发现** | 我把"动画不重排"和"卡片不长大"两件事混成一件，结果动画没了。 | **改完必须验证"动画还在不在"** —— 我验证了"面板不抖"，没验证"它还在动"。**十张相同截图**本该是警报。 |
+| **`dt` 是反馈量，不能用它做放慢** | Sleep(dt×9) 让下一帧 dt 更大。 | **要放慢就改【时长参数】，不要改【帧间隔】** —— 后者是被测量的量，改它会污染测量本身。 |
+| **对"生硬"这类观感描述，要说明是推断** | 我没能复现，改的是曲线。 | **区分"已确认的原因"和"最可能的原因"**，并告诉用户是哪一种 —— 否则用户会以为已经修好了。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.77 **"展开动画太生硬、卡卡的" —— 面板每帧都在重排** ✅
+
+用户：**"现在展开的动画太生硬了 显示卡卡的"**
+
+#### 先量，不猜
+
+我加了逐帧追踪（`FRAME dt=... box ...`），把整段 260ms 的每一帧打出来：
+
+```
+FRAME dt=0.3ms  box y[6,42]  h=36
+FRAME dt=36.1ms box y[6,44]  h=38
+FRAME dt=6.1ms  box y[6,46]  h=40
+FRAME dt=6.1ms  box y[6,48]  h=42      ← 之后全是 6.1ms
+...
+```
+
+**帧间隔非常均匀（6.1ms），没有掉帧、没有尖峰（除了启动那一帧 36ms）** ——
+所以**不是帧率问题**。我一开始怀疑"165Hz 跑在 60Hz 合成器上会拍频"，那个方向是错的。
+
+#### 真正的原因：`SystemPanelFor` 从【当前卡片矩形】算所有位置
+
+```cpp
+layout.gearButton.bottom = box.rect.bottom - pad;                     // 齿轮贴卡片底
+const float sliderBottom = layout.gearButton.top - sliderGap - ...;    // 滑块从齿轮往上叠
+const float gridBottom   = layout.sliders[0].top - 10.0f;              // 网格挤在滑块之上
+const float gridTop      = box.rect.top + pad;
+```
+
+**卡片高 36 DIP 时，齿轮/滑块/网格全被算进那 36 像素里（甚至算出负高度）。**
+
+所以动画过程中，**每一帧整个面板都在重新排版**：
+齿轮在动、滑块在动、磁贴在挤压、宽度还从 220 变到 520 ——
+**每个元素以不同速率往不同方向移动**。那不是"生长"，那是**抖动**。
+
+#### 修法：内容按【最终】矩形排版，只改变"露出多少"
+
+```cpp
+const float span = kExpandedHeightDip - kCollapsedHeightDip;      // 250 - 36
+float progress = (animatedHeight - kCollapsedHeightDip) / span;   // 0..1，取自动画自己的高度
+
+const float revealTop = cardTop - fullHeight * (1.0f - progress);
+card.rect.top    = revealTop > cardTop ? revealTop : cardTop;     // 不高于它该在的位置
+card.rect.bottom = card.rect.top + fullHeight;                    // 高度【恒定】
+card.rect.left   = frame.cardLeftDip;                             // 宽度也【恒定】
+card.rect.right  = frame.cardLeftDip + kExpandedWidthDip;
+```
+
+**高度和宽度都钉死**，面板每帧的排版**完全一样**，只有卡片露出的部分在变 ——
+**从栏后面滑出来，而不是"膨胀"**。这也正是弹出面板该有的行为。
+
+`progress` 取自**动画自己的高度**而不是另一个时钟，所以它不可能与动画脱节。
+
+#### 一处编译器帮我抓到的东西
+
+我写了个 `if (fullHeight > started + 0.01f)` 防除零，编译器报 **C4127（条件表达式是常量）**。
+**它是对的** —— 两个都是编译期常量，这个分支是死代码。
+**我把守卫删了，而不是用 pragma 压掉警告**：**跑不到的代码也测不到。**
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"卡"不一定是帧率** | 帧间隔均匀 6.1ms，一点不掉帧 —— 是**排版在抖**。 | **先分辨"帧没跟上"和"每帧内容都在剧烈变化"**。前者查节拍，后者查布局是否依赖动画中的尺寸。 |
+| **布局依赖动画尺寸 = 每帧重排** | `box.rect.bottom` 每帧都不同，整个面板跟着重算。 | **动画期间应当恒定不变的东西（内容布局）就不要从动画中的量去算。** 让"露出多少"变，而不是让"内容在哪"变。 |
+| **死代码守卫该删不该压** | C4127 指出我的防除零是常量条件。 | **编译器说某个分支不可能执行时，删掉它** —— 用 pragma 压掉等于留一段没人能测的代码。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.76 **面板居中于按钮** ✅（用户最终选择）
+
+用户在"贴近按钮"和"完全居中"之间选了**居中版**。
+
+```cpp
+const island::RectF systemButton = island::SystemButtonFor(anchorIsland);
+const float buttonCentre = (systemButton.left + systemButton.right) * 0.5f;
+const float anchorLeft = buttonCentre - island::kExpandedWidthDip * 0.5f;
+```
+
+#### 实测（2560 宽屏）
+
+```
+面板      855..1371   (中心 1113)
+系统按钮  1108..1138  (中心 1123)   ← 面板正中对准按钮正中
+灵动岛    1170..1390
+应用图标  1404..1553                ← 完全没动
+```
+
+**"叠在岛下面"不是碰撞**：卡片顶边在 y=50，岛底边在 y=42 ——
+卡片的右半只是**沿着屏幕继续往下延伸**，在岛的**下方**，两者不共享任何一行像素。
+而且**图标行在岛的右侧**（1404 起），面板右边缘 1371 —— **根本够不到**。
+
+#### 这次没有反复，因为先把数字摆出来了
+
+红框中心 ≈930、按钮中心 ≈978、面板宽 520、岛左边缘 1110 ——
+**这些数一摆出来，用户就能看见"居中"和"不压岛"差多少**，
+于是直接做了选择，而不用我猜两轮。
+
+**这是这一整段里唯一一次"用户提要求 → 一次改对"的交互**，
+原因不是我更聪明了，而是**我这次先把约束量化再问**。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **量化约束之后再问，用户就能直接决定** | 前几轮我各挑一个方案然后被否。 | **把"冲突的两个数"算出来给用户看**，比描述"两种风格"有效得多 —— 数字让取舍变成可判断的。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.75 **面板右边缘收到按钮正下方** ✅（把"居中于按钮"做到极限）
+
+用户配图，红框标出期望：**"能不能弹窗中间在按钮下面"**。
+
+#### 先把约束算清楚
+
+```
+系统按钮中心 ≈ 978；面板宽 520
+居中于按钮 → 面板 718..1238，右边缘 1238
+灵动岛左边缘 = 1110  → 面板右半会伸到岛【下方】（y 50..300 与岛 y 6..42 不重叠，视觉上不是"盖住"）
+用户此前明确选的约束却是"图标不能被挤走" → 面板右边缘 ≤ 岛左边缘
+```
+
+**这两条差 128 DIP，不能同时满足。**
+
+#### 做法：把"右边缘贴岛"往右推到极限
+
+```cpp
+const float cardRight = anchorIsland.rect.left - 4.0f;   // 原来是 -kTaskIconPadDip(8)
+```
+
+4 DIP 的间隙刚好让卡片边缘不贴着岛。**这是在不越过岛左边缘的前提下能到的最右位置。**
+
+结果：面板 **200..733**，系统按钮 **736..766** —— 面板右边缘**紧贴按钮左边缘**，
+已经是"面板在按钮这一侧、且尽可能靠右"的极限。
+
+#### 又一次被自己的截图骗了
+
+我第一次看这张截图，以为**面板根本没画出来**（只看到设置窗口）。
+重新逐像素采样才发现面板**一直在**（`row 200: 200..733`）——
+**深色卡片压在深色游戏背景上，肉眼分不出来。**
+
+**教训**：**"我看不到"不等于"它不在"** —— 这一整个项目里，
+凡是靠眼睛判断深浅接近的东西，我都错过（7.62 的暗色横条、7.75 的深色卡片）。
+**采样像素永远比看截图可靠。**
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **深色压在深色上，肉眼看不见** | 我以为面板没画出来，其实在。 | **"看不到"要先采样再下结论** —— 尤其深色元素压在深色背景上。 |
+| **约束冲突要塞进代码注释里** | "居中于按钮"和"不压岛"差 128 DIP。 | **把"为什么不能完全满足"写进注释**，否则下一个人会再试一次并再错一次。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.74 **面板被自己的输入区域裁掉了左半边** ✅
+
+用户配图：面板**只有最右一列磁贴可见**，左边全没了。
+
+#### 关键是先量，而不是先猜
+
+我先量了用户截图的尺寸：**1147 宽**（= 2560 × 0.448，用户缩放截图）。
+再量我自己的构建：**面板是完整的**（`row 200: 200..1162`）。
+
+**两边不一样 → 说明不是"位置算错"，而是"某些条件下被裁"。**
+
+于是我加了两行诊断，把两个数并排打出来：
+
+```
+PANELCARD x[642,1162] y[50,300] w=520     ← 卡片画得完整
+REGION    x[948,1564] y[0,258] 616x258    ← 区域左边界在 948
+                    ↑
+        642 .. 948 这 306 DIP 被切掉了
+```
+
+#### 根因：区域左边界取的是"系统按钮"，而卡片比它更靠左
+
+```cpp
+const RectF system = SystemButtonFor(island);
+if (system.left < left) left = system.left;     // 948
+```
+
+面板的**右边缘贴岛、向左延伸 520** —— 所以它左边缘到 **642**，
+而系统按钮只到 **948**。**区域左边界用了按钮，于是把卡片左边 306 DIP 裁掉了。**
+
+**这不是新错误，是老错误的新形态**：区域按"没有卡片时该覆盖什么"算，
+但卡片是**往左伸出去的**。
+
+#### 修法
+
+```cpp
+if (cardLeftDip > 0.0f) {
+    const float cardLeft = cardLeftDip;
+    if (cardLeft < left) left = cardLeft;
+}
+```
+
+修好后：`REGION x[642,1564]` ⊇ `PANELCARD x[642,1162]` —— **6 个磁贴全部可见**。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"画对了"不等于"区域对了"** | 卡片画得完整，区域把它裁了 306 DIP。 | **这是同一份文件里第三次写"绘制和区域必须一致"** —— 每次都是不同的原因（形状、下移、向左延伸）。**只要卡片换了生长方向，就重算区域。** |
+| **两个尺寸不一样时，先怀疑缩放** | 用户截图是 0.448 缩放的。 | **先量截图的真实尺寸**，再决定是不是坐标系问题 —— 否则会把"缩放"当成"画错"。 |
+| **并排打出两个相关数值** | `PANELCARD` 和 `REGION` 一起看，一眼就是 642 vs 948。 | **怀疑两个量不一致时，把两个都打出来**。分开看各自"正常"，并排看就是答案。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.73 **面板移到灵动岛左侧，图标不再被挤走** ✅（用户选 B）
+
+用户配图，红框标出期望位置、蓝框标出被挤走的图标：
+
+> **点击应该在红色框的位置 而不是在这个位置吧 灵动岛右侧的图标都挤走了**
+
+#### 这是一道无解的几何题，所以我把它算清楚再让用户选
+
+```
+系统按钮在 x=984，灵动岛在 x=1020..1240，面板宽 520
+```
+
+**按钮离岛只有 36 DIP，所以 520 宽的面板怎么放都会碰到东西：**
+
+| 方案 | 结果 |
+|---|---|
+| A 左边缘对齐按钮 | 面板到 x=1504 → **压住图标行** → 图标必须右移 |
+| B 右边缘贴岛 | 面板 x=464..984 → **图标完全不动**，代价是离按钮远一点 |
+| C 面板改窄到 ~360 | 要重排磁贴（2 列），内容会挤 |
+| D 按钮/岛整体挪开 | 栏的观感变化较大 |
+
+**我把四个方案的代价写清楚问用户，用户选了 B。**
+**这一步值回成本** —— 前几轮我都是自己挑一个方案然后被否掉，
+因为**这是取舍，不是对错**，而取舍该由用户做。
+
+#### 实现：右边缘贴岛
+
+```cpp
+const float cardRight = anchorIsland.rect.left - island::kTaskIconPadDip;
+const float anchorLeft = cardRight - island::kExpandedWidthDip;
+```
+
+**按钮落在面板的右上角** —— 仍然是"从被按的那个控件打开"，
+而且**打开的内容全在控件所在的那一侧**。
+
+#### 同时撤掉"图标让位"的逻辑
+
+上一轮为了让图标避开卡片，我把图标行推到卡片右边（画/命中/区域三处）。
+面板现在**根本不会到达图标行**，所以那段让位逻辑**整个撤掉**：
+
+```cpp
+(void)cardLeftDip;   (void)cardWidthDip;   // 保留参数，因为区域和命中测试共用这个签名
+```
+
+**参数保留但不用** —— 删掉参数会让两个调用点各自算行起点，那正是这个文件存在的意义所要防止的。
+**保留一个不用的参数，比让两处算法分家要好。**
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **取舍问题不该由我单方面决定** | 三种约束不能同时满足，我前几轮各挑一个方案然后被否。 | **当约束互相冲突时，把选项和代价写出来让用户选** —— 这比连续几轮猜他要哪个便宜得多。 |
+| **"让位"是症状，不是解法** | 图标被挤走是因为面板压住了它们。 | **不要修症状（把图标推开），要把根因去掉（面板别压上去）** —— 让位逻辑整个撤销后代码更少。 |
+| **保留不用的参数好过让两处算法分家** | `TaskRowFor` 的卡片参数不用了。 | **签名统一 > 参数精简**：删掉它，区域和命中测试就会各自算行起点，那是更贵的错误。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.72 **面板改到栏的【下方】** ✅
+
+用户配图指出：
+
+> **弹窗应该是在按钮下面 而不是现在这个样**
+
+#### 原因：卡片的动画盒子从"胶囊顶部"开始长
+
+`Motion` 的盒子是**胶囊变成卡片**：从 y=6 开始向下长到 250。这对**音乐卡片**是对的
+（它**就是**胶囊展开后的样子），但**系统面板和通知是"栏旁边的浮出面板"，不是栏本身**。
+按动画位置画就盖住了开始按钮、面板自己的 toggle 和图标行 —— 正是用户看到的。
+
+#### 修法：只动 TOP，保留动画高度
+
+```cpp
+const bool outerCard = frame.systemPanelOpen ||
+                       (frame.notification != nullptr && frame.state == IslandState::Expanded);
+if (outerCard) {
+    const float cardTop = frame.restingPill.rect.bottom + kCardTopGapDip;   // 42 + 8 = 50
+    card.rect.bottom = cardTop + (card.rect.bottom - card.rect.top);        // 保住动画高度
+    card.rect.top = cardTop;
+}
+```
+
+**只改 TOP，保留动画高度** —— 盒子仍然向下生长，卡片仍然从栏后面滑出来，**只是起点在栏下方**。
+实测 `restingPill.bottom=42 gap=8 -> card y[50,86]`，稳定态 y[50,300]。
+
+**音乐卡片不动**：它是胶囊自己的展开形态，挪开就与它所属的岛脱节了。
+
+#### 连带两处必须一起改
+
+1. **窗口高度 260 → 320**。卡片现在到 y=300，260 的窗口会把**下面 40 DIP 画不出去也点不到** ——
+   与当年让 260 成为必要的裁剪是同一个错误，只是算式动了。
+2. **输入区域**也要跟着下移。区域用 `island.rect.bottom + kCardTopGapDip`，
+   否则区域停在卡片没下移时的顶部，**面板下半部分点不动**。
+
+**一处几何改动，绘制 / 命中测试 / 输入区域三处都要跟** —— 这是第二次写这条规则了（7.71 也写过）。
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"动画盒子"不等于"该画在哪"** | 卡片盒从胶囊顶长起，对音乐卡对，对外部浮出面板错。 | **两种东西共用一个动画盒子时，要问"它们该从同一个地方开始吗"** —— 答案常常是否。 |
+| **一个常量是算出来的，算式变了它就得变** | 窗口 260 是按"卡片从 y=6 长到 250"推的。 | **推导出来的常量要连推导过程一起写下来**（`Geometry.h` 里那段注释救了这次），否则改了布局就不知道该不该改它。 |
+| **同一处几何要在三个地方生效（第二次）** | 绘制、命中测试、输入区域。 | **改位置的代码写完，立刻去搜还有谁在算同一个位置。** 输入区域漏了最隐蔽。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.71 **左 deck 贴到灵动岛 + 删掉指示器** ✅
+
+用户选了 A/B 之后的新要求，一次说清三件事：
+
+> **开始菜单按钮和系统按钮 应该放在灵动岛左侧 红框里的位置
+> 并且 系统按钮应该在开始菜单前面，蓝框里的按钮图标应该删除掉**
+
+#### 改动
+
+| 要求 | 做法 |
+|---|---|
+| 两个按钮放到灵动岛左侧 | 左 deck 从"窗口左边距"改为**锚定灵动岛的左边缘**，向左生长 |
+| 系统按钮在开始菜单前面 | `DeckButtonFor(island, 0)` = 开始（贴岛），`1` = 系统（更左） |
+| 删掉指示器图标 | 网络/蓝牙/音量/电量指示器**整行删除** |
+
+新布局：`[⌄ 系统][⊞ 开始] 灵动岛 [应用图标...]`
+
+```cpp
+inline float DeckRight(const RoundedBox& island) { return island.rect.left - kTaskIconPadDip; }
+inline RectF DeckButtonFor(const RoundedBox& island, int index) { ... }
+inline RectF StartButtonFor (const RoundedBox& island) { return DeckButtonFor(island, 0); }
+inline RectF SystemButtonFor(const RoundedBox& island) { return DeckButtonFor(island, 1); }
+```
+
+**从岛向外计数，而不是从窗口边距向内** —— 这样在 deck 远端增删按钮**不会移动**已有的按钮。
+
+#### 指示器是真正删掉了，不是藏起来
+
+`DrawIndicator`、`IndicatorSlotFor`、`IndicatorHit`、`IndicatorsThatFitLeft`、`LeftDeckFits`、
+`BuildIndicators`、`FrameState::SystemIndicator`、`indicatorCount`、`kMaxIndicators`、
+`kIndicatorButtonDip` —— **全部移除**（删掉比留着更安全：留着的东西下一个人会去用）。
+
+调用点全部跟着改：
+- `RowWidths` / `TaskIconsThatFitAmong` 的"指示器预留宽度"参数删掉（指示器不占宽度了）
+- `IslandWindow::SetIndicatorCount` / `IndicatorAtScreen` 删除，`indicatorCount_` 字段删除
+- 输入区域用 `SystemButtonFor` 而不是 `IndicatorSlotFor(last)`
+
+**保留** `IndicatorGlyph` 和 `SystemStatus`/`SystemStatusReader`：**系统面板的磁贴还在用它们**。
+`DrawIndicator` 从成员函数变成文件内的 `DrawIndicatorGlyph` ——
+**没有任何外部代码再画"裸图标"了**，而成员函数会诱使下一个人重建那个被删掉的行。
+
+#### 顺带修掉：面板会盖住应用图标
+
+卡片锚在系统按钮上，**向右展开 520 宽** —— 正好压住图标行（图标行从岛的右边 8 DIP 开始）。
+实测：开面板时**第一个图标落在卡片第三个磁贴下面**。
+
+修法是让图标行**让开卡片**：
+
+```cpp
+inline TaskIconRow TaskRowFor(const RoundedBox& island, int count,
+                              float cardLeftDip = 0.0f, float cardWidthDip = 0.0f) {
+    row.left = island.rect.right + kTaskIconPadDip;
+    if (cardLeftDip > 0.0f && cardWidthDip > 0.0f) {
+        const float cardRight = cardLeftDip + cardWidthDip;
+        if (row.left < cardRight) row.left = cardRight + kTaskIconGapDip;
+    }
+    ...
+}
+```
+
+**这条规则同时在三个地方生效**：绘制、命中测试、**输入区域**。
+输入区域那一处最容易漏 —— **画对了但区域没跟上的话，图标看得见却点不动**，
+而那正是这个项目已经踩过的坑（"整条带子不可点击"）。
+
+新增 **6 项断言**（测试总数 532 → 538）：系统按钮在开始按钮左边、
+开始按钮与岛不重叠、两者都与岛垂直居中、命中测试互不串台、各分辨率下 deck 都在屏幕内。
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **删干净比留着安全** | 指示器有 10 个符号散在 5 个文件里。 | **删掉的东西要连"能被叫到"的入口一起删。** 留着不用的函数，下一个人会以为它还有用。 |
+| **一条几何规则要在三个地方生效** | 绘制、命中测试、输入区域。 | **布局规则改一处，就去找"还有谁在算同一个位置"。** 输入区域漏了是最隐蔽的，因为它只影响能不能点。 |
+| **从锚点向外计数** | `DeckButtonFor(island, index)` 而不是从窗口边距算。 | **从"不变的那个东西"向外扩散**，这样远端增删不会移动已有的元素。 |
+
+自检 **538 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.70 **真凶：我自己引入的变量遮蔽** ✅
+
+用户第四次说"还是有这问题"，并补了一句关键的：
+
+> **灵动岛下面那个 不点击应该不出来才对**
+
+#### 用"逐个排除"找到了它
+
+我不再靠截图推断，而是**把渲染器一层层剥掉**，每一步都测：
+
+| 实验 | 结果 | 结论 |
+|---|---|---|
+| 只清除不画（clear-only） | 整片纯品红 | **暗色来自某个绘制调用** |
+| 禁用 `DrawSystemPanel` | 暗色**还在** | 不是面板画的 |
+| 把 clear 换成品红 | 暗色区 = 品红+暗色混合 | **有个暗色矩形画在清除之上** |
+| 打印胶囊填充的矩形 | `PILLFILL x[1020,1540] y[6,256] state=expanded` | **胶囊按【卡片】矩形填充** |
+
+#### 根因：我上一轮修 bug 时制造的新 bug
+
+为了修"胶囊按卡片大小填充"，我加了：
+
+```cpp
+const RoundedBox& box = (restingPill 有效) ? frame.restingPill : pill.box;
+...
+RoundedBox card = box;     // ← box 现在是【胶囊】了，不是卡片
+```
+
+**这个新引用叫 `box`，遮蔽了外层的动画盒子。**
+于是卡片用**胶囊的矩形（220×36）**合成 ——
+磁贴挤在顶部、卡片底色变成一个小圆角矩形。
+
+**两个症状、同一个起因**：`pill.box` 在卡片状态下**就是卡片大小的矩形**，
+而**绘制胶囊和绘制卡片必须是两个不同的盒子**。
+
+修法：引用改名 `pillBox`，并显式绑回 `const RoundedBox& box = pill.box;`。
+修好后：面板是不透明卡片（实测 `(300,120)→(45,47,54)`），中间透出游戏（`(1400,60)→(49,82,135)`）。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **遮蔽的变量在调用点完全看不见** | `RoundedBox card = box;` 看起来毫无问题，**C++ 不警告**。 | **内层作用域里不要用外层的名字。** 名字相同而含义不同，是编译器不会帮你发现的错误。 |
+| **`pill.box` 在卡片状态下是卡片** | 它叫 `pill.box`，但内容是"动画中的形状"。 | **名字要描述内容而不是归属。** 这个字段应该叫 `animatedBox`。 |
+| **修一个 bug 时制造了另一个** | 上一轮的修法本身是对的（胶囊不该用动画盒），但引入的引用遮蔽了外层。 | **改完要重新验证"另一条路径"** —— 我只测了暗色盒子消失，没测面板还在不在。 |
+| **用户的补充描述是关键** | "不点击应该不出来" 把范围缩小到"总是画的东西"，而不是"点击后画的东西"。 | **用户描述里的"条件"比"现象"更有信息量。** |
+
+自检 **532 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.69 **真凶：我的单实例保护把被拒绝的副本留在了进程列表里** ✅
+
+用户第三次说"还是有这问题"，配图仍是**两个盒子（518/521 宽，同一批行）**。
+
+#### 我这一轮做对的一件事：不再猜，而是去测保护本身
+
+前面我推断"是两个进程"，但**没验证过保护是否真的有效**。这次直接连启三次并数进程：
+
+```
+launch 1 : lastError=0     → 成为 bar            → 1 个进程
+launch 2 : lastError=183   → 拒绝，但【留着】     → 1 个进程
+launch 3 : lastError=183   → 拒绝，但【留着】     → 2 个进程  ← 就是它
+```
+
+**两个"已拒绝"的副本还活着，各自画自己的 bar。**
+
+#### 根因：`MessageBoxTimeoutW` 不自动消失
+
+我上一轮特意用"超时弹窗"来避免"阻塞进程"，理由是普通 MessageBox 会挂住。
+**但 `MessageBoxTimeoutW` 在这个环境里也没有超时消失** —— 它在模态框里等。
+
+**于是保护本身制造了它要防止的状态**：被拒绝的副本留在进程列表里继续画 bar。
+**一个会滞留的保护比没有保护更糟**，因为它产生的东西和故障一模一样。
+
+修法：**不弹任何窗口，只写日志然后立刻退出**。
+
+```
+launch 1 : 1 个进程
+launch 2 : 1 个进程
+launch 3 : 1 个进程        ← 每次拒绝的副本都立刻退出
+```
+
+#### 这段经历的完整链条（三次误判）
+
+| 轮次 | 我的判断 | 真相 |
+|---|---|---|
+| 7.66 | "右边那块是浏览器黑边" | 测量对（确实在我们的绘制范围外），**但结论错** —— 它是**另一个我们的进程**画的 |
+| 7.67 | "是两个进程，加互斥体保护" | **方向对**，但保护实现有缺陷 |
+| 7.68 | "区域被裁到 44px" | **读了自己打印的中间帧**，稳定值是 250 |
+| 7.69 | "保护没生效，去测它" | ✅ **连启三次数进程，一次就看到了** |
+
+**四轮里三轮是被"没有实测的推断"带偏的。** 唯一一次直接给出答案的，
+是**连启三次并数进程**这个动作 —— 十秒钟的事。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **会滞留的保护比没有保护更糟** | 模态弹窗让被拒绝的副本继续画 bar。 | **"拒绝启动"的路径必须立刻消失。** 任何提示都要么不阻塞，要么根本不做。 |
+| **加了保护之后要测保护本身** | 我实现了它、跑通了一次，就再没验证过。 | **保护和功能一样需要验证** —— 而且它更容易出错，因为它只在"异常路径"上运行。 |
+| **十秒钟的实测顶三小时的推断** | 连启三次数进程。 | **能直接观察的就不要推断。** 我在这段里花的推断时间远超写这个测试的时间。 |
+
+自检 **532 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.68 **面板确认正常 —— 又被自己的诊断读数骗了一次**
+
+用户给了日志，一行就把问题解决了：
+
+```
+panel: state=expanded open=1 tiles=6 cardLeft=54
+window region: 1786x44   →  1786x148  →  ...  →  1786x250
+```
+
+**区域是对的** —— 它从 44 一路平滑长到 **250**，卡片完整显示。
+**面板位置也对**：`cardLeft=54`，贴着按钮。
+
+#### 我这一轮的错误：读了自己打印的中间值
+
+我那行诊断打印 `region=1786x44`，我据此宣布"卡片被裁到 44px"。
+**实际上那是那一帧刚开始时的值** —— 区域在动画过程中会一路更新，日志下一行就是 148、158……
+
+**我加诊断是为了不再靠截图猜，结果又靠一个"时机不对的读数"下了结论。**
+打印本身没错，**错的是我拿"某一瞬间的值"当"稳定态的值"**。
+
+#### 结论：双实例确实是原因
+
+日志里 `window region: 1786x44 (state collapsed)` 出现在**启动时**，
+而用户点开面板后区域长到 250 —— **说明用户那次运行只有一个实例，面板是好的。**
+
+前面几轮看到的"右边居中盒子"，与"exe 被锁 + 日志被锁 + 日志落到 %TEMP%"
+这三条旁证一致，**是旧实例留下的**。**单实例保护（7.67）就是针对它的修复。**
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **拿中间帧的值当稳定值** | `region=...x44` 是动画第一帧，稳定值是 250。 | **过渡过程中的读数不能当作结论。** 打印"变化量"时要么跟着打完整序列，要么等稳定后再读。 |
+| **诊断打印本身可能误导** | 我加它是为了摆脱截图猜测。 | **诊断也要被诊断**：一个只打单点值的 trace，会让人以为那个点就是全部。**要么打序列，要么明确标注它是什么时刻的值。** |
+
+自检 **532 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.67 **真相：是两个 island_bar 同时在跑** ✅
+
+用户第二次说"还是这样"，配图仍是**左边面板 + 右边一个居中卡片**。
+
+#### 我上一轮的判断错了一半
+
+我说"右边那块不在我们输入区域内、是浏览器黑边"。**测量上是对的，结论上是错的** ——
+它**确实不是我们在那一帧画的**，但**是另一个 island_bar 画的**。
+
+**决定性证据 —— 两个盒子的宽度完全一样**：
+
+```
+row   8: 64..563(500)     1030..1529(500)    ← 两个卡片，同宽
+row 240: 54..573(520)     1020..1539(520)
+```
+
+**右边的 520 宽、居中在 1280 —— 那正是 7.64 之前"卡片居中"的行为。**
+
+#### 早就有的旁证，我一直没串起来
+
+1. 我每轮构建时**exe 被锁住** → 因为**用户上一次的实例还在跑**
+2. 我**看不到任何 island_bar 进程**，但**日志文件被锁** →
+   锁它的进程**不在我的会话里**
+3. 用户启动新 exe 时，日志落到 `%TEMP%`，因为 exe 旁边的日志**已被另一个实例持有**
+
+**这三条都在说"有两个进程"，而我一直在把它们当成"环境问题"逐个绕过。**
+孤立看每条都像噪声；**串起来就是答案。**
+
+#### 修法：命名互斥体单实例
+
+```cpp
+HANDLE singleInstance = CreateMutexW(nullptr, TRUE, L"IslandBar.SingleInstance");
+if (singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) { ... return 1; }
+```
+
+**为什么用互斥体而不是找窗口**：无论另一个实例是在启动、运行还是退出，检查方式都一样；
+而且它不会因为对方在另一个桌面、或改了窗口类名而失效。
+
+**为什么用超时弹窗而不是普通 MessageBox**：普通 `MessageBox` **会阻塞进程直到有人点确定** ——
+从快捷方式或脚本启动时，就会留下**一个躺在进程列表里什么都不做的 island_bar**，
+**正是这个保护要防止的状态**。用 `MessageBoxTimeoutW`（user32 的非文档接口，自 Win2000 起存在）
+6 秒自动消失，**日志行才是持久的报告**。
+
+实测：第一个留下、**第二个自己退出**、进程数 = 1。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **多条"环境噪声"其实是同一个答案** | exe 被锁、日志被锁、日志落到 %TEMP% —— 都在说"有两个进程"。 | **反复出现的"环境问题"要当成线索而不是障碍。** 同一个异常出现三次以上，它大概是真相而不是噪声。 |
+| **"不是我的像素"推不出"没人画它"** | 那块确实不是我们在*那一帧*画的，但是另一个**我们**画的。 | **排除自己之后要问"那还有谁"**，而不是直接归因给无关的第三方。 |
+| **保护要能自己收场** | 阻塞式 MessageBox 让第二个实例永远卡着。 | **任何"拒绝启动"的路径都必须在无人干预时也能结束。** 否则保护和故障是同一种状态。 |
+
+自检 **532 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.66 **"点击这个也出来了" —— 一个真问题、一个假警报**
+
+用户配图：左面板在（已锚定），**右边又有一个盒子**，说"点击这个也出来了"。
+
+#### 假警报：右边那个盒子不是我们画的
+
+逐像素量：
+
+```
+row 200: 54..573        ← 我们的面板 ✓
+         1020..1539     ← 这个盒子在 y=6..259
+```
+
+**关键**：我们的**输入区域只有 y=0..44**，而这个盒子延伸到 y=259。
+**像素在我们区域之外 —— 所以不可能是我们画的。**
+
+它是**用户浏览器里视频的黑边**：地址栏 `rou.video/v/cmv0ays9i0...` 就在它下面一格。
+**视口、黑边、地址栏垂直对齐** —— 是那个窗口的一整块。
+
+**教训**：我又差点把**别的窗口的像素**当成自己的（7.62 已经犯过一次）。
+这次救了我的是**"输入区域只有 44 高"这个已知数值** ——
+**"这块像素在不在我的绘制范围内"比"它长什么样"更能判定归属。**
+
+#### 真问题：点击岛也会把面板打开
+
+用户说的"这个"如果指岛，那就**真的错了**：面板开着时点岛，
+走到的还是"岛被点击 → 请求卡片"那条分支，于是**又开了一个卡片式表面**。
+
+**弹出式面板的常规行为是：点外面就关掉。** 而在这个 bar 上，**岛就是"外面"**。
+
+修法：面板打开时，**除了开始按钮、toggle 和磁贴之外的任何点击，都当作"收起面板"**。
+这既是用户预期，也是**不用重新找那个 chevron 的唯一退出方式**。
+
+#### 顺带修掉：字段设得太晚
+
+`frame.systemPanelOpen` 和 `frame.cardLeftDip` 原本设在**循环底部**，
+而 `frame.pill.box` 在**顶部**就取好了 —— 于是卡片的盒子是从**旧位置**推出来的：
+**两个面板，一个挂在按钮下、一个在屏幕中间。**
+
+**把字段设晚和根本没设，是同一种缺陷**，而且它看起来像渲染故障。
+
+自检 **532 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **又差点把别人的像素当成自己的** | 右边盒子是浏览器视频的黑边。 | **判定像素归属要看"它在不在我的绘制范围内"**，不是看它长什么样。**输入区域的尺寸是已知的** —— 用它。 |
+| **"点外面关掉"是弹出面板的必备行为** | 面板开着时点岛，又开了一个卡片。 | **弹出面板必须支持"点外部关闭"**，否则用户只能去找那个开它的按钮。 |
+| **字段设晚 = 字段没设** | 标记在底部设，盒子在顶部取 → 两个面板。 | **给"本帧的盒子"提供输入的字段，必须在盒子被取之前设好。** 顺序不是风格问题。 |
+
+### 7.65 **系统面板第二行磁贴** ✅
+
+用户选了 A：补第二行。
+
+#### 字形码位：**画出来验，结果查文档会全选错**
+
+上一轮 `E0CE` 的教训（缺字形不报错、只画空方框）用上了 —— 这次我**先把候选码位画成一张图看**：
+
+| 磁贴 | 我"以为"的 | **实际正确** |
+|---|---|---|
+| 辅助功能 | `E8B5` / `E943` | **`E776`**（人形） |
+| 节能模式 | `E85A` | **`E83E`**（带闪电的电池） |
+| 实时字幕 | `E7EF` / `ED1D` | **`E7F4`**（带字幕的屏幕） |
+
+`E8B5` 是右箭头、`E943` 是花括号、`E7EF` 是带盾牌的电池 —— **全是别的东西。**
+**"我以为的"三个里有两个是错的。**
+
+#### 磁贴带"动作"，不再靠标签判断
+
+`SystemPanelTile` 加了 `PanelAction action` + `const wchar_t* uri`：
+
+```cpp
+enum class PanelAction { None, OpenSettings, ToggleMute };
+```
+
+**为什么动作放在磁贴上而不是按标签查表**：标签是**给用户看的文字**，动作不是。
+**改名不该悄悄改变行为** —— 而按标签查表恰恰会把这两者绑在一起，且绑在无法测试的那个方向上。
+
+点击处理：`ShellExecuteW(nullptr, L"open", uri, ...)`，
+**并把返回值打进日志** —— "什么都没发生"和"页面打不开"否则完全一样。
+
+各磁贴的去向：`ms-settings:network-wifi` / `bluetooth` / `network-airplanemode` /
+`easeofaccess` / `batterysaver` / `easeofaccess-hearing`。
+
+#### 诚实之处：三个磁贴没有可读状态
+
+- **辅助功能**：它是**启动器**不是开关。shell 打开的是一个包含放大镜／颜色滤镜／讲述人的**浮出面板**；
+  这里打开的是那些开关**所在的页面**，同一个目的地上一层，且**不需要自己的状态**。
+- **节能模式**：状态**是**可读的（`GetSystemPowerStatus` 的 `SystemStatusFlag`），所以磁贴**如实反映**机器；
+  但开关它是电源方案写入，未实现，所以**打开页面**而不是假装能切。
+- **实时字幕**：**能不能看到字幕是否在跑，这个进程做不到**。所以恒显示，
+  否则老版本上会变成网格里的一个洞。
+
+**能读的读，不能读的不假装** —— 磁贴仍然有用（它把用户带到设置所在的地方），但不谎报状态。
+
+#### 新增 19 项断言
+
+```
+[ OK ] every tile is inside the card      3 tiles: grid [1034..1526] x [20..66], slider top 184
+[ OK ] no tile overlaps the slider
+[ OK ] a tile's centre hits that tile
+[ OK ] a point on the slider is not a tile
+```
+
+**按 1..6 个磁贴逐个断言**网格布局，因为"磁贴挂出卡片外"和"磁贴压住滑块"
+在截图里**都看不出来**（你只会看到面板的一角），而它们都是算术问题。
+
+自检 **532 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"我以为的"码位两个错一个对** | `E8B5`/`E943`/`E7EF` 都不是想要的图标。 | **字形码位一律画出来验。** 这条上一轮写过，这一轮**真的照做，于是避免了三处错误**。 |
+| **动作不该从标签推导** | 标签是给用户的文字，改名不该改行为。 | **行为随数据走，不要随显示文本走。** 后者把两件无关的事绑在一个不可测的方向上。 |
+| **"没有状态"要如实呈现** | 三个磁贴读不到状态。 | **能读的读，不能读的不假装** —— 磁贴仍然可用（打开设置页），但不谎报开关状态。 |
+
+### 7.64 **面板锚定到按钮** + 卡片底色 ✅（内容对齐未完成）
+
+用户提了两点：
+
+> 弹出的位置不对 应该是点击的按钮的地方弹出 然后内容要和图片中功能一致 win11 系统功能
+
+#### 一、位置：卡片改成从被按的按钮挂出来
+
+`CardLeftFor(anchorLeft, cardWidth, windowWidth)`：**左边缘对齐按钮的左边**，
+如果会跑出窗口就从右边推回来，再兜底夹到边距。
+
+**为什么是"对齐左边缘"而不是"居中在按钮上"**：弹出式面板的**左边缘**才是要和按钮对齐的那条边 ——
+居中对齐会让面板随着按钮位置左右漂，而左对齐在视觉上像"从这里长出来"。
+
+渲染器里对**所有三种卡片**（系统面板、通知、音乐卡）统一做一次平移，
+因为三者都是"拿一个盒子、在里面自己排版" —— **移动盒子是唯一一处能同时移动三者的改动**。
+
+实测：卡片左边缘现在落在按钮正下方（x≈54），不再在屏幕中间。
+
+#### 二、顺带修掉：卡片没有底色
+
+系统面板**没有专辑封面那样模糊背景**，而我的第一版**忘了给它填卡片底色** ——
+于是磁贴和滑块直接画在桌面上。**亮色壁纸下只能看到磁贴的描边**，因为磁贴底是 5% 白、下面是壁纸。
+
+加了卡片填充（0.09/0.10/0.13，97% 不透明）。**这是设置界面，必须压在背景之上还能读** ——
+shell 自己的快速设置也是不透明的，同一个理由。
+
+#### 三、内容对齐：**没做完，我选择停下**
+
+对照用户的截图，还差：**第二行磁贴**（辅助功能／节能模式／实时字幕）和**亮度滑块**。
+
+**亮度我写了 WMI 实现（`WmiMonitorBrightness` + `WmiMonitorBrightnessMethods`），然后把它删掉了。**
+理由：
+
+- 我这个环境里 **WMI 一律 access-denied**，**我无法验证它**
+- 那段代码要用 `IWbemServices::ExecMethod` 传位置参数，**传错顺序会静默失败**
+- 而**这几轮的所有事故都来自"没验证就发出去的代码"**
+
+**所以我把亮度撤了，而不是发一个可能静默失效的滑块。** 宁可少一个功能，不要多一个骗人的控件。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **卡片忘了填底色** | 系统面板没有模糊背景层，而我以为"卡片"总有个底。 | **每一个新的"卡片内容"都要自己负责底色**，因为它没有可继承的背景。 |
+| **锚定要对齐"视觉上连着的那条边"** | 居中对齐会让面板随按钮左右漂。 | **弹出面板对齐左边缘**；居中是"属于屏幕中央"的语义，不是"从按钮长出来"。 |
+| **我写了无法验证的代码，然后删掉了** | WMI 在本环境 access-denied，`ExecMethod` 传参错序会静默失败。 | **写不了验证就不发。** 这几轮的 bug 全部来自"没验证就发" —— 宁可少功能。 |
+
+自检 **513 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.63 **系统面板通了 —— 根因是我把赋值放错了分支**
+
+用户只说了"还是这样"，但**`%TEMP%\island_bar.log` 里那行 `state: expanded` 就是全部线索**：
+**策略是对的，面板标记没到渲染器。**
+
+#### 真根因：赋值写在了 `if (shortShape)` 里面
+
+```cpp
+const bool shortShape = state == Collapsed || state == MusicStrip || state == Hover;
+if (shortShape) {
+    ...
+    frame.systemPanelOpen = systemPanelOpen;   // ← 在卡片状态下这个分支不执行
+}
+```
+
+**卡片本身不是 `shortShape`，所以那一行永远不执行。**
+于是循环顶部 `systemPanelOpen = 1`，**而交到渲染器的帧上它一直是 0** ——
+策略把形状提升成了卡片，渲染器又去查一个**悄悄保持为假**的标记，**面板永远不被合成**。
+
+**没有任何报错，唯一的症状是一个空的卡片轮廓。** 这也是它难找的原因。
+
+#### 定位过程（这次终于有方法）
+
+我加了 `MARK A` / `MARK B` 两个打印：
+
+```
+MARK A: forced=1 now=1      ← 循环顶部，标记是对的
+（MARK B 从未出现）          ← 赋值那一行根本没执行
+```
+
+**"某个赋值没有执行"这个信息，只有把打印放在赋值所在的同一层才能拿到。**
+之前我一直在渲染器侧打印，看到的永远是"标记是 0"，却不知道它为什么是 0。
+
+#### 顺带修的第二处：区域晚了一帧
+
+`UpdatePointerState()` 在循环**顶部**，它内部会 `ApplyInputRegion()` ——
+而标记是在**底部**才进帧的，所以**区域总是晚一帧**，卡片被按胶囊高度裁掉。
+
+修法：在帧填完之后**再调一次** `ApplyInputRegion()`（矩形没变时它立刻返回，所以重复调用无害）。
+
+**修好后（真机截图确认）**：`No Wi-Fi` / `Bluetooth` / `Airplane` 磁贴 + 音量滑块 + 设置齿轮，
+卡片完整、尺寸正确。
+
+自检 **513 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **赋值写在了"短形状"分支里** | 卡片状态不是短形状，那行永不执行。 | **给帧填字段的代码，要放在"所有状态都会经过"的层级。** 按状态分支的代码块里不适合放"全局性"的赋值。 |
+| **诊断打印要放在"出问题的那一层"** | 我一直在渲染器侧打印，只看到"标记是 0"，看不到"为什么是 0"。 | **怀疑某个赋值没执行时，把打印放在那一行的同一层。** 在消费侧打印只能告诉你结果，不能告诉你原因。 |
+| **区域的应用时机也是一帧之差** | 指针轮询在顶部、标记在底部，区域用的是上一帧的结论。 | **凡是"依赖本帧状态"的副作用，必须排在本帧状态确定之后。** |
+| **用户的"还是这样"里其实有线索** | 他说"还是这样"，而他的日志那行 `state: expanded` 直接证明了策略是对的。 | **用户的日志比用户的描述更有信息量。** 读日志，不要只读抱怨。 |
+
+### 7.62 **"变成这样了" —— 一个真 bug、两个假线索、以及我该更早停下**
+
+用户报："变成这样了"（配图：岛变成一条**宽而扁的黑条**）。
+
+#### 找到并修掉的真 bug：**输入区域的两个维度来自两个不同的形状**
+
+```
+row 12: 1174..1385 (w 212)   ← 静止的胶囊，画得对
+row 40: 1020..1539 (w 520)   ← 卡片的宽度，出现在胶囊到不了的那一行
+```
+
+`InputRegionFor` 的**宽度取自目标状态、高度取自静止胶囊** —— 于是卡片收起的过程中，
+区域是 **520 × 44**，**把还很大的卡片裁成了正好这个形状**。
+
+**这就是那条"宽扁黑条"。** 一个维度跟着目标走、另一个不跟，是这类 bug 的典型形状。
+
+修法：**区域覆盖"正在画的那个形状"**，而不是它要去的那个。签名加一个 `current` 参数，
+`ApplyInputRegion` 传 `motion_.Current()`。加了断言：
+
+```
+[ OK ] the input region covers the whole shape that is drawn
+        collapsed: shape bottom 42 DIP, region bottom 44 px
+        expanded:  shape bottom 256 DIP, region bottom 258 px
+```
+
+#### 两个假线索：**我自己的诊断方法骗了我两次**
+
+| 假线索 | 真相 |
+|---|---|
+| **"exe 是旧的"** | 我的 Python 字符串检查写错了 f-string，返回"字符串不存在"。我据此怀疑了好几轮二进制过期 —— **而二进制一直是新的**。ASCII 搜索立刻证明标志就在里面。 |
+| **"卡片被裁到 44 px"** | 我在 y=40 测到的暗像素**不是我们的**：`x=1500`（胶囊右边界 1390 之外）在 y≥44 是纯白 `(255,255,255)` —— 那是**设置窗口**压在我的截图范围上。**我把另一个窗口的像素当成了自己的。** |
+
+**第二个尤其值得记**：我用"暗色连续段"当判据，而判据本身没有排除**别的窗口**。
+**测量要能排除干扰源，否则它只是在产生看起来像结论的噪声。**
+
+#### 现在的状态
+
+- 布局是对的：`[开始按钮 | WI-FI | 蓝牙 | 音量] 岛 [应用图标...]` —— 实测**零重叠**
+- 静止态渲染正确
+- **系统面板仍未确认显示**：`--system-panel` 下我截到的图里**卡片不可见**，
+  而我**没能区分这是代码问题还是我的截图环境问题**（设置窗口一直压在那里）
+
+**513 项自检全绿**，干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **区域的两个维度来自两个形状** | 宽度跟目标、高度跟静止。 | **一个几何体的所有维度必须来自同一个来源。** 混用不同状态的部分尺寸，得到的形状在过渡中必然是错的 —— 而且只在过渡中错。 |
+| **诊断脚本自己会撒谎** | 写错的 f-string 让"字符串存在"报成不存在。 | **诊断工具必须先被验证。** 用它下结论之前，先用一个已知为真的输入试它。 |
+| **把别人的像素当成自己的** | 设置窗口压在截图范围内，我把它读成了卡片的填充。 | **测量必须能排除干扰。** 判据要包含"这块像素属于谁"，不能只看颜色。 |
+| **我该更早停下** | 我在这条线上耗了十几轮，每轮都被环境吞掉。 | **连续两次诊断被证伪时，应该停下来重新设计验证方法**，而不是继续用同一个方法试。 |
+
+### 7.61 阶段 9：**系统面板（快速设置）—— 代码就位，但我没能亲眼验证** ⚠️
+
+用户给了一张 Windows 11 快速设置面板的截图，要求"在开始菜单旁边加一个按钮，点击出来这些内容"
+和"和这个逻辑一样"。
+
+#### 按那张截图的**结构**做的
+
+```
+[ 磁贴 ] [ 磁贴 ] [ 磁贴 ]      2 行 3 列
+[ 磁贴 ] [ 磁贴 ] [ 磁贴 ]
+[ 喇叭  -------------o------ ]   音量滑块
+[                      (齿轮) ]   设置按钮
+```
+
+磁贴有**开/关两种底色**（开是系统强调色，关是浅底+描边）—— 这是磁贴相对"文字列表"的全部意义：
+**状态在读文字之前就已经可见**。
+
+按钮是**把手上那个 chevron**（面板开着时朝上）—— 指向本身就是它要传达的全部信息：
+"再按一次会关掉"。
+
+#### 一个真 bug：标记给了渲染器，却没给策略
+
+`frame.systemPanelOpen` 被渲染器读了，但**没有传进 `PointerContext`** ——
+于是 `NextState` 不知道面板开了，状态停在 `Hover`，**卡片永远不会被画**。
+
+**记录的手法**：`frame.state` 和 `frame.systemPanelOpen` 都要到，缺一不可。
+**新加一个"请求卡片"的条件时，必须同时接上策略和渲染。**
+
+#### ⚠️ 我没能验证它
+
+这一节是**诚实的缺口**，不是完成：
+
+- 我加了 `--system-panel` 开关强制打开面板，用来截图验证
+- **但面板始终没出现在截图里**，而我花了很多轮在**环境的构建/替换问题上**：
+  exe 被你会话里的实例锁住过、日志被锁住过、`--help` 不列出新开关、
+  同样的字符串检查一次为真一次为假（我自己的 Python 检查写错了）
+- **最后我没能确定"面板不显示"是代码问题还是环境问题**
+
+所以我**停下了**，没有继续瞎改代码。已做完的：**511 项自检全绿**、干净重建 SMOKE PASS。
+**未验证的**：面板到底长什么样、点开是否正常。
+
+#### 教训（比功能本身更重要）
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **标识符传了一半** | `systemPanelOpen` 给了渲染器，忘了给策略。 | **一个"状态输入"要同时到达所有消费者。** 加新输入时，列出所有读它的地方，逐个接上。 |
+| **我的自检脚本本身有 bug** | 检查二进制字符串的 Python 用错了 f-string，导致"字符串不存在"的假结论，我据此怀疑了好几轮二进制过期。 | **诊断工具本身要先验证。** 一个会撒谎的探针比没有探针更糟 —— 它让你去修一个不存在的问题。 |
+| **在被锁的 exe 上浪费了太多轮** | 用户会话里的实例锁住 exe 和日志，我的构建"成功"却没换文件。 | **每次验证运行前，先确认 exe 的 mtime 和日志格式**；发现锁住就**立刻停下问用户**，而不是反复重建。 |
+| **该停的时候没停** | 我连续很多轮在做"验证"，而每一轮都被环境问题吞掉。 | **连续两次验证被环境吞掉时，应该停下来报告，而不是继续试。** 用户的时间比我的完整性更重要。 |
+
+**未完成的事已如实记在 `FEATURES.md` 的专门章节。**
+
+### 7.60 阶段 8 第四轮：**系统指示器移到左侧** ✅
+
+用户要求：
+
+> 这种系统类型放在左侧吧
+
+#### 为什么应该放左边（不只是"换个位置"）
+
+**右侧是会增长的一排** —— 每打开一个窗口就多一个按钮。指示器放右边意味着：
+窗口越多，**系统状态越往右漂**，最后漂到 shell 自己的通知区域下面。
+
+**左侧是固定的**，所以指示器**永远在同一个位置**。这也和 Windows 11 一致：
+开始按钮和系统状态是**两端**，中间的岛表示"当前"。
+
+#### 空间够不够：算了一下，正好
+
+原来开始按钮钉在岛左边 8 DIP 处，左侧只剩 **38 DIP** —— 连一个指示器都放不下。
+
+改成锚定在**窗口左边距**后：
+
+```
+边距 16 + 开始 30 + 间隙 8 + 3 个指示器 106 + 间隙 8 = 168
+```
+
+而 2560 宽的显示器上**岛左边缘正好在 1170**（(2560−220)/2）。
+**所以岛保持居中，左侧deck刚好填满。** 实测断言：
+
+```
+start [16,46], indicators [54..88..122..186], island left 1170
+```
+
+#### 两个 deck 现在是独立的
+
+**指示器不再占用图标行的位置空间** —— 它们由岛的左边缘界定，图标行再长也够不到。
+所以 `TaskIconsThatFitAmong` 不再给指示器扣减：**扣了就是为图标用不到的空间付代价。**
+
+指示器数量改由 `IndicatorsThatFitLeft` 限定，放不下时**丢掉最后一个并打日志** ——
+**静默丢掉的指示器是用户找不到的控件。**
+
+#### 架构上的整理
+
+- `StartButtonFor` 从"锚定岛左边"改成"锚定窗口边距"
+- 新增 `IndicatorSlotFor(island, index)`：**左锚定在开始按钮上**，向右排
+- 新增 `IndicatorHit(island, count, x, y)` —— **渲染和命中用同一个函数**，
+  所以点击不可能落在被点按钮的旁边
+- `DrawIndicator` 的参数签名没变，但位置来源换了
+
+#### 又一次被锁住的 exe 骗了
+
+我用了一整轮**旧二进制**：exe 被用户会话的 pid <pid> 锁着，
+我的构建"成功"了但**没有替换文件**，日志里的 `19:13` 时间戳揭穿了它 ——
+而那条日志的格式还是**旧格式**（`icons + 3 indicators`），新格式是 `icons on the right`。
+
+**新二进制里同时含新旧两个格式串**（旧的字符串还在别处引用），
+所以"grep 到新字符串"**不能证明**运行的是新版 —— 只有**日志的实际格式**能证明。
+
+自检 **511 项全绿**（新增 6 项），`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **布局要放在不会增长的那一侧** | 右侧随窗口数增长，系统状态被推着走。 | **区分"固定内容"和"增长内容"**：固定的锚在边缘，增长的让它在中间长。 |
+| **"构建成功"不等于"二进制换了"** | exe 被别的会话锁着，链接失败或写入被拒，而我读的是**旧进程写的日志**。 | **每次验证运行前，先确认二进制的时间戳和日志格式。** 只看退出码会验一整个旧版本。 |
+| **grep 字符串不能证明版本** | 新二进制里同时有新旧的格式串。 | **用"只可能来自新代码"的可观测输出**判断版本（这里是日志行的格式），而不是字符串存在性。 |
+
+### 7.59 阶段 8 第三轮：**系统指示器画出来了** ✅（点击行为未做）
+
+用户给了一张 Windows 11 托盘的截图（`中` `显示` `喇叭` `18:45`）说"要做这个"。
+
+#### 先确认输入法怎么读
+
+试了三条路：
+
+| 方法 | 结果 |
+|---|---|
+| `ImmGetContext(foreground)` | **返回 0** —— 前台不是 IME 客户端（bar 见到的每个窗口都不是） |
+| `WM_IME_CONTROL` → `IMC_GETCONVERSIONMODE` / `IMC_GETOPENSTATUS` | **全部返回 0**（实测五个码全 0） |
+| **`GetKeyboardLayout(前台线程)`** | ✅ **可用** —— 布局 `0x08040804`，低字 `0x0804` = 简体中文 |
+
+**所以指示器显示的是「语言」，不是「中/英模式」。** 那个模式正是取不到的东西 ——
+**所以不画它**，而不是猜一个。
+
+#### 画图标：先手画，失败，改用字形
+
+第一版我**手画折线**做蓝牙符号，结果是一个**像沙漏又像虫子**的东西：
+
+```
+[7i] [8s]  ← 蓝牙画成了沙漏
+```
+
+**六段直线描述不了那个符文。** 改成用图标字体，然后**又踩一坑**：
+
+```
+Fluent E0CE  →  空心方框（缺字形）
+MDL2   E0CE  →  空心方框
+Fluent E702  →  ✅ 正确的蓝牙符号
+MDL2   E702  →  ✅ 也有
+```
+
+**码位错了，不是字体错了。** 验证方式是**画一张候选字形表然后看**，
+而不是查文档 —— 查文档正是我 E0CE 出错的原因。
+
+于是全部改成字形：蓝牙 `E702`、音量 `E767`（静音 `E74F`）、电池 `E850..E853/E83F`。
+**只有输入法仍是文字**，因为它的内容是语言字符而不是符号。
+
+#### 顺手抓到两个真 bug
+
+**1. 指示器只在采样时构建**：`BuildIndicators` 原本写在 2 秒定时器里面，
+于是**采样之间的帧里指示器数量是上一次的值，第一帧是 0** ——
+窗口被告知"没有指示器"，指针轮询没有东西可命中，而**渲染却照画**。
+**读数该定时采样，列表必须每帧重建。**
+
+**2. 日志看不到指示器**：`row:` 那行只列应用图标，描述的是"到最后一个图标就结束"的那排几何 ——
+**正是会压住指示器的那种几何**。加了 `i`/`s` 标记后：
+
+```
+row: hovered=-1, 8 icons + 3 indicators
+  [7i 1636..1666] [8s 1670..1700] [9s 1704..1734] [10s 1738..1768]
+```
+
+**零重叠，间距精确 4 DIP。**
+
+#### 当前进度
+
+| 部分 | 状态 |
+|---|---|
+| 数据层（WiFi/蓝牙/音量/电池/输入法） | ✅ 真机取到 |
+| 布局 + 索引空间 + 绘制 | ✅ **505 项全绿** |
+| **点击行为**（音量开音量条 / WiFi·蓝牙开设置页） | ⬜ **未做** |
+
+自检 **505 全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **能用字形就别手画** | 手画的蓝牙符文六段直线，出来是沙漏。 | **图标字体里的符号是设计师做的。** 手画只在字体里确实没有时才值得。 |
+| **字形码位要"画出来验"，不要查文档** | `E0CE` 我以为是蓝牙，实际是缺字形 → 空心方框。 | **缺字形不报错，只画方框。** 所以字形方案必须**渲染一次看一眼**。 |
+| **"定时采样"被误用到"每帧需要的列表"** | 读数值可以缓存 2 秒，但**列表结构必须每帧正确**。 | **区分"值多久变一次"和"结构多久变一次"。** 值是 2 秒，结构是每帧。 |
+| **日志只覆盖了一半的行** | `row:` 只列应用图标。 | **trace 必须能表达会出错的那部分。** 只记录一半的 trace 会让人相信另一半是对的。 |
+
+### 7.58 阶段 8 第二轮：**系统状态层（WiFi / 蓝牙 / 音量 / 电池）—— 数据与布局已落地** 🔶
+
+用户要求：
+
+> 现在把 wifi 蓝牙等系统应该做出来
+
+#### 先摸清哪些数据真的拿得到（探针）
+
+写了个探针挨个试，结果**不是"都有"也不是"都没有"**：
+
+| 数据 | 结果 |
+|---|---|
+| WLAN 接口状态 | ✅ `disconnected`（枚举到 1 个网卡 `MediaTek Wi-Fi 6 MT7921`） |
+| SSID + 信号强度 | ✅ 连接时才有，未连接时 API **返回错误而不是"未连接"** |
+| **WLAN radio 开关** | ❌ 查询**返回成功但 `dwNumberOfPhys = 0`** —— 这个 build 不暴露 |
+| 蓝牙 radio | ✅ `<device-name>`，MAC `<mac>` |
+| 音量 | ✅ 已有实现 |
+| 电池 | ✅ API 通，台式机返回 **`255 = 未知` + flag `0x80 = 无电池`** |
+
+**探针里我自己也踩了一个坑**：`WlanQueryInterface` 返回的大小**小于**我传入的结构体时
+**不回填 size**，所以 `dwNumberOfPhys` 读到了 `4050143248`（栈垃圾）。零初始化 + 校验上界后才对。
+
+#### 为什么把"决策"和"取数"分开
+
+`SystemStatus.h/.cpp` 里，**API 调用只在一处**，产出纯结构体；
+**"这个结构体意味着画什么"全是纯函数**，可以断言。
+
+理由是**这些 API 的失败方式是"有条件"而不是"缺失"**：
+
+- 未连接时**查不到 SSID，是报错**
+- 蓝牙 radio **关掉时仍然会被枚举出来**
+- 电池 API 在台式机上**成功**并返回 255（**天真地画就是一块 255% 的电池**）
+- WLAN radio 状态**根本不暴露** —— 照它画就是**编造**
+
+#### 布局：系统图标接在图标行末尾
+
+和 Windows 11 顺序一致。**一个按钮，不同数据源** —— 同尺寸、同命中规则、同 hover 变宽，
+所以是**同一排**，不是第二排。第二排意味着第二套偏移量，而这个项目已经吃过
+"同一个东西的坐标在两处计算"的亏。
+
+**断言当场抓到一个真 bug**：`TaskIconsThatFitAmong` 原先受 **12 上限**限制，**不是受空间限制** ——
+于是"留 3 个位置给系统图标"**根本没起作用**，图标数还是 12，系统图标会**压在上面**。
+
+```
+[FAIL] reserving three indicators costs icons    12 icons alone, 12 icons with 3 indicators
+```
+
+改成受空间限制后：**`8 icons alone → 5 icons with 3 indicators`**。
+
+#### 而且必须按"按钮打开后"的宽度算
+
+如果按静止的 30 DIP 算，能塞 12 个；但**指针一碰上去**，那个按钮从 30 胀到 132 DIP，
+**整排往右窜 102 DIP** —— 会跑出窗口或被裁掉。
+
+```
+all 16 buttons opened would end at 3570 of 2560   ← 断言证明"上限"方案必然溢出
+```
+
+所以排的宽度按 `kTaskWideButtonDip`（132）算，**右边缘永远不动**。
+代价是图标数从 12 降到 8（无系统图标时）—— **这才是诚实答案**，因为 12 只在"没人指任何东西"时成立。
+
+#### 当前进度
+
+| 部分 | 状态 |
+|---|---|
+| 数据层（`SystemStatus.h/.cpp`） | ✅ 真机取到数据，纯函数可断言 |
+| 布局（系统图标接在行末、按空间定图标数） | ✅ 4 项断言 |
+| 窗口侧的索引空间（行 = 应用图标 + 系统图标） | ✅ 500→505 项全绿 |
+| **画出来**（WiFi/蓝牙/音量/电池图标） | ⬜ **未做** |
+| **点击**（音量开音量条、WiFi/蓝牙开设置页） | ⬜ **未做** |
+
+自检 **505 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"没有公开 API"不等于"拿不到"** | 托盘图标真的拿不到（已证死路），但这几项**都有公开 API**。 | **先分项测，不要整块下结论。** "系统托盘"听起来一件事，实际是六个各自不同的可行性问题。 |
+| **成功的调用可能什么都没写** | `WlanQueryInterface` 返回 0，但 `size` 没回填，字段是栈垃圾。 | **"返回成功"和"输出被写入"是两件事。** 输出结构体要先清零，并校验读到的值是否在合理范围内。 |
+| **上限常量会掩盖空间约束** | 12 的上限让"减去系统图标占位"变成一个空操作。 | **断言要能表达"扣除生效了"** —— 只断言"排能装下"永远发现不了"扣除没生效"。 |
+| **按静止尺寸排版，指针一动就溢出** | 静止 30 DIP 能塞 12 个，打开后要 132 DIP。 | **如果某个尺寸会变，就按它最大的那个排。** 否则"能装下"只在最宽松的时刻成立。 |
+
+### 7.57 阶段 8 第一轮：**托盘图标 —— 探针找到死路，用户叫停** ⛔
+
+用户选定做托盘，但**探针先跑了一步**，结果值得记下来。
+
+#### 探针先于实现
+
+托盘图标**没有公开 API**。标准做法是读 `Shell_TrayWnd` 里 `ToolbarWindow32` 的按钮
+（跨进程读 Explorer 内存）。这条路我在写代码前先测：
+
+```
+Shell_TrayWnd         : 00000000002C03AE  class=Shell_TrayWnd    visible=0
+TrayNotifyWnd         : 00000000000903B8  class=TrayNotifyWnd    visible=0
+tray toolbar          : not found
+```
+
+**本机（Win11 26220）`Shell_TrayWnd` 子树下没有 `ToolbarWindow32`** ——
+新版托盘换了实现，**老路无从附着**。
+
+#### 用户的判断
+
+> 托盘图标先不做
+
+**这个叫停是对的**：路是死的，换通道（UIA 或别的）是一次**重新调研**，
+不是一个"接着写"的任务。**先花十几分钟证明路是死的，比写完一整块再发现要好。**
+
+#### 已清理
+
+- `src/TrayProbe.cpp` **删除**（从未加进 `CMakeLists.txt`，没有留下半截死代码）
+- `scratch/` **删除**
+- 死路写进 `FEATURES.md` 的托盘那一行，**避免以后有人重走**
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"没有 API"的做法要先证明可行** | 跨进程读托盘内存是**未文档化**的手段，依赖 shell 的内部结构。 | **凡是依赖未文档化结构的方案，先写探针。** 一个 40 行的探针十几分钟就能证伪，而整块功能是几小时。 |
+| **探针的价值可以是"否"** | 这次探针的产出是**此路不通**。 | **否定结果也是结果** —— 它省下了写完整块再发现的时间，而且它可复现（参数和窗口树都记下来了）。 |
+| **叫停不是失败** | 用户看到"路是死的"就叫停了。 | **把"这条路多难"如实汇报，让用户决定要不要换路线。** 而不是自己硬撑着换一条更重的通道。 |
+
+自检仍为 **500 项全绿**（探针从未进构建，不影响）。
+
+### 7.56 阶段 7 第五轮：**岛的动画去掉（用户拍板）** + **两项主动推迟** ✅
+
+#### 一、灵感岛只剩一种形状（用户原话："灵动岛 不需要左右胀了 这个动画去掉吧"）
+
+这一句**同时解决了我正在纠缠的 bug**。上一轮我在纠结"音乐条盖住开始按钮"，
+把音乐条从 520 缩到 396 —— **还是碰撞**：
+
+```
+start button        x 1132..1162
+collapsed        island x 1170..1390   clear
+music-strip OLD  island x 1020..1540   CLASH
+music-strip NEW  island x 1082..1478   CLASH   ← 缩窄也没用
+```
+
+**根因不是宽度，是"对称展开"本身**：任何比胶囊宽的状态，左右各伸一半，
+**左边缘必然伸向开始按钮**。用户的决定把这一类问题整体消掉。
+
+现在只有两种"不同形状"的状态：
+
+| 状态 | 形状 |
+|---|---|
+| `Collapsed` / `Hover` / `MusicStrip` | **同一个胶囊**（220×36） |
+| `Expanded` | 卡片（520×232）——**不同种类的东西** |
+| `FullBar` | 满宽条（全屏用） |
+
+用**一个 `SettledSizeFor()`** 表达，让"它们同形"成为**结构事实**而不是碰巧相等。
+于是这三个状态之间的**过渡距离是 0**。
+
+**断言抓到我漏的一步**：形状相同了，但 `SetTarget` **仍会启动一次 160ms 动画** ——
+**看不见，但不免费**（持续重绘、重设区域、自报 animating）。加 `SameBox()` 短路：
+**"没什么可动的"必须意味着"什么都不跑"。**
+
+#### 二、两项由用户主动推迟（原话："你先记录一下 最后在改 我们先做其他的"）
+
+| # | 现象 | 已知事实 | 下一步 |
+|---|---|---|---|
+| 1 | **点开始按钮，菜单不出现** | 日志证明**点击命中**（1146,31 ∈ 1132..1162）且 `Ctrl+Esc was sent`。探针证明 **Ctrl+Esc 在同一会话从普通 shell 有效**（前台变成 `XamlExplorerHostIslandWindow`）。**差异在点击的上下文里** | 看 `modifiers before -- ctrl/shift/alt/win/lmb`。**最可疑 `lmb=1`**（鼠标键按着 → Windows 当手势）；其次 `ctrl=1`。若全 0 → 换通道 |
+| 2 | **显示歌名而非歌词** | 这是代码里的**正确降级**（取不到 LRC 用歌名兜底），**不是显示错误** | 看 `lyrics: loaded` / `lyrics: none` 及失败原因（无网 / 匹配不到 / 超时） |
+
+**推迟是合理的** —— 这两项都不影响其他功能开发。代价只有一个：
+**"记录"必须真的能被找回来**，所以它们被写进 `FEATURES.md` 的**专门章节**，
+而不是留在聊天里。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **我在调参数，而问题在结构里** | 520 缩到 396 仍碰撞 —— 碰撞来源是"对称展开"，不是那个数字。 | **连续两次调参都失败时，停下来问"是不是结构错了"。** 参数的可行域若是空的，怎么调都不会对。 |
+| **"所以它不会发生"要写成断言** | 形状相同 → 不该有动画，但代码没保证。 | **相邻状态相同 ≠ 状态切换零成本。** 要显式短路并断言。 |
+| **用户的决定可能比我的方案更好** | 我在"缩窄"和"左对齐"之间纠结；用户直接说"不要胀了"。 | **把纠结的问题说给用户听** —— 他可能有更根本的取舍，而你只看到两个坏选项。 |
+| **推迟的项必须落在文件里** | 两项都是"下次再说"，很容易真的丢掉。 | **凡是"先记下"的东西，写进 `FEATURES.md` 的专门章节**，写清现象、已知事实、下一步看什么。 |
+
+自检 **500 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.55 阶段 7 第四轮：**灵动岛只剩一种形状** ✅
+
+用户拍板：
+
+> 灵动岛 不需要左右胀了 这个动画去掉吧
+
+#### 这一句同时解决了一个我正在纠缠的 bug
+
+我上一轮正在纠结"音乐条盖住开始按钮"，试了把音乐条从 520 缩到 396 —— **还是不够**：
+
+```
+start button        x 1132..1162
+collapsed        island x 1170..1390   clear
+expanded         island x 1020..1540   CLASH
+music-strip OLD  island x 1020..1540   CLASH
+music-strip NEW  island x 1082..1478   CLASH   ← 缩窄也没用
+```
+
+**根因不是宽度，是"对称展开"本身**：任何比静止胶囊宽的状态，
+左右各伸一半，**左边缘必然伸向开始按钮**。
+
+用户的决定把**这一类问题整体消掉**，而不是调一个数字。
+
+#### 修法：只有两种状态是"不同形状"
+
+| 状态 | 形状 |
+|---|---|
+| `Collapsed` / `Hover` / `MusicStrip` | **同一个胶囊**（220×36） |
+| `Expanded` | 卡片（520×232）——**不同种类的东西** |
+| `FullBar` | 满宽条（全屏用） |
+
+用**一个 `SettledSizeFor()`** 表达，而不是四个各自独立的常量 ——
+**让"它们是同一个形状"成为代码里的结构事实，而不是碰巧相等。**
+
+**于是这三个状态之间的过渡距离是 0。**
+
+#### 顺手让"没有距离"真的等于"不跑动画"
+
+断言抓到我漏了一步：形状相同，但 `SetTarget` **仍会启动一次 160ms 的动画** ——
+**看不见，但不免费**：它会保持帧循环持续重绘、重设窗口区域、并把自己报告成 animating。
+
+加了 `SameBox()`：**目标形状和当前形状相同就直接返回"无需过渡"。**
+"没什么可动的"应该意味着**什么都不跑**。
+
+#### 新增 4 项断言
+
+```
+[ OK ] collapsed, hover and music are all the same shape as the pill   pill x [1170, 1390] y [6, 42]
+[ OK ] switching between two same-shaped states starts no transition
+[ OK ] and neither does switching to the lyric strip
+```
+
+**按状态断言，而不是按那个出问题的地方断言** —— 下一个新加的状态如果又比胶囊宽，
+会在这里被抓住，而不是在屏幕上。
+
+自检 **500 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **我在调参数，而问题在结构里** | 我从 520 缩到 396，仍然碰撞 —— 因为**碰撞的来源是"对称展开"**，不是那个数字。 | **连续两次调参都失败时，停下来问"是不是结构错了"。** 参数的可行域如果是空的，再怎么调都不会对。 |
+| **"所以它不会发生"要写成断言** | 形状相同 → 不该有动画。代码里没保证这一点。 | **相邻状态相同，不等于"状态切换是零成本的"。** 要显式短路，并断言它。 |
+| **用户的决定可以比我的方案更好** | 我在"缩窄"和"左对齐"之间纠结；用户直接说"不要胀了"。 | **把纠结的问题说给用户听** —— 他可能有更根本的取舍，而你只看到两个坏选项。 |
+
+### 7.54 阶段 7 第三轮：**悬停不再把岛胀成空条** ✅
+
+用户截图指出：
+
+> 鼠标放上去 是这种效果
+
+图里岛胀成一条**中间全是空的**宽条。
+
+#### 真因：一个被时代甩下的形状
+
+日志把两个数字放在一起，一眼就看出问题：
+
+```
+draw icons: count=7, island x [761, 1799]      ← 岛自己胀成 1040 宽
+row: [0 1807..1837] [1 1841..1871] ...         ← 图标在 1807..2042，在岛【外面】
+```
+
+**`Hover` 把岛胀到 1040 DIP，而图标根本不在里面**（岛结束于 1799，第一个图标从 1807 开始）。
+于是那条宽条里只有一个时钟和 1000 DIP 的空洞。
+
+**这个形状是历史遗留**：最早的设计**没有常驻图标行**，悬停必须胀宽，才放得下任务栏。
+后来用户要求"打开一个应用就在岛旁边多一个图标" —— **图标移出去了，胀宽却留下来了。**
+
+#### 修法
+
+`kHoverWidthDip` 从 **1040 改成与静止态相同（220）** —— **悬停不再改变岛的大小**。
+响应指针的现在是**图标行**：指到哪个哪个变宽显示标题，岛保持不动。
+
+`Hover` 状态本身保留，因为"指针在栏上"仍然是一个策略要跟踪的条件 —— 只是它不再是一个尺寸。
+
+#### 两个断言跟着失效（都是"对的断言指错了对象"）
+
+```
+[FAIL] mid-transition width lies between the ends
+[FAIL] settled exactly on the hover width
+```
+
+它们**原本想验证的是"动画中途不停在端点"**，只是拿 Hover 当例子。
+现在 Hover 不再是宽度变化，这两条就测不到东西了。改成用 **`Expanded`**（确实同时改变宽高）。
+
+**断言没错，是它指向的过渡不再移动任何东西。**
+
+#### 为了让形状能被"看"，加了调试开关
+
+```
+--state collapsed|hover|expanded|music-strip|full-bar
+--start-hover
+```
+
+**因为一个形状可以通过所有断言却依然是难看的。**
+这一轮就是靠它把四种状态各拍一张、并排对比才看清的 ——
+**盯着几何数字看不出"中间是空的"。**
+
+自检 **496 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **形状随设计演进而失效，但没人回头删** | 图标移出岛之后，岛的"悬停胀宽"就没有用途了，却留了好几轮。 | **改变了布局的前提时，要回头检查所有依赖旧前提的形状。** 需求变了，"当时对的"会变成"现在没用的"。 |
+| **断言指向了不再移动的过渡** | 两条断言用 Hover 举例验证动画中间态；Hover 不再改变尺寸后，它们变成空转。 | **断言失效有两种：代码错了，和断言指错了对象。** 这次是后者 —— 修断言，不改代码。 |
+| **几何能通过断言，却依然难看** | 1040 宽的岛"符合"所有几何断言。 | **视觉问题要有视觉的验证手段。** 加了 `--state` 开关，让每个形状能被拍下来看 —— 数字看不出"中间是空的"。 |
+
+### 7.53 阶段 7 第二轮：**开始菜单用 Ctrl+Esc，不是 Win 键** ✅
+
+用户反馈：
+
+> 灵动岛变宽了
+
+**这个细节把问题分成两半**：
+
+1. 点击**正确路由到了开始按钮**（日志 `start click: sent`）—— 指针移向按钮时经过岛，岛展开成
+   `Hover`，**这是预期行为**
+2. **Windows 键发出去了，但 shell 没有响应**
+
+#### 探针一次定案
+
+`SendInput` 返回成功只表示"事件进了队列"，**不表示 shell 照做了** —— 这个区别从程序内部看不见。
+所以写了 `scripts/probe-start.ps1`，**四种方式各试一次**，每次之后读**前台窗口的类名**：
+
+```
+[before anything]        foreground='XamlExplorerHostIslandWindow'
+[after Ctrl+Esc]         foreground='XamlExplorerHostIslandWindow'   ← 仍是它：生效
+[after Win (SendInput)]  foreground='Chrome_WidgetWin_1'             ← 交还给 Chrome：没生效
+[after Win (keybd_event)]foreground='Chrome_WidgetWin_1'             ← 同样没生效
+```
+
+**`XamlExplorerHostIslandWindow` 就是 Windows 11 开始菜单的宿主窗口。**
+
+**结论**：合成按键**没有被忽略**（否则 Ctrl+Esc 也不会生效）——
+**是我用了错的那个键**。
+
+#### 修法
+
+`ToggleStartMenu` 改成发 **Ctrl+Esc**。它还顺带消掉了那个最麻烦的边界情况：
+
+**Win 键的含义取决于是否按着修饰键**（Win+E 打开资源管理器；按着 Ctrl 时单独按 Win 什么也不做），
+而 **Ctrl+Esc 没有第二含义** —— 所以"有时灵有时不灵"那个症状在这条路上不存在。
+
+仍然保留：**无论成败都显式释放修饰键**。一个逻辑上按住的 Ctrl 比"菜单没打开"严重得多 ——
+**用户之后按的每个键都会变成快捷键**，而这是个会活过那次点击的缺陷。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"调用成功"当成"目的达成"** | `SendInput` 返回 1 只说明**事件入了队列**。 | 凡是"投递"型 API，**都要另外找一个可观测的结果**来判断是否真的生效（这里是前台窗口类名）。 |
+| **凭常识选 API，没有实测** | Win 键"显然"该打开开始菜单 —— 它在合成输入下无效。 | **有多个等价途径时，最"显然"的那个不一定可用。** 写一次探针同时试所有途径，比逐个改代码快得多。 |
+| **用户的观察里藏着定位信息** | "灵动岛变宽了"同时说明了**点击路由对了**和**菜单没出来**。 | 用户描述现象时**不要只取"没成功"这一个信息** —— 他说的每个细节都在缩小范围。 |
+
+自检 **496 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.52 阶段 7 第一轮：**灵动岛左侧的开始按钮** ✅（按键路径待用户验证）
+
+用户要求：
+
+> 先做在灵动岛左侧固定的应用，然后点击固定一个开始菜单，点击弹出开始菜单
+
+#### 布局：两端的镜像
+
+```
+开始按钮 1132..1162 │ 岛 1170..1390 │ 图标 1398..1428 ...
+        └─ 间隔 8 ─┘          └─ 间隔 8 ─┘
+```
+
+**完全对称**：开始按钮和图标按钮**同尺寸**（30 DIP），都用岛到它的 8 DIP 间距。
+两侧都从**同一个岛盒**派生，所以不可能对"中间在哪"产生分歧。
+
+标记是**画出来的**（四个方块拼成 Windows 标志），**不是加载图标** ——
+少一个要随程序发布的文件，少一个会加载失败的东西。
+
+#### 关键断言：按钮必须在**输入区域**里
+
+```
+[ OK ] the input region reaches the Start button, or it could never be clicked
+        start [1132, 1162] DIP; region [1132, 1802] px
+```
+
+**按钮画在区域外就完全点不到，而画面上看不出任何异常** —— 这正是要断言的原因。
+（这也是上一轮那个"红框不可点击"的同一类问题。）
+
+#### Windows 11 打开开始菜单没有 API
+
+**实测确认**：
+
+- Windows 11（build 26220）把开始菜单放在 XAML 进程里，
+  **Win7 时代的 `WM_SYSCOMMAND` + `SC_TASKLIST` 完全无效**
+- `Shell_TrayWnd` 下**没有 `Start` 子窗口**（实测 `child Start -> 0`）
+- 各种 XAML 宿主类名（`XamlExplorerHostIslandWindow` 等）**都不存在**
+
+所以用**合成 Windows 键** —— 开始菜单**就是那个键的动作**。
+
+#### 写成"能分辨成功与尝试"的形式
+
+`StartMenuResult` 分三种：`Sent` / `InputBlocked` / `NoInput`。
+**因为发按键失败之后不留任何痕迹**，而"按钮没反应"对这三种原因是同一个症状。
+
+还做了一件容易被漏掉的事：**先轻敲一下 Ctrl**。因为**用户正按着修饰键时，Win 会变成快捷键而不是开始菜单**——
+症状是"按钮有时灵有时不灵"，是最难查的那种。
+
+半途失败时**显式补一个抬起**，否则 Windows 键会逻辑上一直按下，**用户之后按的每个键都会变成快捷键**。
+
+#### 我测不出来，如实说明
+
+沙箱里前台一直是 Chrome，**合成按键没有任何反应**。可能是沙箱不转发输入，
+**也可能是这条路根本不行 —— 我在这里无法区分**。
+所以日志会打印 `start click: sent` / `input blocked`，由用户一次运行定性。
+
+自检 **496 项全绿**（新增 8 项），`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+### 7.51 阶段 6 第四轮：**全屏时灵动岛填满顶部条带** ✅
+
+用户提了两件其实是一件事的事：
+
+> 1. 应用全屏的时候能不能，灵动岛鼠标上去这样（能交互）
+> 2. 能不能让应用**真正的全屏**啊，而不是留这个空白
+
+#### 先测出到底是谁在占位（不猜）
+
+```
+Shell_TrayWnd   visible=False   rect=(0,0)-(2560,32)   ← 用户的原生任务栏在屏幕【顶部】
+work            top=32                                   ← 工作区从 32 开始
+```
+
+**关键事实**：一条屏幕边缘只能有一个 AppBar，而 **shell 的任务栏即使被隐藏也仍然注册着它**。
+所以：
+
+- 工作区永远从 32 开始 → 最大化窗口顶部永远留 32px 空白
+- 我们的 `Claim(Top)` **必然被拒** —— 这就是之前 `ABM_NEW refused error 5` 的真正原因
+  （此前我一直以为那只是沙箱权限问题）
+
+#### 用户选定的方案：**不抢，填满它**
+
+新增 `IslandState::FullBar`：
+
+| | |
+|---|---|
+| 宽度 | **整个显示器宽度**（2560） |
+| 高度 | **32px** —— 正是那条带子的高度 |
+| 位置 | y=6 .. y=38，**下缘正好接到工作区顶部 y=32** |
+
+于是**带子被栏盖住、应用从 y=32 开始、屏幕上没有一处浪费**。
+
+**输入区域跟着走**：全宽、只有栏那么高（40px = 6 边距 + 32 栏 + 2 余量），
+所以**栏下面仍然能点到应用**。
+
+#### 状态由策略决定
+
+`fullscreenApp` 加进 `PointerContext`，**`NextShape` 里优先级最高**；
+并且**退出全屏时显式回到 resting** —— 否则会卡在 `FullBar`，
+因为**没有任何其他规则认识这个状态**，`NextShape` 会原样返回它。
+
+#### 已知取舍（如实记下，没有掩盖）
+
+`kFullBarHeightDip` **写死 32**，而带子厚度是**由用户的任务栏设置决定的**（常见 32/40/48）。
+在别的机器上会露缝或压住一点。**应该改成运行时从工作区读**：
+
+```cpp
+bandDip = PixelsToDip(monitor.work.top - monitor.screen.top, monitor.dpi)
+```
+
+用户说"先这样"，所以**记为已知问题**而不是已完成。
+
+自检 **488 项全绿**（新增 7 项），`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **把"抢不过来"误判成"沙箱权限不够"** | `ABM_NEW error 5` 我一直归因于沙箱。真相是**用户的 shell 任务栏已经占着顶部那条边**。 | **同一个错误码在不同环境下有不同原因。** 我连续几轮用"沙箱限制"解释它，直到实测才知道是**用户的实际配置**。 |
+| **用户描述成两件事，其实是同一个** | "岛能交互"和"真正全屏"都是那 32px 造成的。 | 再次应验：**先找共同原因**。这次找到了 —— 一个 shell 的 AppBar 抢占。 |
+| **硬编码了一个本应读出来的尺寸** | 带子高度=任务栏厚度，是**每台机器不同**的值，我写死了 32。 | **凡是"由外部设置决定"的尺寸，都要运行时读**。写死会在别人的机器上错，而且症状（一条缝）很难联想到常量。 |
+
+### 7.50 阶段 6 第三轮：**区域跟着画面走** + **全屏时让路** ✅
+
+用户确认区域问题解决，并提出两件新事：
+
+> 1. 应用全屏的时候能不能，灵动岛鼠标上去这样（能交互）
+> 2. 能不能让应用**真正的全屏**啊，而不是留这个空白
+
+#### 第 1 件：输入区域高度用了整个窗口
+
+**我之前只查了 `y=20`**（那里区域边界看得见），漏了下半部分。这次逐个点测：
+
+```
+(1300, 20) -> 'IslandBar.IslandWindow'
+(1300,100) -> 'IslandBar.IslandWindow'   ← 问题在这
+(1300,200) -> 'IslandBar.IslandWindow'   ← 和这
+```
+
+**区域高度设成了整个窗口 240px，而岛只占顶部 42px** —— 下面 198px 看起来像空桌面，
+实际上把点击全吞了。**这就是红框。**
+
+**修法**：区域 = **当前状态实际画到的高度**，用**渲染器同一个 `BoxForState`** 算：
+
+| 状态 | 区域高度 |
+|---|---|
+| 折叠 | **44px**（药丸 42 + 2px 抗锯齿余量） |
+| 展开 | **240px**（卡片 232 必须能点） |
+
+加了缓存：矩形没变就跳过 `SetWindowRgn`。
+
+#### 第 2 件：`IsFullscreenAppInFront()` **从来没有被调用过**
+
+又是死代码（和 `Activate` 一样）：**shell 从 AppBar 写好的那天就在告诉我们全屏应用来了，
+但没有任何人听**。于是全屏应用头顶留着 42px 空白，岛上还压着它。
+
+**两个抱怨是同一个抱怨**：预约让应用无法占满屏幕，岛又压在它上面。
+所以**两件事一起做**：**释放预约 + 隐藏岛**，退出全屏时恢复。
+
+**为什么全屏时不提供"鼠标滑上去唤出"**：全屏是"我要整个屏幕"的意思。
+指针划过顶部就弹出来，会**正好在用户最不想要的时刻**打断视频或游戏。
+shell 自己的任务栏在全屏时也是不出现的。
+
+#### 顺带抓到第 4 次"用工作区定位"
+
+改全屏时自检报错：`strip top 32, screen top 0`。查出 `Create()` 里有个 **DPI 修正分支**
+用了 `monitor_.work.top`：
+
+```cpp
+const LONG h = DipToPixels(kWindowHeightDrip, monitor_.dpi);
+rect_.top = monitor_.work.top;    // ← 主路径用的是 screen.top
+```
+
+**只在"窗口 DPI 与显示器 DPI 不一致"时才走到**，所以长期隐藏。
+而**预约会移动工作区**，所以"从工作区定位的窗口"是**bar 能推动的窗口** ——
+和预约走位是**同一个闭环，只是发生在窗口而不是 bar 里**。
+
+**同一个根因第 4 次出现**（7.33 窗口、7.49 预约、7.50 区域高度、7.50 DPI 分支）。
+教训已经写了三遍，**说明我每次只修看得见的那一处，没有系统性地搜"所有用了工作区的地方"**。
+
+自检 **481 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **只在区域边界可见的地方取样** | 我只测 `y=20`，那里正好能看到边界，于是"验证通过"；`y=100/200` 从没测过。 | **取样点要覆盖整个可疑范围，不是找一个能通过的。** 通过一次不等于覆盖。 |
+| **"让路"和"全屏"被当成两件事** | 一个是岛压在上面，一个是预约占着空间 —— 但它们是**同一个预约**造成的。 | 用户描述成两件事时，**先查找共同原因**。分开修会各修一半，剩下的仍然表现为原来那两个症状。 |
+| **死代码：检测到了但没人听** | `IsFullscreenAppInFront()` 存在很久，**零个调用点**。 | 和 `Activate` 同一条：**没有被调用的代码等于没有这段代码**。声称某功能完成前先找出调用点。 |
+| **同一个根因第 4 次** | 每次都只修看得见的那处。 | **修完一处要全文搜同类模式**。写了三遍规则还在犯，说明缺的是**搜索动作**而不是规则本身。 |
+
+### 7.49 阶段 6 第二轮：**AppBar 反馈环 —— 桌面被推下去了** ⚠️→✅
+
+用户从自己的 shell 运行，**`--appbar` 注册成功、原生任务栏隐藏成功**，但桌面坏了：
+
+> 可以隐藏任务栏，但是**都挤在下面了**，上面这么大都不让点击
+
+#### 日志直接给出反馈环
+
+```
+appbar: ABM_SETPOS asking for 0,0    2560x42   ← 第一次正确
+appbar: ABN_POSCHANGED -- re-claiming the space
+appbar: ABM_SETPOS asking for 0,42   2560x42   ← 每次下滑 42px
+appbar: ABM_SETPOS asking for 0,84   2560x42
+appbar: ABM_SETPOS asking for 0,126  2560x42
+```
+
+**bar 每次"重新预约"都从当前工作区的顶部起算，而它自己的预约就在缩短那个工作区。**
+于是每轮下滑一个 bar 的高度，直到滑出屏幕 —— 上面 300 多 px 被"预约"掉，
+所以**那片区域不可点击**，所有窗口被挤到底部。
+
+**这是 7.33 那个坑的同一形态**：用**自己正在改变的东西**当坐标基准。
+（7.33：窗口从 `work.top` 定位；本轮：AppBar 从 `workBefore.top` 定位。）
+
+#### 修法一：锚点改成**显示器边界**
+
+新增 `MonitorBoundsOf()` / `AppBarStripRect()` —— **矩形的每一条边都来自显示器，一条也不来自工作区**。
+`AppBarStripRect` 是**自由函数**，所以能脱离窗口和 shell 测试。
+
+#### 修法二：落地校验从**相对**改成**绝对**
+
+```cpp
+// 原来（相对）：工作区必须比自己之前缩短 thicknessPx
+topIsRight = workAfter.top == workBefore.top + thicknessPx;
+```
+
+**这个校验抓不住反馈环 —— 因为每一步都"恰好缩短了一个厚度"，每一步都是合法的。**
+它把走位报告成成功。
+
+```cpp
+// 改成（绝对）：工作区顶边必须在显示器顶边下方恰好 thicknessPx
+topIsRight = workAfter.top == anchor.top + thicknessPx;
+```
+
+#### 修法三：已经是我们的预约就不再重算
+
+shell 在我们自己的预约之后也会发 `ABN_POSCHANGED`。加了幂等检查：
+工作区已经显示"从该边让出 thicknessPx"就直接返回，不再写一次桌面布局。
+
+#### 新增 7 项断言，**并且验证它能表示旧 bug**
+
+```
+[ OK ] a top bar's strip is one thickness off the monitor's top
+[ OK ] the strip rectangle does not move when asked again after the work area shrank
+        asked twice: 0,0 2560x42 then 0,0 2560x42 (work area top is 42)
+[ OK ] deriving the strip from a shrunken work area does move it, so the old bug is representable
+[ OK ] a bottom bar's strip is one thickness off the monitor's bottom
+[ OK ] a left bar's strip is one thickness off the monitor's left
+[ OK ] a right bar's strip is one thickness off the monitor's right
+[ OK ] no edge produces an empty rectangle, which is refused
+```
+
+第三条是**故意用错误输入去喂**，证明"旧 bug 是可以被表示的" ——
+断言能证明正确，但只有**反例能被表示**才说明它真的在测那个性质。
+
+#### `scripts\try-appbar.ps1` 加了**漂移看门狗**
+
+第一版脚本会**等满超时**才事后检查。现在**运行期间每 200ms 量一次工作区顶部**，
+超过预期 120px 就立刻杀掉并恢复 —— **在桌面还基本正常、窗口还没全被推走的时候就抓住**。
+
+自检 **470 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **用"操作会改变的值"当操作的基准（第二次）** | AppBar 从工作区顶部定位，而工作区正是预约会缩短的东西 → 每轮下滑一个 bar 高。 | **同一个根因第二次出现说明规则没有被真正执行。** 7.33 已经写下"不要用自己会改变的值当基准"，但没有检查**所有**用工作区/自己产出的值做定位的地方。 |
+| **相对校验抓不住累积错误** | "比自己之前缩短一个厚度"对**每一步**都成立，于是走位被报告成成功。 | **累积性错误必须用绝对量校验**，不能校验增量。相对校验只能证明"这一步看起来对"。 |
+| **恢复脚本自己重启了 Explorer** | `SPI_SETWORKAREA` 在低权限下失败（error 5），脚本于是重启 Explorer —— 那是破坏性的。 | 恢复动作要**分级**：先尝试非破坏性的，**明确说明**下一步会重启 shell，而不是默默做掉。 |
+| **断言要能表示旧 bug** | 只断言"新代码正确"无法区分"性质成立"和"断言没测到那个性质"。 | **用一个错误的输入喂进去，证明它会被判失败。** 这次做到了（第三条断言）。 |
+
+### 7.48 阶段 6 第一轮：**准备验证 `--appbar`**（抢占顶部条带）
+
+"替代任务栏"的最后一环，也是**唯一必须从用户自己的 shell 启动**的一项 ——
+沙箱里 `ABM_NEW` 被拒（error 5），所以**从项目开始到现在从未在正常环境验证过**。
+
+#### 先修掉一个真实缺陷：预约高度写成了会误导人的表达式
+
+```cpp
+// 原来：
+island::DipToPixels(island::kPillTopMarginDip + island::kCollapsedHeightDip, monitor.dpi)
+```
+
+`kCollapsedHeightDip` **恰好等于** `kPillHeightDip`（都是 36），所以**结果正确但纯属巧合**。
+读起来像是在预约"收起态药丸的高度"而不是"整个窗口 chrome 的高度" ——
+**下一个改收起高度的人会在毫不知情的情况下改变栏占用的屏幕高度。**
+
+新增 `kReservedBarHeightDip = kPillTopMarginDip + kPillHeightDip`，并断言其值。
+
+> 我一开始写了一条断言说"原来少算了 6 DIP" —— **算错了**：6+36 = 42，和 6+36 一样。
+> 断言失败把这个错误当场暴露出来，我改成了陈述实测值。**先量再写结论。**
+
+#### 新增 `scripts\try-appbar.ps1`
+
+**为什么它需要单独一个脚本**：预约会重写工作区，**每个最大化窗口都会跟着动**。
+上一次尝试把机器上所有窗口都推到了屏幕底部，而且**没有任何报错**。
+所以这个脚本：
+
+- **开跑前**先打印恢复命令，而不是出事后才说
+- **带超时**运行，到时强制结束（析构函数会释放预约）
+- **读日志**报告实际发生了什么
+- 结束时**检查工作区**
+
+#### 干跑时抓到脚本自己两个 bug
+
+**1. 它根本没传 `--appbar`** —— 跑的是普通模式，永远测不到这个功能。
+
+**2. 它把 shell 自己任务栏的 32 px 当成了我们的预约**，于是**重启了 Explorer** ——
+对一个**从来没有出过问题**的桌面做了破坏性恢复。
+
+改成**读日志判断**：只有程序自己报告 `appbar: registered` 时，
+剩下的预约才被当作"我们的"去回收。现在它会正确地说：
+
+```
+[appbar] the bar did NOT register as an AppBar, so it reserved nothing.
+[appbar] the 32 px reserved at the top belongs to the SHELL's taskbar, not to us.
+[appbar] nothing to undo -- the recovery script was deliberately not run.
+```
+
+自检 **463 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **表达式"碰巧算对"** | `margin + collapsed` 与 `margin + pill` 数值相同，读起来却是另一个意思。 | **巧合的正确性要消除，不能留着。** 数值相同的两个常量会让代码"看起来在说另一件事"，而下一个改常量的人不会知道这里有耦合。断言把值钉住。 |
+| **拿"有预约"当成"我们的预约"** | shell 自己的任务栏也预约 32 px，脚本因此重启了 Explorer 去修一个没坏的桌面。 | **现象的所有权要先确定。** "存在某个状态"和"这个状态是我造成的"是两件事，**恢复动作只能用在后者上**。 |
+| **又一次没量就写结论** | 我断言"少算了 6 DIP"，实际一分不差。 | 同一条教训再次出现：**断言失败时先怀疑断言**。这次它当场救回了一个错误结论。 |
+
+### 7.47 阶段 5 第三轮：**点击激活全部打通**（用户验证）✅
+
+用户："现在都可以了"。本轮修掉三个独立缺陷。
+
+#### 缺陷一：点击**跳位** —— 我的设计错误
+
+`WindowList::Refresh` 用 `EnumWindows` 的 **Z 序**（前到后）当按钮顺序，而**激活窗口就会改变 Z 序**：
+
+```
+点击按钮 → 窗口被激活 → Z 序变化 → 下次 Refresh 重排 → 按钮跳到第一位
+```
+
+**修法**：按钮顺序**跨刷新记住** —— 已存在的窗口保持原位，新的追加到末尾。
+断言（对真实桌面刷新 5 次）：`6 buttons tracked over 5 refreshes, first move at -1`。
+
+**理由**：按钮的位置是人**记住并伸手去点的**，点完就跑掉会破坏肌肉记忆。
+
+#### 缺陷二：`WS_EX_TRANSPARENT` 让 Windows **完全跳过命中测试**
+
+这是"点击应用图标出不来"的真因。设了那个样式后，Windows **根本不调用 `WM_NCHITTEST`**，
+直接把点击丢给下层 —— 所以能否点到**完全取决于 8ms 轮询有没有先把样式清掉**：
+
+```
+指针移到图标上 → 轮询（最多 8ms 后）才清样式
+        ↑ 在这个空档里点击 → 穿到桌面 → 什么都不发生
+```
+
+**日志证据**：28 次点击到达窗口过程，**只有 4 次被路由**。
+
+**修法**：样式**完全不再切换**，改由 `WM_NCHITTEST` 逐点回答
+（岛上→`HTCLIENT`，其他→`HTTRANSPARENT`）。**它是随点击同步到达的，没有空档。**
+
+#### 缺陷三：跨进程的 `ShowWindow(SW_RESTORE)` **对最小化窗口无效**
+
+用户报"最小化的应用点了没反应"。日志把中间值全打出来了：
+
+```
+activate: entering, wasIconic=1, foreground before=0
+activate: raised after AllowSetForegroundWindow, nowIconic=1   ← 前台成功，但仍是图标状态
+```
+
+**8 次最小化点击全部如此**，而非最小化的 3 次**全部成功** —— 问题精确定位在"还原"这一步。
+
+**修法**：三条文档化路径依次尝试，**每条的结果单独记录**：
+
+| 顺序 | 方法 | 结果 |
+|---|---|---|
+| 1 | **`WM_SYSCOMMAND` + `SC_RESTORE`**（同步投递） | ✅ **一次就成，8/8** |
+| 2 | `SetWindowPlacement(SW_SHOWNORMAL)` | 没轮到 |
+| 3 | `ShowWindow(SW_RESTORE)` | 没轮到 |
+
+**为什么必须逐条记录**：哪条有效**取决于目标应用**，无法从文档推出来 —— 必须观察。
+只记最终状态会让"三条都没用"和"第一条只是需要时间"无法区分。
+
+#### 缺陷四：点击**不会最小化**（半个手势）
+
+任务栏按钮是**开关**：已在最前→收起，其他→拿到前面。之前只会"拿到前面"。
+
+**实现**：
+- "是否已在最前"用 **`GetForegroundWindow()` 实时查询**，不用列表缓存（缓存 500ms 才刷新，
+  而这里问的正是**点击那一瞬间**谁在最前）
+- 最小化走 **`SC_MINIMIZE`**，**不用 `ShowWindow(SW_MINIMIZE)`** —— 后者不跑窗口自己对最小化的处理
+
+**顺带修掉一个真实隐患**：点击处理原用 `taskWindows.At(icon)` 索引**实时列表**，
+而列表每 500ms 重排 → **可能激活你没点的那个窗口**。改成用**构建帧时冻结的句柄数组**。
+
+#### 自检的边界（有意为之）
+
+**真正的点击手势不在自检里做**：在自检中最小化窗口会**把用户正在用的东西收走**，
+激活则会**抢走焦点**。所以只断言决策输入和拒绝路径：
+
+```
+[ OK ] minimising no window is refused, not attempted
+[ OK ] activating no window is refused, not attempted
+[ OK ] minimising a dead handle is refused
+[ OK ] activating a dead handle is refused
+[ OK ] the cached foreground is the live one, or nothing yet
+```
+
+**自检不能为了覆盖率去干扰使用者的桌面。**
+
+自检 **461 项全绿**，`-Clean` 干净重建 SMOKE PASS，清单嵌入已验证，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **拿"数据顺序"当"显示顺序"** | `EnumWindows` 的 Z 序会因激活而变，用它当按钮顺序 → 点一次跳一次。 | **会变化的数据不能直接当稳定的界面顺序。** 界面的位置要**自己记住**。 |
+| **用样式开关代替命中测试** | `WS_EX_TRANSPARENT` 让系统跳过 `WM_NCHITTEST`，于是决定权落在一个 8ms 轮询上，**点击和轮询是两条不同的消息，之间有真实的空档**。 | **凡是"点击能否到达"的决定，必须在携带这次点击的那个消息里做出**（`WM_NCHITTEST`），不能依赖另一个异步过程先改变状态。 |
+| **跨进程 API 的"成功"不等于"生效"** | `ShowWindow` 返回非零只表示**请求入队**；`SetForegroundWindow` 成功也不代表窗口**不再最小化**。 | **跨进程操作要回读目标状态**来判断结果，不能信返回值。**并且要逐条记录每个候选路径的结果** —— 哪条有效是**运行时事实**，不是文档能给出的。 |
+| **自检不能为了覆盖率干扰使用者** | 最小化/激活的真实测试会收走用户的窗口、抢走焦点。 | **有副作用的路径，自检只测决策与拒绝，手势交给真人。** 覆盖率不值得弄乱别人的桌面。 |
+
+### 7.46 阶段 5 第二轮：**点击激活经用户验证通过** ✅
+
+用户点击后的日志：
+
+```
+[15:51:53.522]   icon click: index 5 -> "Windows PowerShell"
+[15:51:53.522]   icon click: activated "Windows PowerShell"
+[15:51:53.678]   icon click: index 5 -> "Windows PowerShell"
+[15:51:53.678]   icon click: activated "Windows PowerShell"
+```
+
+**索引正确、前台切换成功、窗口真的跑到前面了 —— 用户确认。**
+
+这是本项目**第一次由真人验证通过的交互路径**。`FEATURES.md` 里那条
+"最大风险：交互层从来没被真人验证过一次"**现在可以撤掉了**。
+
+#### 但同一份日志里还有一个我如实记下的现象
+
+**28 次点击到达了窗口过程，却只有 4 次产生了路由日志。**
+
+我没有把这条当成"日志刷掉了"就放过，而是逐条列出来核对了时间戳：
+到达却未路由的点击分布在 15:51:47 – 15:52:09 全程，间隔从 160ms 到 1.6s 都有，
+**不是"太快丢帧"能解释的**。
+
+可能的原因有两个，**目前无法从这份日志区分**：
+1. 日志缓冲（`LogLine` 只在缓冲满或正常退出时落盘）—— 我读文件时那部分还没写进去
+2. 这些点击真的没有被帧循环处理
+
+**所以本条记录为"仍有未解释的现象"，不是"已解决"。**
+
+#### 顺带做的加固
+
+**点击从 `bool` 改成计数**。一个 flag 装一次点击，无论来几次；一帧内两次点击会**静默丢掉一次**，
+而"丢掉的点击"和"被误解的点击"从日志上完全一样。改成计数后至少能回答
+**"消息到底到没到"** —— 这个问题决定了故障在窗口过程还是在路由。路由也改成 `while` 循环，
+一帧内的每一次点击都处理。
+
+自检 **455 项全绿**，`-Clean` 干净重建 SMOKE PASS，清单嵌入已验证，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一帧里丢点击** | `bool clickPending_` 装一次点击；一帧内两次点击，第二次无声消失。 | **"发生过"这件事要用计数，不要用标志位。** 标志位会把"两次"压成"一次"，而丢失的次数正好是排查最需要的信息。 |
+| **"日志里没有"被当成"没有发生"** | 28 次到达、4 次路由。我差点直接写成"点击很快丢失"。 | **先分清"没发生"和"没记录"。** 这两个结论指向完全不同的修复方向，而在拿到反证之前**都不该写成结论**。 |
+| **第一次真人验证通过** | 交互层从项目开始到现在**从未被真人验证过**，这是第一次。 | 沙箱里验证不了的路径（鼠标、前台切换），**必须安排一次真人验证并明确记录结果** —— 否则整条功能链都建立在推断上。 |
+
+### 7.45 阶段 5 第一轮：**点击图标激活窗口** —— 接上最后一段线 ✅
+
+#### 背景：这段逻辑一直是死代码
+
+`WindowList::Activate`（`SetForegroundWindow` → `AllowSetForegroundWindow(ASFW_ANY)` →
+`AttachThreadInput` + `BringWindowToTop`）早就写好，**但没有任何调用点**。
+之前图标根本不能命中，接上去也没有意义；现在可以了。
+
+#### 新接的部分
+
+1. **`IslandWindow::IconAtScreen(POINT)`** —— 窗口自己回答"这个屏幕点在哪个图标上"。
+   为什么不让 `main` 自己算：**那就是第二份布局**，而这个项目刚刚才吃过
+   "同一个对象的位置在两处各算一次"的亏（7.44：背景走了、图标没走）。
+   **一次布局，一处产出。**
+
+2. **点击优先路由到图标，再给岛**。图标不是岛的一部分：
+   点在图标上意味着"切到那个窗口"，**不能再被当成"确认通知"或"播放控制"**。
+
+#### 顺带抓到一个真 bug
+
+点击的上界我一开始写成 `icon < taskWindows.Count()`。但**行里只显示 `TaskIconsThatFit` 那么多**，
+而**窗口列表可以比它长**。于是**点在最后一个图标右边**时，索引仍可能落在列表范围内 →
+**激活一个屏幕上根本没有图标的窗口**。
+
+改成 `icon < taskWindowsShown`（记录当前实际显示几个）。**上界必须是"看得见的数量"。**
+
+#### 新增 4 项断言
+
+关键是**索引到窗口的映射**：行几何说"第 3 个图标被点了"，窗口列表说"第 3 个图标是哪个窗口"。
+两处都是同一列表的下标，**没有任何东西强制它们一致**，所以必须测：
+
+```
+[ OK ] the window list found something to point at       the live desktop has 6 windows listed
+[ OK ] the centre of every shown icon reports that same icon   6 icons shown, first disagreement at index -1
+[ OK ] a point past the row activates nothing
+[ OK ] a listed window has a handle to activate
+```
+
+对**真实的 `WindowList`** 测，因为空列表对什么都能同意。
+
+#### 日志会报告点击去了哪
+
+```
+icon click: index 3 -> "任务管理器"
+icon click: activated "任务管理器"
+icon click: activation REFUSED for "任务管理器"
+```
+
+**`SetForegroundWindow` 在好几种正常情况下会被拒绝**，所以它**不谎报成功**：
+被拒绝就写 `REFUSED`。一条"无论发生什么都写 activated"的日志会让下一次排查从一个假事实开始。
+
+自检 **455 项全绿**，`-Clean` 干净重建 SMOKE PASS，清单嵌入已验证，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **上界用了"数据有多少"而不是"显示了多少"** | 窗口列表比图标行长，于是能激活屏幕外的窗口。 | **边界必须用"用户能看到的数量"**，不是后备数据的数量。两个数不同时，**取小的那个**。 |
+| **一段逻辑没有任何调用点** | `Activate` 写好很久，从没被调用过，"写完了"和"能用了"之间差一个调用点。 | **没有被调用的代码等于没有这段代码。** 声称某功能完成前，先找出它的调用点。 |
+| **沙箱里点不了鼠标** | `SetCursorPos` 失败（error 203），所以我**永远无法自己验证点击**。 | 无法自测的路径要**留下能自测的部分**（索引映射）并把**不能自测的部分写进日志**，交给用户一次验证。 |
+
+### 7.44 阶段 4 第十八轮：**图标跟着按钮走** ✅
+
+用户截图并指出：
+
+> 还是有问题，**背景跟着移动了 但是图标没有**
+
+#### 真因：图标用静止几何，按钮用动画几何
+
+```cpp
+// TextRenderer，绘制时：
+const RectF box     = TaskIconButtonAtAmounts(...);   // 按钮：动画后的位置
+const RectF iconBox = TaskIconAt(island, i, count);   // 图标：TaskIconAt 内部固定传 -1
+```
+
+而 `TaskIconAt` 的实现是 `TaskIconButtonAt(..., -1)` —— **`-1` 就是"静止布局"**。
+
+于是：**按钮为邻居让位而右移了 102 DIP，图标却还钉在静止位置。**
+屏幕上就是"背景走了，图标没走"。
+
+#### 为什么会写成那样
+
+注释里写着当时的理由（是真心的，也是错的）：
+
+> "Positioned from the button's RESTING left edge, never from the animated one, so the icon does not
+> drift as the row moves to make room for a neighbour. An icon that slid sideways while the pointer was
+> on it would move the very thing being pointed at."
+
+**这个担心是对的，但已经被别处解决了**：指针所指的那个按钮**自己不会移动**（只有它**后面**的按钮被推走）。
+所以图标跟着自己的按钮走，**指针指着的东西依然不动**。当时用错了手段来解决一个真实的问题。
+
+#### 修法
+
+新增 `TaskIconInBox(const RectF& button)` —— **图标从"它所属按钮的矩形"派生**。
+绘制时背景和图标**用同一个 `box`**，两者在构造上不可能分家。
+
+#### 新增断言，并且**证明它抓得住旧代码**
+
+```
+worst drift of an icon inside its own button: 0.000 DIP
+```
+
+这次我做了解析验证（不再只是声称）：
+
+```
+one button open (button 4):
+  button 4: button.left=1534.0  icon=1539.0   drift=0.0
+  button 5: button.left=1670.0  icon(old)=1573.0  icon(new)=1675.0  drift(old)=102.0
+  button 6: button.left=1704.0  icon(old)=1607.0  icon(new)=1709.0  drift(old)=102.0
+
+worst icon drift, OLD code: 102.0 DIP
+worst icon drift, NEW code:   0.0 DIP
+=> the assertion CATCHES the old code
+```
+
+**102 DIP 正是用户在屏幕上看到的错位量。**
+
+#### 这是同一个 bug 的第三次露头
+
+| 轮次 | 表现 | 同一根因 |
+|---|---|---|
+| 16 | 变宽按钮盖住邻居 | 画的几何 ≠ 判断用的几何 |
+| 17 | 邻居不让位 | 布局只算"被指到的那一个" |
+| **18** | **背景走、图标不走** | **按钮用动画几何，图标用静止几何** |
+
+**根因始终是同一个：同一个东西的几何被算了两遍，两遍用了不同的输入。**
+每一轮我只修了当时看得见的那一处，没有去找"还有谁在用另一套几何"。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **同一对象的两部分各算一次几何** | 按钮位置一套、图标位置另一套，来自不同输入。 | **一个对象的所有部分必须从同一个矩形派生。** 改完位置后，**搜出所有"另一个地方也在算这个位置"**。 |
+| **用错手段解决一个真实的顾虑** | "图标不能动"的顾虑是对的，但解法应该是"所指按钮自己不动"，而不是"图标永远钉在静止位置"。 | 顾虑成立**不代表**当时的解法成立。**写注释解释理由时，要一起写下"这个理由是否真的被满足"**。 |
+| **同一个根因连续三轮以不同面貌出现** | 我每轮只修看得见的那一处。 | **修完一处，要问"还有谁在用另一套几何/另一个数据源"。** 修表象会让同一个根因换个地方再出现。 |
+
+### 7.43 阶段 4 第十七轮：**让位真正修好，用户日志确认** ✅
+
+用户按新流程跑了两次。第二次的日志：
+
+```
+=== OVERLAP check ===
+  NO OVERLAP LINE -- the row never overlapped
+
+row: hovered=4 [3 1500..1618 h0.86] [4 1622..1666 h0.14] [5 1670..1700 h0.00]
+row: hovered=4 [3 1500..1610 h0.79] [4 1614..1666 h0.21] [5 1670..1700 h0.00]
+row: hovered=4 [3 1500..1602 h0.71] [4 1606..1666 h0.29] [5 1670..1700 h0.00]
+```
+
+**按钮 3 收起的同时按钮 4 展开，间隔每帧都是精确 4 DIP。** 这正是用户报的场景
+（"一个在收、一个在开"），之前会盖住，现在每帧都对得上。
+
+#### 真因（第 16 轮就已经拿到证据，这一轮才修对）
+
+第 16 轮的实时检查报出了：
+
+```
+OVERLAP: button 5 ends at 1641.0 but button 6 starts at 1632.7 (amounts 0.42 / 0.30, hovered=5)
+```
+
+**画的几何和判断的几何不是同一套**：
+
+| | 用的输入 |
+|---|---|
+| 我加的实时检查 | **每个按钮各自的** `hoverAmount` |
+| **实际绘制** | **一个** `hoveredIndex` + 它的 amount |
+
+绘制时**只有被指到的按钮变宽，其他按钮停在静止位置** —— 所以宽按钮直接盖住还半开的邻居。
+
+#### 修法
+
+布局核心改成 **`TaskIconButtonAtAmounts(..., const float* amounts)`**：
+**每个按钮的宽度来自它自己的 amount，位置是前面所有按钮宽度的累加。**
+
+于是恒等式成立：**每个按钮都从上一个的右边缘 + 一个间隙开始** → **重叠在构造上不可能**。
+绘制（`TextRenderer::DrawTaskIcons`）和实时检查现在**调用同一个函数、传同一组宽度**。
+
+#### 为什么自检 450 项都没抓到
+
+**它们只传一个非零 amount。** 而"同时有两个按钮在变化"恰恰是实时栏里唯一会发生的情况。
+
+**测试无法表达失败场景，就不会发现它 —— 无论写多少条断言。**
+这条现在是这个项目的核心教训之一。
+
+#### 我又一次"验证"失败，并且如实记录了
+
+我试图证明新断言能抓住旧算法，**结论是不能**：旧算法自身自洽，它只是**和绘制不一致**。
+所以新断言证明的是"新算法没有重叠"，**不是**"它能防住旧算法"。
+这一点写进了断言的注释，没有包装成"验证通过"。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **检查用一套几何、绘制用另一套** | 实时检查按每个按钮的宽度算，绘制只按"被指到的那个"算。检查是对的，绘制是错的 —— 所以检查抓到了真实缺陷，但我第一反应是怀疑检查。 | **检查必须和被测代码走同一条路径**。检查发现异常时，先假设**被测代码错了**，而不是检查错了。 |
+| **测试的输入空间覆盖不到真实场景** | 450 项断言全部只给一个非零 amount。 | **断言的数量不重要，输入空间的覆盖才重要。** 真实系统里"多个状态同时处于中间值"是常态，测试必须能表达它。 |
+| **又一次拿"我验证过了"当结论** | 我一度想宣布断言能防住旧算法。 | **验证失败也是结果，要如实记录。** 把"没验证到"写成"验证通过"会让下一个人失去判断依据。 |
+
+### 7.42 阶段 4 第十六轮：**用户日志定位到真因**（两个动画量互相矛盾）✅
+
+用户照新流程跑了一次，"跑完了"。日志这次**能读到了**（`LogPath` 改到 exe 旁边）。
+
+#### 日志直接给出答案
+
+```
+row: hovered=3 [3 1500..1632 h1.00 s1.00] [4 1534..1564 ...] [5 1568..1598 ...]
+```
+
+`hovered=3`，`h1.00 s1.00` —— **两个值都是 1.0**。而按钮 3 是 `1500..1632`（132 DIP，已展开），
+按钮 4 在 **1534** —— **`1534 < 1632`，按钮 4 落在按钮 3 的矩形里面。**
+
+**让位从来没有发生。按钮 4 和 5 站在原地，被按钮 3 盖住。**
+
+#### 真因：宽度用 `hoveredAmount`，位置用 `shiftAmount`
+
+```cpp
+// 按钮 3 自己的宽度用这个：
+width = kTaskIconButtonDip + (kTaskWideButtonDip - kTaskIconButtonDip) * hoveredAmount;
+// 按钮 4 的位置用这个：
+left += width + (kTaskWideButtonDip - kTaskIconButtonDip) * shiftAmount;
+```
+
+**两个独立动画量决定同一个边界。** 静止时相等、结束时相等，**中间不相等** ——
+而"中间"就是用户看到画面的全部时间。
+
+#### 修法：一个值同时决定宽度和位置
+
+```cpp
+const float hoveredWidthDip =
+    kTaskIconButtonDip + (kTaskWideButtonDip - kTaskIconButtonDip) * hoveredAmount;
+// 按钮自己用它，它后面的每一个也用它
+```
+
+**一个值不可能和自己不一致。** `shiftAmount` 整个删掉（第二个动画、字段、参数）。
+
+新增断言：**遍历整段动画，展开的按钮右边缘永远不超过下一个的左边缘**
+（"the worst overlap across the transition was 0.00 DIP"）。
+**旧断言只在静止态和结束态检查 —— 而那正是两个值唯一相等的两个点。**
+
+#### 我这一轮犯的更严重的错误
+
+为了修这个，我用正则批量改写调用点，其中一条正则**从 `Renderer.cpp` 的
+`AddCubic(0.0, from, slope, 0.0f, 0.0f)` 里删掉了最后一个参数**。
+
+于是编译报 `AddCubic 不接受 4 个参数`。我看到"一个我没碰过的文件、我没碰过的行报错"，
+**推断这是一个潜伏已久、因为文件从未重新编译而没暴露的 bug** ——
+还据此写了一整套"死代码被激活"的解释，写进了注释和交接文档。
+
+**全错。那个 bug 是我三十秒前自己造的。** 快照核对时我还被骗了一次：
+我看的那份快照**是我改动之后**拍的（我的备份只保留 10 份，4 参数的原件被挤掉了），
+于是我"证实"了 5 参数是原始状态，更加确信自己的故事。
+
+真相靠干净重建才浮出来：**`Renderer.cpp` 和 `Renderer.h` 本来完全正常，恢复后
+449 项全绿。**
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **批量正则改写调用点，伤到了别的函数** | 一条正则按"逗号个数"匹配，从 `AddCubic` 里删掉一个参数。 | **不要用按形状匹配的正则改代码。** 要改就按**函数名**精确匹配，改完全文搜该函数名核对。 |
+| **看到"我没碰过的地方报错"，就编出潜伏 bug 的故事** | `AddCubic` 报错**正是我造成的**，只是报错点在别处。 | **先问"我刚刚改了什么"，再问"这里本来就有问题吗"。** 报错位置和肇事位置经常不在一起。 |
+| **用快照"证实"自己的假设，却没核对快照的时间** | 那份快照是**改动之后**拍的，所以当然含有我的错误值。 | **引用证据前先确认证据的时间早于改动。** 用错误时间点的证据"证实"假设，比没有证据更糟 —— 它把错误的结论变成了"已核实"。 |
+| **只在端点检查，中间才是问题** | 断言检查静止和结束两个状态，而那两个状态恰好是两个动画量唯一相等的地方。 | **检查要覆盖过程，不只是端点。** 两个量"最终一致"完全不能说明它们"始终一致"。 |
+
+### 7.41 阶段 4 第十五轮：**把日志搬到 exe 旁边**（治本）✅
+
+用户反馈 7.40 的 `collect-trace.ps1` 也拿不到东西，并说：
+
+> 还是这样，你帮我开发工具打开吧 我在开发工具里看
+
+#### 根因是设计问题，不是脚本问题
+
+日志写在 `%TEMP%`，而 **`%TEMP%` 是每个 shell 独立的**：
+
+```
+程序在那个 shell 里写 → 只有那个 shell 找得到
+我从这边搜       → 搜的是另一个目录 → "找不到" → 我误判成"日志不存在"
+```
+
+**每一次"请把日志发我"都让用户去做一件本来不该他做的事。**
+脚本再聪明也绕不开"文件在别的 shell 的私有目录里"。
+
+#### 修法：日志写在 **exe 旁边**，不再是 `%TEMP%`
+
+`LogPath()` 现在的顺序：
+
+1. **exe 所在目录** —— 路径**只取决于程序放在哪**，不取决于谁启动它。
+   **每一边看到的是同一个路径。**
+2. `%TEMP%` —— 保留为回退（exe 放在不可写的位置时）。
+
+而且是**写入探测**（试开一次）而不是假定可写：
+"通常可写"正是日志会**静默写不进去**的原因。
+
+实测：日志现在在
+
+```
+C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.log
+```
+
+**这个路径我能直接读，用户也能直接在开发工具里打开。** 同一个文件。
+
+#### 顺带：`bar-log.ps1`
+
+一条命令显示最近一次运行的 `anim: / row: / title: / icon hover:` 行，
+**优先读 exe 旁边那个固定路径**，`%TEMP%` 的旧日志只作回退。
+
+#### 我这一轮又踩的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **把"找到文件"的责任推给使用者** | 我连续四轮写脚本去"找"日志，而根因是**日志被放在了只有它自己能找到的地方**。 | **如果一样东西反复"找不到"，不要写更聪明的搜索——改把它放到确定的位置。** 查找的复杂度应该由设计消除，不是由工具吸收。 |
+| **"通常可写"当成"可写"** | `%TEMP%` 之所以被选中就是因为它总是可写；换成"exe 旁边"之后，这个前提**不再自动成立**。 | 换了位置就要**重新验证新位置的前提**：现在是写入探测，不是假定。 |
+
+自检 **450 项全绿**，清单嵌入已验证，快照已存。
+
+### 7.40 阶段 4 第十四轮：**日志路径每个 shell 都不同**；新增一键取证 ✅
+
+用户发来的截图显示：**变宽的胶囊里只有 "…"**，没有标题文字。
+
+#### 我上一轮的结论也是错的（第三次）
+
+7.39 我断言"每一条日志都是 self-test 的"。用户这次跑的是**真的程序**（`built: 14:21:59`）。
+
+真相是：**`%TEMP%` 每个 shell 都不一样**。
+
+```
+我的 shell      : %USERPROFILE%\AppData\Local\Temp\dsh-8yaf3F\
+用户的 shell    : 另一个 dsh-XXXXXX\ 目录
+```
+
+程序**如实打印了它自己的日志路径**——只是那条路径**在我的 shell 里不存在**，
+因为那是**用户 shell 的临时目录**。我从我的 shell 去搜，自然搜不到，于是错误地
+推断"没有真实运行的日志"。
+
+**这也解释了更早的困惑**：我"搜遍机器"时看到的那些日志，各自属于**不同的 shell**。
+
+#### 新增 `scripts\collect-trace.ps1`（一条命令，输出落盘）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\collect-trace.ps1
+```
+
+- 启动程序、**等它退出**（用户关窗口）
+- 把程序 stdout 存到 `trace.txt`（**自己启动的那一次**，不猜路径）
+- **源码比 exe 新就直接拒绝运行**并提示先构建
+- 直接打印 `anim: / row: / title: / icon hover:` 行
+
+**为什么必须这样**：日志在"启动它的那个 shell 的 %TEMP%"里。
+只有**由脚本自己启动并自己收集**，才不会拿错文件。
+
+#### 又一次"读错了那个数"：我的新断言自己就写错了
+
+我断言"0.55 的门槛只有 24 DIP，所以标题被压成省略号"。
+**实测是 45 DIP**——我随口估的数错了。
+
+按真实数值算：标题框宽度 = `30 + 102*hover - 43`，在 `hover=0.55` 时是 **45 DIP**，
+**已经够放一个字**。**所以门槛不是原因。** 断言已改成陈述实测值。
+
+**"为了给修改找个理由而随口估一个数"**，这个数会进到记录里变成假事实。
+
+#### 现在确定的事
+
+| 事实 | 证据 |
+|---|---|
+| 布局数学对 | 全开时标题框 91 DIP |
+| 标题框随动画单调增长 | 断言（修正后通过） |
+| 新门槛（44 DIP）比旧门槛（45 DIP）**几乎一样** | 断言实测 |
+| **`hovered` 的值、指针是否被认到图标上** | **仍未知——需要用户跑 `collect-trace.ps1`** |
+
+自检 **450 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **把"%TEMP%"当成全局唯一** | 每个 shell 有自己的临时目录，程序如实打印的那条路径**在我的 shell 里不存在**，我据此推断"没有真实日志"——**结论完全反了**。 | **程序打印的路径是相对于它自己的环境的。** 跨 shell 传递路径信息时，要由**产生它的那个 shell** 去读，或者让脚本自己收集。 |
+| **为了解释修改而随口估一个数** | 我估"0.55 → 24 DIP"，实际 45 DIP。**这个假数字差点进了记录，用来"证明"一个并非原因的改动是对的。** | 任何进入解释或注释的数字**必须来自实测**。否则它会以"已证事实"的身份留下来，误导后来的人（包括我自己）。 |
+| **"我搜不到" ≠ "不存在"** | 前一轮的结论建立在"搜遍机器"之上，而搜索范围本身是错的。 | **搜索的边界就是结论的边界。** 声明"某物不存在"之前，先确认**搜索覆盖了它可能出现的所有位置**。 |
+
+### 7.39 阶段 4 第十三轮：**我一直在看自己 self-test 的日志** ⚠️（仍未解决"让位"）
+
+用户发来 `run.ps1` 的输出与日志查询结果。**这一次的数据推翻了我的整个排查方向。**
+
+#### 决定性事实：**没有任何一次"真实运行"的日志**
+
+我搜遍了机器上所有 `island_bar.log`：
+
+```
+14:13:34  dsh-8yaf3F\island_bar.log      <- 我自己的 --self-test
+12:31:41  Temp\island_bar.log
+12:29:24  dsh-tM9YH8\island_bar.log
+```
+
+**每一条都没有 `row:` / `anim:` 行**——而这些行只在**帧循环**里打印。
+`--self-test` **不跑帧循环**，所以它**永远不可能**打印这些行。
+
+用户看到的那条 `icon hover: none (pointer local 0,0, 0 icons)` 正是 **self-test 的输出**：
+`--self-test` 从不调用 `SetIconCount`，所以 `iconCount_` 恒为 0，日志当然说 0 个图标。
+
+**我连续两轮都在拿 self-test 的日志，去推断用户悬停时的行为。**
+
+#### 第二个事实：`run.ps1` 从来没有等待程序
+
+输出里 `[run] built: 13:09:04` 而当时的源码是 14:0x —— **用户跑的是旧二进制**，
+而且脚本**立刻**打印了 `[run] exited with 0 after 0.0s`。
+
+7.26 我以为用 `WaitForExit()` 修好了它。**没有**：它照样立刻返回。
+所以**每一次"请跑一次"都没有真正运行过新版本**，也就从来没有产生过有用的日志。
+
+**改成显式轮询 `HasExited`**（唯一没有骗过我的形式），并把程序的 stdout 重定向到文件，
+**从程序自己的输出里读出它打印的日志路径**（而不是脚本去猜 `%TEMP%`）。
+另外**加回陈旧二进制检查**：源码比 exe 新时明确警告。
+
+实测：脚本运行 7 秒后 `app running: 1 | run.ps1 waiting: True`，杀掉程序后才继续
+（`exited with after 6.5s`）。**这次是真的在等。**
+
+#### 顺带发现的荒谬之处
+
+我的日志里那条**固定的字面量** `[run] the program prints "log file: <path>"`——
+`<path>` 是**写死的占位符**，我给用户看了一个假路径。已改成从程序输出中读出真实路径。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **拿 self-test 的日志推断运行时的行为** | `row:`/`anim:` 只在帧循环里打印，self-test 不跑帧循环；`iconCount_` 在 self-test 里恒为 0。**我看了两轮假数据。** | **先确认这份日志是哪条代码路径产生的。** 日志里的时间戳和内容要能对上"谁写的"。**同一个程序的不同模式，日志含义完全不同。** |
+| **"请跑一次"必须以"它真的跑了"为前提** | `run.ps1` 不等待、且用旧二进制，所以两轮"请跑一次"都没有效果。 | 交付一条命令时，**要验证这条命令真的做了它承诺的事**（等程序退出、用新构建）。**否则用户的时间和我的时间一起浪费。** |
+| **`WaitForExit()` 在这台机器上不等待 GUI 程序** | 7.26 我换成 `WaitForExit()` 并宣布修好，实测仍然是 0.0 秒。 | 修好一个"工具不可靠"的问题后，**要重跑那个具体场景确认**，而不是靠推理认定。这里靠推理，于是同一个 bug 又活了一轮。 |
+| **给用户看了一个写死的占位路径** | 脚本打印 `"log file: <path>"`——字面量。 | 给用户的**任何路径都必须是运行时真实值**，占位符等于没有信息。 |
+
+### 7.38 阶段 4 第十二轮：让位**真的生效**了；并修掉"图标从指针下跑掉" ✅
+
+用户看完 7.37：
+
+> 1.**没有让位**。 2.**没有（指选错图标），图标上移动时不该展开岛**。 3.现在可以（过渡动画，不用再改）
+
+#### 第一件事：先证明问题在哪，而不是继续改
+
+7.37 的让位代码**在**、布局**数学正确**（新加的端到端断言算出"第二个按钮移动 102.0 DIP，
+第一个长大 102.0 DIP"）。但用户说"没有让位"。
+
+**所以先排除"用户跑的是旧构建"**：查了 exe 里的字符串
+（**注意：断言是宽字符串，必须按 UTF-16 搜，按 ASCII 搜会误判为"不存在"**），
+确认 `made room` 等确实在二进制里。**排除了版本问题，才去查逻辑。**
+
+#### 真因：**按钮从指针下面跑掉了**
+
+这是我上一轮**推理错的地方**。我说"用静止布局判定就不会选错"——对了一半：
+
+```
+指针在第二个按钮上 → 判定为 2 → 第二个长大 → **把第三个推右**
+                                            ↑ 但第一个不动，所以指针下的图标没跑
+```
+
+等等——第二个长大只推**它后面**的，所以指针下的第二个**没动**。但**当指针在第一个上**：
+第一个长大 → **第二个右移** → 指针原来在第二个上，现在落到了
+**第一个和第二个之间的空隙**里 → 静止布局判定"不在任何按钮上" → **第二个被放弃**。
+
+而**"不在图标上"正是允许岛展开的条件**，所以岛就展开了——**这正是用户报的第 2 条**。
+
+**两个症状同一个根因。**
+
+#### 修法：把两个问题分开
+
+| 问题 | 用什么回答 |
+|---|---|
+| 指针**移到了**哪个按钮？ | **静止布局**（不受动画影响，所以不选错） |
+| 指针**还在这一排上**吗？ | **整排的范围**（含长大按钮多占的地方，所以标题也算） |
+
+新增 `TaskIconToKeepOpen(island, count, current, x, y)`：**先问静止布局**，
+问不到就**问整排范围**，在范围内就**保持当前的按钮**。这是**滞回**，
+让两套几何不再互相打架。
+
+#### 又一个我写错的断言
+
+我断言"行打开后，同一个点落在第一个按钮的静止范围内"——**算错了**：
+第二个按钮的静止范围是 1432..1462，指针在中心 1447，**仍然在它自己的范围内**。
+
+改成**测真正会出问题的那个点：两个按钮之间的空隙**（`secondRest.left - 2`）：
+
+```
+[ OK ] a point in the gap is over no resting button
+[ OK ] but that point is still on the row
+[ OK ] the open button is not abandoned when the row moves under the pointer
+        kept 1 for a point 2 DIP into the gap at 1430
+```
+
+**"点在按钮里"两种情况都能通过，所以证明不了任何事；必须测空隙。**
+
+#### 新增：图标悬停的状态日志
+
+```
+icon hover: an icon (pointer local 1447,56, 4 icons)
+```
+
+**"没让位"和"指针根本不在图标上"从截图上看一模一样，而修法完全相反**
+（前者是布局，后者是命中判定）。这行日志把两者分开。
+
+自检 **447 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **布局"正确"不等于流程"正确"** | 布局数学算对了 102 DIP 让位，但**运行时不生效**，因为指针下的按钮被推走后判定变了、按钮被放弃。 | 单元层面正确只是必要条件。**"这条路径真的会走到吗"要单独验证**，最好用**端到端的点位**去测。 |
+| **宽字符串不能按 ASCII 搜** | 我搜 `made room` 得到"不存在"，差点判定为陈旧构建；实际是 `L"made room"` 存成 UTF-16。 | 查二进制里的字符串，**先确认它是什么编码**。误判会导致去改本来没问题的东西。 |
+| **判定要区分"到达"与"仍在"** | 一个"在哪个按钮上"的判定同时承担了两件事，于是行一移动就把按钮判丢了。 | 把"**移到了哪个**"和"**还在不在范围内**"分开，并用**滞回**（保持当前值）避免两者互相打架。 |
+| **测试点选在"两种情况都成立"的地方** | 我测了按钮中心——它在静止范围内，所以新旧逻辑都给同一个答案。 | 测边界情况要**选在两种行为会分岔的点上**（这里是按钮之间的**空隙**）。否则测试通过等于没测。 |
+
+### 7.37 阶段 4 第十一轮：**变宽盖住邻居 → 整排平滑让位** ✅
+
+用户看完 7.36 后：
+
+> 1.是慢慢划过但是出现了图片中的问题就是**其他图标不动遮住了标题**，
+> 而且鼠标移动**灵动岛展开了**。 2.现在可以（指过渡动画）
+
+#### 我上一轮把约束做过头了
+
+7.36 我把"整排不动"当成了绝对正确的性质，并写成了断言。
+**但"不动"就没有空间放标题**，于是变宽的按钮**直接画在后面的图标上面，把它们盖住了**——
+正是截图里看到的。
+
+**真正的需求不是"不动"，而是"平滑地让位"。**
+
+#### 修法：两个动画量，而不是一个
+
+| 量 | 含义 |
+|---|---|
+| `hoverAmount` | 被指到的按钮**长大了多少**（0..1） |
+| `shiftAmount` | 它前面的按钮**把它推了多远**（0..1） |
+
+布局：每个按钮的左边 = 行起点 + **前面所有按钮的当前宽度**之和。
+于是被指到的按钮长大的同时，**后面的按钮同步右移让出空间**，标题有地方放。
+
+**两者用同一个目标值和同一个速度推进**，所以空间是**随着按钮长大同步打开**的，
+读起来是"一个东西在展开"，不是"按钮跳一下、布局再跳一下"。
+
+**环路依然断开**：指针在哪个图标上，仍然用**静止布局**判断
+（`TaskIconUnderPointer`），所以不依赖动画进度。
+
+**图标位置仍不参与插值**——图标始终在自己的静止位置，
+所以**按钮在它周围和身后长大，而图标本身不动**，指针指着的东西不会跑掉。
+
+#### 又是我断言写错两次
+
+| 我写的断言 | 真相 |
+|---|---|
+| "shift 为 0 时，长大的按钮什么都不动" | 它**宽度当然会变**（正在原地长大，行还没让位）。正确的性质是**左边缘不动**、**其他按钮宽度不变** |
+| 上一轮遗留的"只有被指到的按钮尺寸变化"（检查位置+宽度） | 位置**本来就该变**（让位）。只剩**宽度**该不变 |
+
+**两次都是测试错了、代码是对的。** 这是本项目里同一现象的又一次——
+**断言失败时，先算一遍断言自己的数。**
+
+#### 实测
+
+`docs/icons-row-final.png`：静止态整排图标，**彼此不重叠**，背景与岛同色。
+自检 **440 项全绿**，`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **把"不动"当成目标，而不是手段** | 我为了让判定稳定，要求整排不动；结果**没有空间放标题**，内容被盖住。 | 约束要为**目标**服务。为了稳定性把布局冻结住，会牺牲掉布局本来要提供的功能。**先问这个约束要保证什么，再问它是否必要。** |
+| **"平滑移动"和"不动"都能断开环路** | 环路来自**单帧跳变**，不是来自移动本身。把移动做成连续动画，判定用静止布局，环路同样断开。 | 断环路的办法不止一种。**选那个不牺牲功能的**。 |
+| **测试错了两次都指向"我把它想简单了"** | 一次断言"什么都不动"，一次断言"位置不变"。 | 性质要写**精确**：说"左边缘不动"就别写成"不动"；说"只有宽度不变"就别把位置也包进去。**含糊的断言会同时放过错误和误伤正确。** |
+
+### 7.36 阶段 4 第十轮：修**悬停选错图标** + 加**展开动画** ✅
+
+用户报两条：
+
+> 鼠标移上去变宽感觉卡卡的 是不是没有过度动画的原因，
+> 还有就是变宽后，鼠标移到第二个图标的时候不是第二个图标变宽 而是鼠标在的位置的图标变宽
+
+第二条是**真 bug**，而且**必然发生**。
+
+#### bug：判断用的几何，被判断的结果改变了（又一个闭环）
+
+变宽把后面的图标**推右**了，而我用**上一帧的布局**（已经有一个变宽）去判断指针在哪个图标上：
+
+```
+静止:        [A] [B]
+A 变宽后:    [A────加宽────] [B 右移]
+指针从 A 移到 B 的原位置 → 在新布局里那里**仍在 A 的范围内**
+                        → 判定为 A → A 保持宽 → **B 永远到不了**
+```
+
+**这是本项目第四个"闭环"**（前三个：AppBar 改工作区 → 窗口跟着动；
+指针判定用会变的几何；现在这个）。
+
+#### 两处修改，合起来解决
+
+**① 判定用"静止布局"**：新增 `TaskIconUnderPointer()`，**任何图标都没变宽**时的几何。
+于是"指针在哪个图标上"**只取决于指针位置**，不取决于它即将产生的答案。
+
+**② 变宽不再推挤别人**：变宽后的按钮**从它自己的静止左边缘向右生长**。
+于是**整排都不动**——判断几何和绘制几何**永远一致**，闭环从结构上消失。
+
+这比"用静止布局判断、用动画布局绘制"更彻底：**两者根本是同一套几何**。
+
+断言也升级成更强的性质：**遍历所有 (hovered, i) 组合，除被指到的那个外，
+每个按钮的位置和宽度都必须和静止时完全一样**。把缺陷放回去验证：
+
+```
+with the defect: exit=7 FAIL=7
+[FAIL] growing one button does not move the next one
+[FAIL] only the pointed-at button changes size
+```
+
+#### "卡卡的"：宽度**一帧之内跳过去**，所以读起来像卡顿
+
+宽度原来是瞬间切换。**即使什么都没有变慢，"瞬间跳变"本身就会被读成卡顿**——
+用户就是这么描述的。
+
+改成**按帧推进的过渡**（~160 ms，从帧自己的 delta 驱动）：
+
+```cpp
+const float speed = 1.0f / 0.16f;
+const float step = speed * dt;
+amount += step;   // clamp 到目标
+```
+
+并**把"正在动画"当作重绘理由之一**，否则动画会在没有任何其他变化时停住。
+
+**标题在按钮开到 55% 之后才画**：在半宽的框里画标题会得到一个
+"省略号里的省略号"，那看起来像故障而不是过渡。
+
+`hoveredIndex` 之外新增 `hoveredAmount`（0..1），布局函数用它插值宽度。
+**图标位置不参与插值**——图标始终在静止位置，所以**按钮在它周围长大而图标不动**。
+
+#### 顺带两处 API 简化（编译器"未引用参数"警告提示的）
+
+- `ShouldAcceptPointer` 不再需要 `hoveredIcon`：它现在用静止布局判断
+- `TaskIconAt` 不再需要 `hoveredIndex`：图标位置与悬停无关
+
+**警告说"参数没被引用"，往往意味着这个参数不该存在。**
+
+自检 **436 项全绿**（新增 14 项），`-Clean` 干净重建 SMOKE PASS，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **判断用的几何被判断结果改变** | 用"已有一个变宽"的布局判断指针在哪个图标上，而变宽会推挤后面 → 第二个图标永远到不了。 | **判断的输入不能依赖判断的输出。** 做"哪里被指到"这类判定时，用**不受该判定影响的几何**（这里是静止布局）。 |
+| **"瞬间跳变"会被读成"卡顿"** | 宽度一帧内切换，实际帧率没问题，但**感觉是卡的**。 | **视觉上的卡顿可以完全与性能无关。** 用户说"卡"时，除了量帧时间，也要问"是不是没有过渡"。 |
+| **闭环的第四种形态** | AppBar 改工作区→窗口跟着动；指针判定→几何变；现在判定→推挤→判定。 | 模式是同一个：**A 改变了 B 所依赖的东西，而 B 又回头影响 A**。加任何"会改变布局/状态"的功能时，**先问谁依赖它**。 |
+| **警告"参数未引用"是设计信号** | `hoveredIcon` 和 `TaskIconAt` 的 index 变成无用。 | 参数变成未引用，通常说明**它本来就不该是参数**。顺手删掉，而不是加 `(void)`。 |
+
+### 7.35 阶段 4 第九轮：图标加**和岛一样的背景** ✅
+
+用户确认（第 1、2 点）：
+
+> 1.显示标题了。 2.是。 **但是看不清，加一个背景和灵动岛一样的**
+
+#### 问题
+
+图标原来**直接画在桌面上**。浅色壁纸下**图标和标题都看不清**——
+这正是用户说的"看不清"。
+
+#### 修法：用**岛自己的填充色**，而不是另选一个
+
+关键是**颜色从调用方传进来**，而且传的就是**画岛用的那个值**：
+
+```cpp
+frame.taskButtons[i].fill = frame.pill.fill;   // 与岛同一个颜色
+```
+
+**不是在绘制处再挑一个"看起来差不多"的深色**——
+那样两边一旦有一边改了，就会**悄悄不一致**。现在是**由构造保证同色**。
+
+圆角用**胶囊形**（半径 = 高度一半），和岛自身的圆度一致；
+并沿用岛的做法**加一圈同色描边**，遮掉抗锯齿留下的浅色缝。
+
+#### 又一个"两处各算一次"的坑（我自己抓到的）
+
+我第一版让 main **算好背景矩形传进来**，而绘制处**自己又调一次布局函数**算按钮矩形。
+**两处用不同的 `hoveredIndex`**（一处传 `-1`，一处传真实值）——
+于是按钮变宽时，**背景会留在原地而按钮已经移走**。
+
+**改成：只传颜色，矩形在绘制处由同一次布局调用得出**，
+两者**不可能不一致**。这和本项目里反复出现的
+"同一个判断出现在两处就一定会漂移"是同一个坑。
+
+#### 实测（`docs/icons-bg.png` 放大 2 倍）
+
+每个图标现在都有自己的**深色胶囊背景**，标题清楚可读；
+当前窗口有额外一层浅色，**在岛的颜色之上**，所以无论岛是什么颜色都看得出来。
+
+自检 **422 项全绿**，`-Clean` 干净重建 SMOKE PASS，清单嵌入单独验证，快照已存。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"视觉上没关系"的元素直接画在桌面上** | 图标和标题画在壁纸上，浅色壁纸下**都看不清**。 | 任何要**读**的内容都需要**自己的背景**。把可读性交给底下的东西去保证，等于没有保证。 |
+| **派生值要在原值旁边取，不要另选一个"差不多的"** | 我可以给图标选一个"看起来像岛"的深色；那就变成两个常量，**迟早不一致**。 | 让调用方传**同一个值**（`frame.pill.fill`），**由构造保证一致**，而不是靠两个地方写得一样。 |
+| **同一个布局算两次，就会用不同的参数** | 背景矩形在 main 里算（`hoveredIndex = -1`），按钮矩形在绘制处算（真实 index），按钮一变宽两者就分家。 | **一次布局，一处产出。** 我只传颜色，矩形在绘制处由**同一次调用**得出。**派生几何不要跨模块传递。** |
+
+### 7.34 阶段 4 第八轮：**悬停应作用于"那个图标"，不是整排** —— 又是硬编码 ⚠️→✅
+
+用户反馈（三个问题里两个对了）：
+
+> 1.有。 2.对的上。 3.**鼠标移到应用图标没有变宽和显示标题，只有放到灵动岛上显示**，
+> 但是这个逻辑不对，应该是鼠标放在应用图标，这个图标变宽并显示标题
+
+#### 根因：`ShouldAcceptPointer` **只测了岛的形状，没测图标**
+
+图标在岛的**旁边**，落在所有岛形状之外。于是：
+
+1. 指针移到图标上 → `ShouldAcceptPointer` 返回 false → **窗口保持点击穿透**
+2. `pointerInside_` 不变 → 状态机不动
+3. **图标看得见，但完全不可交互**——既不能悬停也不能点击
+
+而状态机那边还有一个相关的错：`ShouldPromoteToTaskbar` 把"指针在栏内"当成一个整体条件，
+所以**只要指针在栏内（含图标上）就把整个岛展开**。
+
+#### 修法一：图标进入命中判定
+
+`ShouldAcceptPointer` 增加 `iconCount` / `hoveredIcon` 两个参数，
+用 `TaskIconHit` 判断指针是否在图标上。**图标是栏的一部分**，
+不这样做它们就只是装饰。
+
+#### 修法二：悬停 **只加宽被指到的那一个**
+
+`hovered` 从 **bool 改成 index**：
+
+```cpp
+RectF TaskIconButtonAt(island, index, count, hoveredIndex);
+```
+
+**只有 `index == hoveredIndex` 的那个按钮变宽**。
+关键约束：**被加宽按钮之前的按钮绝不允许移动**——行从固定左边缘向右生长。
+如果左边的按钮会动，**指针指着的那个按钮会从指针下面跑掉**。这条写成了断言。
+
+#### 修法三：`NextShape` 改为接受一个结构体
+
+参数从 4 个涨到 6 个（其中 4 个是 bool），**位置参数多到没人读得懂，而且写反了照样编译**。
+改成 `PointerContext`，并新增 `PointerIsOnIcon()`：
+
+```cpp
+if (PointerIsOnIcon(c)) return false;   // 在图标上 → 岛不展开
+```
+
+#### 修法四：边缘处理又硬编码了状态
+
+```cpp
+} else {
+    window.SetState(island::IslandState::Hover);   // <-- 又是这里
+}
+```
+
+**这是同一个坑的第四次**（前三次见 7.31）。这次改成：
+
+```cpp
+} else if (!(window.IconCount() > 0 && window.HoveredIcon() >= 0)) {
+    window.SetState(island::IslandState::Hover);
+}
+```
+
+**并写下规则**：边缘处理只提供"指针进来了"这个**事实**；形状由策略决定。
+
+#### 又两次是我的断言写错
+
+| 断言 | 我写的 | 真相 |
+|---|---|---|
+| "加宽后图标位置不变" | 用 `hovered=true` 对比 | **bool 已改成 index**，`true` 变成 `0`（= 第一个被加宽），全表失效 |
+| "加宽会把后面的按钮推开" | 拿 button 1 对比 hovered=2 | **button 1 在 button 2 之前**，正确地不动。应该用 hovered=0 测 button 1 |
+
+**两次都是测试错了、代码是对的。** 这已经是本项目里同一个现象的第 N 次——
+**断言失败时先算一遍断言自己的数**。
+
+#### 先建了备份机制（因为没有版本控制）
+
+`git` 这台机器**没装**（上一轮删掉 `src/CMakeLists.txt` 后无法恢复，就是这个原因）。
+所以新增 `scripts/snapshot.ps1`：把源码复制到 `backups\<时间戳>-<标签>`，
+保留最近 10 份，**并排除 `backups` 自身**（否则每份快照都包含之前所有快照）。
+
+**动这次重构之前先跑了一份**，改完又跑了一份。这是没有版本控制时唯一的退路。
+
+自检 **422 项全绿**，`-Clean` 干净重建 SMOKE PASS，清单嵌入已单独验证。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **可交互的元素必须进入命中判定** | 图标在岛的旁边，而命中判定只测岛的形状 → **图标可见但完全不可交互**，而且**没有任何报错**。 | 画在哪里，就要在哪里能被命中。**"可见"和"可交互"是两条独立的通路，必须分别验证。** |
+| **"指针在栏内"不等于"指针在岛上"** | 一个 bool 把两种位置混成一种，于是悬停图标也把岛展开。 | 位置判定要**区分到用户能感知的粒度**。悬停的对象是"那个图标"，判定就必须精确到图标。 |
+| **同一个坑的第四次：边缘处理硬编码状态** | 前三次是卡片打不开、方向错、任务栏到不了；这次是悬停图标展开整排。 | **把这条写成规则并检查所有调用点**：形状只能由 `NextShape` 决定。**同一个缺陷重复出现，说明规则没有被真正执行，只被记录过。** |
+| **改签名后旧断言会"看起来仍能编译"** | `bool` 换成 `int` 后，`false`/`true` 变成了 `0`/`1`，**语义完全变了但仍能编译**。 | 改参数语义时，**要搜出所有调用点逐个确认**，不能靠编译器报错——这类改动编译器不会拦。 |
+
+### 7.33 阶段 4 第七轮：**我删掉了 `src/CMakeLists.txt`，构建被我弄坏了** ⚠️→✅
+
+用户跑 `run.ps1` 报：
+
+```
+CMake Error at CMakeLists.txt:70 (add_subdirectory):
+  The source directory C:/PROJECT/Taskbar/IslandBar/src
+  does not contain a CMakeLists.txt file.
+```
+
+**这是我造成的：`src/CMakeLists.txt` 在我的操作过程中被删掉了。**
+而且**项目没有版本控制**（`C:\PROJECT\Taskbar` 不是 git 仓库），**没有备份可恢复**。
+
+#### 最可能的原因
+
+我在本轮多次用过这个命令来清理构建残留：
+
+```powershell
+Get-ChildItem 'C:\PROJECT\Taskbar\IslandBar\build' -Recurse -Include '*.old','*.stale' |
+  ForEach-Object { Remove-Item $_.FullName -Force }
+```
+
+**`Get-ChildItem` 的 `-Include` 配 `-Recurse` 是有名的陷阱**：
+在 PowerShell 5.1 里 **`-Include` 会作用到容器路径本身**，
+而不是像预期那样只作用于递归找到的子项。一旦路径或参数被解析得不合预期，
+**它会把容器目录里的文件也匹配进来删掉**。
+
+我**不能百分之百证明**就是这条命令干的（没有审计日志），
+但它是我用过的**唯一**会按模式删文件的操作，所以它是首要嫌疑。
+**我不该在没有版本控制的项目上跑这种"按模式递归删除"。**
+
+#### 修法：按源码清单重建 `src/CMakeLists.txt`
+
+从 `src/` 的实际文件列表、README 的构建说明和 CMake 的错误信息重建，
+并保留了三处**承重**设定及其原因：
+
+| 设定 | 为什么 |
+|---|---|
+| `cppwinrt` include 路径 + `/await` + `windowsapp.lib` | SMTC（Windows.Media.Control）的投影头不在默认搜索路径里 |
+| **`/MANIFEST:EMBED` + `/MANIFESTINPUT`** | PerMonitorV2 DPI 声明必须在**第一个窗口存在之前**被系统读到；丢了它窗口会被系统缩放，**所有布局度量静默出错** |
+| `WIN32_EXECUTABLE` + **`/ENTRY:mainCRTStartup`** | GUI 子系统（双击不开控制台），但程序有普通的 `main()` |
+
+**重建后逐项验证**（不是"能编译就算好"）：
+
+```
+exe exists: True   built: 13:22:49   size: 1276416
+self-test   : exit=0  OK=418  FAIL=0
+volume-test : exit=0
+window-list : 6 listed of 313: 289 invisible, 11 cloaked, 3 untitled, 0 owned, 2 tool, 2 shell, 0 self
+manifest embedded: PerMonitorV2/IslandBar.Bar/dpiAwareness/Common-Controls  全部 present
+DPI 自检: GetDpiForWindow matches monitor   window reports 96 dpi
+```
+
+**清单嵌入是单独验证的**，因为它是"丢了也能编译通过、但行为静默变错"的那一类。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **`Get-ChildItem -Include` 配 `-Recurse` 会命中容器本身** | PowerShell 5.1 里 `-Include` 作用于**容器路径**，而不是只作用于递归结果。我在做"删构建残留"这种危险操作时用了它。 | **永远不要用"按模式递归删除"**。要删就**逐条列出完整路径、确认、再删**。`-Include` + `-Recurse` 组合禁用。 |
+| **项目没有版本控制** | 一个文件被删掉就**永久丢失**，只能靠记忆和文档重建。 | **动任何"批量删改"之前，先有版本控制**（哪怕只是 `git init`）。没有它，一次误操作就是不可逆的。 |
+| **重建的东西必须逐项验证，不能只验证"能编译"** | 清单嵌入、DPI 声明这类东西**丢了照样编译通过**，只在运行时静默出错。 | 重建构建文件后，要**单独验证那些"能编译但会静默变错"的设定**（这里：清单是否真的嵌进了 exe、DPI 自检是否还过）。 |
+
+### 7.32 阶段 4 第六轮：**改对了设计——图标常驻在岛旁边** ✅
+
+用户看了 7.31 的成果后说：
+
+> 有了 但是不是我想要的，我想要的是每打开一个应用 就在灵动岛旁边多一个图标
+
+**我理解错了需求。** 我做的是"悬停时把岛展开成一条横跨屏幕的任务栏"，
+而用户要的是**灵动岛保持原样，旁边常驻一排应用图标**——
+这才是 Dynamic Island 的做法，也是他一开始就说过的"鼠标移上去显示歌曲信息"那种形态。
+
+三个细节用户已确认：**图标全在右侧**、**点击激活（已在前台则最小化）**、**超出就只显示 N 个**。
+
+#### 删除 `TaskbarLayout.h`，新增 `TaskStripLayout.h`
+
+| | 旧（错） | 新（对） |
+|---|---|---|
+| 岛的宽度 | 悬停时胀成 1040 DIP 的条 | **始终 220 DIP，居中不动** |
+| 图标 | 悬停时才出现，在条里面 | **常驻在岛右侧，静止时也在** |
+| 悬停的作用 | 展开成长条 | **只把按钮变宽，露出标题** |
+
+**岛的位置不随应用数量变化**——这是整个设计的要点，
+而且我把它写成了断言：**岛居中，位置只是显示器宽度的函数**。
+一个"每开一个应用就横向挪一下"的岛比没有岛更糟。
+
+图标 30 DIP 见方、间距 4 DIP、最多 12 个；
+悬停时按钮展宽到 132 DIP 显示标题。
+**图标左对齐**，所以按钮变宽时**图标不会横向移动**（也有断言）。
+
+#### 实测（`docs/icons-rest.png`，放大 2 倍）
+
+**静止状态**下：左边是显示 `13:19` 的岛，右边一排图标
+（DeepSeek、终端、文件夹、微信…），**当前窗口有高亮底色**。不需要悬停。
+
+#### 本轮抓到的两个问题
+
+| 问题 | 真相 |
+|---|---|
+| **旧头的常量与新头冲突** | `TaskbarLayout.h` 和 `TaskStripLayout.h` 都定义了 `kTaskIconSizeDip`。删掉旧文件后 `Renderer.h` 还包含它，编译直接失败——这次失败是**好事**，比安静地用错常量强。 |
+| **我的断言写错了点** | "点在最后一个按钮之后应该没命中"，我却用**第二个按钮右边 +40 DIP**——而 4 个按钮间距 34 DIP，那个点落在**第三个按钮里**。**测试错了，代码是对的。** |
+
+自检 **418 项全绿**（新增 25 项几何断言），`-Clean` 干净重建 SMOKE PASS。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"有了但不是我要的"要立刻重问，不要自己猜** | 我按"悬停展开成任务栏"做了一整轮，方向错了。用户一句话就点明了：**"每打开一个应用就在岛旁边多一个图标"**。 | 需求里**形态**比功能更容易理解错。做之前用**一张草图或一句话**确认形态，比做完再改便宜得多。 |
+| **断言写错点，却去怀疑对的代码** | "点在这之后应该没命中"用错了坐标，落在第三个按钮里，测试红了。 | 断言失败时**先算一遍断言自己的数**。**测试错了和代码错了同样常见**，而前者的代价是让人去改对的代码。 |
+| **删掉的头文件仍被包含** | 两个头定义了同名常量，删一个立刻编译失败。 | 这类失败是**好的**：它把"悄悄用错常量"变成了"编译不过"。**宁可编译期冲突，也不要运行期碰巧对**。 |
+
+### 7.31 阶段 4 第五轮：**"没有按钮"——同一个坑第三次**：边缘处理里硬编码了状态 ⚠️→✅
+
+用户报告悬停后**一个按钮都没有**。预览里画得好好的，所以问题不在绘制。
+
+#### 根因：指针"进入"这个**边缘事件**里硬编码了目标状态
+
+```cpp
+if (window.TakePointerInsideChanged(&pointerInside)) {
+    if (pointerInside) {
+        window.SetState(island::IslandState::Expanded);   // <-- 直接去卡片
+    }
+```
+
+我这一轮把 `Hover` 改成了任务栏本体，**却只改了 `StatePolicy.h`，没改这个边缘处理**。
+于是：指针进入 → 立刻 `Expanded` → 下面的策略看到状态已是 Expanded，
+`ShouldPromoteToTaskbar` 只对 `Collapsed`/`MusicStrip` 返回真 → **任务栏永远到不了**。
+
+**每一块代码单独看都"按写法工作"，所以没有任何报错。**
+
+#### 这是同一个坑的第三次
+
+| 轮次 | 同一个错误的形态 |
+|---|---|
+| 最早 | 提升逻辑**写在"降低已打开卡片"的分支里** → 卡片永远打不开 |
+| 上一轮 | 展开时两侧往内收 → 方向错了 |
+| **本轮** | **边缘处理里硬编码状态，绕过了策略** → 任务栏永远到不了 |
+
+**三次都是"决定形状的逻辑存在于策略之外"。** 策略是纯函数、有测试，
+**但只有在被调用的前提下才有意义**；一旦某处自己写了一个状态，策略就被旁路了。
+
+**规则**：**任何改变形状的地方都必须经过 `NextShape`。**
+边缘处理只应提供"指针进来了/出去了"这个**事实**，不该自己决定去哪个形状。
+
+#### 修法
+
+边缘处理现在也走同一条规则：指针进入 + 无通知 → `Hover`；有通知 → `Expanded`。
+
+#### 新增一条常态化日志（这是本轮最重要的工具）
+
+```
+taskbar: state=collapsed, 0 buttons from 0 windows listed (...)
+```
+
+**每次形状或按钮数变化时打印一次**，于是"没有按钮"这句话可以被拆成三种：
+
+| 日志 | 含义 |
+|---|---|
+| `state=collapsed` | **形状没变** → 指针没被识别（问题在输入） |
+| `state=hover, 0 buttons from 0 windows` | 形状对了但**枚举没结果** → 问题在筛选 |
+| `state=hover, N buttons from N windows` | 都对了，**但屏幕上没有** → 问题在绘制 |
+
+**这三种需要完全不同的修法，而"没有按钮"这句话把它们混成了一个。**
+同一套做法（先量再改）上一次找出了 `WM_TIMER` 不投递。
+
+自检 **393 项全绿**。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **改了策略，漏了调用点** | 策略改了行为，但边缘处理自己硬编码了状态，**策略被旁路**。每块代码单独都对，没有任何报错。 | **一个规则有唯一的家还不够，还必须确认所有调用点都走那个家。** 改规则时**搜索所有改变该状态的地方**，不只是改规则本身。 |
+| **"没有按钮"不是可诊断的描述** | 它可能是"形状没变"、"枚举为空"、"画不出来"三种之一。 | 让程序**自己报出中间值**（形状 + 计数），把一句模糊反馈拆成互斥的几种。**先量再改。** |
+| **预览通过会掩盖真实路径的缺陷** | 预览**直接设置状态**，所以它验证的是绘制，**完全不验证状态是否会被到达**。 | 预览只证明"能画"。**"能不能到达"必须在真实路径上验证**，而验证方法就是记录中间状态。 |
+
+### 7.30 阶段 4 第四轮：**悬停态变成任务栏本体**（窗口按钮画出来了）✅
+
+用户选 A：把窗口按钮画进岛里。
+
+#### 一个设计决定改变了整件事：**悬停态不再是空的中转站**
+
+`Hover` 原来是一个**更宽的空胶囊**——存在的唯一目的是"从静止态到卡片的路上经过一下"。
+**现在它就是任务栏本体。** 状态机随之改动：
+
+| 进入条件 | 结果 |
+|---|---|
+| 指针在内 + **无通知** | → `Hover`（任务栏） |
+| **有通知**（不论指针在哪） | → `Expanded`（卡片） |
+
+**通知优先级高于指针**，这一条必须放在最前面，且**必须忽略指针**。
+第一版忘了这点：通知到达时若指针不在岛上，卡片根本不开——
+因为旧逻辑只在"指针在内"时才提升。**消息该不该显示，与指针在哪无关。**
+
+#### 按钮尺寸由"标题要放得下"决定，而不是按图标算
+
+最省事的设计是一排小图标（外壳自己也基本是这样）。**否掉了**，因为这台机器上的窗口标题是：
+「检索文件夹并继续任务 — DeepSeek Harness」。**图标无法区分三个相似的窗口，
+而任务栏按钮存在的意义就是一眼认出来。** 所以按钮宽度 122 DIP，
+标题用**真正的省略号**裁剪（`CreateEllipsisTrimmingSign`），
+一条 1040 DIP 的条能放 **8 个**。
+
+#### 实测（`docs/taskbar-3x.png`，放大 3 倍）
+
+```
+4 listed of 315: 293 invisible, 9 cloaked, 3 untitled, 0 owned, 3 tool, 2 shell, 1 self
+```
+
+条上四个按钮，**图标都出来了**：DeepSeek 图标、终端、文件夹、QQ 音乐图标，
+标题各带省略号，**当前窗口有高亮底色**。
+
+#### 本轮抓到的三个真 bug
+
+| bug | 症状 | 根因 |
+|---|---|---|
+| **`SendMessageTimeoutW` 的返回值和输出参数搞反了** | **图标全部消失**（日志却报 `ok`） | 它**返回的是"调用是否成功"**，图标写在**第 7 个参数 `PDWORD_PTR`** 里。我读了返回值、把输出参数传了 `nullptr`，于是**每个窗口都"没有图标"而调用报成功**，代码退回到可执行文件图标——对控制台宿主就是那个**通用文件夹**。 |
+| **预览里每帧刷新窗口列表** | 一个阶段刷出 **400 多行**相同日志，把其他信息全埋了 | 实时循环有 500ms 节流，**预览这条路径我漏了**。 |
+| 图标按进程取，受权限限制 | 某些窗口显示通用文件夹 | 改为**优先取窗口自己的图标**（`WM_GETICON`），不需要跨进程权限，而且是窗口真正选定的那个。 |
+
+**第一个 bug 值得单独记**：`SendMessageTimeoutW` 报**成功**，而结果是"什么都没有"。
+**"调用成功"和"拿到了东西"是两个判断**，我把它们当成一个了。
+
+自检 **393 项全绿**。状态机的 14 种组合表**整体重写**了——
+因为规则变了，**旧表描述的是已经不存在的行为**（旧表说"指针进入 → 卡片"）。
+**测试与代码不一致比没有测试更糟**，它会让失败的构建看起来才是对的。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **Win32 "返回值 / 输出参数" 二选一搞反** | `SendMessageTimeoutW` 返回成功，图标在输出参数里。读错一个位置，**所有图标静默消失**，而日志说一切正常。 | 用 Win32 API 时**逐个确认每个值从哪来**。**"调用成功" ≠ "拿到了数据"**，两者必须分别判断。 |
+| **同一条逻辑有两处实现时，只给一处加节流** | 实时循环有 500ms 节流，预览路径没有 → 一阶段 400 行日志。 | 节流/缓存这类约束要**放在被共享的地方**，或者**两处都改**。复制一条逻辑就要复制它的约束。 |
+| **规则变了，测试表没变** | 状态机规则改了，14 项组合表还在描述旧行为。 | 改规则时**测试表要整体重写**，并加"哪一项错了"的诊断输出（`first: <case>`），否则只知道有几项错。 |
+
+### 7.29 阶段 4 第三轮：**窗口枚举 + 激活**（只读桌面，风险低）✅/⚠️
+
+用户同意先做这块：**它只读桌面状态、不改**，风险远低于 AppBar。
+
+#### 新增 `WindowList.h / .cpp`
+
+枚举本身只有几行，**难点全在"哪些窗口该上榜"**，所以把判定做成**纯函数**
+（`ShouldListWindow(WindowTraits)`），与填字段的 Win32 调用分开。
+理由很实在：**开发沙箱的桌面上没有应用窗口，任何需要真实窗口存在的逻辑都测不了**，
+但规则可以测——而规则恰恰是最容易写错的部分。
+
+规则与理由（每条都写了注释）：
+
+| 规则 | 为什么需要 |
+|---|---|
+| 不可见 → 不列 | 筛掉绝大多数 |
+| **被 DWM 遮蔽（cloaked）→ 不列** | **最重要、最不直观的一条**：挂起的 UWP 应用保留顶层窗口，`IsWindowVisible` 说它可见，只有 `DWMWA_CLOAKED` 能识破。少了这条，任务栏全是幽灵 |
+| 无标题且未声明 `WS_EX_APPWINDOW` → 不列 | 大量辅助窗口可见、无标题，只用来收消息 |
+| 有 owner → 不列（除非 `WS_EX_APPWINDOW`） | 有 owner 的是对话框/浮板。外壳自己也是这条规则 |
+| `WS_EX_TOOLWINDOW` → 不列（除非 `WS_EX_APPWINDOW`） | 浮动工具板 |
+| 外壳自身窗口 → 不列 | `Shell_TrayWnd`/`Progman`/`WorkerW` 都可见、有标题、属于 Explorer。**`Progman` 就是桌面**——列上去会得到一个"点击后聚焦壁纸"的按钮 |
+| 本进程窗口 → 不列 | 任务栏不能列自己 |
+| 零尺寸 → 不列 | 看不见也点不到 |
+
+**`EnumWindows` 按 Z 序（前→后）返回**，所以数组顺序直接就是要画的顺序，不用再排序。
+
+#### 真实桌面实测（这是单元测试到不了的部分）
+
+```
+3 listed of 310: 290 invisible, 9 cloaked, 3 untitled, 0 owned, 3 tool, 2 shell, 0 self
+  1. pid <pid>           Windows PowerShell
+  2. pid <pid>         检索文件夹并继续任务 — DeepSeek Harness
+  3. pid <pid>  [min]  挪威的森林 (深情女声版) - 阿耶耶
+```
+
+**310 个顶层窗口筛出 3 个**，其中**9 个幽灵被 cloaked 规则拦下**——规则在真实桌面上生效。
+计数**按原因分类**，所以日志能解释"为什么只有 3 个"，而不是只报一个数字。
+
+#### 激活：本环境被 Windows 拒绝（**这是预期的，不是 bug**）
+
+```
+activating entry 2 (pid <pid>, not minimised)...
+activate was REFUSED by Windows
+```
+
+代码依次尝试**三种文档化途径**：`SetForegroundWindow` → `AllowSetForegroundWindow(ASFW_ANY)`
+→ `AttachThreadInput` + `BringWindowToTop`。全部失败。
+
+原因：Windows 的前台锁只允许**特定条件**下的进程夺取前台，目的是防止程序抢焦点。
+**真实的任务栏点击属于允许的情形**（用户刚点过）；而沙箱里从后台进程发起的调用不属于。
+**修法是把"拒绝"如实报出来**——因为"点了没反应"和"Windows 拒绝置顶"从外面看一模一样。
+
+自检 **392 项全绿**（新增 18 项），`-Clean` 干净重建 SMOKE PASS。
+
+#### 新增两个诊断入口
+
+- `--window-list`：打印会上榜的窗口 + 按原因分类的计数
+- `--window-list --activate`：再激活第一个非当前窗口，报告成功/被拒
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **`IsWindowVisible` 说可见，窗口却根本看不见** | 挂起的 UWP 应用保留顶层窗口且 `IsWindowVisible` 为真，只有 DWM 的 cloak 属性揭示真相。 | 判断"能不能被看到"要问**合成器**（DWM），不要只问窗口管理器。这是"幽灵条目"的根源。 |
+| **枚举结果需要"为什么"而不只是"有多少"** | 310 个窗口筛出 3 个，只报数字无法判断是对还是错。 | 筛选**按原因分类计数**并写进日志；数字要能自证。 |
+| **报"失败"比报"成功"更有用** | 激活被拒时如果吞掉，用户看到的就是"点了没反应"。 | 对**可能被系统合法拒绝**的操作，要把拒绝**报出来**并解释，因为它的症状与"功能没做"无法区分。 |
+
+### 7.28 阶段 4 第二轮：**AppBar 把用户的桌面弄坏了** —— 找到闭环并加了保护 ⚠️
+
+用户第一次用 AppBar（当时是默认开启）后报告：
+
+> 所有应用窗口都跑到屏幕最下面了，包括这个灵动岛
+> 全都点击不了，灵动岛遮盖住了所有应用
+
+**这是本项目第一次真的弄坏用户的系统。** 而且**报错信息是零**——AppBar 改的是
+**工作区矩形**，改坏了画面上看不出"谁改的"。
+
+#### 根因：一个闭环
+
+上一轮加 AppBar 注册时，**没有发现窗口自身依赖工作区**：
+
+```
+窗口 SyncToMonitor() 用 monitor_.work.top 定位
+        ↓
+AppBar::Claim() 把工作区顶部下移（这就是"让出空间"）
+        ↓
+外壳广播 WM_SETTINGCHANGE
+        ↓
+窗口收到 → 调用 SyncToMonitor() → 把自己也往下挪
+        ↓
+岛下移 →（最大化窗口跟着工作区下移）→ 岛盖住所有应用
+```
+
+**"让出空间"这个动作本身把岛也推下去了。** 典型的自反馈：
+**改系统状态的动作，触发了一个依赖该状态的自身重定位。**
+
+#### 修法一：窗口改挂**屏幕**顶边，不再看工作区
+
+`rect_.top = monitor_.screen.top`（原来 `monitor_.work.top`）。
+
+挂到屏幕边缘后，**工作区怎么变都动不了岛**，闭环从结构上不可能再接上；
+而且"预留的那一条"和"画出来的胶囊"位置**由构造保证一致**。
+
+自检里对应断言改了，并**新增一条**把不变量写出来：
+
+```
+[ OK ] strip top edge meets the top of the screen
+[ OK ] the strip starts at or above the work area, never below it
+```
+
+#### 修法二：`ABM_SETPOS` 前后**校验落点**，不对就立刻撤销
+
+**这个检查本该第一轮就有。** AppBar 预留空间不能"观察后修正"：
+`ABM_SETPOS` 一改，全机最大化窗口跟着动，而进程内部看不出任何异常。
+现在**把结果与要求逐边比对**：顶栏必须恰好让工作区在顶部少 `thickness`，
+另外三条边**必须一动不动**。不符就**立即 `Release()` 撤销**并写明原因。
+
+#### 修法三：拒绝不合理请求 + 自己构造矩形
+
+- 厚度 ≤ 0 或 **> 屏幕高度 1/4** → 拒绝
+- 工作区为空 → 拒绝；算出的矩形为空 → 拒绝
+- **矩形改为按显示器边界自己构造**，不再"就地修改 `ABM_QUERYPOS` 的建议值"
+  （建议值在失败时可能是空的或原样返回，就地改会得到一个跨半屏的矩形）
+- `ABM_SETPOS` **之前**把确切矩形写进日志——事后唯一的记录
+
+#### 修法四：**默认关闭**，改为 `--appbar` 显式开启
+
+它不可能再"顺手"弄坏任何人的桌面。**这是安全决定，不是未完成的功能。**
+
+#### 修法五：新增 `scripts/restore-desktop.ps1`
+
+一条命令恢复：结束残留进程 → `SPI_SETWORKAREA` 把工作区设回全屏 →
+重启 Explorer（AppBar 注册表由 Explorer 持有，重启即清空）。
+**恢复不能要求用户先理解原理。**
+
+自检 **374 项全绿**，`-Clean` 干净重建 SMOKE PASS，四个脚本 parse 通过、零非 ASCII。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **改全局状态的动作触发了自身重定位** | 注册 AppBar 改了工作区，而窗口按工作区定位 → 窗口自己下移 → 岛盖住所有应用。 | **任何"改全局状态"的功能，先查：本进程有没有东西依赖那个状态？** 有依赖就是闭环。把自身锚定在**不会被自己改动的东西**上。 |
+| **全程没有任何报错** | `ABM_*` 全部返回成功；损坏的是"工作区"这个抽象状态。 | 对**不可观测的全局副作用**，必须**做完立刻校验落点**，不符就撤销。**不要等用户来告诉你。** |
+| **旧 API 的"建议值"可能根本没被填充** | 把厚度写进 `ABM_QUERYPOS` 的就地结果；该调用若失败/未填充，就地结果可能原样或为空，写上去就是跨半屏的矩形。 | 不要**就地修改**外部 API 返回的结构；**自己从可靠来源构造**，外部值只用在它确实负责的维度上。 |
+| **有风险的功能不该默认开启** | 我把改全局状态的功能设成默认，第一次运行就弄坏了用户桌面。 | **会改系统全局状态的功能默认关闭**，用显式开关打开，并**同时提供一条命令的恢复手段**。 |
+
+### 7.27 阶段 4 第一轮：**AppBar 注册**（替代任务栏的真正地基）✅/⚠️
+
+用户决定先做**第一个任务：替代任务栏**。梳理后发现阶段 4 基本是空的，而其中
+**最关键、最容易被跳过的一块是 AppBar 注册**。
+
+#### 为什么 AppBar 才是"替代"的分界线
+
+没有它，我们的岛只是**浮在桌面上的一个条**：最大化窗口照样占满整个屏幕，
+岛压在窗口标题栏上。
+
+有它，**桌面会把那一条空间让出来**：工作区从岛的下方开始，最大化窗口自动避开——
+和真正的任务栏完全一样。**这才是"替代任务栏"。**
+
+用户当初的决策是"隐藏原生任务栏、自绘岛体"，而"自绘"里隐含了"让出空间"这一步，
+之前一直没做。
+
+#### 新增 `AppBar.h / .cpp`
+
+`SHAppBarMessage` 协议比这个项目其他部分都老，几个坑都写在代码注释里：
+
+| 坑 | 处理 |
+|---|---|
+| `ABM_NEW` 返回成功，**但桌面一点没变** | **用工作区是否真的变化来判定成功**，不看返回值 |
+| `ABM_QUERYPOS` 给的是**建议**矩形 | 文档明确要求调用方**自己压上厚度**再 `ABM_SETPOS`；直接采纳建议是这类代码最常见的错法 |
+| 回调消息 id 在 `WM_APP` 范围，**编译期未知** | 不能在 `switch` 里写 `case`，改为在 `WndProc` 的默认路径里检查 |
+| `ABN_POSCHANGED` 必须**真的重新认领** | 忽略它会让岛与它宣称的空间逐渐脱节 |
+| 退出时若不 `ABM_REMOVE` | **工作区永久留下一道缺口**，看起来像系统坏了而不是程序没清理 |
+
+结果用 `AppBarResult` 区分四种情形（注册成功 / 无窗口 / 回调被拒 / 未被注册 / 未获批空间），
+**因为它们需要完全不同的应对**——这正是上一轮学到的"不要把它们塌缩成一个 bool"。
+
+退出路径**显式调用 `Release()`**（不只是靠析构），并写日志：
+方法顺序明确，且**在日志里留下证据**。
+
+#### 本环境的实测结果（沙箱）
+
+```
+native taskbar: CANNOT BE HIDDEN from this process
+appbar: ABM_NEW refused (error 5); another bar may own the edge
+```
+
+`error 5` 是**拒绝访问**——沙箱进程完整性低于 Explorer，UIPI 拦掉了。
+**这不是代码问题，是权限问题**，与任务栏隐藏受阻是同一个原因。
+**需要在正常 shell 里验证。**
+
+自检 **373 项全绿**（新增 8 项 AppBar 断言）。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **头文件缺 `shellapi.h` → 报"未知重写说明符"** | `APPBARDATA` 未声明时，编译器把**成员名**当成了说明符，报 `C3646: unknown override specifier`，**错误位置完全指不到缺失的 include**。 | 头文件里**作为成员出现的类型**，其 include 必须在该头文件里，不能只在 `.cpp` 里。遇到"未知说明符"先想**类型未声明**。 |
+| **"成功"的返回值掩盖什么都没发生** | `ABM_NEW` 可以返回真而桌面毫无变化；这类 API 的返回值**不是结果**。 | 对这类调用，**用可观测的外部状态判定成功**（这里是工作区矩形），不要信返回值。 |
+| **老 API 的"建议值"不是最终值** | `ABM_QUERYPOS` 按文档只是建议，必须自己压厚度再 set。 | 文档里写"suggested / 由调用方决定"的参数，**要当成输入而不是输出**。 |
+
+### 7.26 阶段 3 第十八轮：`run.ps1` 的"立即退出"是**脚本在说谎**；另修构建期的文件锁 ✅
+
+用户发来 `run.ps1` 的运行截图，末行是决定性的：
+
+```
+[run] exited with 0 after 0.0s
+[run] log: %USERPROFILE%\AppData\Local\Temp\island_bar.log
+Get-Content : 文件"...island_bar.log"正由另一进程使用，因此该进程无法访问此文件。
+```
+
+**我自己的诊断代码抓到了我自己的 bug**：
+`Get-Content` 报"文件正由另一进程使用"，说明 **程序其实还在跑**，
+而脚本却声称它"0.0 秒就退出了"。**这两件事不可能同时为真，除非脚本没等它。**
+
+#### 真因：`& $Exe` 没有可靠地等待
+
+```powershell
+& $Exe @AppArgs          # 报 "exited with 0 after 0.0s"，程序仍在运行
+$code = $LASTEXITCODE
+```
+
+**修法**：改用显式进程对象和 `-Wait`，退出码从**进程对象**取，而不是 `$LASTEXITCODE`
+（后者只对真正等待过的命令可靠）：
+
+```powershell
+$process = Start-Process -FilePath $Exe -ArgumentList $AppArgs -PassThru -NoNewWindow
+$process.WaitForExit()
+$code = $process.ExitCode
+```
+
+**实测**：脚本运行 6 秒后 `run.ps1 is STILL WAITING for the app (correct behaviour)`，
+杀掉程序后脚本才继续并打印 `exited with  after 5.5s`。**等待现在是真的。**
+
+#### 顺带修掉：读日志时要先复制
+
+`Get-Content` 在**日志文件被占用时直接失败**——而这恰恰是"程序还在跑"时最可能的情况。
+于是脚本**想要展示证据的那一刻，正是它读不到证据的时刻**。
+改成**先 `Copy-Item` 再读**，并在复制也失败时明确指出"是不是还有旧的 island_bar 在跑"并列出进程。
+
+#### 再顺带：构建期的文件锁
+
+清理重建时链接失败：
+
+```
+LINK : fatal error LNK1104: 无法打开文件"...\island_bar.exe"
+```
+
+**没有任何 island_bar 进程在跑**，句柄比进程多活了若干秒（杀毒扫描，或上一个实例还在收尾）。
+重试没用（锁的时间远超任何合理重试窗口），但**改名有用**：锁允许改名，链接器随即创建新文件。
+
+`build.ps1` 现在**先把这个 exe 改名移到一边**再链接；若链接仍然失败，
+**把旧二进制放回去**，避免一次偶发失败同时毁掉上一个可用构建。
+
+#### 关于"都没有解决"
+
+用户上一轮说"MVP 全没解决"。从证据看**至少三件事已经是好的**，只是看不到：
+图标已经能取到（`icon dump: 856/1024 像素可见`）、app 名字已解析成"QQ音乐"、
+指针轮询已改为帧循环（不再依赖不投递的 `WM_TIMER`）。
+**问题在于我始终没能给用户一个可靠的"运行 + 取证据"通道**——这一轮修的就是它。
+
+自检 **365 项全绿**，`-Clean` 干净重建 SMOKE PASS，`--volume-test` PASS。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **启动脚本报告了假的"已退出"** | `& $Exe` 报 `exited with 0 after 0.0s`，而程序仍在运行（日志文件被占用证明了这点）。整整一轮都被这个假象误导，以为程序启动即崩。 | 启动器**必须用显式进程对象 + `-Wait`**，退出码从进程对象取。**"程序退了"和"我没等"必须能区分。** |
+| **读证据的代码在需要它的时刻失效** | `Get-Content` 对**被占用的文件直接抛异常**，而"文件被占用"正是程序还在运行的特征——于是最该看到证据的时候看不到。 | 读日志/读输出**先复制再读**；复制失败时**要说清可能的原因**（还有旧实例在跑）并列出进程。 |
+| **文件锁会伪装成"代码编译不过"** | 链接报 `LNK1104 cannot open file`，看起来像构建配置坏了，其实是句柄没释放。 | 构建脚本**先改名再链接**，并在失败时**恢复旧产物**。**偶发失败比慢更糟**——它会训练人忽略失败。 |
+| **"用户说没解决"要先检查交付通道** | 我连续几轮修代码，却从没检查过**用户能不能成功运行并取回证据**。 | 用户说"还是不行"时，先验证**交付与取证通道**，再改功能。**修得再多，用户跑不起来就等于没修。** |
+
+### 7.25 阶段 3 第十七轮：**找到"悬停/点击全都没反应"的真因** —— 指针轮询依赖的 WM_TIMER 从未到达 ✅
+
+用户说"问题都没有解决"。这一轮**不再靠猜**，给窗口过程加了**消息计数**和**指针位置轨迹**，
+一次就拿到了决定性证据。
+
+#### 决定性证据
+
+```
+pointer timer: running (id 0000000000000001, every 8 ms)
+messages/s: WM_TIMER=0 WM_MOUSEMOVE=0 WM_NCHITTEST=0        <-- 一秒内一条都没有
+```
+
+**指针轮询是靠窗口定时器驱动的，而 `WM_TIMER` 从来没有到达窗口过程。**
+后果完全无声：
+
+1. `UpdatePointerState()` 实际几乎不被调用
+2. `pointerInside_` **永远是 false**
+3. 形状**永远不会**提升成卡片
+4. `clickThrough_` 永远是 1（点击穿透），所以**点击全部漏到桌面**
+5. 而界面画得**完全正常**——所以看起来像"功能没做"，实际是"输入全死"
+
+**这就是"悬停没反应 + 点击没反应"的同一个根因。**
+
+#### 修法：指针改由**帧循环**轮询
+
+帧循环本来就以合成器频率运行（比 8ms 还好），而且**不会被消息泵饿死**。
+`window.UpdatePointerState()` 现在直接放在帧循环里调用（已验证在循环内、brace depth 4）。
+
+**验证**：指针轨迹从**整个进程只有 1 行**（仅来自 `Create`）变成正常记录，
+且 `clickThrough=1` 会随离开/进入正确切换。
+
+#### 日志噪音同时修掉
+
+第一版指针轨迹**每秒打 4 行"还在外面"**，会把唯一重要的那行淹掉。
+改成**只在"接受与否"发生变化时打印**：进入一行、离开一行。
+（这个教训本身值得记：**诊断输出要按状态变化打，不能按时间打**。）
+
+#### 顺带把 app 名字修对了
+
+卡片顶排原来显示的是**机器标识** `QQMusic.exe`（用户截图里就是这个）。
+SMTC 对绝大多数桌面程序**不提供显示名**，所以改从可执行文件的**版本信息**取：
+
+```
+icon: app='QQMusic.exe' name='QQ音乐' -> C:\SOFTWARE\QQMusic\QQMusic.exe (864 bytes)
+```
+
+**这行日志也是一个版本指纹**：显示 `QQ音乐` 才说明跑的是这一版；
+显示 `QQMusic.exe` 就是旧版。
+
+#### 仍然诚实记录的两点
+
+1. **我无法证实用户的机器上 `WM_TIMER` 也是 0**——沙箱里这个进程收不到任何消息，
+   所以 `WM_MOUSEMOVE=0` 是**环境的必然结果**。但"悬停和点击都没反应"与
+   "指针轮询没在跑"的症状**完全吻合**，而且改成帧循环轮询**在任何情况下都更可靠**
+   （不依赖消息投递），所以这个修复无论原因如何都成立。
+2. **`run.ps1` 立刻退出**我仍然复现不出来，脚本已改为自动打印日志尾部。
+
+自检 **365 项全绿**，`-Clean` 干净重建 SMOKE PASS，`--volume-test` PASS。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **定时器"启动了"不等于"消息到了"** | `SetTimer` 返回了有效 id，日志写着 "running"，但消息计数显示 `WM_TIMER=0`。两者是完全不同的断言。 | 依赖**消息投递**的功能，要能**证明消息真的到了**（计数），不能只看"注册成功"。能用**轮询**就别依赖消息。 |
+| **输入全死，界面却完全正常** | `pointerInside_` 永远 false → 永不提升 → 永远点击穿透。界面照画，所以看起来像"功能没做"。 | "画得对"和"能交互"是**两个独立的通路**。验收必须**分别确认**，不能因为界面好看就认为功能没问题。 |
+| **诊断输出按时间打会淹掉信号** | 第一版每秒 4 行"还在外面"，把唯一重要的状态变化埋了。 | 诊断要**按状态变化**打（进入/离开），不要按时间打。**日志的价值在于信噪比，不在行数。** |
+| **"问题没解决"要先怀疑自己的验证方式** | 我连续几轮在开发机上"验证通过"，但那是**同一个会话里的同一个进程**，从没验证过**消息与输入通路**。 | 用户说没解决时，**先问"我的验证方式和用户的使用方式差在哪"**，而不是继续加功能。 |
+
+### 7.24 阶段 3 第十六轮：卡片上的**白方块**——PNG 编码器丢了 alpha ✅
+
+用户发来卡片截图：来源图标的位置是一个**白色方块**，左边文字变成了 "QQMusic.exe"。
+
+#### 真因：编码器把所有图都当不透明处理
+
+`WicImage.cpp` 的 `EncodeFrameToPng` 有一行注释写着：
+
+```cpp
+// RGB for the file: album art is opaque, and dropping alpha makes it smaller.
+converter->Initialize(source, GUID_WICPixelFormat24bppBGR, ...);
+```
+
+对**专辑封面**是对的（不透明，丢 alpha 更小）。对**应用图标**是错的：
+图标大部分是透明的，**丢掉 alpha 后透明背景变成不透明黑**，
+压在卡片浅色蒙版上就是**一个白方块**。
+
+**修法**：给编码器加 `keepAlpha` 参数。图标走 `32bppBGRA`，
+封面和模糊背景继续走 `24bppBGR`。
+
+#### 同一个函数还藏了第二个 bug：**返回缓冲区容量而不是真实长度**
+
+原来的注释承认了这点，说"诚实的过估胜过错测量"，并依赖"解码器会停在 IEND"。
+但**写出文件的调用方不会**：
+`--icon-dump` 把一个 **698 字节**的 PNG 写成了 **32768 字节**，
+后面跟着 **32070 字节的垃圾**。
+
+**修法**：新增 `PngLength()`，**遍历 PNG 块头直到 IEND**，得出真实长度。
+这比猜更可靠——文件自己说了它在哪里结束。
+
+#### 验证（这次是量出来的，不是看出来的）
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| dump 出的文件 | 32768 字节，32070 字节垃圾 | **881 字节**，精确 |
+| IHDR 颜色类型 | `2`（RGB，无 alpha） | **`6`（RGBA）** |
+| 解码后像素 | 1024/1024 全不透明 → 白方块 | **856 有内容 + 168 透明** |
+
+**注意我自己也差点误判**：我第一次手工解析 PNG 时**没有还原行过滤器**，
+于是算出"947 个全透明像素"，和程序报的 856 不符，差点又去改对的代码。
+补上过滤器还原后两边一致（856/1024）。**手写解析器时要还原滤镜**。
+
+**新增 7 项断言**把两个 bug 都钉住，并把缺陷放回去验证测试会红：
+
+```
+with alpha stripping reintroduced: exit=1 FAIL=1
+[FAIL] a transparent corner stays transparent through a re-encode   corner alpha 255, centre alpha 255
+```
+
+自检 **365 项全绿**。
+
+#### 关于 `run.ps1` 立刻退出（exit 0）
+
+用户那边 `run.ps1` 打印了 banner 然后**立刻 `[run] exited with 0`**。
+我在开发机上**复现不出来**（同样的命令能正常跑住）。
+
+**已改进**：`run.ps1` 现在
+- 记录运行时长，**不到 3 秒就判定为异常**；
+- 立刻**把日志尾部打印出来**（GUI 程序没有别的办法说明自己为什么停）；
+- 若**连日志文件都没有**，那本身也是信息——说明它在 `main()` 之前就死了。
+
+**未解决，标记为待查。**
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"够用就行"的编码假设会反噬** | 封面不透明 → 统一丢 alpha 以减小体积。图标一来，同一个假设就把透明变成了黑块。 | 编码路径要在**调用点**声明它是否需要 alpha。**默认值要选安全的那一侧**（保留 alpha），而不是省事的那一侧。 |
+| **"解码器会容忍"不等于"写出文件的人会容忍"** | 返回容量而非长度，解码器确实能靠 IEND 停下——所以这个 bug 藏了很久。但写出文件的调用方会把垃圾一起写出去。 | 一个"宽容的读者"存在，**不能成为"不准确的写者"的理由**。有调用方要写文件时，长度必须真实。 |
+| **我自己手工解析也错了** | 我第一次解析 PNG 时没还原行过滤器，结果和程序报的不一致，差点去改对的代码。 | 写**临时解析器**时要和正式解码器逐项对齐（这里就是 PNG 的行过滤器）；**两边不一致时，先怀疑自己的临时工具**。 |
+| **复现不了的 bug 也要留下证据通道** | `run.ps1` 立刻退出，我在开发机上复现不出。 | 复现不了时**不要猜**，而是让程序/脚本**自己把证据留下来**（这里：异常退出就打印日志尾部）。 |
+
+### 7.23 阶段 3 第十五轮：**用户测的是过期二进制** + 图标路径端到端证实 ✅
+
+用户报"图标还是没有 / 还是点不了 / 没测试"。查下来**前两条的共同原因是同一个**，
+而且不在代码里——**在流程里**。
+
+#### 决定性证据：用户测的 exe 比源码旧
+
+用户报告时，`build\Debug\...\island_bar.exe` 的构建时间是 **11:34:57**，
+而 `MusicSession.cpp` 的修改时间是 **11:31:34**——**图标解析那一段根本不在这个 exe 里**。
+用户是照着上一轮的消息跑的（那条消息发出时新构建还没生成），
+**所以他在测一个不包含修复的程序**。
+
+我上一轮说"请重新编译"，但**没有任何东西能让人确认自己跑的是不是新构建**。
+这是我的流程缺陷，不是用户的疏忽。
+
+#### 修法：`scripts/run.ps1`
+
+一个脚本做三件事，让"跑错二进制"不再可能：
+
+1. **先杀掉残留进程**。查到**有一个 `island_bar` 进程自 11:38 起一直挂着**——是我自己测试留下的。
+   残留进程会**自己画一个胶囊**，点击落在谁身上取决于 z 序，
+   **这和一个坏掉的点击处理器长得一模一样**。
+2. **先编译**，并且**如果 exe 比最新源码旧就明确警告**。
+3. **在当前控制台里启动**，这样"log file:"那行路径直接可见。
+
+#### 图标路径这次是**端到端证实**的
+
+新增 `--icon-dump <appid>`：把**解码后的像素**写成 PNG，并统计可见像素。
+
+```
+icon dump: resolved to C:\SOFTWARE\QQMusic\QQMusic.exe
+icon dump: encoded 32768 bytes of PNG
+icon dump: decoded 32x32, 1024 of 1024 pixels visible, max alpha 255, mean alpha 255.0
+icon dump: wrote ...\island_bar-icon.png
+```
+
+我把那个 PNG 打开看了，**就是 QQ 音乐的黄底音符图标**。
+所以：路径解析对、图标导出对、解码对、像素不透明。整条链子都通了。
+
+#### 顺带抓到两个我自己写的 bug
+
+| bug | 症状 | 原因 |
+|---|---|---|
+| **`--icon-dump` 让程序挂住** | 命令不返回，进程一直在跑 | 我漏了**在参数解析循环里注册这个标志**，于是它落到默认分支**去启动任务栏**了。 |
+| **同一路径在 dump 里导出 0 字节，在预览里 32768 字节** | `encoded 0 bytes of PNG`，看起来像"这个 exe 没有图标" | **`SHGetFileInfoW` 需要 COM 单元**。测试命令没 `CoInitializeEx`，shell 报成功但**给回 NULL hICON**。 |
+
+第二个尤其值得记：**同一个函数、同一个路径、两个调用点，结果不同**——
+差别只在**调用它的上下文**。这类"看起来像数据问题、实际是环境问题"的故障，
+只有把中间结果打出来才能定位。
+
+自检 **358 项全绿**，`-Clean` 干净重建 SMOKE PASS。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"请重新编译"不是交付** | 我改完代码就让用户编译，但**没有任何可验证的标记**说明他跑的是哪一版；这一轮就此白费。 | 交付要包含**启动方式**，而且要能**自证版本**（先编译、比时间戳、杀残留）。不能让用户靠"我记得编译过了"来判断。 |
+| **残留进程会伪装成 bug** | 我自己测试留下的 island_bar 进程挂了一个多小时，它会**自己画一个胶囊**。点击落到谁身上取决于 z 序——**和坏掉的点击处理完全一样**。 | 测试脚本**开头必须清理旧进程**。查"点了没反应"之前先确认**只有一个实例在跑**。 |
+| **忘了注册命令行标志 → 落到默认分支** | `--icon-dump` 没进解析循环，于是程序**启动了任务栏**并一直运行，看起来像"命令挂住"。 | 加子命令时**必须同时改三处**：默认值、解析循环、分发分支。漏了第二处会静默降级成"正常启动"。 |
+| **同一函数在不同上下文结果不同** | `SHGetFileInfoW` 在没有 COM 单元的线程里**报成功但给 NULL 图标**。 | 调 shell / COM API 前**先确保单元已初始化**。"同一个函数应该给同样结果"是假设，不是事实。 |
+
+### 7.22 阶段 3 第十四轮：按用户实测信息修好图标解析 + 日志路径自我公开 ✅
+
+用户发来两条**实测**结果，各自解决一个我查不到的问题。
+
+#### 1. QQ 音乐在 `C:\SOFTWARE\QQMusic\QQMusic.exe`
+
+我上一轮说"这台机器没装 QQ 音乐所以无法验证"——**错了，它装了**，只是在
+**`C:\SOFTWARE\`**，不在 `Program Files`，而且**注册表 App Paths 里什么都没有**。
+所以我那两级查找（路径存在 → App Paths）全都落空，卡片只能退回彩色圆点。
+
+**新增 `SearchInstallRoots`**：在安装根目录里按文件名查找，往下找**两层**，
+覆盖 `C:\SOFTWARE\<产品>\<app>.exe` 和 `C:\Program Files\<厂商>\<产品>\<app>.exe`。
+
+用**同一个解析器**在预览里验证（`ResolveAppIconPath(L"QQMusic.exe")`）：
+
+```
+music preview: source icon loaded (32768 bytes)
+music preview: icon resolved to C:\SOFTWARE\QQMusic\QQMusic.exe    <- 找到了真的那个
+```
+
+这台开发机的 `C:\SOFTWARE\QQMusic\QQMusic.exe` 确实存在（229656 字节），
+所以**图标路径这次是端到端验证过的**，不再只是"管线能跑通"。
+
+#### 2. 日志找不到——**我给了错的路径，而且不该让人猜**
+
+用户按我说的 `Get-Content "$env:TEMP\island_bar.log"` 得到"路径不存在"。
+`LogPath()` 用的是 `GetTempPathW()`，它在**那个 shell 里**不是进程算出来的那个 `%TEMP%`——
+我让用户去看一个**由另一个进程按自己的环境算出来的**路径，这本身就是错的做法。
+
+**修法**：程序**开机就把日志路径写进日志、并打印到控制台**：
+
+```
+log file: %USERPROFILE%\AppData\Local\Temp\dsh-tM9YH8\island_bar.log
+```
+
+（用 `LogLine` + `PrintOneLineImpl` 而不是 `LogAndPrint`：后者会经 `LogLine` 回到
+`OpenLog`，只是**恰好**因为 `g_file` 已设才没出事，依赖这个太脆。）
+
+**规则**：**不要让用户去猜路径**。凡是要用户提供文件的地方，程序自己报出完整路径。
+
+#### 顺带把顶排文字做成独立格式
+
+来源名原来复用 `appFormat_`（11 DIP、居中、本来是给通知标题的），
+在卡片顶排既偏小又对齐不对。新增 `appRowFormat_`（13 DIP、左对齐）和
+`volumeFormat_`（11 DIP、右对齐）。
+
+自检 **358 项全绿**，截图 `docs/card-final.png`。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"没装"是结论，不是证据** | 我说"这台机器没装 QQ 音乐"，因为我在 `Program Files` 和注册表里搜不到。它其实在 **`C:\SOFTWARE`**，一个我没想到的根目录。 | **"我搜过的地方没有"不等于"不存在"。** 查不到时要先问"我搜了哪些地方、还有哪些可能"，再决定能否下结论。 |
+| **不要给别人一个由第三个进程算出来的路径** | 日志路径来自 `GetTempPathW()`，在用户的 shell 里 `%TEMP%` 与进程的不同，于是他按我说的路径找不到文件。 | 要用户取文件时，**程序自己打印完整路径**。让用户猜路径就是让人白跑。 |
+| **注册表不是唯一清单** | QQ 音乐完全没注册 App Paths，直接在 `C:\SOFTWARE` 下。 | 解析"程序在哪"要多路并举（路径存在 → App Paths → 常见安装根目录），任一路成功即可。 |
+| **`LogAndPrint` 不能在 `OpenLog` 里用** | 会 `LogAndPrint → LogLine → OpenLog` 重入；当前只是**碰巧**因为 `g_file` 已设而安全。 | 初始化函数里不要调用会绕回自己的公开 API；**"碰巧没坏"要当隐患处理**，并写下原因。 |
+
+### 7.21 阶段 3 第十三轮：图标 / 音量交互 / **音乐优先于视频** / 比例重做 ✅
+
+用户第二轮反馈四条，逐条处理。
+
+#### 1. **音乐要优先于浏览器视频**（功能缺陷）
+
+`GetCurrentSession()` 返回的是"外壳认为当前"的那个会话，而**浏览器放视频时经常抢到它**，
+因为视频是刚打开的。所以卡片显示了浏览器视频而不是正在放的音乐。
+
+**改成自己枚举所有会话并打分**（`ChooseSession` + `SessionScore`）：
+
+| 因素 | 分值 |
+|---|---|
+| 已知音乐播放器（qqmusic / cloudmusic / spotify / kugou …） | +100 |
+| 已知浏览器或视频播放器（chrome / msedge / firefox / vlc …） | −100 |
+| 正在播放 | +50 |
+
+未知应用按**音乐**算（专用播放器注册会话的概率远高于浏览器被认错）。
+两项相加就能同时处理"音乐 vs 播放中的视频"（名字分）和"音乐 vs 刚打开但暂停的视频"（播放分）。
+
+实测这台机器上正确选中 `QQMusic.exe`。**加了 6 项断言**直接测打分函数
+（它是纯函数，不必真的同时开两个播放器）。
+
+#### 2. 左侧图标
+
+新增 `FetchAppIcon`：从 `SHGetFileInfoW` 取 32×32 图标 → 画进 top-down DIB →
+走**已有的 PNG 编码路径** → 解码 → 当位图缓存（新 `BitmapSlot::AppIcon`）。
+
+app id 不一定能用：打包应用是 `package!App`（指包不指文件）。所以
+`ExecutableFromAppId` 会拒绝它，并退回彩色圆点而不是显示错误的图标。
+**纯文件名**（QQ 音乐就注册成 `QQMusic.exe`）走**注册表 App Paths** 解析——
+这正是外壳自己查找程序的地方。
+
+#### 3. 音量：点击喇叭才出现进度条
+
+按要求改成：**平时只显示喇叭**；**点击喇叭展开**进度条和百分比；再点收起。
+**点击喇叭不再切换静音**——想打开滑条的一次点击不该把机器弄哑（原来就是这么做的，已改）。
+
+#### 4. **"不好看"的真因：我的比例是错的**
+
+对比参考图的**比例**才看出来：参考卡片宽 384 DIP、封面 111 DIP，**封面占 29%**；
+而我的封面 80 DIP / 卡片 520 DIP = **15%**，只有参考的一半。
+**封面是卡片上最大的元素，我却把它画成了缩略图。**
+
+按比例重新定尺寸（封面 80→96，来源图标 18→22 DIP，间距相应调整）。
+截图 `docs/card-proportioned.png`。
+
+#### 本轮由测试抓到的真 bug
+
+`SHGetFileInfoW` 加了 `SHGFI_USEFILEATTRIBUTES` 时，外壳**只看文件名后缀、不碰磁盘**，
+所以**不存在的路径也会返回一个通用 exe 图标**。这条断言第一次就红了：
+
+```
+[FAIL] a missing executable yields no icon
+```
+
+去掉该标志后，调用会真的检查文件并如实失败。**如果没有写这条否定断言，
+"路径错了但我们照样画了个图标"会一直藏着。**
+
+自检 **358 项全绿**（新增 15 项），`-Clean` 干净重建 SMOKE PASS，`--volume-test` PASS。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"看起来对不对"要靠比例，不能靠感觉** | 卡片被评"不好看"，我逐个元素看都觉得没问题；一比**比例**立刻发现封面只有参考的一半大。 | 对照参考图时，量**比例**（占宽/占高的百分比），不要只量绝对值、更不要凭眼睛。 |
+| **`SHGFI_USEFILEATTRIBUTES` 会凭空造出图标** | 它让外壳只按后缀回答，不存在的文件也给通用图标，于是"路径无效"无法被发现。 | 需要**判断文件是否真实存在**时不能用这个标志。用**否定断言**保护（"不存在的输入必须没有输出"）。 |
+| **旧式的"当前项"API 会选错** | `GetCurrentSession` 按外壳的偏好返回，浏览器放视频时常抢到，压过正在播放的音乐。 | 有多个候选时**自己枚举并排序**，把判断依据（应用类别、播放状态）写成**纯函数**并单独测试。 |
+| **app id 可能是包名而非路径** | 打包应用用 `package!App`，指包不指文件；纯文件名还要查 App Paths。 | 解析外部标识符时，**先分类再解析**，无法解析时要能**退回一个诚实的默认外观**，而不是猜一个。 |
+
+### 7.20 阶段 3 第十二轮：卡片加**来源 + 可调音量**（按用户给的参考图）✅
+
+用户给出 Windows 音量弹窗的截图，要求卡片**左上角显示歌曲来源、右上角显示音量且可调节**。
+
+#### 卡片现在的样子
+
+```
+● QQ音乐                    ▬▬▬▬▬▬░░  62%  🔊
+┌────────┐  东大街
+│  封面   │  张超洋 · 东大街
+└────────┘
+01:33  [██████████░░░░░]              05:40
+        ⏮        ( ⏸ )        ⏭
+```
+
+截图 `docs/card-volume2.png`。**这张卡片已经和用户给的参考图逐项对应**：
+来源（左上）、音量条+百分比+喇叭（右上）、封面、标题、副标题、两个时间、进度条、三个控制。
+
+#### 音量是真的能调，不只是画出来
+
+新增 `AudioVolume.h/.cpp`，用 **WASAPI 的 `IAudioEndpointVolume`**（系统主输出音量）：
+
+- 点在**音量条**上 → 按点的位置直接设值（`VolumeFractionAt`）
+- 点在**喇叭或百分比**上 → 切换静音
+- 键盘/系统弹窗改了音量 → 每 500ms 轮询同步，并触发重绘
+
+**为什么放在自己的线程上**：`IMMDeviceEnumerator` 会碰音频服务，音频栈刚唤醒时可能阻塞几十毫秒。
+**在帧循环里做这个就是卡顿的来源**——所以设备接口全部在 worker 的 MTA 里创建和使用，
+帧循环只读一个快照、写一个"请求"。
+
+**新增 `--volume-test` 做真实往返验证**（截图看不出设备音量变没变）：
+
+```
+volume test: read 20% (muted=0)
+volume test: set to 25% -> device reports 25%
+volume test: set to 75% -> device reports 75%
+volume test: mute 0 -> 1
+volume test: restored to 20% (was 20%)
+volume test: PASS
+```
+
+**设备自己确认**了每一次改动，并且**测完恢复原值**（诊断不该留下副作用）。
+
+#### 顺便修的两处
+
+| 问题 | 原因 |
+|---|---|
+| 喇叭图标画成了一个菱形 | 我只画了喇叭的三角"号角"，没画方形的"箱体"。**喇叭需要箱体+号角两半才认得出**。 |
+| `const auto near = ...` 编译失败 | `near` 和 `far` 是 **MSVC 的遗留关键字**，仍会被吃掉，于是变成 `const auto = ...`（C2513）。改名 `nearRect`。**这和之前 `small` 那次是同一类坑**。 |
+
+自检 **343 项全绿**（新增 16 项音量布局/命中断言）。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **MSVC 仍保留 `near`/`far`/`small` 等遗留关键字** | `const auto near = [..]` 报"C2513 在 = 前没有声明变量"，因为 `near` 被宏式地吃掉了。`small` 之前也踩过。 | 变量名避开 `near`/`far`/`small`/`pascal` 这类 16 位时代的标识符。**报错指向一个语法完全正确的声明时，先怀疑名字。** |
+| **只画一半的图标认不出来** | 喇叭只画号角 → 看起来是菱形。 | 画图标要按**整体轮廓**检查，不是逐个图元检查。截图看一眼就知道。 |
+| **设备相关的功能要单独验证** | 音量的效果在**音频设备**上，不在屏幕上；截图和像素断言都证明不了它。 | 对"效果在本进程之外"的功能，要写**往返验证**（设值 → 从设备读回 → 比对 → 恢复）。 |
+
+### 7.19 阶段 3 第十一轮：卡顿**仍未解决**，改为让用户提供数据 ⚠️
+
+用户反馈"还是卡"。本轮**没有找到原因**，但把测量做对了，并留下可远程诊断的日志。
+**这一节不claim任何修复。**
+
+#### 我前两轮测错了量
+
+前两轮我一直在优化**单帧绘制耗时**并据此声称改善（1438→1261 µs，半透明改不透明）。
+但**卡顿是"两帧之间的间隔出现了长空档"，不是"单帧画得慢"**。
+测错了量，所以两轮优化都没有针对真正的问题——这是本轮最重要的认识。
+
+#### 这一轮把两种量都测了
+
+新增 `FrameStats`：记录**帧间隔**（不只是绘制耗时），输出平均值、**最差值**、
+以及一个粗略直方图 + `>50 ms` 的卡顿计数。**最差值才是关键**，平均值会把它藏起来。
+
+**实测（开发机，空闲状态，`music-strip`）：**
+
+```
+interval avg 15.7 ms, worst 31.2 ms, hitches(>50 ms) 0
+  | <8:1 <16:201 <24:49 <33:4 <50:0 <100:0 <250:0 250+:0
+redraws: animating=0 clock=4 notify=0 music=2 lyrics=0 progress=0 first=0
+```
+
+**结论：开发机上循环以显示器刷新率（63 fps）运行，4 秒内只重绘 4–8 次，
+最差间隔 31 ms，一次卡顿都没有。**
+
+而且顺手发现：**空闲时循环仍在以 63 fps 唤醒**（因为等待合成器节拍），
+只是绝大多数迭代不绘制。这是"叫醒但不干活"，不造成卡顿，但也不理想。
+
+#### 所以现在的状态
+
+- 开发机上**复现不出**卡顿（没有外网、也没法移动鼠标，见下）；
+- 用户机器上**稳定复现**；
+- 我上一轮认定的"展开时两侧内收"（7.18）在几何上确实是个问题、也确实修了，
+  但**它显然不是用户看到的那个卡顿**。
+
+#### 已经把诊断留在常驻程序里
+
+实时循环现在**每 4 秒**往日志写一行：
+
+```
+interval [<当前形状>] avg ... worst ... hitches(>50 ms) N | <8:N <16:N ... 250+:N
+redraws: animating=N clock=N notify=N music=N lyrics=N progress=N first=N
+```
+
+这一行能区分三种完全不同的原因：
+
+| 日志表现 | 含义 |
+|---|---|
+| **`250+:N` 非 0** | 真的掉帧/卡帧 → 渲染或等待出问题 |
+| **间隔正常但 `animating` 很大** | 动画被反复重启 → 状态机抖动 |
+| **间隔正常、计数也正常** | 不是本进程的帧问题 → 可能是 DWM 合成、显卡驱动、或"感觉卡"来自别处 |
+
+**需要用户在悬停卡顿发生时把这段日志发回来。** 没有这个数据，下一轮仍然是猜。
+
+#### 已知的测量盲区（诚实记录）
+
+1. **沙箱没有外网** → 歌词抓取无法验证。
+2. **沙箱禁止移动光标** → `SetCursorPos` 返回错误 203，
+   所以**悬停这个动作本身永远无法在开发机上复现**。试过用 `--music-preview` 直接驱动状态机，
+   但那强制每帧重绘，恰好把真实的节流行为掩盖掉了——测出来的"零卡顿"因此没有说服力。
+
+### 7.18 阶段 3 第十轮：悬停卡顿的真因——**展开时两侧反而往内收** ✅
+
+用户回答"1"，即**鼠标刚移入的那一下卡**（不是一直卡、也不是周期性卡）。这把范围缩到了展开动画。
+
+对比两个数字就看到了：
+
+| | 宽度 |
+|---|---|
+| 歌词条（静止态） | **520** |
+| 卡片（展开态） | **400** |
+
+指针移入是从**歌词条 → 卡片**，所以"展开"的**前 ~100 ms 两侧其实在往内收**，
+同时底边往下掉。**一个正在展开的形状，不应该有任何一边变窄。** 这就是那一下卡顿的来源
+（不是帧率问题——单帧只有 1.3 ms；是动画方向错了）。
+
+**修法**：卡片宽度改成 **520**，与歌词条一致 → 展开**只往下长，横向完全不动**。
+顺带卡片文字也宽松了。
+
+**加了断言把这条规则固定下来**（两处宽度以后不能再各改各的）：
+
+```
+[ OK ] opening the card from the lyric strip never narrows it   strip 520 DIP, card 520 DIP
+[ OK ] opening the card from the plain pill never narrows it either
+```
+
+自检 **327 项全绿**，截图 `docs/card-520.png`。
+
+**这是同一个错误的第三次出现**：前两次分别是
+「指针进入先撑到 720 再缩回 400」（7.14）和这次「520 缩到 400」。
+**每次都是"展开"过程中出现了反方向的位移。** 教训记在下面第 1 条。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"展开"里出现反方向位移** | 卡片比静止态窄，于是展开的头 100 ms 在横向收缩。同一类错误犯了三次（720 绕路、520→400 收缩）。 | 每次改尺寸都要问一句：**从 A 到 B，有没有哪个维度是朝反方向走的？** 展开态的每个维度都应 ≥ 静止态。用断言写死，别靠眼睛。 |
+| **用户回答"1"就是最有价值的线索** | 我列了三种卡顿（移入那下 / 一直 / 周期性），回答"1"直接排除了帧率和渲染，指向动画。 | 把模糊的"卡"拆成互斥的几种再问，比继续埋头测帧耗时有用得多。前两轮我一直在量帧耗时，方向就错了。 |
+
+### 7.17 阶段 3 第九轮：卡顿=半透明合成；进度条改平滑；歌词加**瞬时失败重试** ✅
+
+用户报三件事，逐条处理：
+
+#### 1. 悬停卡顿 1–2 秒（截图印证）
+
+截图里能看到**资源管理器窗口的文字透过卡片**（"Debug"、文件列表）。原因是卡片填充是
+**0.55 半透明**，所以 DWM 必须**逐帧把卡片与后面所有窗口做 alpha 混合**；
+而悬停时卡片还在做 300ms 展开动画，于是每帧都在混合。
+
+**改成 0.98 近乎不透明**，同时把 scrim 从 0.62 降到 0.48（填充已经提供对比度）。
+另外把整卡大小的模糊背景改用**线性**重采样（原来用 cubic）——它本来就是模糊的，
+线性看不出区别，但便宜得多；80 DIP 的封面仍用 cubic。
+
+顺带量到卡片单帧绘制从 **1438 µs 降到 1261 µs**（-12%）。
+
+#### 2. 进度条每 2 秒跳一次
+
+SMTC **每 2 秒**才报一次播放位置，直接用它画进度条就是 2 秒一跳。
+
+**改成在两次轮询之间本地推算**：记住位置读到的时刻，之后按经过的毫秒往前加，
+每次拿到新位置就重新对齐，并把结果**同时**用于进度条和时间文字（两者不会打架）。
+只有 `Playing` 状态下才推算，暂停时不走。
+
+还要让它能**触发重绘**（否则只是内部数值在变）：比较"显示的秒数"是否变化，
+变了就重绘。这样每秒重绘一次，显示才真的动。
+
+#### 3. 歌词"上一版能显示、这版不显示"——**是我上一轮加的重抓防护造成的**
+
+上一轮为了修"每 2 秒重抓"，我加了 `haveAsked_`，把**否定结果也永久缓存**。
+这在正常网络下没问题，但我加的缓存**把瞬时失败也当成永久答案**：
+网络抖一下、或者用着**中文查询编码还是 GBK 的那个坏构建**，一次失败就被记成
+"这首歌没有歌词"，之后**无论重启多少次都不再重试**——正是用户看到的现象。
+
+**修法**：区分**永久失败**和**瞬时失败**。
+
+- 服务端明确回答"这首歌没有歌词"（空歌词、纯音乐）→ **永久**，不再重试；
+- 连不上、HTTP 非 200、响应结构不对 → **瞬时**，**最多重试 3 次**，防止真的断网时死循环。
+
+实测 16 秒内正好 3 次 `lyrics: none`，然后停止 —— 重试上限生效。
+
+**顺带说明**：用户说"上一版能显示歌词"。上一版是**单源（只有网易云）+ 编码 bug**。
+它能显示说明那次请求恰好成功了；而这一版的双源 + 永久缓存把它挡住了。
+现在的实现是双源 + 瞬时重试，比两版都更稳。
+
+自检 **325 项全绿**，`-Clean` 干净重建 SMOKE PASS 零 warning。
+卡片截图 `docs/card-opaque2.png`（模糊封面背景 + 不透明卡片）。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"缓存否定结果"把瞬时错误也缓存了** | 为了不重复请求而缓存"没有歌词"，结果**一次网络抖动 = 这首歌永久没有歌词**，重启都没用。 | 缓存失败要**区分永久与瞬时**。瞬时失败给有限次重试（这里是 3 次），否则断网会死循环。 |
+| **半透明卡片 = 每帧全屏 alpha 混合** | 卡片 0.55 透明，加上展开动画，DWM 每帧都要把卡片与后面所有窗口混合 → 1–2 秒卡顿。 | 悬浮层的**不透明度是性能开关**。能用不透明就别用半透明；模糊背景已经提供了想要的观感。 |
+| **用轮询到的位置直接画进度条** | 数据源每 2 秒才更新一次，进度条就每 2 秒跳一次。 | 轮询来的**连续量要本地推算**，并在拿到新值时重新对齐；还要**让它触发重绘**，否则数值在变、屏幕不动。 |
+| **重采样滤波器不必都用最高质量** | 整卡大小的模糊背景用 cubic 是浪费——它本来就是模糊的。 | 按**内容**选滤波器：平滑模糊用线性，小而精细的用 cubic。 |
+
+### 7.16 阶段 3 第八轮：**找到歌词抓不到的真因——中文查询被按 GBK 编码** ✅
+
+用户要求"直接抓取 QQ 音乐或网易云的歌词"。为了查清为什么抓不到，我加了
+`--lyrics-verbose`：把**实际请求的 URL 和响应前 400 字节**打出来。一打就看到了：
+
+```
+netease search: HTTP 0  /api/search/get/?s=%B9%A9%CF%FA%C9%E7%C0%D6%B6%D3...
+```
+
+`%B9%A9%CF%FA` 是 **GBK** 的「供销」。而接口要的是 **UTF-8**（`%E4%BE%9B`）。
+**每一个中文搜索请求都是畸形的**，服务端当然什么都查不到——而这看起来跟
+"这首歌没有歌词"一模一样。
+
+**根因**：查询串取自 `argv`。Windows 上 `argv` 是**按进程 ANSI 代码页**转换过的，
+中文歌名进来就已经是 GBK 字节，`UrlEncode` 再把这几个字节逐个百分号编码，
+于是发出 GBK 编码的查询。
+
+**修法**：用 `CommandLineToArgvW(GetCommandLineW())` 取真正的宽字符再转 UTF-8
+（`ArgumentAsUtf8`）。修完：
+
+```
+s=%E4%BE%9B%E9%94%80%E7%A4%BE%E4%B9%90%E9%98%9F%20%E6%88%91...   ← 正确的 UTF-8
+```
+
+**新增 5 项断言**把这条钉死（一个汉字 → `%E4%BE%9B`、整首歌名、未保留字符原样、
+保留字符转义、缓冲区过短仍终止），并把缺陷放回去验证测试会红：
+
+```
+with the GBK expectation: exit=1 FAIL=1
+[FAIL] a Chinese character is percent-encoded as UTF-8
+```
+
+自检 **325 项全绿**。
+
+#### 顺带修好的构建脚本问题
+
+`-Clean` 重建突然失败：`No CMAKE_CXX_COMPILER could be found`。原因：机器上装了
+**winget 版 cmake**，它在 PATH 里更靠前，于是 `build.ps1` 用了它；而脚本**从不初始化
+MSVC 环境**（一直靠 VS 生成器自己发现工具链），这个 cmake 于是选了 **Ninja**，
+找不到编译器就失败。
+
+**修法**：`build.ps1` 现在**优先用 VS 自带的 cmake**；只有 `cl.exe` 已在 PATH 上
+（即先 dot-source 了 `env.ps1`）才允许 Ninja。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **`argv` 不是 UTF-8** | Windows 上 `argv` 按进程 ANSI 代码页转换。中文歌名进来是 GBK，百分号编码后发给期望 UTF-8 的接口，**请求永久畸形**，且症状与"没有歌词"完全一样。 | 命令行里的**非 ASCII 文本必须走 `CommandLineToArgvW`**。任何要发到网络的字符串，先确认它是 UTF-8 还是 ANSI。 |
+| **"抓不到歌词"要能看见真实请求** | 之前只报"unreachable"，看不到 URL，所以这个编码 bug 藏了好几轮。 | 网络故障诊断**必须打印实际 URL 和响应片段**。`--lyrics-verbose` 就是为此加的，加完一次就定位了。 |
+| **装了新工具会悄悄改变构建行为** | winget 版 cmake 抢到 PATH 前面，脚本选了 Ninja，而 MSVC 环境没初始化 → 配置失败。 | 脚本要**显式指定**关键工具（优先 VS 自带），并在改用非默认路径时**打印原因**。工具链选择不能依赖 PATH 顺序。 |
+| **局部变量名与宏冲突** | `wchar_t small[5];` 报"非法的 wchar_t char"——`small` 在某个 Windows 头里是宏。 | 报错指向一个语法完全正确的声明时，**先怀疑名字被宏占用**，改名验证。 |
+
+### 7.15 阶段 3 第七轮：修「歌词反复重抓」+ 确认标题渲染正常 ✅
+
+用户反馈歌词仍未显示（截图里胶囊只有一个字），并再次要求接 QQ 音乐/网易云。
+（QQ 音乐源已在 7.14 加上；本轮查的是**为什么还是不显示**。）
+
+#### 查证结果一：标题渲染是正常的，控制台乱码骗了我
+
+日志里 `music: [QQMusic.exe] 鐜嬪敮鏃?- 涓嶅繍` 看着像乱码，但那是**控制台代码页**的问题，不是数据。
+把 stdout **重定向到文件后按 UTF-8 解码**：
+
+```
+utf-8      -> music: [QQMusic.exe] 王唯旖 - 不必 (playing)
+gbk        -> decode failed: 'gbk' codec can't decode byte 0x96 ...
+```
+
+所以 SMTC 给的数据是干净的 UTF-8。而用户截图里"只有一个字"，很可能就是**歌名本身很短**
+（当时的曲目是 `不必`，两个字；后来是 `我听见了，你的痛苦成立`）。**渲染没问题**——
+`--music-preview` 新增的 `strip + title` 阶段用中文歌名 `东大街` 渲染，实测三个字居中显示正常。
+
+**教训**：GUI 子系统的控制台输出**不能直接看**，代码页会把 UTF-8 显示成乱码。
+要判断编码，必须**重定向到文件再按 UTF-8 解码**。
+
+#### 查证结果二：真 bug —— 没有歌词时会**无限重抓**
+
+日志里 `lyrics: none (0 lines)` **每 2 秒出现一次**，也就是每首歌播放期间会一直重新请求。
+
+原因在 `LyricsProvider::Request`：
+
+```cpp
+// 错的：只记住了"成功"的情况
+const bool sameAsHeld = haveLyrics_ && std::strcmp(title, requestedTitle) == 0;
+```
+
+`haveLyrics_` 只在**抓到歌词**时为真。抓不到时它一直是 false，于是每次音乐修订号变化
+（每 2 秒一次）都会重新入队——**两个源就是每 2 秒 4 个请求，一直重复到歌播完**。
+答案永远不会变，纯粹是浪费，还容易被服务端限流。
+
+**修法**：加 `haveAsked_`，把**否定结果也记住**；并且**同时比较标题和歌手**
+（不同歌可能同名）：
+
+```cpp
+const bool sameAsAsked =
+    haveAsked_ && std::strcmp(title, requestedTitle) == 0 &&
+    std::strcmp(artist ? artist : "", requestedArtist) == 0;
+```
+
+实测（12 秒、两首歌）：
+
+```
+lyrics: on demand, NetEase then QQ Music
+music: [QQMusic.exe] 供销社乐队 - 我听见了，你的痛苦成立 (playing)
+lyrics: none (0 lines)          ← 只出现一次
+state: music-strip (...)
+music: [QQMusic.exe] ... (playing)   ← 后续修订号变化，不再重抓
+```
+
+自检 **320 项全绿**，干净重建 SMOKE PASS 零 warning。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **只缓存成功结果 = 失败时无限重试** | `haveLyrics_` 只在成功时为真，于是"没有歌词"这个答案被反复重新求值，每 2 秒一次。 | 缓存要连**否定结果**一起记。判断"问过没有"用一个独立的 `haveAsked_`，不要复用"有没有结果"的标志。 |
+| **控制台乱码让我误判数据是坏的** | 中文在控制台显示成 `鐜嬪敮鏃?`，但重定向到文件按 UTF-8 解码完全正确。 | 判断编码问题**必须看原始字节**：重定向到文件再用 UTF-8 解码，不要凭控制台显示下结论。 |
+| **"只显示一个字"其实是歌名很短** | 当时曲目叫 `不必`（两个字）。 | 报告"显示不对"时要**先确认数据本身**，再怀疑渲染。`--music-preview` 里加一个用真实中文歌名渲染的独立阶段，就是为了把这两件事分开。 |
+
+### 7.14 阶段 3 第六轮：直达卡片 + 加 QQ 音乐歌词源 ✅
+
+用户指出两件事，第一件是我的设计错了：
+
+#### 1. "先左右展开，然后缩回来显示卡片" —— 中间态是多余的
+
+四态机器里，指针进入时先切到 `Hover`（720×36 的横条），等动画结束后再由
+`StatePolicy` 提升到 `Expanded`（400×232 卡片）。于是视觉上是
+**先横向撑开到 720，再收缩成 400 的卡片**——一个来回，用户直接读成"卡"。
+
+**而且方向本来就不对**：卡片（400）比悬停条（720）**窄**，所以这个中间态不是过渡，
+是绕路。已改成**指针进入直接进卡片**：
+
+- 帧循环：`pointerInside` → `SetState(Expanded)`；
+- `ShouldPromoteToCard`：从 `Collapsed` / `MusicStrip` / 遗留的 `Hover` 都直接promote到 `Expanded`。
+
+实测一条边即可到位：`strip -> expanded (width 400 DIP)`。
+
+#### 2. 歌词：新增 QQ 音乐作为第二个源
+
+用户要求"从 QQ 音乐或者网易云音乐获取"。现在**两个源都试，按顺序**，各自报告失败原因：
+
+- 网易云：`/api/search/get` 取 `songs[0].id` → `/api/song/lyric`（JSON，字符串里是 LRC）
+- QQ 音乐：`u.y.qq.com/cgi-bin/musicu.fcg` 搜索取 `mid` → `c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg`
+  （**XML，LRC 在属性里，换行是 `&#10;`**，所以需要实体解码而不是 JSON unescape）
+
+两个源失败时日志会**同时给出两条原因**，而不是一句笼统的 FAILED：
+
+```
+lyrics test: FAILED after 16 ms --
+  netease: search request failed (unreachable/blocked/TLS refused);
+  then qq: search request failed (unreachable/blocked/TLS refused)
+```
+
+**为什么加两个源**：用户的网络可能只挡其中一个。如果两个都挡，说明需要代理，
+那时再考虑本地 `.lrc` 文件或让用户配代理。
+
+**为了让解析器可测，把它们从匿名命名空间提到头文件**（`FindJsonStringValue` /
+`FindJsonIntegerValue` / `DecodeXmlEntities` / `ExtractLyricField` / `ExtractQqXmlLyric`）。
+理由：两个服务的**响应形状是这部分唯一能离线验证的东西**，而沙箱没有外网——
+放在匿名命名空间里等于让唯一可测的一半不可测。新增 17 项断言（嵌套 id/mid、`tlyric` 不被误认、
+`&#10;` 解码、实体表、截断与畸形输入、前缀键不误匹配）。
+
+自检 **320 项全绿**。
+
+#### 本轮踩到的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **多了一个"来回"的中间态** | 进入时先撑到 720 再缩到 400，方向反了还多了 250ms 动画。 | 状态机的每条边都要问"这一步朝目标方向走了吗"。中间态如果**比两端都宽**，它就不是过渡。 |
+| **反复插桩把命名空间搞乱了** | 几次字符串替换 + 拼接后，匿名命名空间的开闭和重复定义全乱了，出现 `island::\`anonymous-namespace'::ExtractLyricField` 这种"重载不明确"，而全文件只有一个定义。 | 是**括号配平**问题，不是定义问题。`Select-String '^namespace \{|^\} // namespace'` 一条命令就能看清结构——遇到"重载不明确"先查这个，别去数函数。 |
+
+### 7.13 阶段 3 第五轮：卡片已能弹出；"卡顿"未复现 ✅/⚠️
+
+用户反馈两件事：截图确认**卡片已经能弹出来了**（封面、标题、三按钮、进度条都在），
+但**歌词仍不显示**，且**鼠标移上去很卡顿**。
+
+#### 卡顿：测了一轮，没能复现，但留下了一个真实的低效点
+
+按"先量化再改"的顺序做了三件事：
+
+1. **给渲染加了帧耗时统计**（`Renderer::LastFrameMicroseconds` / `AverageFrameMicroseconds`）。
+   没有数字时"卡顿"不可证伪。
+2. **`--music-preview` 现在逐形状报告帧耗时**，实测：
+
+   | 形状 | 平均绘制 |
+   |---|---|
+   | 收拢胶囊 | 242 µs |
+   | 歌词条 | 560 µs |
+   | 悬停条 | 233 µs |
+   | **卡片** | **1439 µs** |
+
+   卡片确实是别的形状的 6 倍（它要画两张图 + 五层结构），但 1.4 ms 只占 60 Hz 帧预算的 8%。
+3. **猜错了原因并纠正**：我以为瓶颈是「每帧重建 D2D 位图会把像素重新上传到 GPU」，
+   于是加了位图缓存（按素材 revision 缓存，`Renderer::CachedBitmap`）。
+   **然后测出来缓存几乎没差别**（1655 µs → 1655 µs）。缓存保留，因为它是对的（避免无谓上传），
+   **但它不是卡顿的原因**——这条要记下来，免得下次又往这个方向猜。
+
+4. **又测了重绘频率**（临时插桩统计 5 秒内的重绘次数）：空闲时**5 秒只有 8 次重绘**，
+   不是持续 60 Hz。所以不是"每一帧都很慢"，而是**每 2 秒一次卡顿**——周期恰好等于 SMTC 轮询周期。
+
+**结论：我没能复现用户描述的卡顿**，也没有把它归因到某个具体代码路径。可能相关的是：
+每 2 秒 SMTC 修订号变化 → 走一遍解码/模糊/重绘；以及卡片半透明（0.55）叠在桌面上由 DWM 混合。
+**没有定论，不该假装有。**
+
+保留的直接改进：
+- 位图缓存（按素材 revision，正确且省无谓上传）；
+- 设备丢失（`D2DERR_RECREATE_TARGET`）时**同时清空位图缓存**——不清的话缓存键仍然匹配，
+  会一直用一个属于已消失设备的位图，最坏情况是永远恢复不了的 device-removed 循环。
+
+#### 歌词：诊断已明确，是**环境无外网**，不是代码
+
+```
+lyrics test: FAILED after 31 ms -- the search request failed (unreachable, blocked, or TLS refused)
+```
+
+31 ms 内就失败 = 连接被拒，不是超时。同一环境 `curl https://example.com` 也是 TLS 失败（exit 35）。
+**必须在用户的普通 shell 里验证**。
+
+#### 本轮新增的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **猜错了性能瓶颈，而且测出来才发现** | 我认定"每帧重建位图导致卡顿"，加了缓存，一测**毫无差别**。 | 性能问题**先测再改**。加 `LastFrameMicroseconds` 这类指标，改完对比同一个数字。这次如果没测，我会把"加了缓存"当成修复汇报给用户。 |
+| **"卡顿"要区分持续慢和周期性卡** | 空闲 5 秒只重绘 8 次，但每 2 秒固定卡一次——问题在**触发频率**，不在单帧耗时。 | 同时测"单帧耗时"和"重绘频率"。两者对应完全不同的修法。 |
+| **位图缓存在设备丢失时必须一起清** | 缓存键（revision）仍然匹配，于是永远复用属于已消失设备的位图。 | 任何"按内容缓存 GPU 资源"的地方，都要挂在设备生命周期上，而不只是内容变更上。 |
+
+### 7.12 阶段 3 第四轮：修「鼠标移入不显示卡片」✅
+
+用户报告：直接运行 exe 后**只显示歌曲名**，**鼠标移入不显示卡片**。
+
+**根因**：`Hover` 是**死状态**。
+
+升级成四态时，我把「开卡片」的判断写进了**降低已开卡片**的那个分支里：
+
+```cpp
+// 错的：只有已经 Expanded 时才判断，Hover 永远进不来
+if (window.State() == IslandState::Expanded && !active && !window.IsAnimating()) {
+    window.SetState(window.IsPointerInside() ? Hover : resting);
+}
+```
+
+于是链路是 `Collapsed/MusicStrip → Hover → ？`，**没有任何代码把 Hover 变成 Expanded**。
+指针进胶囊 → 变 Hover（720px 宽的条）→ 就停在那里，卡片永远不开。
+没有音乐时症状更隐蔽：Hover 看起来就是「摊开的条」，用户可能以为正常。
+
+**为什么之前的 283 项断言全绿却没抓到**：所有几何断言都在问「这个矩形能不能被点到」，
+答案一直是「能」——**矩形完全可达，只是状态机从来没去要它**。
+这是一个**策略 bug，不是几何 bug**，而策略当时写在 `main.cpp` 的帧循环里，测不到。
+
+**修法**：把策略抽成 `StatePolicy.h` 的纯函数 `NextShape(shape, resting, pointerInside,
+notificationActive)`，帧循环只调用它。
+
+**并且踩到了一个"测试骗人"的坑**：我第一版回归测试把策略**复述**在测试文件里，
+于是**它能对着仍有 bug 的构建通过**——测试的副本是对的，`main.cpp` 的不对。
+这跟 7.9 那条「同一个判断出现在两处就一定会漂移」是同一个错误的另一种表现。
+改成调用真函数后，我又**故意把缺陷放回去验证测试会红**：
+
+```
+self-test with the defect reintroduced: exit=4 FAIL=4
+[FAIL] the state policy gives the expected shape for every case 2 of 10 combinations wrong
+[FAIL] a settled hover with the pointer inside opens the card
+[FAIL] the card stays open while the pointer is inside
+[FAIL] the card opens from the plain pill too
+```
+
+恢复后 **303 项全绿**。
+
+#### 本轮新增的坑
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **Hover 成了终态** | 见上。四态状态机里每个状态都要有出边，`Hover` 只被当作「入口」用，没人给它出边。 | 状态机要按**转移表**检查：对每个状态问「它怎么出去」。`StatePolicy.h` 现在就是那张表，`TestPointerStateCycle` 逐项断言。 |
+| **测试复述规则 → 对 bug 通过** | 回归测试把策略抄了一份，结果对着坏构建也是绿的。 | 回归测试必须**调用**被测函数，不能复述它。验证方法：**先把缺陷放回去，确认测试变红**，再恢复。 |
+| **改头文件后 MSBuild 有时不重编** | 把一个 `.h` 恢复成几分钟前的内容（时间戳回退），增量构建**跳过**了重编，于是测的是旧二进制，我一度以为修复没生效。 | 改完头文件如果结果不对劲，**touch 一下包含它的 .cpp** 强制重编，或直接 `-Clean` 重建。别急着怀疑代码。 |
+| **沙箱里 `SetCursorPos` 失败（error 203）** | `ERROR_ENVVAR_NOT_FOUND`，低完整性进程不能移动物理光标。于是**鼠标悬停根本无法用自动化复现**。 | 需要指针的场景要做**注入点**：把「这个屏幕坐标算不算命中」抽成纯函数（`ShouldAcceptPointer`）直接测，或像 `--music-preview` 那样直接驱动状态机并报告每个形状「中心是否可达」。 |
+
+### 7.11 关于在线歌词：仍未闭环，需要用户在有网环境验证 ⚠️
+
+用户报告「歌词没有显示」。查证结果：**不是代码问题**。
+
+- 运行日志确认请求发出了：`lyrics: none (0 lines)`
+- 新增的失败原因诊断给出：**`the search request failed (unreachable, blocked, or TLS refused)`**，16 ms 内返回
+- 同一个沙箱里 `curl https://example.com` 也是 TLS 失败（curl exit 35）
+
+即**这个开发沙箱完全没有外网**。所以歌词抓取必须由用户在普通 shell 里验证：
+
+```powershell
+& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --lyrics-test "就让这大雨全都落下" "容祖儿"
+```
+
+现在这条命令会明确打印**失败原因**（搜不到／没歌词／请求失败／响应格式不对），
+不再是含糊的 `FAILED`。若用户环境能通网而仍无歌词，输出会直接指出是哪一步。
+
+---
+
+## 8. 路线图
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 0 | 工具链、冒烟、改名清理、DComp/D2D 地基 | ✅ |
+| 1 | 三态动效 + 时钟 | ✅ |
+| 2a | 通知**推送**通道（管道 + 客户端 + 存储 + 卡片 + 点击已读） | ✅ |
+| 2b | 通知拦截：读 `wpndatabase.db`（需要 SQLite amalgamation） | ⏳ 未开始 |
+| 3 | SMTC 音乐：三态 + 媒体弹窗式卡片 + 在线歌词 | ✅（歌词抓取待有网环境验证） |
+| 4 | 任务栏替代：AppBar 注册、隐藏原生任务栏、窗口枚举、图标、点击激活 | ⏳ 隐藏任务栏代码已就绪（见 7.6） |
+| 5 | 托盘图标、窗口缩略图、pin、多显示器 | ⏳ |
+
+### 未完成清单（截至 2026-10-09）
+
+**有残留代码、但只做了一半：**
+
+- **通知图标**：协议收下了 `iconPath`（`Notification.cpp:86/120`），但**渲染层从没画它**。
+- **多显示器**：`QueryAllMonitors()` 在 `Monitor.cpp` 定义了，但**从没被调用**——实际只用
+  `MonitorFromPoint` 跟随主显示器。
+- **播放位置实时刷新**：`positionMs/durationMs` 已用于进度条，但时间标签只在 SMTC 的修订号
+  变化时刷新，而该修订号只在换曲/状态变化时递增，所以秒数不会自己走。
+
+**整块没开始：** 阶段 2b（`ISLANDBAR_FETCH_SQLITE` 开关待用户拍板）、阶段 4、阶段 5。
+
+**受阻：** 隐藏原生任务栏（需用户在会话外的普通 shell 里跑 `--probe-taskbar`，见 7.6）。
+
+---
+
+## 9. 待用户决定 / 下一步
+
+| 项 | 说明 |
+|---|---|
+| `--lyrics-test` 的结果 | **最重要**：请在有网的 shell 里跑一次，把输出发回。这决定歌词功能是否闭环。 |
+| `--probe-taskbar` 的结果 | 需在**会话外**的普通 shell 里跑。决定走 AppBar 还是 `uiAccess`。 |
+| 是否打开 `ISLANDBAR_FETCH_SQLITE` | 阶段 2b 的前置。需要从 sqlite.org 拉 amalgamation。 |
+| 阶段 4 的 `uiAccess` | 决定要不要买代码签名证书（否则自绘任务栏点不动管理员窗口）。 |
+| 是否装 Ninja | 只影响编译速度（可绕开本机 MSBuild `/m` 不可用的问题）。 |
+
+### 建议的下一步（按性价比排序）
+
+1. **补齐音乐卡片**：播放位置每秒刷新（进度条和时间一起走）。
+2. **阶段 2b**：读 `wpndatabase.db`，这才是「通知双通道」的另一半（微信通知现在收不到）。
+3. **先解决任务栏隐藏**：用户跑一次探测，就知道到底是 UIPI 还是 Windows 11 压根不让，
+   然后决定走 AppBar 还是 `uiAccess`。
+4. **清理半成品**：多显示器的 `QueryAllMonitors()` 要么接上，要么删掉；通知 `iconPath`
+   要么画出来，要么从协议里去掉——留着未使用的代码比缺功能更容易误导。
+### 7.86 **B1/B2：音乐卡的控制键点不到 + 通知/音乐卡收起时"一帧消失"** ✅
+
+用户点名的两项（见 7.81 第七节与 7.82 第六节的"本轮未做"），一起做掉。
+
+#### B1：音乐卡的播放/上一首/下一首，命中判定在错误的位置
+
+卡片是**挂在栏下方**画的（顶边 = 静止胶囊底边 + 间隙），左边缘钉在打开它的那个控件上；
+而命中判定问的是 `motion_.Current()` —— 那个盒子**在屏幕正中**、顶边在**胶囊的顶边**。
+2560 显示器上量出来：**画在 x 853..1373 y 50..300，测在 x 1020..1540 y 6..256** ——
+横向差 **167 DIP**、纵向差 **44 DIP**，所以三个控制键**一个都按不到**。
+
+修法：新增 `PlacedCardFor(restingPill, cardLeftDip)`（Motion.h），把"卡片被放在哪"算一次；
+`MusicControlAtScreen` 与 `SystemTileAtScreen` 都用它。同类相消：删掉 `BoxHangingFrom`
+—— 它做的是同一件事但保留了**动画盒子的顶边**（正是上面那个错），**而且没有任何调用者**。
+`systemPanelCardLeft_` 改名 `cardLeftDip_`：它一直存的是"卡片"的位置，不是"面板卡片"的位置，
+而这个名字正是音乐卡按错盒子的原因之一。
+
+自检新增（**走窗口**，与真实的点击同一条路径）：`play/pause centre (1113,265) -> 2`（PlayPause）✓。
+
+#### B2：通知卡 / 音乐卡在收起时"一帧消失"
+
+这两张卡的绘制条件是 `state == IslandState::Expanded`，而 **`state` 是目标**：收起一开始它就已经
+是"回到胶囊"，所以**整个收起动画期间什么都不画** —— 卡片在第一帧就消失。7.82 给面板加了锁存修好了
+面板，这次把同一个概念做成帧的属性：
+
+* `CardOwner`（None / SystemPanel / Notification / Music）+ 纯函数 `NextCardOwner(...)`：
+  **卡片还被要求着**（动画目标是卡片）时按优先级重新选（面板 > 消息 > 音乐）；
+  **卡片正在离开**时**保持**上一帧的归属 —— 卡片比它被打开的理由多活一次退场的时间。
+* 三张卡**统一画法**：内容按**最终尺寸**排版（`panelCard`），由**揭示裁剪**决定露出多少。
+  音乐卡过去是"按动画盒子排版"（每帧重排，正是 7.77 在面板上追过的那个毛病），
+  现在和面板一样只被"揭开"。
+* 通知内容**复制一份**留在帧里（而不是指向通知存储的指针）：卡片退场期间存储的环形缓冲可能被复用。
+
+**实测**（通知 6 秒自动消失，逐帧日志）：
+
+```
+owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目标)
+```
+
+即：**退场全程都在画**（修前一行都没有），高度平滑收缩 ✓。截图为证：
+`docs/notification-retraction.png`（卡片逐帧缩小，而不是"啪"一下不见）。
+
+#### 测试也是契约：4 条像素断言当场报警
+
+改动后自检立刻红了 4 条（通知/音乐的"文字真的画出来了"）——因为它们构造的 frame 只设了
+`state = Expanded`，而渲染器已经改看 `cardOwner`。**断言是对的，它说的是老契约**：
+把两个测试 frame 补上 `frame.cardOwner = Notification / Music` 即可，并顺手把"测试 frame 要
+和帧循环构造的一样"写进注释。另外新加的运输控件断言一度让后面 3 条命中断言失败，因为
+`cardLeftDip_` 是命中测试的输入、而它没把窗口还原 —— 已修正并注明（帧循环里不可能出现，
+因为它每帧都设）。
+
+自检 561 → **567** 项全绿。快照：`backups/…-card-owner-and-placed-card`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
+| **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
+| **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
+### 8.42 **"还是那个问题" —— 日志全对、画面不换：缓存的键会重复** ✅
+
+8.41 之后用户只回一句「**还是那个问题**」。这次日志**完全正常**：
+
+```
+15:40:01.542  music: cover NONE (0 bytes, revision 0)
+15:40:01.542  music: cover dropped (the new track has none yet)
+15:40:02.810  music: cover arrived late (17002 bytes)
+15:40:02.835  music: cover decoded 128x128
+```
+
+——丢掉了旧封面、新封面也到了、也解码了。**字节全对，屏幕上是旧图**，所以问题不在"拿到什么"，在"画的是哪一张"。
+
+#### 根因：解码结果的缓存键会重复
+
+渲染器把解码好的封面传成 GPU 位图并缓存，键是 **(revision, 宽, 高)**：
+
+```cpp
+if (cache.bitmap && cache.revision == revision && cache.width == width && cache.height == height)
+    return cache.bitmap;          // 命中就是"复用上次那张图"
+```
+
+而播放器那边的 revision 是这么来的：
+
+```cpp
+fresh.artworkRevision = previous.artworkRevision + 1;
+```
+
+`previous` 是**上一次发布**的读数 —— 一首**没有封面**的歌发布的是 `revision = 0`，于是下一首的封面（晚到的）又拿到 **1**。而缓存里躺着的正是**上一首** `(1, 128, 128)` 的位图 → **命中 → 复用 → 画的是上一首的专辑图** ✓✓，而日志里 `cover decoded` 一切正常。
+
+**"重启就对了"也再次得到解释**：新进程的缓存是空的，没有可命中的旧图。
+
+#### 改法（两条，互为保险）
+
+1. **revision 改成单调递增**（worker 里一个只加不减的计数 `artworkSerial`）：播放器只要换图，号就一定变，缓存的假设这才成立。
+2. **缓存键里加上像素指针**：`cache.pixels == pixels`。一条"假设键唯一"的缓存，在键不唯一时就会画错图 —— 这一条让它自己兜住。
+
+#### 验证
+
+* 新断言直接问缓存（不经画面）：**两张不同的图、同一个 revision，不能共用一张位图** —— 读数 `A cached 1, B cached 1, A still cached 0` ✓（第二次渲染后 A 已经不在缓存里 = 真的重建了）。旧代码在这里会红（`B cached 0`）。
+* 真机换歌前后各拍一张：`captures/cache-0-before.png`（《不完美的我》封面 = 浅蓝）→ `captures/cache-1-after.png`（《千万次想象》封面 = 深蓝舞台照），**封面确实换了** ✓✓；日志同一次换歌里 `dropped → arrived late → decoded` 齐全。
+* 自检 **749 → 750 项全绿**。
+
+#### 教训（写给下一个"日志全对"的时刻）
+
+**"数据对了"不等于"画面对了"。** 这一轮所有的日志行（cover NONE / dropped / arrived late / decoded）都指着一个健康的管线，而用户的屏幕上是错的图 —— 因为从**解码结果**到**屏幕像素**之间还有一层缓存，而它不在日志里。遇到这种"日志都说没问题"的报告，下一步该问的是"**从日志里的那个东西到用户看到的东西之间，还有谁在参与**"。
+### 8.41 **切歌后封面"没换"：上一首的封面从来没被丢掉** ✅
+
+用户接着报：「**现在是歌曲切换了 但是封面图没有换**」。这是上一条（空封面）的**同一处状态的另一面**：解码出来的封面只存在两个文件作用域的指针里（`artworkPixels` / `backgroundPixels`，还有渲染器按 **revision** 缓存的 GPU 副本），而解码块的条件是
+
+```cpp
+if (frame.music && nowPlaying.artworkSize > 0) { ...解码、建 wash... }
+```
+
+**新歌没有封面（revision 0）时这段根本不进** —— 于是上一首的封面、上一首的模糊背景、上一首的封面取色，全都原样留着；卡片于是**用上一首的专辑图**介绍新歌。用户上次看到的是"空槽"（那首连数据都没有、且栏当时还没读到），这次看到的是"旧图"（上一首的图还在）——**一个缺陷的两副面孔**。
+
+**改法**：加一条 else 分支 —— `artworkRevision == 0` 且已经解过图（`lastDecodedArtworkRevision != 0`）时，把 `artworkPixels` / `backgroundPixels` / 尺寸 / `waveAccent` 全部清空，并记一行 `music: cover dropped (the new track has none yet)`。清空**不看卡片是否打开**（数据的事与画不画无关），这样卡片打开时看到的必然是**占位符（♪）**而不是别人的专辑图；播放器一发出封面，revision 变 1，上面那段立刻接管。
+
+**验证（真机一次真实换歌）**：
+
+```
+15:14:22.491  music: cover present (23363 bytes, revision 1)     ← 换歌前那首有封面
+15:14:22.495  music: cover decoded 128x128
+15:14:28.077  music: cover NONE (0 bytes, revision 0)            ← 换到一首当时没有封面的歌
+15:14:28.077  music: cover dropped (the new track has none yet)  ← 旧封面当场丢掉 ✓
+```
+
+截图 `captures/swap-1.png`：卡片显示的是新歌《心中的日月》+ **♪ 占位符**，不再是上一首的专辑图。
+
+**这三条连起来才是完整的封面故事**（8.38 / 8.39 / 8.40 / 8.41 各修一段，缺一条用户就还会看到错的画面）：
+
+| 现象 | 根因 | 修在哪 |
+|---|---|---|
+| 没封面时像"栏丢了图" | 卡片没有自己的底面 | 8.33 `FillCardSurface` |
+| 切歌后空一会儿才出现 | 只在换歌那一瞬取一次封面 | 8.39 `ShouldFetchArtwork`（缺封面就每秒再问，15 秒窗口） |
+| 播放器说 present、栏说 NONE | 为"自报长度 0"的流拒绝读取 | 8.40 分块读流 |
+| **切歌后显示上一首的图** | **revision 0 时没有清掉已解码的封面** | **8.41 清空 + ♪ 占位** |
+### 8.40 **封面真正的根因：栏拒绝读"自报长度为 0"的缩略图流** ✅ + **"立马切歌"是播放器的事（实测 6 秒）**
+
+用户回来说：「**切歌的时候能不能快点，就是点击 立马切歌，然后切歌后封面还是没有**」。8.39 的两条都不够，这次两条都查到了底。
+
+#### 一、封面：`FetchArtwork` 把长度读出来、然后**选择不信** —— 可它偏偏又信了
+
+函数上方的注释一直写着"缩略图流**不一定报长度**，所以用 DataReader 读到结尾"，而下面的代码是：
+
+```cpp
+const uint64_t available = stream.Size();
+if (available == 0 || available > kMaxSourceBytes) return 0;   // ← 就是因为"没报长度"而拒绝
+```
+
+**探针与栏同刻对照**（14:46 那首《七月的极光》）：
+
+```
+gsmtc_probe : Thumbnail    : present      ← 会话一直带着封面
+island_bar  : music: cover NONE (0 bytes) ← 栏拒绝读
+```
+
+所以"关掉再打开就能查到"也说得通了：**新起的会话通常已经报出长度**，旧代码才读得到。**改法**：按 256 KB 分块读到流结束（`LoadAsync` 不管流怎么自报长度都会在结尾停下），8 MB 上限不变，读到上限就判为截断并放弃（不拿半张图去重编码）。
+
+**中途实拍（没有重启，就是这次修的意义）**：
+
+```
+14:52:14.207  music: cover NONE (0 bytes, revision 0)     ← 换歌那一刻还是没有
+14:52:27.004  music: cover arrived late (26101 bytes)     ← 13 秒后播放器发了，栏读到了 ✓
+```
+
+#### 二、"点击 立马切歌"：请求 0 毫秒就到，播放器要 ~6 秒
+
+栏自己的日志只能证明"栏发了、播放器接受了"（`next requested` → `transport next accepted` 114 ms），之后却是 7.5 秒才有新歌。为了分清"请求没送到"和"播放器慢"，给 `gsmtc_probe` 加了 `--skip-next`：**从另一个进程发同一个 SMTC 调用**，然后逐秒打印会话里的标题。
+
+```
+--- skip next ---
+  before       : 阿岚
+  accepted     : yes after 0 ms
+  + 1 s … + 5 s : 阿岚            Playing
+  + 6 s         : 不见相思         Playing   <- CHANGED
+```
+
+**结论：QQ音乐自己要 ~6 秒才真的换歌**（同样的事栏的日志里是 7.5 秒）。它不是"没收到请求"，是**要去把下一首的音频流就绪** —— 这一秒数栏改不了。栏能改的是两头：检出（2 s → **1 s** 轮询 + 检出后 **250 ms × 6 s** 追赶）和拿到封面（本次修的那条）。用户之所以感觉"什么都没发生"，很大程度上是因为**封面那时还没到**（见上一条）。
+
+**顺带**：那次探针测试**真的切了用户正在放的歌**（阿岚 → 贺子玲《不见相思》）。
+
+#### 三、复现用的命令
+
+```
+build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe              # 看 Thumbnail: present/none
+build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe --skip-next  # 发一次跳曲，逐秒看播放器多久才动
+```
+### 8.39 **切歌 4-5 秒 + 封面"关掉再开才有" —— 栏只问过播放器一次封面** ✅
+
+用户报：「**点击切歌 还是需要等个4 5秒才行，然后查一下封面 为什么切歌就没有了 然后程序关闭 后再打开就能查到**」。
+最后半句是决定性的：**关掉再打开就有封面** —— 说明媒体会话**一直带着那张封面**，是**栏没再去问**。
+
+#### 一、封面：只在"换歌那一刻"取一次
+
+`MusicSession` 的轮询里本来是这样：
+
+```cpp
+const bool trackChanged = ...;
+if (trackChanged) {
+    fresh.artworkSize = FetchArtwork(properties, fresh.artwork, kMusicArtworkCapacity);
+}
+```
+
+"只在换歌时取封面"看着是最省的做法（每次轮询都解码+重编码封面纯属浪费），但它建立在**播放器会在换歌的同一瞬间发出缩略图**这个假设上 —— 而 QQ音乐不是：它先给标题/歌手，封面晚一两秒（甚至更久）才发。于是那一刻取到 0 字节，此后再也不问；**只有重启栏（= 重新走一次"换歌"）才会再取一次**，正好是用户描述的现象。
+
+**改法**：把"要不要去问"抽成纯函数 `ShouldFetchArtwork(trackChanged, artworkMissing, sinceLastTry, sinceTrackChange)` —— 换歌时问；**当前这首歌还没有封面时继续问**（最多每秒一次，因为每次都要开一条流并重编码 PNG）；拿到就停；一首歌的前 **15 秒**都没等到就彻底放弃（有些歌**根本没有**封面，不能每秒问一整首）。另外补一行日志 `music: cover arrived late (N bytes)` —— 这正是"晚到的封面被接住了"的证据。
+
+**实测（部署后立刻抓到，就是用户那种情况）**：
+
+```
+14:32:46.091  music: cover present (21032 bytes, revision 1)   ← 启动时那首
+14:32:47.135  music: cover NONE (0 bytes, revision 0)          ← 换到一首当时没有封面的歌
+14:32:54.221  music: cover arrived late (31366 bytes)          ← 7 秒后播放器发了，栏接住了 ✓
+```
+
+**反向验证**：把 `ShouldFetchArtwork` 临时改回"只认 trackChanged" → 新断言当场变红（`missing+1 s 0`），改回来 749 项全绿。
+
+#### 二、4-5 秒：一半是"多久才发现换歌了"
+
+用户是**在 QQ音乐自己的窗口里**点的切歌（那份日志里没有任何 `next requested` —— 栏根本不知道发生过一次点击）。所以栏只有一条线索：**轮询时发现标题变了**。而轮询间隔原本是 **2000 ms** —— 光是"发现"就要等最多 2 秒，之后才轮到追赶。
+
+两处改动：
+
+1. **静默轮询 2000 → 1000 ms**（`kPollIntervalMs`）。原来的 2 秒是按"元数据是推送的、问快也没用"定的，漏掉的正是"播放器里切歌"这条路：只能靠问。读的是本地 SMTC，不是网络，代价是一次 worker 唤醒，换来一秒的延迟。
+2. **追赶的触发条件从"栏自己发起的跳曲"扩到"任何一次检测到的换歌"**（`NextPollIntervalMs(now, lastSkip, lastTrackChange)`）：只要标题变了，接下来 6 秒按 250 ms 轮询 —— 于是新封面、新歌词、新进度条都在半秒内跟上。
+
+**实测**：部署后日志里 `music: [...]` 的行距从 ~2.0 秒变成 **0.8–1.2 秒**（14:32:50.547 → 51.351 → 52.324 → 53.126 → 54.242 → 55.615 → 56.815 → 58.012）。
+
+**一条诚实的边界**：我只能修"发现之后"那一段。**播放器自己多久才把新歌的元数据发出来，栏无能为力** —— 如果 QQ音乐要 3 秒才发，用户看到的就是 3 秒 +（现在）≤1 秒。另外我那次合成点击虽然让栏发出了 `next requested` 并被"accepted"，QQ音乐**没有真的换歌**，所以"点栏上的 ⏭ 到画面更新"这条端到端计时这次仍然没能自己量到。
+### 8.38 **切歌要等 2-3 秒 + 切歌后封面没了** ✅（第三点见末尾"未复现"）
+
+用户报：「**切歌的时候 封面图就没有了 ，而且切歌的时候点击完 需要等个2-3秒才能切**」，附一张卡片图：封面槽是空的（他自己画了红框），左上角应用图标位置是一个**浅灰方块**。
+
+#### 一、切歌慢：点击 163 ms 就被接受，栏却要 1.65 秒后才知道
+
+日志把两秒半说得很清楚：
+
+```
+14:11:48.743  music: next requested
+14:11:48.906  music: transport next accepted     <- 播放器 163 ms 就接受了
+14:11:50.557  music: [QQMusic.exe] ...           <- 栏过 1.65 秒才读到新歌
+```
+
+8.28 修的"点完立刻轮询"只对**播放/暂停**有效（那里可以乐观翻转），而**跳曲**没有任何可乐观发布的东西 —— 新歌的标题、封面、歌词都得等播放器给，而轮询间隔是 **2 秒**，于是点击到画面更新之间凭空多出最多一整个轮。用户感受就是"点了要等 2-3 秒才能切"。
+
+**改法**：跳曲后进入一段"追赶"期 —— `NextPollIntervalMs(now, lastSkip)`（纯函数，见 `MusicSession.h`）在跳曲后的 **4 秒**内把轮询间隔从 2000 ms 降到 **250 ms**，播放器一有新歌就立刻显示（封面与歌词一起快了）。等待与"该不该轮询"两道门用的是**同一个 interval 变量**，不会一边等 250 ms 一边被 2 秒的门挡回去。
+
+**验证**：自检 4 条（未跳曲 2000 / 刚跳 250 / 三秒后仍 250 / 五秒后回 2000），**743 项全绿**；真机上跳曲后的轮询实测间隔 **0.4–0.9 秒**（每次轮询自己也要 0.2–0.6 秒去读 WinRT，所以不是精确 250）。
+
+**诚实交代一处**：我用合成点击点了卡片上的 ⏭（日志 `music: next requested` + `accepted` ✓），但 QQ音乐**没有真的换歌**（四秒后标题还是《满分》），所以"新歌多快出现"这次没能端到端量到 —— 真正跳曲的计时在你手上。追赶逻辑本身是被断言钉住的。
+
+#### 二、切歌后封面没了：那两首歌播放器**根本没发封面**
+
+8.36 加的日志这次立刻给了答案：
+
+```
+14:11:54.889  music: [QQMusic.exe] 安扬 - 余烬 (playing)
+14:11:54.889  music: cover NONE (0 bytes, revision 0)     <- 就是用户截图里那首
+14:12:57.979  music: cover NONE (0 bytes, revision 0)     <- 下一首也没有
+```
+
+**连着一首都没有**，而且这一分钟里没有一次 `music: cover decoded` —— 不是"发晚了"，是**根本没有**（探针对这两首也会显示 `Thumbnail: none`）。栏拿不到像素，画不出封面。
+
+但"空的封面槽"看起来像**栏丢了图**。所以补了**占位符**：同一个圆角方块、比卡面亮一点的白 7%、中间一个 ♪（Windows 自己的媒体弹窗就是这么做的）。字体单独给到 38 DIP —— 先用卡片标题的 20 DIP 试过，在 92 DIP 的方块里只是一个点，等于没画。
+
+**验证**（像素）：封面槽中心的读数 `63.29`（"只有卡面"是 `19.01`，"什么都没有"是 `6.16`；槽角 `35.90` = 只有底色），断言"占位符真的画了" = 中心 > 角 + 4。
+
+#### 三、未复现：应用图标位置的浅灰方块
+
+用户图里左上角（本该是 QQ音乐图标）是一个 **21×21 的浅灰实心方块**。查了整条图标路：
+
+* `--icon-dump QQMusic.exe` → `decoded 32x32, 856 of 1024 pixels visible, max alpha 255`，写出的 PNG 就是**正常的 QQ音乐图标**（黄/绿）；
+* 那一分钟的日志：`icon: app='QQMusic.exe' ... (864 bytes)` → `icon decode: ok, 32x32, rev 1`（14:11:41.761，比他截图早 13 秒），此后**再没变过**（图标只在 app id 变化时才重新取）；
+* 我自己 3:18 / 13:32 / 13:57 三次拍的卡片，同一位置**都是黄色 QQ图标**；
+* 槽位缓存是分开的（`Artwork` / `Background` / `AppIcon` 三个 slot，图标行另用 `windowIconCache_`），没有串位的可能。
+
+所以这块**没能复现**。如果它再出现，请告诉我大概时间 —— 日志里 `icon:` 与 `icon decode:` 两行会说明是"没字节"、"没解开"还是"解开了却没画"，三种情况的修法完全不同。
+### 8.37 **鼠标移到按钮上变成小手 —— 窗口从来没设过光标** ✅
+
+用户报：「**这些按钮 鼠标移上去 应该变成小手**」，附音乐卡上一排 ⏮ ⏸ ⏭ 的照片。
+
+#### 根因：注册窗口类时给了箭头，然后再也没人碰过它
+
+`wc.hCursor = IDC_ARROW`，而 WndProc 里**根本没有 `WM_SETCURSOR`** —— 于是栏上每一个控件（卡片的三个传输键、图标行、deck 的两个按钮、面板的磁贴/喇叭/滑条/翻页/齿轮、声音页的行）在**被点之前**都和"栏的面板"长得一模一样：都是一个箭头。
+
+#### 改法：一个判定 + 一个消息
+
+* `IslandWindow::PointerOverControl(point)`：**用的是点击处理器判断"这一按是什么意思"的同一批命中测试** —— `IconAtScreen` / `StartAtScreen` / `SystemButtonAtScreen` / `MusicControlAtScreen` / `SystemPanelHitAtScreen` / `SoundPageHitAtScreen`。**一个"出现在点了也没用的地方"的小手比没有小手更糟**，所以没有第二个判定。
+* WndProc 新增 `WM_SETCURSOR`：只有 `LOWORD(lParam) == HTCLIENT` 才回答（别处这扇窗已经在 `WM_NCHITTEST` 里说过"不是我的"），设 `IDC_HAND` 或 `IDC_ARROW` 并返回 TRUE。放在这里而不是帧循环里，因为**这正是 Windows 为这个问题发的消息**，指针一动、一点它就会再来一次，答案不会过期。
+* **胶囊本身不是控件**：悬停它会开卡片，但那不等于"按"，整条栏都是小手等于把这个"表面"说成了"按钮"。消息纸条也不给小手（整条可点掉，但那是"消掉"，不是控件；通话条自 8.34 起点击已经什么都不做）。
+
+#### 现场抓到的坑：媒体的封面也变成了小手
+
+第一版**没有按"哪张卡片在场"过滤**，而面板的磁贴和音乐卡的按钮**同时**躺在窗口里（帧循环无论面板显不显示都会填它的文字），于是鼠标停在**音乐卡的封面**上时，判定命中的是**封面背后那块面板磁贴** —— 实测 `card cover (1092,172) -> HAND`。
+
+修法：判定按**卡片归属**分流，归属由帧循环每帧告诉窗口（`SetCardOwner`）。顺带把 `CardOwner` 从 `Renderer.h` **搬到 `CardLayout.h`** —— 窗口要认识"哪张卡"，而不该反过来为了一个枚举去 include 渲染器。
+
+#### 验证
+
+* 自检新增 7 条（胶囊/空白处不是控件；开始键、系统键、图标是；deck 缝隙不是；卡片的 ⏮ ⏸ ⏭ 是、卡片文字不是），**738 项全绿**。
+* **真机实测 14 个点**：临时把指针挪过去，再问 Windows 当前光标是什么（`SetCursorPos` + `GetCursorInfo`，与 `LoadCursor(IDC_HAND)` 比对句柄），测完把指针放回原处：
+
+| 位置 | 结果 |
+|---|---|
+| 卡片的 ⏮ / ⏸ | **HAND** |
+| 卡片封面 / 标题文字 | arrow |
+| 胶囊中央 | arrow |
+| 开始键 / 系统键 / 第一个图标 | **HAND** |
+| 面板磁贴（三点）/ 滑条（两点）/ 喇叭 / 页码列 | **HAND** |
+| 卡片右侧的空白（点击穿透区） | arrow |
+
+  面板的**齿轮**没测到：它按布局在卡片**右下角**（`CardLayout.h` 写着 `gearButton; // bottom right`），我取样用的两个点落在了它的矩形之外 —— 它走的是同一句判定（面板任何非 `None` 的目标都给小手），而它自己的命中早已由自检断言（`SystemPanelHitFor(...) == Gear`）。
+
+### 8.36 **「封面能不能取到」现在有一行日志回答** ✅
+
+用户问「**看一下 现在音乐获取 封面 能获取到不**」。当时的答案是"能"，但**没有任何一行证据**：卡片要么有封面要么没有，只能靠截图看。加了两行日志，正好把屏幕上长得一样的三种情况分开：
+
+```
+music: cover present (22480 bytes, revision 1)     ← 媒体会话发来了字节（这是它给的上限值）
+music: cover decoded 128x128                       ← 这一栏真的解码出来了，卡片上就是它
+```
+
+以及两种失败，各一行：
+
+```
+music: cover NONE (0 bytes, revision 0)            ← 播放器根本没发（gsmtc_probe 会显示 Thumbnail: none）
+music: cover COULD NOT DECODE 0x0                  ← 发了，但这一栏解不开（以前和"没发"完全分不出）
+```
+
+**实测（当前正在放的《红妆 - 灼夭》）**：`Thumbnail: present`（探针）→ `cover present (22480 bytes)` → `cover decoded 128x128` → 卡片左侧就是那张封面（`captures/cover-check.png`）。对照 8.33 那首《奔向山海 乘风归来》：探针 `Thumbnail: none`，日志现在会写 `cover NONE` —— **"取不到封面"要先看是播放器没发，还是栏没解开**，这一行就是为了这个。
+
+**检查顺序（写进 TESTING）**：① 跑 `gsmtc_probe.exe` 看 `Thumbnail:`；② 看栏日志里那两行 `music: cover`；③ 都不对才看渲染。
+
+自检仍是 **728 项全绿**（只加日志，不改绘制）。
+
+### 8.34 **微信通话"不显示了" —— 两个真因：消息抢走岛 + 点击把通话读掉** ✅
+
+用户报「**你查一下 为什么微信通话 不显示了**」。运行中的日志已经说明**检测没坏**（那通真实通话 13:37:22 被识别、通告、连图标都取到了），坏的是"谁占着岛"。
+
+#### 真因一：通话不是"最新的一条"就不再显示
+
+`NotificationStore::ActiveDisplay` 只回答**最新的那一条**（未读 + 未过期，sticky 则不过期）。通话是 sticky 的，但**只要有一条更新的消息**（微信来消息比打电话频繁得多）成了 newest，通话就再也不显示 —— 消息 6 秒过期之后 `ActiveDisplay` 返回 `nullptr`，岛**当场收回**。日志逐行对得上：
+
+```
+13:37:22.307  wechat: call announced as '通话中' (notification 9)
+13:37:23.232  wechat: announced '有新消息' from its notification sound
+13:37:29.394  state: music-strip        <- 通话还在响，岛上什么都没有
+```
+
+**改法**：帧循环里 `ActiveDisplay` 拿不到东西时，回落到**通话那一条**（`NotificationStore::Find` + 未读判断）。规则是参考实现的那条：**刚到的消息优先**（打电话不是隐藏别人刚发来的消息的理由），消息一过**通话立刻回来**；点过（读过）的通话不再回落 —— "已读"在别处也是这个意思。
+
+#### 真因二：点一下岛会把通话"已读"，从此整通电话都不再出现
+
+同一份日志里还有一条：
+
+```
+13:43:19.485  click routed: state=notice-strip, meaning=dismiss
+13:43:19.485  notifications: 1 marked read (click)
+```
+
+打电话的人**很自然地点一下岛**（每个消息都是这么消掉的），而 `MarkAllRead` 把通话那条也读掉了；读了就不再显示，于是**整通电话里它再也没出现过**。而"通话结束"才该是它的终点 —— 那是 watcher 的职责，它本来就会做（`call ended (notification N retired)`）。
+
+**改法**：新增 `MarkAllReadExcept(keepId)`，点击处理器把通话 id 排除在外。消息照旧一点就消，通话留着。
+
+#### 真因三（顺带）：竖滚改回来之后剩下的"两行"只有折行，见 8.35
+
+#### 验证：端到端，用一个假通话
+
+打电话不能自动化，所以 `scripts\fake-call-window.ps1` + 一份 `powershell.exe` 的副本（改名 `WeixinCallProbe.exe`）造了一个**窗口在屏幕外**的假通话 —— watcher 判的是**可执行文件名**前缀（`Weixin`/`WeChat`）+ 可见窗口标题里有"音视频通话"，所以这条路是它本来就要认的。
+
+* 8:34 之前：岛上出现通话条（`call-1-detected.png`，绿计时 00:06 + 电平条），来一条消息把它顶掉（`call-2-message.png`），**消息过期后岛收回**（`state: collapsed`）。
+* 8:34 之后：同样的三步 —— 通话条出现 → 消息顶掉 → **通话自己回来**（`call-4-after-fix.png`，绿计时 00:17 继续走），整段**没有一条 `state: collapsed`**。
+* 自检 **725 → 727 项**：新增"新消息优先于通话"、"消息过期后通话还在"、"未知 id 找不到"、"点击读掉消息但不动通话"、"通话是唯一未读"。
+
+#### 坑：假窗口差点白造
+
+用 `Start-Process -WindowStyle Hidden` 启动探针时，进程的 `STARTF_USESHOWWINDOW/SW_HIDE` 会让**第一个 `ShowWindow` 调用**（窗体的）建出一个**永远不可见**的窗口：日志 `'微信音视频通话' (-4000,-4000) 740x360 visible=0`，watcher 于是完全无视它。改成**在脚本内部** `ShowWindow(GetConsoleWindow(), SW_HIDE)` 隐藏控制台、让窗体正常显示，才被认到。**"注入了但没效果"和"注入失败"是两件事，这一行 visible=0 就是分界线。**
+
+### 8.35 **一行高的盒子里被折成两行 —— 量宽用错字体（拉丁字母才暴露）** ✅
+
+8.34 的验证截图里露出一个**旧缺陷**：推送来的消息 `WeChat · hello there my friend again` 在纸条上被折成两行（"hello there my friend" / "again"），见 `captures/call-2-message.png`。这正是用户当时说「**是歌词不要换行**」的东西 —— 8.31 我改错了地方（去掉了竖滚），8.32 又按用户要求改回来，**真正的折行一直没修**。
+
+#### 根因
+
+`DrawTrackLine` 的绘制矩形宽度取自 `TextWidth()` —— 它用 **`appFormat_`（11 DIP 常规）** 测量，而这一行是用 **`pillLineFormat_`（11 DIP 加粗）** 画的。拉丁字母的加粗字宽**更宽**，矩形于是比字窄几个 DIP，而 `pillLineFormat_` 的换行模式是 DirectWrite 的默认值 **`WRAP`** → 装不下的尾巴被折到第二行，第二行又只有一个行高的盒子，于是只露出半行。
+
+**CJK 永远测不出来**：中日韩字形在两种字重下宽度相同，所以自检里全是中文歌词时它一直是绿的；`na na na …` 七个词组的差值又刚好小于那 4 DIP 余量。**只有宽拉丁字母（W、h、ll）才越过阈值** —— 用户那首歌恰好是 `na na na`，我这次的假消息恰好是 `WeChat · hello there`。
+
+#### 改法
+
+1. `pillLineFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)`：这一行**永远一行**，放不下就滚动（滚动本来就是它的设计）。
+2. 新增 `TextRenderer::TrackLineWidth()`：**用画它的那个格式**量宽，绘制矩形与"要不要滚动"的判断（渲染器 + 帧循环 + 自检）全部改用它 —— 两者再也不可能各算各的。
+
+#### 验证：先红后绿，量"墨迹分几段"
+
+* 第一版断言量**行数**（≤12）—— 折行时读到 11、不折时 9，**它放过了缺陷**（假绿）。改成量**墨迹的段数**：一行字是一段，折行是两段（中间隔着下伸部的空隙）。
+* 修前：`'WeChat · hello there my friend': 16 rows, 2 band(s) of ink` → **红**。
+* 修后：`13 rows, 1 band(s) of ink` → **绿**；`na na na na na na na` 也从 9 行降到 6 行（同样是那段余量的问题）。
+* 真机：同一条消息现在是**一行**（`captures/wrap-after-fix.png`），长句子会滚动而不是折行。
+* 自检 **727 → 728 项全绿**。
+
+### 8.33 **音乐卡没封面时"背景色不显示了" —— 这张卡自己的底面从来没画过** ✅
+
+用户报：「**背景色 不显示了**」，附卡片截图：白字、进度条、控制键直接飘在桌面壁纸上，卡片**没有底**。
+
+#### 先分清"没有背景"和"没有封面"
+
+媒体会话自己给了答案 —— `tools\gsmtcprobe`（同一个 app id、同一时刻的读数）：
+
+`Thumbnail    : none`
+
+**那首歌根本没发布封面**。而音乐卡的两层背景**都来自封面**：`DrawMusicCard` 的第 1 层是封面的模糊 wash、第 2 层是 48% 的 scrim —— 于是没有封面时，卡片上只剩一层半透明黑压在桌面上，字就成了"浮在照片上"。**栏没有坏，它画的正是它拿到的东西**；坏的是"这张卡没有自己的底面"。
+
+#### 根因：三张卡片里只有它没调 `FillCardSurface`
+
+面板、声音输出子页、通知卡片（8.21 修过）都调 `FillCardSurface` 画自己的底面。音乐卡没调，而 `FillCardSurface` 上方的注释**正是这么写的**："the media card has its own (the cover's wash plus a scrim)" —— 这句只在**有封面**时成立，注释于是替这个缺陷站了半年的岗（8.21 那条"注释说它做了、其实没做"的翻版）。
+
+#### 改法：底面当第 0 层
+
+`DrawMusicCard` 开头加一句 `FillCardSurface(context, box, opacity)`，和另外两张卡同一个函数、同一个颜色（`0.09,0.10,0.13 @ 0.97`）。**有封面时看不出任何变化**：wash 是一张不透明的模糊图，整张盖在底面上（右侧截图对比为证）。注释同时改掉。
+
+#### 验证（先红后绿）
+
+* 新断言：**不传封面**渲染音乐卡，量**封面槽**那块的读数（这一块在没有封面时是空的；卡片顶带不行 —— 那上面有播放器图标和名字，实测**损坏状态下也读 31**，第一版断言因此是假绿）。
+* 读数：损坏 **6.16**（只有 scrim 压桌面）→ 修后 **19.01**（底面 26 被自己的 48% scrim 压暗到 19，正是"看起来像一块深色面板"）。阈值取 12，两边都有余量。对照：通知卡片的顶带 `26.62`。
+* 自检 **719 → 720 项全绿**。
+* 真机：带封面的歌（`captures/card-with-artwork-after.png`）与修前逐像素同观感；没封面的歌现在是一块深色卡面（用户那张截图里的样子就是它被修掉前的状态）。
+
+#### 顺手记下的一条工具用法
+
+**"这首歌到底有没有封面"不再靠猜**：`build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 会直接打印 `Thumbnail: present|none`。以后"封面/背景不见了"先跑它，再看栏。
+
+### 8.32 **竖滚改回来了（用户要求）—— 8.31 的交叉淡入淡出撤掉** ✅
+
+8.31 装上去当天，用户看完只回一句：「**还是改回去把**」。
+
+**做了什么**：把 8.31 的改动整体撤回，逐项对齐：
+
+* `TextRenderer::DrawTrackLine` 恢复那对竖向偏移（`arrivingOffset = (1 - progress) * lineHeight`、`leavingOffset = progress * lineHeight`），两行各按一行高上下错开；删掉 8.31 加的两个画刷与 `leavingBrush`。
+* 名字改回 `LyricLineRollFor` / `kLyricLineEnterSeconds` / `FrameState::lyricLineRoll` / `TextRenderer::LineRoll` —— 行为是滚动，名字就得说滚动。
+* 自检把 8.31 换掉的六条断言**原样恢复**（窗口上半 = 离场行、下半 = 入场行、刚切换时窗口是空的、旧行还在场上……），读数与 8.31 之前一致：`fill 12.46 / 12.46 | at the change 12.46 / 12.46 | settled 61.63 / 64.76 | half way with the old line 126.96 / 103.23`，**719 项全绿**。
+* 8.30 的**两端渐隐**（长歌词不被圆角斜切）是另一件事，保留不动。
+
+**留下的判据（写给下一次）**：**"两行半"是这个动画的定义，不是缺陷**。任何带竖向位移的切换都会在胶囊那 36 DIP 里同时露出上下两个半行；只有"原地不动"的过渡（交叉淡入淡出）能避免它。8.31 已经证明淡入淡出在数据上真的只占一行（10/10/10/10 行墨迹），用户看过之后仍然选了滚动 —— 所以这条**不要再当成 bug 去修**，除非用户明确要求"切换时不要出现两行"。
+
+**代价记账**：8.30 的两端渐隐 + 8.31 的淡入淡出，一个保留、一个撤回，两者互不依赖（一个管横向、一个管切换）。回滚路径记在 8.31 末尾的那两行代码里，双向都能查。
+
+### 8.31 ~~歌词切换时"两行"—— 竖滚会把一行切成上下两个半行；改成原地交叉淡入淡出~~ **已于当日撤回（见 8.32）**
+
+用户报：「**像这种的 就应该填充灵动岛**」→ 我先追问「填充哪一个」，用户只回一句「**是歌词不要换行**」。
+
+#### 先量，再改（两条线索分开）
+
+1. **不是换行**：`pillLineFormat_` 的换行模式确实是默认的 `WRAP`，而绘制矩形的宽度取自**另一个格式**的测量（`TextWidth` 用 `appFormat_` 11 DIP 常规，实际用 `pillLineFormat_` 11 DIP **加粗**）——理论上正是"拉丁字母测窄了、画宽了 → 折行"。**实测否掉了它**：把 `na na na …` 从 7 个加到 59 个字符、再塞 `\r`/`\n`，渲染出来都是 **9 行墨迹（一行）**。所以折行不是原因（这条仍然值得记住：**CJK 两种字重同宽，所以中文歌词永远测不出来**，而自检里全是中文）。
+2. **是竖滚**：录了运行中那一栏 40 帧（300 ms 一帧），再用逐行墨迹统计：`f33` 这类帧出现 **两段墨迹**（上一行升出、下一行升入，两行各自被"一行高窗口"切掉一半）。对照用户的两张图逐像素量：第一张里 row1 的**字顶被削平**（已上移 ≈7 DIP）、row2 是右下方一小段"半行"——**正是竖滚的中途帧**。
+
+#### 改法：两行不再同时出现
+
+`TextRenderer::DrawTrackLine` 里那一对**竖向偏移**删掉（`arrivingOffset` / `leavingOffset`），改成**同一中心**的交叉淡入淡出：旧行按 `1 - progress`、新行按 `progress`，先画旧行再画新行，两个画刷两档透明度。名字一起改干净，免得下一个人看到 `roll` 以为是滚动：`LyricLineRollFor` → `LyricLineFadeFor`、`kLyricLineEnterSeconds` → `kLyricLineFadeSeconds`、`FrameState::lyricLineRoll` → `lyricLineFade`、`TextRenderer::LineRoll` → `LineFade`。时长仍是 **0.26 s**（8.15 定的那个"看得见"的下限）。
+
+#### 验证
+
+* 自检改成**量墨迹的行数**（不是亮度：亮度分不清"一行淡了一半"和"两行各半"），两条断言读数：
+  `settled 10, at the change 10, half way 10, settled again 10 | peaks 155.4 / 155.4 / 123.6 / 155.4`
+  —— 行数**全程不变**（一行）、中途亮度下降（交叉淡入的特征）、两端回到满值。
+* **反向验证**：把竖向偏移临时还原成竖滚再跑 → `half way 13`，断言当场变红（1 failure）。13 比 10 多出来的 3 行，就是"一行高窗口"漏进来的那半行 —— 用户照片里那两条细缝。
+* 真机：换上新版后重录 40 帧，**每一帧都是 10 行墨迹（一行）**，其中 `g26` 峰值 224（其余 237）是抓到的一帧中途淡入淡出，仍是一行。截图 `captures/lyric-one-row-after.png`；竖滚那两帧的原样在 `captures/lyric-roll-before.png`（取自用户原图）。
+
+#### 代价与后路
+
+8.15 用户要过"**从下面向上滚动**"，这次按"不要换行"的指示把它去掉了 —— 这是**用户的指示优先于实现**，不是回退。想要回滚：把两处 offset 加回去即可（`drawLine(previous, midY - progress * lineHeight, …)` / `drawLine(wide, midY + (1 - progress) * lineHeight, …)`），自检会立刻变红，提醒"两行"这件事又回来了。
+
+> **同一天就回滚了**：用户看完淡入淡出，回了一句「还是改回去吧」，于是竖滚原样装回 —— 见 8.32。下面这条"后路"因此已经走过一次，两个方向都验证过。
+
+### 8.30 **长歌词被胶囊的圆角切掉半个字 —— 两端改成渐隐** ✅
+
+用户报：「**歌词 长的话能不能会这样**」，截图里胶囊最左边那个 "na" 被圆角斜切掉了一半。
+
+#### 根因是几何，不是滤镜
+
+`DrawTrackLine` 的裁剪用的就是**胶囊自己的体育场形**。跑马灯把文字按 `start - offset` 往左推，一个字一旦越过左端，就被那道**圆弧**切开 —— 切点是曲线的、切在字的中腰，所以看起来是"字坏了"而不是"字走了"。右端同理（字从弧里"长出来"）。
+
+#### 改法：只为"放不下"的行加一层不透明度蒙版
+
+`D2D1_LAYER_PARAMETERS1::opacityBrush` + 一条水平线性渐变（两端 alpha 0、往里 20 DIP 满值），只在一个**需要滚动**的行的两次绘制外面 Push/Pop。淡出宽度 `LyricEndFadeDip(宽)` 上限是**宽度的四分之一**，所以窄胶囊的两端永远不会在中间相遇把整行压暗。**放得下的行根本不进这条分支** —— 没有蒙版、没有渐变、和以前逐像素一样（刻意做成"分支"而不是"两端永远淡出"）。
+
+#### 验证：读数 + **反向验证**
+
+* 自检新增两条，读数 `at the end=49.84, just inside=122.87, fade=20 DIP of 220` —— 同一行、同一偏移、两条**同样 10 DIP 宽**的带，一条落在渐隐区、一条紧挨其内侧。
+* **把渐变关掉再跑一遍**（`LyricEndFadeDip` 临时 `return 0.0f`）：`at the end=122.75, just inside=122.87` → 两条断言当场变红（2 failures）。关掉时两端与内侧**读数相同**，这正是"硬切"的定义；打开后差 73 个单位。这条反向验证是必须做的：否则断言可能因为"两端本来就偏暗"之类的理由通过。
+* 屏幕上：`--music-preview` 的 `strip + lyric` 阶段实拍 `captures/lyric-end-fade.png`（左边"时候"正在淡出、右边"看日…"正在淡入，中间全亮）。修前那张在 `captures/lyric-cut-before.png`（用户原图同款：字被弧线切开）。
+
+#### 顺带查出预览工具的第三个缺失字段
+
+`frame.restingState` 没设 → 默认 `Collapsed` → 渲染器于是画**时钟**而不是歌词（胶囊那一行是按"静止状态"选的，见 8.12）。所以 `--music-preview` 的 `strip + lyric` / `strip + title` 两个阶段**从来就拍不到歌词** —— 我这次是先拍到时钟才发现。补上 `restingState = MusicStrip` 之后才拍得到上面那张。
+
+一句话记法：**预览帧要和真机帧设一样多的字段**。同一个函数里已经栽了三次：`restingPill`（8.29）、`outerCardUp` / `cardOwner`（8.29）、`restingState`（8.30）—— 少一个就是一个"看起来正常、内容却是别人的"假象，而且每次都骗过了一整轮排查。
+
+### 8.29 **音乐卡右上角的喇叭删掉（用户要求）—— 连同它那条"永远打不开"的滑条一起清干净** ✅
+
+用户先问「你可以改音乐软件里的音量么」，随后改口：「**那就把音乐卡片里右上角的喇叭图标去掉吧**」。
+
+#### 删掉的是整组控件，不是那个图标
+
+喇叭是这条控件**唯一的手柄**（点它才展开百分比 + 64 DIP 滑条），只藏图标会留下一块点不开的死命中区。所以整组删除：`MusicCardLayout::{volumeIcon,volumeReadout,volumeBar}`、`kMusicVolumeBarWidthDip`、`MusicVolumeAt` / `VolumeFractionAt` / `VolumeFractionForDrag`、`MusicCardText::{volume,muted,volumeExpanded}`、`FrameState::{volume,muted,volumeExpanded}`、帧循环里三条写入口（按下 / 拖动 / 点击）与 `musicVolumeDrag` 一族、诊断开关 `ISLANDBAR_VOLUME_OPEN`，以及**为"卡片音量打到播放器那一路"刚写好的 `SessionPidForApp`**（没有调用者了，按本项目的规矩不留死代码。将来要用回来，设计在这里：媒体会话的 app id 与 mixer 的 session 按**文件名**大小写不敏感匹配，优先"正在出声"的那一条，取不到返回 0）。
+
+#### 顺带量出来的既有缺陷：那条滑条从来没有出现过
+
+`frame.volumeExpanded` **从来没有被赋过值**（`rg -n "frame.volumeExpanded" src` 命中 0 处），而渲染器只在它为真时画百分比和滑条 —— 也就是说用户看得见的**只有那个喇叭**；`ISLANDBAR_VOLUME_OPEN` 诊断设的是帧循环里那个**同名局部变量**，改了也传不进渲染器。所以 8.00 那条"音乐卡上的条也能拖了"**在真机上从未被看见过**。这一次要删的正好是"唯一被看见的那一半"，但这条要记着：**一个字段没人赋值，和一条分支不存在，观感一样**。
+
+#### 同时修掉 `--music-preview` 的一个谎言（顺手，已验证）
+
+预览工具的 `card` 阶段**从来没画过卡片**。四件事都缺：
+
+1. `frame.outerCardUp` 与 `frame.cardOwner` —— 渲染器只在这个组合下才会去画卡片；
+2. `frame.restingPill` —— 卡片顶边按它算（8.21 通知卡片的底也是栽在同一个字段上）；
+3. **每帧 `window.ApplyInputRegion()`** —— 这一条才是真正把卡片切掉的那个：区域（`SetWindowRgn`）是**裁剪**，只在 `SetState` 时应用一次的话，动画把盒子长大之后区域还停在胶囊高度，卡片**画出来又被剪掉**。真机帧循环里那句调用上面早就写着这条教训（"a region applied one frame late keeps the CARD clipped to the pill's height"）。
+
+实测：修前 `draw avg 417 us`（其它阶段 ~1200 us），定时截图里只有胶囊；修后 `card` 阶段画出了完整卡片（`captures/pv-card.png`：来源行只有 QQ音乐图标 + 名字，右上角空白，01:33 / 05:40 进度条）。**注意**：预览是**工具**，真机截图才是证据（见上）。
+
+#### 验证
+
+* **自检 716 项全绿**。删掉的 16 条音量断言换成 4 条"右上角不再是控件"：`MusicControlAt(角) == CardControl::None`、角仍落在来源行内、`appText.right == appRow.right`、名字还剩得下地方（第一次跑就红了一条 —— 取点取到 `cardRect.right - 10`，而行的内边距是 16，取点落在行外，已改成 `appRow.right - 6`）。
+* **真机实拍**（用户当时正在放 QQ 音乐《想念 (Rehearsal Version)》）：`ISLANDBAR_FORCE_INSIDE=1` 让指针"停在岛上"→ 卡片真的打开，截图 `captures/card-live.png`、放大的来源行 `captures/card-approw-zoom.png`（只有 QQ音乐图标 + 名字，右上角空白）。日志 `state: expanded (pointer inside=1, resting=music-strip)`，且整段**没有一条 `volume:` 行**（入口已经不存在）。
+* 部署后 `Get-FileHash` 两处一致（`C4D34A5A…5281`），栏以新映像运行（pid <pid>）。
+
+#### 没有丢的功能
+
+* **设备总音量**：还在系统面板那条滑条上（0.12 秒追赶的过渡也在 —— `shownVolume` 保留就是因为面板靠它绘制）。
+* **单个应用的音量**（也就是用户真正想调的那个"音乐软件自己的音量"）：仍在「系统按钮 → 音量行 → 输出设备按钮 → 声音输出 → **音量合成器**」，走 `IAudioSessionManager2 → ISimpleAudioVolume`，真读真写。卡片上那条滑条本来调的是**设备总线**，不是播放器 —— 删掉它反而少一个会误解的地方。
+
+### 8.28 **按下暂停后按钮要 ~2 秒才变 —— 竞态 + 播放器自己的状态上报** ✅
+
+用户报：「**点击暂停 歌曲停止了 但是这个差不多2秒左右才变播放按钮**」—— 2 秒正是 `kPollIntervalMs`。
+
+#### 根因：一次 fire-and-forget 与一次立刻轮询的竞态
+
+代码本来就打算"按完立刻刷新"：
+
+```cpp
+session.TryTogglePlayPauseAsync();   // 发了不等
+lastPoll = 0;                        // ... 然后立刻轮询
+```
+
+但**播放器还没生效**那一刻的读数仍然是 `Playing` ✗ → 于是状态要等下一个整轮（2 秒）才变成 `Paused` ✓✓。
+注释里那句"the next poll publishes the new state"（不等待是**故意**的）正是这个竞态的来源。
+
+#### 修法（三步，用户报了两次）
+
+**第一步：在轮询 worker 上等播放器确认，再读** ✓（`TryTogglePlayPauseAsync().get()`）。
+用户回"**还是啊**" —— 于是有了第二步。
+
+**第二步：确认即翻转（乐观更新）** ✓。等待"请求被接受"这一层并不等于"播放器已更新自己的
+`PlaybackInfo`"：实测音乐**已经停下**了，按钮还要约 2 秒才变 ✓。所以确认一到就把状态按动作的含义
+翻转并发布（下一轮轮询若与此不符会自我纠正 ✓）：
+
+```cpp
+if (accepted && pendingAction_ == Transport::PlayPause && previous.present) {
+    previous.state = (previous.state == Playing) ? Paused : Playing;   // 就地改，不复制
+    EnterCriticalSection(&lock_); current_ = previous; LeaveCriticalSection(&lock_);
+    InterlockedIncrement(&revision_);      // 帧循环据此立刻重绘
+}
+```
+
+（就地改 `previous` 而不是拷贝：`MusicInfo` 带封面、很大，这个项目在自检里为它爆过一次栈。）
+
+**第三步（用户回"还是一样的"之后）：按下之后**跳过当场那次轮询**。** 乐观翻转被紧跟着的轮询
+**覆盖**了 ✗：那句 `lastPoll = 0` 本意是"让按钮追上点击"，而播放器的状态此刻还是旧的 ✗ →
+翻过去又被写回来，看起来和没翻一模一样 ✓。删掉 `lastPoll = 0` **还不够** —— 轮询的门槛里有一条
+`!toggleRequested`，而这一轮它恰好为真 ✓，所以要在处理完动作后直接 `continue` ✓。
+
+#### 我给自己补的那个"眼睛"：`ISLANDBAR_TRANSPORT_MS`
+
+这个 bug 前两轮我**没法自己验**（transport 只有点击能触发，而栏的合成点击落在**真实光标**位置 ✗）。
+于是加了一个诊断开关：栏在启动 N 毫秒后自己按一次播放/暂停 ✓（与已有的"定时开面板"同类）✓。
+第一次跑就把它验死了：
+
+```
+run1（暂停）：play/pause requested 03:01:07.435 → transport accepted .438（+3 ms）→ music (paused) .457（+22 ms）
+run2（恢复）：play/pause requested 03:01:14.496 → transport accepted .499（+3 ms）→ music (playing) .500（+4 ms）
+```
+
+**22 毫秒**（原来是 ~2000 毫秒）✓。这一条也是本轮的教训：**当一个东西只能靠人手触发时，先给它一个
+定时触发口**，否则每一轮都只能"改完等你试"。
+
+```cpp
+bool accepted = false;
+switch (pendingAction_) {
+    case Transport::Previous: accepted = session.TrySkipPreviousAsync().get(); break;
+    case Transport::Next:     accepted = session.TrySkipNextAsync().get(); break;
+    default:                  accepted = session.TryTogglePlayPauseAsync().get(); break;
+}
+LogLine(L"  music: transport %hs %ls", what, accepted ? L"accepted" : L"REFUSED by the player");
+```
+
+* 阻塞是安全的：这里是**轮询 worker**，没有帧要丢；而且它拿到的返回值就是**播放器是否接受** ✓
+  —— 顺手加了一条日志，把"请求发出去了没有"和"播放器认不认"分开（原先只有请求那一行）：
+  `music: transport play/pause accepted` / `… REFUSED by the player`。
+* 之前"不能在 UI 线程等"的判断仍然成立：这一行跑的从来不是 UI 线程 ✓（`RequestTransport` 才是给 UI 用的）。
+
+自检 **731** 项全绿（无回归）。快照：`backups/…-transport-waits`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"发了不等"后面接"立刻读"** | 读的是**动作生效前**的状态，看起来像"要等很久才更新" | 读自己刚做的改动，要么**等确认**，要么**乐观更新**——二者选一，别裸读 |
+| **"等确认"了还是慢** | 播放器接受请求 ≠ 它更新自己的 `PlaybackInfo`（可能差一两秒）| 对外部动作的反馈，**确认 + 乐观发布**：先按动作的含义更新，让它自己在下一轮纠正 |
+| **乐观更新被"立刻再读一次"覆盖** | 那次读取拿的是旧值，把刚翻过去的状态写了回来 | 做了乐观更新就**别再当场读源**；要读的门槛（这里是 `!toggleRequested`）也要一起跳过 |
+| **只能人手触发的东西没法自己验** | transport 只有点击能到，而合成点击落在真实光标位置 | 给这类路径加一个**定时触发开关**（`ISLANDBAR_TRANSPORT_MS`），把"改完等你试"变成可自证 |
+| **注释里的"故意不等待"过期了** | 当年怕 UI 线程被阻塞，而这一行从来不在 UI 线程上 | 一条"故意"的理由要跟着**位置**复核：代码搬了家，理由就未必还成立 |
+| **日志只有"请求"没有"结果"** | `requested` 那一行无法区分"播放器拒绝"与"我们没送出去" | 对外部动作的日志要写到**确认**为止（这里是 `accepted` / `REFUSED by the player`）|
+
+#### 关于"我没法自己验"的说明
+
+栏自己合成的那次点击**用的是真实光标位置**（不是传入的坐标），所以它只能验证"点栏外"这一类；
+卡片内的控件**必须真人点** ✓ —— 这一条本轮又撞了一次：我原先以为合成点击能替我按播放键，
+实测日志里连处理行都没有（真实光标在 (910,392)）。
+
+### 8.27 **暂停后歌词该留着、卡片不该来回闪（8.26 的两处后续）** ✅
+
+用户报：「**暂停音乐后灵动岛不显示歌词了 应该显示，并且音乐卡片会出现消失的来回**」（附截图：卡片只剩一条细带）。
+
+#### 一、"暂停就不显示歌词"是我上一轮把方向搞反了
+
+8.26 之前 `musicResting` 要求"正在播放"，于是暂停后胶囊换成时钟；我在 8.26 里**顺手把它当成对的**
+（文档里甚至写了"暂停的会话休息态是普通胶囊"）—— 用户要的恰恰相反：**暂停后歌词还要在** ✓
+
+**改法**：`musicResting = nowPlaying.present && nowPlaying.title[0] != '\0'` —— **有会话（含暂停）就用歌词条** ✓
+（MusicStrip 与 Collapsed 是同一个矩形，所以"条"并不会变宽，只是那一行由时钟换成歌词 ✓）。
+同时两处配套：暂停时**跑马灯不再前移**（歌词静止不动 ✓，也不再有每帧重绘的必要 ✓）、
+峰值电平条只在**正在播放**时按 30 Hz 要帧 ✓。
+
+#### 二、"卡片来回闪" —— 8.26 改动的副作用，又是一条规则抢另一条
+
+8.26 让暂停也能展开卡片 ✓，但 `ShouldPromoteToTaskbar` 里那条"卡片在场就别压回 hover"的例外
+写的是 `resting == MusicStrip` —— 而暂停时 resting 是 Collapsed ✗ → 于是**同一帧里**：展开规则说
+Expanded、悬停规则说 Hover，两者每 ~0.24 秒互换 ✓。用户日志给了铁证：
+
+```
+state: expanded (pointer inside=1, resting=collapsed)
+state: hover    (pointer inside=1, resting=collapsed)
+state: expanded (pointer inside=1, resting=collapsed)
+state: hover    (pointer inside=1, resting=collapsed)
+…
+（51 条状态行里 33 次 A-B-A 来回）
+```
+
+**改法**：把那条例外扩成 `resting == MusicStrip || musicPresent` ✓ —— 与 8.23 同一条教训：
+**同一个条件被用来表达两件事**（"在放歌" vs "有播放器"）。
+
+断言：`the card stays up over a paused session` ✓（暂停 + 卡片已开 + 指针在岛上 → 仍是 Expanded ✓）。
+自检 730 → **731** 项全绿。快照：`backups/…-paused-lyric-and-card`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **我把要求读反了** | "暂停后不显示歌词了 应该显示" —— 我上一轮按"暂停就不该显示"去修 | 报告里的"应该 X"要先复述一遍再动手；能读成两个方向时，**先说清我读成了哪个** |
+| **一个改动会激活另一条沉睡的规则** | 8.26 让暂停能开卡片 → 悬停规则立刻把它压回去 | 放开一个"能做什么"的限制后，检查**与之互斥/互补的规则**是否还成立（8.23 的翻版）|
+
+### 8.26 **暂停后没法再按播放 —— 卡片要求"正在播放"才能开** ✅
+
+用户报：「**暂停后 灵动岛还是显示歌词不动 除非关闭音乐软件，还有就是暂停按钮点击没有变化**」。
+
+#### 先用日志把两件事分开
+
+他的日志里两种状态都在：`music: … (paused)` 出现过 ✓，而且**暂停之后形态确实离开了歌词条**：
+
+```
+02:45:03.315   music: [QQMusic.exe] … (paused)
+02:45:03.541   state: hover    (pointer inside=1, resting=collapsed)
+02:45:04.007   state: collapsed (pointer inside=0, resting=collapsed)
+```
+
+即"暂停后岛还停在歌词上"**在当前版本里已经不成立**（是更早版本的现象），而
+"暂停按钮点击没有变化"有一个**结构性**的原因：
+
+#### 根因：展开音乐卡的条件是"正在播放"
+
+`ShouldPromoteToCard` 的最后一句是 `return c.resting == MusicStrip;`，而
+`resting == MusicStrip` 只在**正在播放**时为真（`musicResting = present && state == Playing`）。
+于是按下暂停的那一瞬间：卡片**当场收回** ✗ —— 按钮消失、符号的变化看不到，而"再按一次恢复播放"
+那一下**根本无从发生** ✓✓。用户看到的"点击没有变化"就是这个：按下去效果是"卡片没了"。
+
+#### 修法：把"有播放器"与"正在播放"分成两个问题
+
+* `PointerContext` 新增 `musicPresent`（有会话，暂停也算 ✓），循环里用 `nowPlaying.present` 填；
+* `ShouldPromoteToCard` 改成 `resting == MusicStrip || c.musicPresent` —— **暂停的会话照样能展开卡片**，
+  于是 ▶ 就在手边 ✓（卡片的曲名/封面/进度仍在，`frame.music` 本来就按 `present` 给 ✓）。
+
+断言：`a paused session still opens the media card`（暂停 + 指针在岛上 → Expanded）✓ 与
+`... and with no session at all the same pointer opens nothing` ✓。自检 728 → **730** 项全绿。
+快照：`backups/…-paused-card`。
+
+#### 一条验证方法的更正（写在文档里，省下一次踩）
+
+`ISLANDBAR_CLICK_AT` 合成的那次点击**只能点栏外**：它的原用途是验证"点卡片外面收起"，
+实现上走的是"栏自己发一次点击"，而栏内的按压判定读的是**系统按键状态**，合成不进去 ✓
+（实测日志只有 `clicking at (… ) from the bar itself`，没有随后的 `click at screen …` 处理行）。
+所以**卡片里的控件只能由真人点** —— 这一条要用户的手。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个条件同时表达了两件事** | `resting == MusicStrip` 既表示"在放歌"，又被当作"可以展开详情" | 问"这个条件的**用途**是什么"：能展开详情的判据是"有播放器"，不是"正在播放" |
+| **按了没反应 = 那个控件在按之前就消失了** | 暂停 → 卡片收回 → 按钮不见 | "控件无效"的投诉先查**它还在不在**（可达性），再查它的处理函数 |
+| **报告里的两个症状未必同源** | 一条已在当前版本修好，另一条是结构性问题 | 用日志把每个症状**分别**对到证据上（时间戳+状态行），不要因为一起说出来就一起改 |
+
+### 8.25 **图标出现/消失太突兀 —— 给每个图标一个"出现量"** ✅
+
+用户报：「**可以了 但是现在 灵动岛右侧 图标出现和消失有点太突兀了没有动画**」。
+
+#### 根因：成员变化在**一帧之内**完成
+
+`frame.taskButtonCount` 直接等于"这次列出来的窗口数"，所以开一个窗口它的图标**当场就在**、
+关一个窗口它**当场就没了** ✗ —— 没有任何时间维度。
+
+#### 修法：每个窗口一个"出现量"，并且把**正在离开的**也画出来
+
+* `TaskIconAppearStep(amount, arriving, dt)`（`TaskStripLayout.h`，纯函数，可断言）：
+  列出时向 1 缓动、不在列表里时向 0 缓动，`dt` 自身钳在 0.1 秒内 —— **一次卡顿不会把淡入变成硬切** ✓；
+* 帧循环里维护 `rowSlots[]`（每个窗口一个 `{handle, appear}`）✓，帧给的是**并集**：
+  列出的窗口按原顺序在前 ✓、正在离开的接在后面 ✓（**不动正在留下的那些位置** ✓）；
+* 渲染器按 `appear` 缩放：背景/图标透明度 ✓ + 图标**由小变大**（0.70 → 1.00）✓ —— 只做淡入
+  仍然会"跳"，缩小入场才像"出现" ✓；
+* `IconForWindow` 的缓存查找**提到 `IsWindow` 之前**：窗口关掉之后图标还要被用 0.22 秒 ✓
+  （否则退场只剩一个空槽 ✓）；
+* 重绘理由加 `rowAppearAnimating`（在绘制里算、下一帧读）✓，否则动画不会被画出来（8.15 的老教训）。
+
+**一个默认值陷阱**：`taskButtonAppear` 是零初始化的数组，未填写的帧 = "所有图标都不可见" ✗
+→ 加了 `taskButtonAppearValid`：**没填 = 全部就位**，所有测试帧与预览行为不变 ✓。
+
+#### 验证
+
+* 纯函数断言四条：`an arriving icon moves gradually`、`... and reaches one`（四步走到 1 并停住）、
+  `a departing icon moves by the same step`（进出同速）、`a very slow frame cannot jump the arrival to the end`、
+  `a frame with no time in it changes nothing` ✓；
+* **端到端（用户自己的栏）**：开记事本 → `draw icons: … arrive 0.61 → 0.70 → 0.77 → 0.84 → 0.89 → 0.96`；
+  关掉 → `arrive 0.33 → 0.26 → 0.19 → 0.12 → 0.03` 然后才 `count=9` ✓✓（日志新增的
+  `arrive` 字段就是为此加的：让"动画在跑"有文字证据，而不是只能靠照片）；
+* 自检 723 → **728** 项全绿。快照：`backups/…-icon-appear`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"有动画"要先有"时间维度"** | 成员变化是一帧完成的，`appear` 之前根本不存在 | 想给一个"变化"加动画，先给它一个**0..1 的量**（谁在动、动到哪），再谈曲线与时长 |
+| **淡入仍然会"跳"** | 固定大小的淡入读起来仍是"突然出现" | 出现/消失同时改**透明度与尺寸**（这里是 0.70→1.00）|
+| **零初始化的新字段会改变旧行为** | 未填的测试帧 = 所有图标不可见 | 新增数组字段时给一个"未填写"的语义（`…Valid`），让**没填等于老行为** |
+| **缓存查找被前置条件挡住** | `IsWindow` 在缓存之前 → 退场图标取不到位图 | 缓存的用途就是"东西没了还能画最后一眼"，查找要放在"还在不在"之前 |
+
+### 8.24 **右侧图标只显示 8 个 —— 行宽按"每个按钮都展开"算** ✅
+
+用户报：「**灵动岛 右侧现在只能显示8个 再开个窗口就不显示了**」（附截图，红框圈着那 8 个图标）。
+
+#### 证据就在用户自己的日志里：列表有 9 个，只画了 8 个
+
+```
+taskbar: state=hover, 8 buttons from 9 windows listed (9 listed of 518: …)
+```
+
+于是问题被夹在两个候选之间：是**列表**缺了窗口，还是**"能放几个"算少了** —— 这句同时说了两件事：
+列表有 9 ✓、画面只给了 8 ✗ → 是后者 ✓。
+
+#### 根因：槽位宽度取了"展开后"的宽度
+
+`TaskIconsThatFit(monitorWidth, wanted)` 里的 `kRowSlotWidestDip = kTaskWideButtonDip + gap`
+= **132 + 4 = 136**，而展开宽度之所以是 132，是因为**展开的按钮要显示标题** ✓。可用宽度 =
+2560 − 1390(岛右缘) − pad − 8 ≈ **1162** → `1162 / 136 = 8.5 → 8` ✓✓ —— 正好是用户看到的数字，
+而整行**实际只用了 272 DIP**（8 × 34）✗。
+
+#### 修法
+
+```cpp
+// 静止宽度 + 只留"一个"展开位
+const float slot = kTaskIconButtonDip + kTaskIconGapDip;          // 30 + 4
+const float openExtra = kTaskWideButtonDip - kTaskIconButtonDip;  // 132 - 30
+const float room = availableWidthDip - openExtra + kTaskIconGapDip;   // N 个槽有 N-1 个缝
+fit = room / slot;
+```
+
+同一个算式抽成 `TaskIconsThatFitInWidth()`，两个入口（"给可用宽度"和"给显示器宽度+想要几个"）共用；
+顺带删掉已经没有调用者的单参数旧算式与 `kRowSlotWidestDip` 常量。**上限 `kMaxTaskIcons` 12 → 20**：
+真正的约束是宽度（2560 宽能放约 30 个），上限只该防"超宽屏出现四十个按钮"这种蠢事，不该是决定因素。
+
+#### 验证
+
+* 新断言（就是用户这一例）：`nine windows all show on a 2560-wide monitor  9 wanted -> 9, many wanted -> 20`
+  与 `a wide monitor shows more than the eight it used to` ✓；
+* 原有的**性质断言**继续成立（这正是修法对不对的判据）：`the last icon that fits is still on the monitor`、
+  `the row still fits when its last button is widened`、`a narrower monitor fits fewer icons`（1024 → 11 < 20）✓；
+  另一条老断言现在读数变成 `20 icons fit; the last ends at 2074 DIP, region ends at 2176 px` ✓（输入区域仍覆盖整行）；
+* **端到端（用户自己的栏）**：部署前 `8 buttons from 9 windows listed` → 部署后
+  **`10 buttons from 10 windows listed`** 且 `row: … 10 icons on the right` ✓（当时正好开着 10 个窗口）。
+  诊断时我在他机器上开过一个记事本窗口，验证完已关闭。
+* 自检 721 → **723** 项全绿。快照：`backups/…-row-fit-resting-width`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个常量被当成"每个都这么大"** | 展开宽度是 132（要显示标题），但一行里**最多只有一个**是展开的 | 用"最坏情况"当槽位宽度前，先问**最坏情况能同时出现几次**（这里：一次）|
+| **日志一句话同时排除了两个候选** | `8 buttons from 9 windows listed` 说明了列表=9、画面=8 | 让日志**同时**打印"输入有多少 / 输出给了多少"，一步就把范围夹住（这条日志当初就是为此写的） |
+| **上限值掩盖了真正的算法** | 用户以为"只能 8 个"是上限；上限其实是 12，8 来自宽度算式 | 报"只能 N 个"时，先分清 **N 是上限还是算出来的**（`TaskIconsThatFit(2560,1000)` 的读数一眼就能分） |
+
+### 8.23 **"还是会触发" —— 帧循环里还藏着第二条"指针→状态"策略** ✅
+
+8.22 按用户要求去掉了通知开卡片的策略，用户回：**但是现在还是会触发啊**。
+
+#### 证据：`notice-strip` 与 `expanded` 每 0.35 秒交替
+
+用户日志里同一时刻两种状态反复出现：
+
+```
+02:30:17.883   state: notice-strip (pointer inside=0, resting=music-strip)
+02:30:18.274   state: expanded   (pointer inside=1, resting=music-strip)
+02:30:18.638   state: notice-strip (pointer inside=1, ...)
+02:30:18.916   state: expanded   (pointer inside=1, ...)
+```
+
+再按老办法**受控复现**（强制指针在岛上 + 一发通知 + 截图）：卡片**仍在**（`captures/now.png`）。
+
+#### 根因：`main.cpp` 的"指针进出边界"处理器是一份**第二策略**
+
+它自己写着"a state chosen here rather than by the policy is the defect"，却仍然在选状态：
+
+```cpp
+if (pointerInside) {
+    if (active) window.SetState(IslandState::Expanded);        // ← 通知又一次开卡片
+    else if (systemPanelOpen) window.SetState(...Expanded);
+    else if (!(...)) window.SetState(...Hover);
+} else if (active) {
+    window.SetState(IslandState::Expanded);                    // ← 还有一处
+}
+```
+
+于是同一帧里：**策略**说"通知 = 纸条"，**这段**说"通知 = 卡片"，两者每帧轮流赢 → 画面在纸条和卡片间闪 ✓
+（8.22 只是清掉了策略那一半，所以现象照旧 ✓）。
+
+**修法**：这段边界处理器**只消费那个事件，不再选任何状态**（`(void)pointerInside;`）——
+面板那条由策略覆盖（`systemPanelOpen` 无论指针在哪都返回 Expanded ✓），悬停那条也由
+`ShouldPromoteToTaskbar` 覆盖 ✓。**一个策略，一个实现**。
+
+#### 验证
+
+* 同一场景再复现（`captures/now2.png`）：岛是**变宽的纸条**，里面一行 `ToastTest · 构建完成`，
+  屏幕上**没有任何卡片** ✓；该实例日志在通知到来后只出现 `notice-strip`，**不再交替** ✓。
+* 自检 **721** 项全绿。快照：`backups/…-single-policy`。
+* 说明：**音乐卡**仍按设计在悬停时展开（`resting == MusicStrip` → 卡片）✓ —— 那是"播放时移入显示详情卡"，
+  与通知无关；要一起去掉的话说一声。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **注释承认了缺陷，代码却保留着** | 那段处理器写着"这里选状态是缺陷、现在由策略决定"，但 `if (active) → Expanded` 两行还在 | 注释里的"现在由 X 决定"必须伴随**旧代码的删除**；只写不删 = 两份策略继续互相打架 |
+| **现象没消失时，先看状态是否在"交替"** | 日志里两种状态每 0.35 秒互换 = 两个规则在抢 | 状态机出现周期性互换，几乎总是"第二个决策者"，而不是动画或绘制问题 |
+| **改了一处就以为改完了** | 8.22 只删了策略那一半 | 改一条策略前先搜**谁还在决定同一件事**（`SetState(` 的全部调用点）|
+
+### 8.22 **通知不再弹卡片（用户要求）—— 消息就只有纸条** ✅
+
+用户对刚修好的通知卡片只说了一句：
+
+> **这个卡片不需要**
+
+于是把"通知 → 卡片"整条策略去掉，消息**只有纸条**：
+
+* `NextShape`：`notificationActive` 无论指针在哪儿都返回 `NoticeStrip` ✓（原来"指针在岛上 → Expanded"那一条删掉）；
+* `ShouldPromoteToCard`：去掉 `if (c.notificationActive) return true;` ✓（悬停不再有第二条读消息的路）；
+* 三条记录旧契约的断言改成新契约（"通知不分指针位置都显示纸条"）：
+  `a notification shows the strip whatever the pointer is on`、`a notification is the strip, not the card, even while the music card was open`、`and a notification from the plain pill is the strip, not the card` ✓。
+
+**代价（写进代码注释）**：消息的**全文**和**来源图标**只存在于那张卡片上，所以两者一起失去
+（`CardOwner::Notification` 从此没有任何东西会产生它 → `TextRenderer::DrawNotification` 与
+`NotificationIcon.*` 变成**不可达**）。代码先留着并**明确标注"不可达、下一趟要么删要么重新接线"**，
+而不是让它看起来还活着；`CardOwner` 的枚举值保留原编号（帧日志会打印它）。
+
+通知纸条本身的功能不变：收到通知 → 岛左右变宽 → 一行 `应用名 · 标题`（太长会滚动）→ 约 6 秒收回 → 点击岛 = 已读；
+微信消息/通话条都走纸条这条路 ✓。
+
+自检 **721** 项全绿（就是改掉那三条旧契约后的数）。快照：`backups/…-no-notification-card`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个"先做了再说"的功能会连带一串东西** | 卡片带出：全文、来源图标（8.20 刚加固过）、三条断言 | 删一个用户不要的功能时，把它**带出来的东西逐个清点**，并明确哪些留着、为什么 |
+| **删到一半的代码比删干净的更危险** | `CardOwner::Notification` 不再被产生，但绘制与图标还在编译、还有测试 | 这一趟先把"不可达"标注写进代码（读者第一眼就知道），下一趟连同测试一起删 |
+
+（下面是刚修完、随后被本次移除的那张卡片，留作记录。）
+
+### 8.21 **通知卡片根本没有底 —— 文字飘在桌面上，被当成"冒出一个窗口"** ✅
+
+用户报"灵动岛通知的时候 红框里会出现"，并补充"**我有通知的时候 鼠标放在灵动岛上就会出现 不放是不会出现的**"。
+8.20 我先怀疑了图标字段被交给 Shell（那条**确实是缺陷**、也确实修了，但**不是这个现象的原因** ✗），
+用户回"还是有"。于是做了一次**受控复现**：停栏 → 用 `ISLANDBAR_FORCE_INSIDE=1` 的诊断实例
+（指针被当作在岛上）+ 发一条 `--notify "构建完成" --body "0 errors, 3 warnings" --app "ToastTest"` → 截图。
+
+**截图里就是用户红框里的东西**：`ToastTest` / `构建完成` / `0 errors, 3 warnings` 三行字，
+而**没有任何背景** —— 文字直接飘在浏览器窗口上（用户看到的"标题栏和 — □ ×"是浏览器自己的 ✓）。
+
+#### 根因：`DrawNotification` 从来不画自己的底
+
+面板卡片、声音输出页都是自己 `FillCardSurface(context, box, opacity)`；音乐卡片有封面 wash + scrim；
+**只有通知卡片什么都没画**。而 `FillCardSurface` 上方的注释一直写着
+"every outer card gets it … the notification and the media card from their own code" —— 一句**假的注释**，
+正是它让这个缺陷通过了评审。
+
+**为什么以前看不出来**：岛的填充本来会在过渡帧里跟着**卡片大小的盒子**走（就是 8.10 修掉的那块"黑板"），
+于是通知卡片看起来总是有底；**8.10 把填充钉回胶囊之后**，卡片的底就彻底没了，文字开始飘 ✓
+（"一个功能靠一处 bug 活着"的第四例，见 7.87 / 8.11）。
+
+**为什么自检没抓到**：通知卡片的测试帧**没有设 `restingPill`**，于是渲染器回退到"动画盒"作为岛的填充 ——
+而动画盒就是卡片那么大，填充把整张卡都盖住了，测试于是永远不需要卡片自己的底 ✓✓
+（"测试帧是一份契约"，7.86 的同一条教训，反向撞上了一次）。
+
+#### 修法
+
+1. `DrawNotification` 开头调用 `FillCardSurface(context, box, opacity)`（与面板同一个函数，同一种外观）；
+   顺手把那句假注释改对，并写明它错过评审的原因。
+2. 测试帧补上 `frame.restingPill = window.LayoutIslandFor()`（**和帧循环一致**），
+   并新增一条断言：卡片**顶部**那条带（那里没有任何文字 —— 时钟画在胶囊里、通知文字从 52% 高度开始）
+   必须是底面的读数：`card top band = 27.49 (a transparent card reads 0.00)`。
+
+#### 验证
+
+* 自检 720 → **721** 项全绿；
+* **同一场景的实拍对比**：`captures/card-check.png`（修前：三行字飘在浏览器上）与
+  `captures/card-check2.png`（修后：圆角深色卡片，三行字在里面）。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一句注释声明了一个不存在的调用** | "the notification … from their own code" —— 它从来没写过 | 注释里的**承诺**要能被验证；这轮之后凡"某卡片自己画的"都在断言里有对应读数 |
+| **测试帧比帧循环"多给"了一个字段** | 测试帧没设 `restingPill` → 填充变成卡片大小 → 卡片的底永远不被需要 | 测试帧必须**和帧循环给的一样**；多给一个字段就等于把缺陷遮住（7.86 的教训反过来） |
+| **修掉一处 bug 会让另一处现形** | 8.10 把填充钉回胶囊（对），于是通知卡片失去了唯一的"底" | 修一个"错误来源"时，先问：**有没有东西正靠它供应**（7.87 的老规则，这是第四次）|
+| **我先怀疑了一个"看起来更刺激"的机制** | 图标→Shell 确实可疑，也确实是缺陷，但不是这个现象的因 | 有**受控复现**（强制指针 + 一条通知 + 截图）时，先做它 —— 一张图立刻把"窗口 vs 我们的卡片"分清了 |
+
+### 8.20 **通知的图标字段被交给了 Shell（安全类缺陷，与上一现象无关）** ✅
+
+用户先报"灵动岛通知的时候 红框里会出现"，随后给出了关键的一句：
+
+> **我有通知的时候 鼠标放在灵动岛上就会出现 不放是不会出现的**
+
+#### 因果链：悬停 → 打开卡片 → 解析通知来源图标 → 一次 Shell 调用
+
+* **为什么只有悬停才发生**：通知的来源图标是在**卡片被画出来的时候**才解析的
+  （`if (frame.notification) { NotificationIconSource(...) → LoadNotificationIconPixels(...) }`），
+  而卡片只在指针移到岛上时打开 —— 这是整个悬停路径上**唯一一处把字符串交给外部**的动作。
+* **为什么会出现一个窗口**：`LoadNotificationIconPixels` 对**结尾不是 `.png`** 的来源调用
+  `FetchAppIcon` → 里面是 **`SHGetFileInfoW`**。Shell 会**解析**它拿到的字符串，而对
+  `ms-appx:///…`、`shell:AppsFolder\…`、`::{GUID}`、`OpenAI.Codex_…!App` 这类**不是文件路径**的东西，
+  "解析"就可能变成"去激活它" —— 于是 Codex 的窗口被拉到前面。而这个字段来自**通知载荷**，
+  任何本机进程都能发（见 NotificationPipe），属于**不可信输入**。
+* 顺带把上一轮的结论补全：**那个窗口确实不是我们画的**（全项目只有一个窗口、没有 MessageBox、不调用任何
+  创建通知的 API），但**是我们让它发生的** —— "排除'我们画了它'"之后还要问"我们有没有让它发生"。
+
+#### 修法：`IsPlainIconFilePath()`
+
+只有**绝对路径**（`X:\…` 或 `\\server\share\…`）、不含 URI/Shell 字符、且扩展名在一个短白名单里
+（图片类型 + `.exe`/`.dll`/`.ico`）的字符串才会被交给 Shell；其它一律**拒绝**，并**记一次日志**、
+图标干脆不画（**不出图标**好过**照着一个不可信字符串去动系统**）。图片类型本来就由 WIC 直接读，
+根本不经过 Shell。
+
+#### 验证
+
+新增三条断言，用的就是**通知载荷真的能携带的那些字符串**：
+
+```
+允许：C:\SOFTWARE\QQMusic\QQMusic.exe ｜ \\server\share\app.exe ｜ C:\Program Files\App\logo.PNG
+拒绝：ms-appx:///Assets/Logo.png ｜ shell:AppsFolder\OpenAI.Codex_…!App ｜ ::{20D04FE0-…}
+      OpenAI.Codex_…!App ｜ logo.png ｜（空）｜ C:\temp\logo.exe?size=32 ｜ …\shortcut.lnk ｜ …\thing.bat
+```
+
+自检 717 → **720** 项全绿。日志里现在会（每个来源一次）写明：
+`notification: icon source is not a file path, refused: '<那个字符串>'` —— 这行也是"它原来是什么"的证据。
+快照：`backups/…-icon-source-untrusted`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个"只在悬停时"发生的行为** | 悬停打开卡片，卡片解析来源图标 —— 那是唯一接触外部字符串的地方 | 现象与指针相关时，列出"指针事件触发的副作用"，而不是只看画了什么 |
+| **不可信字符串交给 Shell** | 通知的图标字段来自任何本机进程 | 来自外部的路径/标识符，先用一个**谓词**确认"它就是我以为的那种东西"，再交给系统 API；宁可不出图标 |
+| **上一轮读对了一半** | "窗口不是我们画的" ✓；"因此不是我们的问题" ✗ | 排除"我们画了它"之后，还要问"我们有没有让它发生" |
+
+### 8.19 **美化：胶囊那一行加粗 + 背景电平条（读数就是已有的峰值计）** ✅
+
+用户原话：
+
+> **现在可以了 美化美化就行了 比如字体加粗 背景加上峰值计的采样率之类的**
+
+两件事：
+
+1. **胶囊那一行换成加粗字体**：新增 `pillLineFormat_`（11 DIP、`DWRITE_FONT_WEIGHT_BOLD`），
+   而不是把 `appFormat_` 加粗 —— 那个格式**还被任务栏按钮、卡片的来源行、进度时间共用**，
+   加粗会一起变粗（同一个"一个东西多个消费者"的坑，7.88/8.11 都踩过）。胶囊那一行的**行高**也改成
+   从这个格式量（`TextMetrics::pillLineHeight`），滚动窗口与滚动距离随之跟着它走。
+2. **满胶囊的背景"声波带"，颜色取自专辑封面**（第一版是 14 根竖条，用户看了说「竖条看着有点丑
+   然后能不能占胶囊全部高度 宽度也一样 颜色跟随专辑获取歌曲变」，于是换了形态）：
+   * **形状**：一条横贯整宽、按峰值起伏的**波形带**（`DrawAudioWave`）：每个 x 处的半高 = 平滑包络
+     `AudioWaveEnvelope(step, steps, phase)` × 峰值读数，上下镜像成一条闭合带 ✓；`phase` 随时间漂移，
+     所以**电平不动的时候形状也在动**；
+   * **满高满宽**：包络是**整数个周期**（首尾高度相同 → 接缝处不会有一道竖跳，这条是被断言抓出来的：
+     第一版用了 7π，奇数倍 → `closed=0`）；基线高度取 `0.32 + 0.68 × 电平`，所以安静时也有一条明显的带；
+   * **颜色**：`AccentColourFromArtwork(封面像素)` —— 按**饱和度**而不是平均值挑（照片的平均色是灰褐色的，
+     而"灰褐色"正是要避免的），取出来的色再**推离均值 1.45 倍并把亮度提到 0.8 以上**，暗封面也能出可见的颜色；
+     该值在**封面解码时算一次**（随 `artworkRevision` 缓存），不是每帧；
+   * **不挡字**：整条带的亮度是**纵向渐变** —— 胶囊上下边缘 0.75、中间（正是文字那一行）0.35，
+     文字又是加粗的，所以带子能铺满整个胶囊而文字仍是主角；
+   * 读数来自 `AudioVolume::Peak()` —— **就是通话条那个峰值计**（worker 约 30 Hz 采样）；
+     音乐在放时帧循环按 **33 ms（30 Hz）** 要帧，计进 `music` 那一栏。
+
+#### 验证
+
+```
+红封面 -> 0.95 0.00 0.00（from artwork 1）| 灰封面 -> 默认色、from artwork 0
+暗蓝封面 -> 0.03 0.03 0.80（提亮之后仍可见）
+envelope: 0.01..0.95, closed=1, moves=1
+wave: quiet=55.55 loud=79.63 delta=+24.08 | 红配色=62.26 蓝配色=53.87   ← 颜色真的落到像素上
+no wave=49.05 with wave=64.50 delta=+15.44                            ← 波形确实看得见（不只是"存在"）
+words over the meter=87.74 (fill=12.46)                                ← 文字仍远亮于底色
+```
+
+自检 700 → **717** 项全绿。新增工具 `verify-panel-anchor.ps1 -Shot <文件>`：**不停栏、不启进程**，
+直接拍运行中那一栏的画面（真实字体、真实壁纸、真实播放）。实拍：`captures/beautify-wave2.png`
+（第一版 `beautify-live.png` 是竖条）。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"美化"大多数时候是复用已有的读数** | 峰值计早就在（通话条那条电平），这次只是把它接到另一处 | 想加一个"会动的东西"之前，先找**同一类读数有没有已经读好了**（省掉一条新通道与它的采样率问题）|
+| **加粗也要挑格式** | `appFormat_` 是四个地方共用的 | 改"共享对象"的外观前，先数它的消费者（7.88/8.11/这里，第三次）|
+| **美化也要能被断言** | "条子会动"和"条子没画"在截图里长得一样 | 电平条用两组读数断言（quiet/loud 的差、文字对底色的对比），风格类改动（加粗）留给眼睛 |
+| **"有变化"不等于"看得见"** | 第一版断言只比了 quiet/loud（都过），实拍却是"一条几乎看不见的带"——因为渐变把中间压到 0.10，而低音量时波形恰好只占中间那一条 | 加一条**绝对**的断言：同一帧画/不画它，读数必须差出可辨认的量（`delta=+15.44`）；**规律是先有实拍、再补断言** |
+| **周期性的形状要整数个周期** | 包络用 7π（π 的奇数倍）→ 首尾高度不等 → 接缝一道竖跳 | 横贯整宽的形状，末端相位必须是**首端同相**；这条也是断言抓出来的（`closed=0`）|
+
+### 8.18 **滚动"看起来像没有" —— 旧行也用了新行那半边偏移，于是第一帧就跳出了窗口** ✅
+
+用户原话：
+
+> **歌词向上消失的时候 应该是向上滚一点一点消失，新的应该是从下面滚上了 但是现在看起来像没有一样**
+
+#### 偏移写反了一半
+
+8.15 引入滚动时，两行用的是**同一个偏移**：
+
+```cpp
+const float rollOffset = (1.0f - progress) * lineHeight;
+drawLine(previous, midY - rollOffset, ...);   // 旧行：progress=0 时在 midY - 行高 → 已经在窗外
+drawLine(wide,     midY + rollOffset, ...);   // 新行：这一半是对的
+```
+
+于是**第一帧旧行就跳到窗口上方**（等于瞬间消失），窗口空着等新行走上来 —— 观感就是"旧的没了、新的像没有一样"。
+两行必须**反向**运动：旧行从**原位（正中）**向上走一个行高，新行从**下方一个行高**升到正中。
+
+```cpp
+const float arrivingOffset = (1.0f - progress) * lineHeight;
+const float leavingOffset  = progress * lineHeight;
+```
+
+#### 验证
+
+新增了一条**专门盯这个的断言**（这正是上一版缺的那一条）：换行瞬间，**旧行仍在窗口里**。
+
+```
+fill 12.46 / 12.46 | 换行瞬间（无旧行）12.46 / 12.46 | settled 48.17 / 53.96
+半程带旧行 100.17 / 82.86 | 半程无旧行 12.46 / 82.86 | 换行瞬间的旧行 48.17 / 53.96   ← 新的这条
+```
+
+最后那一对数值就是修复本身：修前它会是 `12.46 / 12.46`（旧行已经不见了）。自检 699 → **700** 项全绿。
+快照：`backups/…-lyric-roll-direction`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **两半的运动用了一个表达式** | 旧行应该从 0 走到 −行高，新行从 +行高 走到 0；写成同一个 `(1−progress)` 就等于旧行第一帧就出局 | 相对运动的两端要**各自写下起点与终点**，不要图省事共用一个偏移 |
+| **断言只覆盖了"新行在下面"，没覆盖"旧行还在"** | 上一轮量的是"窗口空不空/新行在哪"，而这次坏掉的正是旧行那一半 | 一个动画有**几样东西在动**，断言就要有几组（这里：新行的位置、旧行的位置、两行同时在场时的上下关系）|
+
+### 8.17 **每 1、2 秒上下出现"一模一样"的歌词 —— revision 一变就被当成换行** ✅
+
+用户原话（附的还是那张"两行挤在一起"的截图）：
+
+> **还是有问题 歌词每个1 2秒就会上面我发的图片似的 上下会出现一模一样的歌词然后和在一起似的**
+
+#### 线索在"周期"上：1、2 秒 = 会话上报位置的周期
+
+先把用户日志里的播报**计了个数**（`lyrics: line N at …` 这行每次行变化打印一次）：
+
+```
+修前：183 次播报里，96 次的行号和上一次相同（一半以上）
+最后几个：6 7 7 7 8 9 9 9
+```
+
+同一行号被连续播报，说明 `lastLyricIndex` 被**重置**过 —— 而重置它的是音乐块里那句
+"换歌就清掉歌词与滚动位置"：
+
+```cpp
+if (music.Revision() != lastMusicRevision) {      // 任何变化都会进来
+    ...
+    lyricsScrollDip = 0.0f;
+    lastLyricIndex = -2;                          // ← 下一帧把"同一行"当成换行
+```
+
+**而 revision 挪动的理由不只是换歌** —— 位置更新也会挪（1–2 秒一次）。于是每 1–2 秒：
+行号被重置 → 下一帧重新判定 → 判定结果和"上次"不同（上次是 -2）→ **当成换行** →
+滚动重放，而**两侧是同一句文字**（上一行=当前行）→ 就是用户看到的"上下出现一模一样的歌词、合在一起"。
+另外，这一句还会把**长句的跑马灯**每秒重置回开头（同一处代码）。
+
+#### 修法（两处，都是"触发条件用错了维度"）
+
+1. **只有文字变了才算换行**：新增纯函数 `LyricLineChanged(到达的文本, 屏幕上的文本)`，
+   滚动、滚动位置重置、日志都放在它成立时才做。（LRC 里**重复的歌词行**是真实现象，同样不该滚动。）
+2. **音乐块的重置按"曲子"触发**，不按 revision：比较 title+artist（新增 `drawnTrackTitle/Artist`），
+   换歌才清滚动位置与行号。
+
+#### 验证（用户自己的栏，不需要我另造场景）
+
+```
+修前：183 次播报 / 96 次重复
+修后（放歌 30 秒）：5 次播报 / 0 次重复，序列 13 14 15 16 17
+```
+
+每一行只在文字真的变化时播报一次；同一段的 `redraws: … lyrics=18` 说明滚动仍在需要时运行。
+自检 697 → **699** 项全绿。快照：`backups/…-lyric-repeat-fix`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"每 1、2 秒"这个周期就是线索** | 周期 = 媒体会话上报位置的周期 | 现象有固定周期时，先把**系统里同周期的东西**列出来（上报、轮询、定时器），几乎总能对上 |
+| **一个重置被放在过宽的触发条件下** | "revision 变了" ≠ "换歌了" | 重置/清缓存这类动作，触发条件要按**语义**（换歌），不能按"有东西变了" |
+| **重复本身就是证据** | 同一行号连续播报两次 = 它被当成了一次换行 | 让日志**可计数**（同一行号、同一字段），"感觉不对"就变成一个数字（96/183）而不是一段描述 |
+
+### 8.16 **两行挤在 36 DIP 的胶囊里 + LRC 的 offset 一直被忽略** ✅
+
+用户附截图（胶囊里两行字挤在一起、像重影），原话：
+
+> **现在会出现这种问题 没有过度动画 而且 歌词应该和当前唱的一样才对**
+
+#### 一、"没有过渡动画"和"歌词不是当前那句"是**同一件事**
+
+8.15 的竖向滚动是**直接画进胶囊那 36 DIP** 里的，而一行中文大约 20 DIP：滚动中段**两行同时在场**，
+挤在一起、互相压字。于是既读成"没有过渡动画"（动的那一下看不出是个动作），也读成"歌词和唱的不一样"
+（屏幕上有一半是**上一句**）。
+
+**修法**：滚动放进一个**一行高的窗口**（第二层裁剪：`midY ± (行高/2 + 1)`）。
+窗口里任何时刻最多只有一行文字的量 —— 滚动中段看到的是"上一句的下缘 + 新一句的上缘"，
+这才是滚动该有的样子。同时把时长从 0.18 秒放到 **0.26 秒**（0.18 太快，眼睛还没跟上就结束了）。
+
+#### 二、`[offset:N]` 一直是**被显式忽略**的
+
+`ParseLrc` 里那句注释写着"其余（album, offset, by）忽略，而不是存成没人用的字段"。但 offset 不是装饰：
+**它是整首歌的固定平移**，带 offset 的 LRC 从头到尾都偏那么多 —— offset 到一秒以上时，就是用户说的
+"歌词应该和当前唱的一样才对"。**修法**：解析 `[offset:N]`（可正可负），在解析结束时统一加到每一行上
+（它可能出现在行之前或之后，所以要放在最后），并且钳到 0 不为负。
+
+#### 验证
+
+1. **窗口的方向断言**（以真正空白的一帧为基准 —— 见下面的教训）：
+
+```
+fill 12.46 / 12.46 | 换行瞬间 12.46 / 12.46（窗口空 = 新行还在下方）| settled 48.17 / 53.96
+半程带旧行 100.17 / 82.86（上旧下新）| 半程无旧行 12.46 / 82.86（只有下半）
+```
+
+2. **offset 断言**：`[offset:500]` → `10500`；`[offset:-2000]` 写在**行之后** → `8000`；`[offset:-30000]` → 钳到 `0`。
+3. 自检 693 → **697** 项全绿。快照：`backups/…-lyric-roll-window`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一句话里的两个症状其实是同一件事** | "没有过渡动画" + "歌词不是当前那句" = 两行挤在 36 DIP 里 | 观感问题先量**几何**（容器多高、一行多高、滚动多远），别先怀疑动画代码 |
+| **滚动需要"窗口"** | 只有在容器≈一行高时，直接滚才干净 | 滚动要在**一行高的窗口**里做（多一层裁剪），不是把整块容器当窗口 |
+| **"空"的基准要真的是空的** | 第一版基准用"没有歌词"的一帧 —— 渲染器那时画的是**时钟**，读数比"空窗口"还高，断言反而在正确的行为上红 | 基准帧要真的什么都不画（`contentOpacity = 0`），并把这个坑写在断言旁边 |
+| **被"忽略"的元数据不是装饰** | `[offset:N]` 是整首歌的固定偏移，我们一直不读 | 判断"这个字段没用"之前，先分清它是**无用**还是**我们没用**；offset 属于后者 |
+
+### 8.15 **歌词对不上、而且"没动画" —— 用了会话上次上报的位置，新行又是硬切** ✅
+
+用户原话：
+
+> **现在歌词和唱的有点对应不上，而且现在感觉没有动画**
+
+两个症状、一个来源 —— 而且是 **8.14 把歌词修出来之后才看得见**的：日志里先有 `lyrics: loaded (41 lines)`，
+紧接着每一份报告都是 `redraws: ... music=2 lyrics=0`。
+
+#### 一、行是按"会话上次上报的位置"选的
+
+SMTC 只在*变化*时上报位置（1–2 秒一次），所以 `LineAt(nowPlaying.positionMs)` 用的是**最多两秒前**的读数：
+歌词行比唱到的地方晚一两秒才跳 —— "对应不上"。同一个毛病**卡片的进度条早就修过**（那时它每秒跳一格），
+修法是"把读数推算到当前时刻"，但那段算式当时是**内联写在卡片分支里**的，歌词这条路上压根没有它。
+
+**修法**：抽成纯函数 `island::ProjectedPositionMs(positionMs, durationMs, elapsedMs, playing)`
+（`MusicSession.h`），卡片与歌词**共用**。不推算的三种情况写在函数里：暂停（位置本来就不走）、
+直播/无时长、以及会话报 0（那是"这个程序不上报位置"）。多加一处**钳到时长**，避免推算越过整首歌的结尾。
+行变化时日志写明：`lyrics: line N at <推算值> ms (the session last reported <原始值> ms)` ——
+两个值的差就是被补回来的那段时间，也是这条修复自己的证据。
+
+#### 二、新的一行是"硬切"，没有任何入场 → 做成**竖向滚动**
+
+歌词一出现，"有没有动画"就变成了可感知的问题：换行只是文字变了，别的什么都没动。
+
+第一版做的是**淡入 + 从右滑入**（10 DIP、0.18 秒）；用户看到后直接给了方向：
+「**歌词最好是切换的时候是从下面向上滚动**」。于是改成**竖向滚动**：
+
+* 滚动的两侧是**新旧两行**：新行从**下方一个行高**升到位，旧行同时**向上一个行高**滚出，
+  两者永不重叠，由胶囊的裁剪负责揭幕（所以这里改的是**高度**，不是做变换 —— 在已裁剪的图层上做
+  位移看起来像"擦除"）；
+* `LyricLineRollFor(age)`（`Lyrics.h`）给 0.18 秒的**缓出**进度（半程已经走了 0.88，避免"停得太死"）；
+* 旧行的文本与它当时的跑马灯偏移由帧循环**拷贝**保存（提供者那份在换歌时会被整体替换），
+  经 `FrameState::lyricLinePrev` / `lyricLinePrevScrollDip` 传给渲染器；
+* 仍然**必须加重绘理由**（`lyricLineChanged` / `lyricLineAnimating`，都计进 `lyrics=`），
+  否则这段动画根本不会被画出来 —— 这正是修前一整段时间 `lyrics=0` 的原因。
+
+#### 验证
+
+1. **位置推算的断言**：`+1500 ms while playing: 11500; paused: 10000; live: 10000; no reading: 0`（外加钳到时长）。
+2. **滚动的断言（带方向，不只"变暗"）**：缓动 `roll: at the change 0.00, half way 0.88, at the end 1.00`；
+   像素上把胶囊分上下两半量墨迹 —— `upper half: arriving 12.46, settled 30.42, with the old line 79.87 |
+   lower half at the change 53.99`：**刚换行时墨迹在下半**、稳定后升到上半、有旧行时上半是旧行。
+   "只是变暗"会被淡入式入场蒙混过关，所以这里量的是**方向**。
+3. 自检 687 → **690**（推出滚动）→ **693**（带上方向断言）项全绿。
+4. **端到端这一条没做到**：部署新版本时你机器上的播放会话已经结束（日志里没有任何 `music:` 行），
+   所以"屏幕上是否对得上"要靠你放一首歌来看；日志里那行 `lyrics: line N at .. (the session last reported ..)`
+   就是判据（两个值通常会差 0.5–2 秒，差值就是原本会晚到的量）。
+
+快照：`backups/…-lyric-sync-and-entrance`（淡入那一版）、`backups/…-lyric-roll`（竖向滚动，最终形态）。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **时间量只在"事件"时更新** | 任何按时间推进的显示（进度、歌词行、计时）都会阶梯式地跳 | 读时间量的地方要"推算到当前时刻"，并把**不推算的例外**（暂停/直播/不上报）写进**同一个函数** |
+| **同一个算式写了两处** | 卡片进度条修过、歌词行没修 → 同一个毛病在两个地方各犯一次 | 抽成纯函数共用 —— 与 8.14 的"报告一条一个参与者"同族：**一个算式只能有一个实现** |
+| **"硬切"会被读成"没有动画/坏了"** | 换行只改文字、别的都不动 | 一行字也要"到达"，**并且要有重绘理由**，否则动画根本不会被画出来；方向由用户定（第一版做了横向淡入，用户要的是**从下往上滚**）|
+| **改动画要问"哪种动"** | "淡入"和"滚动"都满足"有动画"，观感完全不同 | 拿到"没有动画"这类反馈时，把**动作的形态**问清楚（或先做最直白的一种：这里是"新的从下往上、旧的往上走"），别自己挑一种 |
+
+### 8.14 **在线歌词：三个"读错了地方"的 bug —— 空原文没回退译文、id/mid 读到了嵌套的那一个** ✅
+
+起点是用户的提问：「**现在音乐歌词 是怎么获取的**」——顺手在他机器上真跑了一次歌词探测，发现**不是"怎么获取"，
+而是"根本没获取到"**。三个缺陷，按发现顺序：
+
+#### 一、原文为空、时间轴歌词在**译文**字段里 → 被判成"可重试失败"
+
+真实响应（`Maple Road（你的名字）`，`--lyrics-test --lyrics-verbose` 抓下来的原文）：
+
+```json
+{"sgc":false,"lrc":{"version":1,"lyric":""},"klyric":{"version":0,"lyric":""},
+ "tlyric":{"version":2,"lyric":"[00:15.243]第一阵凉意落在颈间\n[00:17.452]..."}}
+```
+
+抽取器只读 `"lyric"`，且**特意跳过 `tlyric` 里的同名键**（本意是"有原文时别取译文"）。原文为空时它返回 false
+→ 上层报 `TRANSIENT: the response had no lyric field` → 每首歌重试 3 次 → 日志里就是你看到的
+`lyrics: none (0 lines)` ×3。**歌词其实已经下载到手里了。**
+
+**修法**：分层读取 `lrc` → `tlyric` → 扁平 `"lyric"`（QQ 那种），并回报命中的是哪一层；
+命中译文时日志明说：`lyrics: netease sent no original -- using its TRANSLATION`。
+`klyric`（逐字）**故意不读**：它的文本里带 `<00:01.5>` 之类的时间标记，会原样显示出来。
+
+#### 二、探测报告只有一条记录，被最后一个服务覆盖
+
+报告原本是一个 `search/lyric` 记录，两个服务轮流覆写，而 reason 字符串把两家都写进去 ——
+于是**用网易云的结论去读 QQ 的响应体**。改成**每个服务一条记录**（含各自的 verdict）之后，第三个 bug 立刻现形。
+
+#### 三、`id` / `mid` 不是唯一的键，"第一个出现"取到了嵌套的那一个
+
+有了分开的报告才看清：
+
+* **网易云**搜索 HTTP 200、响应里**有**这首歌，但读取器取的是 `"songs"` 之后第一个 `"id"` —— 那是
+  `"artists":[{"id":0}]` 里的 **artist id = 0**（同一首歌的 album id 也排在歌曲自己的 id 前面），
+  于是 `songId <= 0` 被判成 **"the search found no matching track"**（还错报了原因，而且像是"这首歌没歌词"那种永久结论）；
+* **QQ** 同理取到了错的 `mid`，服务直接回 `{"retcode":1101}` 拒绝。
+
+**修法**：`FindFlatStringInArray` / `FindFlatIntegerInArray(document, path, pathLength, key, ...)` ——
+按**路径**找到数组（`{"songs"}` / `{"song","list"}`，QQ 的响应里有三个 `list` 且前两个是空的），
+只读**数组第一个对象自己那一层**的键（数括号深度、跳过字符串），所以**键序和嵌套都影响不了答案**。
+旧的"任意位置第一个键"两个函数**删除**（连同它们的测试），不留第二条读法。
+
+#### 验证
+
+1. **离线断言用真实响应形状**（不是编的 JSON）：`the song's own id is read, not a nested one  found=1 id=3433406446 (the album's is 255723258, an artist's 0)`；另有负号、带引号的数字、空数组、前缀键、字符串里出现 `"mid":` 等边界。
+2. **真网实测**（本机，探测工具）：
+   * `Maple Road（你的名字）`：`using its TRANSLATION` → `OK in 281 ms, **51 lines**`；
+   * `晴天/周杰伦`：`netease lyric: HTTP 200 /api/song/lyric/?id=2652820720`、`verdict: ok` → `OK in 282 ms, **43 lines**`（修前是 `FAILED -- netease: the search found no matching track; then qq: ... retcode 1101`）。
+3. 自检 675 → **687** 项全绿。新增工具：`--lyrics-test <标题> [歌手] --lyrics-verbose`，
+   包装成 `scripts/verify-panel-anchor.ps1 -LyricsProbe -Title .. -Artist ..`（**跑 build 目录的 exe**，
+   否则会截断正在运行的栏的日志）。
+
+快照：`backups/…-lyrics-fields`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"没有这个字段"和"字段是空的"被当成一回事** | 原文确实存在、只是空的；文字在译文里 | 读取器要把"存在但为空"和"不存在"分开回报，否则调用方会走到完全错误的处理分支（这里是重试，以及一句"没歌词"） |
+| **不唯一的键不能用"第一次出现"去读** | `id`/`mid` 在每一层嵌套里都有，且**键序不固定**（另一首歌恰好把歌曲自己的 id 排在最前，所以同一个读取器"有的歌能用有的歌不能用"） | 按路径 + **层级**读；并且把**真实失败过的响应**留成 fixture |
+| **一次差一**（`q - p` vs `q - p + 1`） | 引号之间的**距离**比含引号的名字少 1，于是最简单的文档也匹配不上 | 断言从**最简单的输入**开始（现在是 `{"songs":[{"id":1}]}`），别只测复杂形状 —— 这次是加了一条"最基本能不能读到"的断言才一秒定位 |
+| **诊断的形状决定了诊断的结论** | 一条报告被两个服务轮流覆写，于是"网易云没找到曲目"这句话被拿去解释 QQ 的响应 | 有两个参与者时，报告就要**一条记录一个参与者** |
+
+### 8.13 **鼠标快速横移时歌词上下闪一下 —— 栏自己那一行被画进了"正在收缩的卡片盒"** ✅
+
+用户原话（附件红框圈着胶囊，里面是歌名 `Maple Road（你的名字）`）：
+
+> **播放音乐的时候 鼠标移入显示卡片 鼠标快速横移 就会出现这种情况 歌词会上下闪一下**
+
+#### 根因：被打断的收回动画里，"当前形状"和"状态判据"对不上
+
+`frame.outerCardUp = (state == Expanded || FromState() == Expanded)` —— 卡片动画里它是真的，
+**除非动画被打断**。用户那次动作的日志（`state:` 行，只记变化）：
+
+```
+01:07:07.405  state: hover          (pointer inside=1)
+01:07:07.455  state: music-strip    (pointer inside=0)   ← 指针离开，卡片开始往回收
+01:07:07.458  state: hover          (pointer inside=1)   ← 3 ms 后回来，目标改成胶囊态
+```
+
+`SetTarget(Hover)` 会把 `fromState_` 设成上一个目标（`MusicStrip`），于是两个状态都不是卡片：
+**`outerCardUp` 变 false，而 `current_` 还是卡片那么大（250 DIP）**。
+而胶囊自己那一行是按"给定盒子的垂直中心"画的（`DrawTrackLine` 的 `midY`），
+它的盒子当时写的是 `intoPill ? pillBox : box` —— 于是这一帧歌词被画到**卡片中间**，
+接下来 0.16 秒里随着盒子收缩再升回来。这就是"上下闪一下"。
+
+#### 修法：**栏自己的东西永远用栏自己的盒子**（不再看 `outerCardUp`）
+
+```cpp
+const RoundedBox& lineBox = pillBox;   // 之前是 intoPill ? pillBox : box
+```
+
+`pillBox` 就是 `RowAnchorBox(动画盒, 静止胶囊)`，在所有与胶囊同形的状态里它就是那个矩形，
+所以这条只改变"被打断的那几帧"。通知纸条/通话条仍用 `box`：**在那种状态里纸条就是栏本身**，
+它的展宽正是要跟随的对象。
+
+#### 验证
+
+1. **像素断言**（新增 Diagnostics 检查，直接构造"被打断"的那一帧：动画盒 520x250、`outerCardUp=false`、
+   `restingState=MusicStrip`）：量"字在哪儿" —— 胶囊带里必须有笔画、胶囊**下方那段**（卡片的足迹）必须为空。
+   * 修前（把旧规则装回去）：`interrupted exit: in the pill=12.46, under the pill=200.86`
+     —— 歌词**从胶囊里消失**、被画到胶囊下面（200.86 就是那行字）；
+   * 修后：`in the pill=71.23, under the pill=0.00`。
+2. **E2E 的第一次尝试失败，而这个失败本身是教训**：我用 10 张、间隔 300 ms 的连拍去抓它，
+   两个版本都被判"干净" —— 因为这个缺陷只持续**一两帧**，任何正常节奏的照片都只能拍到它的两端。
+   于是把判据搬进代码：**一个告警**，只在"栏自己那一行被画进比栏更高的盒子"时报一次。
+   新增 `ISLANDBAR_INSIDE_FLICKER_MS`（指针按周期进出岛，复现脚本无法做出的横移手势），
+   跑两轮（每轮 39 次进出）：修复版 **告警 0 次**。（多出来的 109 帧"卡片大小 + 非卡片状态"是
+   `outerCardUp=true` 的那种打断 —— 日志里那行只有在 true 时才打印，所以它们本来就不是这个问题。）
+3. 同一趟里前两条修复的回归也复查了：锚定盒 0 个新值、甲板 opacity 0 个新值。
+
+自检 673 → **675** 项全绿。快照：`backups/…-pill-line-box`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个"进程判据"被当成"形状判据"** | `outerCardUp` 说的是"这次行程涉及卡片吗"，而绘制要问的是"这个盒子现在多大" | 用行程谓词去描述形状，会在**行程被打断**时错（这里的收尾被 3 ms 的重新进入改道） |
+| **同一族缺陷换了三次外衣** | 8.10 修锚定盒（谁跟着动）、8.12 修"画哪一行"、8.13 修"画进哪个盒子" —— 三次都是**动画盒漏进栏自己的绘制** | 缺陷反复换外衣时，说出这一族并立下不变量：**栏自己的绘制永不使用动画盒** |
+| **一两帧的缺陷拍不到** | 10 张 300 ms 连拍把两个版本都判成干净 | 短命缺陷的证据要放进代码（一次性告警 / 断言），不要放在照片里 |
+| **工具：自检两次"卡死"** | 进程写到超过 stdout 管道容量就会阻塞在 write，`Start-Process -Wait` 于是永不返回（不是代码问题） | 长输出重定向进文件；脚本已经把自检输出重定向 |
+| **工具：改名后的副本起不来** | 用另一个文件名复制一份 exe，`Start-Process` 两次都不返回（栏已停、无其他实例） | 前后对照要在**源码里**换回旧规则再跑，不要留着"另一份二进制"这条路 |
+
+### 8.12 **放着音乐点系统按钮，胶囊里的歌词被时间顶掉了 —— 胶囊那一行该按"静止状态"选** ✅
+
+用户原话（附件红框圈着胶囊，里面是 `01:01`，下面开着系统面板）：
+
+> **我现在正在播放音乐 但是点击系统按钮的时候 灵动岛就不显示歌词了**
+
+#### 根因：按"**目标**状态"选内容，而目标状态在卡片期间永远是 `Expanded`
+
+渲染器里胶囊那一行的分支写的是 `frame.state == IslandState::MusicStrip`，而 `state` 是**目标**：
+只要卡片在场（面板、通知、音乐卡都算），它就是 `Expanded`，于是歌词分支不成立、掉进时钟分支。
+**同一件事在帧循环里还有第二处**：歌词文本与跑马灯在
+`if (window.State() == IslandState::MusicStrip && musicResting)` 里才计算 —— 所以面板一开，
+`lyricLine` **根本是空的**，渲染器就算想画也没有东西可画。两处问的是同一个（错）问题，改一处不会好。
+
+#### 修法：胶囊是**静止形态**，它的那一行就按静止状态选
+
+新增 `FrameState::restingState`（帧循环填 `MusicStrip`=音乐在放 / `Collapsed`=什么都没放），
+渲染器的顺序因此变成"**来电 > 消息 > 歌词 > 时间**"，其中歌词那一条看 `restingState` —— 卡片改变不了它，
+所以开合全程都稳定，两端都不会闪。帧循环里的歌词块同样改成 `if (musicResting)`。
+
+顺带修掉一个只在卡片期间暴露的输入错误：跑马灯要的宽度原来取自 `window.CurrentBox()`，
+而它在过渡期间是**卡片大小**（520）——会让跑马灯以为"这行放得下"，而渲染器仍把它按 220 DIP 裁掉，
+长歌词就会既不平移也不滚动。现在取胶囊自己的盒子（`BoxOfState(Collapsed)`），两边同源。
+
+#### 验证
+
+1. **像素断言**（在胶囊的**前缘**量：长歌词在那儿有笔画，而居中画的时钟没有）：
+   `lyric alone=71.23, lyric under a card=71.23, clock under a card=12.46`
+   —— 有卡片和没卡片**读数完全相同**；另加一条"卡片下画的确实是歌词而不是时钟"。
+2. **把旧规则装回去跑过**：改回 `state == MusicStrip` 后断言当场红成
+   `[FAIL] ... lyric under a card=12.46` —— 那个 12.46 与"时钟"**一模一样**，正是用户看到的画面。
+3. **端到端**（`verify-panel-anchor.ps1`，放音乐时跑定时开面板；这首歌没有歌词，纸条上就是歌名）：
+   会话被读到之后（`01:05:38.943`，面板已开 0.4 s），胶囊那条带的均值在**面板开着（2.4/2.7/3.0/3.3 s）、
+   正在收（3.9 s）、已经收完（4.6/5.0 s）的每一帧都是 26.970** —— 像素一致；会话读到之前是 22.017
+   （时钟），也就是用户拍到的那一帧。
+4. 同一趟运行里另两条回归也复查了：锚定盒 `0` 个新值（= 展开时一帧都没变）、甲板 opacity `0` 个新值
+   （= 整条栏没有闪）。
+
+自检 670 → **673** 项全绿。快照：`backups/…-pill-keeps-the-lyric`。证据：`captures/anchor-lyric2-*.png`、
+`captures/anchor-lyric2.log`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"当前是什么"和"正在变成什么"混用** | `state` 是目标，卡片期间恒为 `Expanded`；胶囊那一行因此丢了歌词 | 要问"这个物体**现在**是什么"，就不能读目标状态（与 8.10 的"动画中间帧"是同一族错误的第二次） |
+| **同一个问题有两处在问** | 渲染器的分支 + 循环里"要不要准备歌词文本" | 改判据时**先搜同一句话还有谁在说**：只改渲染器，循环不给文本，照样没歌词 |
+| **一个几何输入只在一种状态下对** | 跑马灯宽度取 `CurrentBox()`，卡片期间是 520 而实际画在 220 里 | 取宽度要取**实际画进去的那个盒子**；与 8.05 的"填充盒不等于动效盒"同源 |
+| **先红一次** | 旧规则下 `lyric under a card=12.46`，和时钟读数一模一样 | 第三次用这条纪律：断言红过，才知道它测的是这件事 |
+| **诊断运行的时序**（读图时注意） | 那次会话是面板开了 0.4 s 后才被读到的，所以最前面两帧还是时钟 | 读数序列里的一次跳变先问"是不是采样晚了一步"，别先当成 bug |
+
+### 8.11 **卡片一动，整条栏闪一下 —— 一个透明度喂给了两样东西** ✅
+
+用户原话（附件截图把**整条栏**圈进红框：甲板 ⌃/⊞、歌词条、右侧应用图标行）：
+
+> **还有一个bug 就是点击系统按钮 或者 播放音乐的时候 鼠标移入灵动岛时候 图片中红框里的会闪一下**
+
+两个场景是同一件事：**都会开卡片**（点系统按钮 = 面板卡；播放中把鼠标移进岛 = 音乐卡，7.87 起的规则）。
+
+#### 根因：`contentOpacity` 同时是"卡片的强度"和"栏自己的强度"
+
+帧循环在卡片过渡时写的是：
+
+```cpp
+frame.contentOpacity = 0.35f + 0.65f * window.EasedProgress();   // 0.35 → 1.00
+```
+
+而 `contentOpacity` 的消费者**不止卡片**：甲板按钮（`DrawStartButton` / `DrawSystemButton`）、
+应用图标行（`DrawTaskIcons`）、胶囊里的时钟 / 歌词 / 通知行 / 通话条（`Renderer.cpp` 466-533）**全都用它**。
+于是每次卡片过渡，整条栏都被乘上 0.35→1.00：**栏在闪，而卡片长在栏的下面、根本没碰到栏**。
+
+**证据：用户自己那次移入的日志**（00:54:59，`start button:` 那行"只在变化时打印"，所以它连刷 60 行本身就是异常）：
+
+```
+00:54:59.190  pointer ENTERED the island: screen (1110,22) ... insidePill=0 accepted=1
+00:54:59.190  state: hover (pointer inside=1, resting=music-strip)
+00:54:59.252  taskbar: state=expanded ...                 ← 播放中，悬停被提升成音乐卡
+00:54:59.255  start button: ... opacity 0.43              ← 甲板掉到 0.43
+00:54:59.530  start button: ... opacity 1.00              ← 340 ms 后爬回 1.00
+00:54:59.541  pointer left the island ...
+00:54:59.543  start button: ... opacity 0.38              ← 移出时又掉一次
+```
+
+#### 这个"整条一起淡"当年是有意的 —— 理由已经过期
+
+`Renderer.cpp` 里写着："Gated on opacity like the rest of the content **so the whole bar still fades as
+one**"。那句话写于**卡片从胶囊里长出来**的年代：那时卡片和胶囊共用一块盒子，整条一起淡确实是对的。
+现在卡片长在栏的**下面**（`restingPill.bottom + 8`），栏自己的矩形一帧都不动，所以"一起淡"只剩下副作用。
+本轮**有意把它反过来**，并把那句注释改写成如今的理由。
+
+#### 修法：拆成两个字段，策略收进一个纯函数
+
+```cpp
+struct ContentStrengths { float bar = 1.0f; float card = 1.0f; };
+inline ContentStrengths ContentStrengthsFor(bool cardUp, float easedProgress);   // Renderer.h
+```
+
+帧循环：`frame.contentOpacity = strengths.bar;  frame.cardOpacity = strengths.card;`
+（两个字段各只有一个含义：**栏的内容** / **卡片的内容与填充**）。四处卡片绘制改用 `cardOpacity`。
+顺带把两个诊断驱动（步骤预览、音乐预览）也从"整条淡"改成"卡片淡"，`TRACE_CARD` 那行同时打印
+`cardOpacity` 与 `barOpacity`。
+
+#### 验证
+
+1. **策略断言**：栏的强度在"开场 / 结束 / 无卡片"三种情况下都是 1.00，卡片的强度是 0.35 → 1.00 → 1.00。
+2. **像素断言（对拉）**：同一张卡片按 1.00 和 0.35 各画一遍，
+   `card 188.70->65.92 (-122.78) | deck 99.78->99.78 (+0.00) | pill 30.05->30.05 (+0.00)`
+   —— 卡片必须变暗、甲板与胶囊必须**一个像素都不动**。
+3. **把旧行为装回去跑过**：让甲板用 `cardOpacity`（= 一个数值喂两处的旧行为），断言当场红成
+   `[FAIL] dimming the card leaves the deck and the pill untouched ... deck 99.78->42.14 (-57.65)`。
+4. **端到端**（`scripts/verify-panel-anchor.ps1 -Deploy`，定时开面板 + `TRACE_CARD`，不需要鼠标）：
+   **`barOpacity` 在 321 帧里全是 1.00**，而 `cardOpacity` 照旧 0.37 → 0.98 平滑淡入；
+   甲板那行（只在变化时打印）整段**只出现一次**，值为 1.00 —— 修前同一段是 60 行从 0.40 爬到 1.00。
+
+自检 665 → **670** 项全绿。快照：`backups/…-bar-does-not-fade`。证据：`captures/anchor-blink*.png`、
+`captures/anchor-blink.log`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个数值回答两个问题** | `contentOpacity` 既是"卡片多实"又是"栏多实"，拆开前谁也算不出正确答案 | 同一个数值被**两类东西**读时，先问"它们问的是同一个问题吗"（与 7.88 的"三张卡共用一个位置"同源） |
+| **注释里的"有意为之"会过期** | "让整条一起淡"写于卡片长在胶囊里的年代 | 改动反了要**改注释、并写下当年为什么**，否则下一轮会把它当成约束 |
+| **异常早就写在日志里** | `start button:` 只在变化时打印，所以"连刷 60 行"本身就是"它在变"的铁证 | 为别的目的加的诊断，往往是新 bug 的第一个目击者 —— 先读日志再猜画面 |
+| **断言要先红一次** | 像素断言在旧行为下红成 `deck 99.78->42.14` | 与 8.10 同：**没红过的断言证明不了任何事** |
+| **脚本别把诊断措辞当契约** | 第一版按 `system panel: open` 找标记，而定时诊断写的是 `diagnostic: panel opened at 1515 ms` → 第 5 步空转 | 匹配措辞要放宽（两种都收）；否则"没有输出"会被误读成"没有证据" |
+
+### 8.10 **点系统按钮时岛上长出一块黑板、时钟浮在中间 —— 锚定盒把"卡片动画的中间帧"当成了通知纸条** ✅
+
+用户原话（附截图：面板左边画得好好的，右边被一块黑色方块压住，`00:42` 漂在方块正中间，第三个瓦片和
+甲板按钮都被挤到别处）：
+
+> **现在点击系统按钮会出现这种问题 好像是应该加了 通知灵动岛左右宽阔影响的**
+
+"好像是通知那条改动影响的" —— **猜对了**，而且这是本轮唯一一条由 8.05 引入、却长在别的功能上的缺陷。
+
+#### 根因：`RowAnchorBox` 的属性判据，卡片自己的生长动画条条命中
+
+8.05 为了让通知纸条能把岛撑宽，把岛的**填充盒**从"永远是静止胶囊"改成了
+`RowAnchorBox(动画盒, 静止胶囊)`（渲染器注释里那段"COULD NOT WIDEN"的历史）。判据当时特意写成
+**属性**而不是状态名 —— 因为纸条自己的长大也要被跟上，用状态名会让填充在两端各跳一下：
+
+```cpp
+if (currentWidth > pillWidth + 0.5f && currentWidth < kExpandedWidthDip - 0.5f &&
+    height < kExpandedHeightDip * 0.5f) return current;   // 比胶囊宽、比卡片窄、不到卡片一半高 → 当成纸条
+```
+
+洞在最后一句：**卡片自己的生长动画，中间帧条条命中**。卡片的盒子是"220x36 → 520x250"的插值
+（`Motion::SetTarget` 里 `from_ = current_`），所以在高度 36→125 DIP 的整段里 —— 开场的**前 40%**、
+收场的**后 40%** —— 它既比胶囊宽、又比卡片窄、又不到卡片一半高。于是**同一个函数**的六个消费者
+（岛的填充、时钟、甲板按钮、应用图标行、窗口区域、命中判定）全部跟着那块正在长大的盒子走：
+
+| 跟着走的东西 | 屏幕上的样子 |
+|---|---|
+| 岛的填充 | 一块黑板从胶囊里长出来，压在面板瓦片上（就是用户截图里那块） |
+| 时钟（`pillBox` 里居中画） | 浮到黑板正中间 —— 7.x 花过力气修掉的"第二个盒子"第二次出现 |
+| 甲板（开始/系统按钮）+ 图标行 | 横向甩出去 150 DIP 再甩回来 |
+| 盒子高度过了 125 DIP 那一刻 | 锚定盒**"啪"地跳回胶囊**（开场 38 ms 时那次跳变） |
+
+**证据：用户自己那次点击的日志**（00:42:13.270 起，`start button:` 那行打印的就是 `RowAnchorBox` 的返回值）：
+
+```
+click at screen (1111,30) = local (1111,30) DIP
+system panel: open
+start button: island x [1158, 1402] ... opacity 0.40
+start button: island x [1120, 1440] ... opacity 0.57     ← 337 DIP 宽：正在长大的盒子
+start button: island x [1112, 1448] ... opacity 0.60
+start button: island x [1170, 1390] ... opacity 0.64     ← 高度过了 125 DIP，锚定盒跳回胶囊
+```
+
+截图也对得上：按图标行（1399..1667，步长 34 → 1:1）标定后，那块近黑方块落在屏幕
+**x 1054..1392、y 10..121**，而同一帧日志里的胶囊是 **x [1170,1390] y [6,42]** —— 右缘吻合、
+左边多出 116 DIP，正是插值帧的形状。
+
+#### 修法：判据换成**高度**（纸条的长大只改宽不改高）
+
+```cpp
+const float pillHeight = restingPill.rect.bottom - restingPill.rect.top;
+if (currentWidth > pillWidth + 0.5f && currentWidth < kExpandedWidthDip - 0.5f &&
+    std::fabs(currentHeight - pillHeight) <= 0.5f) return current;
+```
+
+`kNoticeStripHeightDip == kCollapsedHeightDip`，纸条的插值两端同高，所以"和静止胶囊同高"恰好只描述纸条；
+卡片的插值**第一帧就离开了这个高度**。卡片和满宽栏照旧按宽度排除。
+
+**留下的代价**（写进注释）：纸条与卡片**直接互变**的那种过渡（面板开着时来消息、或消息在时打开面板）
+会把锚定盒在首帧落回胶囊，填充从 420 跳回 220 而不是插值。一次罕见过渡的一帧跳变，
+换掉每一次卡片动画里的黑板 —— 这个交换是本轮的选择，不是没注意到。
+
+#### 验证
+
+1. **回归断言（自检 665 项，0 失败）**：把"胶囊→纸条"和"胶囊→卡片"两种插值各走 19 步，逐帧要求
+   *纸条的每一帧都跟着、卡片的每一帧都不跟*：
+   `[ OK ] the anchor follows the strip's growth frame by frame and never the card's 19 steps: 0 strip frames not followed, 0 card frames followed`
+   **并且把旧规则装回去跑过一次**：同一条断言当场红成 `8 card frames followed` —— 正好是
+   高度 36→125 的那 8 步（19 步的前 40%）。**一条从未红过的断言证明不了任何事，这条红过。**
+2. **端到端**（新增 `scripts/verify-panel-anchor.ps1`：用 `ISLANDBAR_PANEL_MS` 定时开合面板，
+   **不需要鼠标、也不需要注入**）：整段开合里锚定盒**只有一个值 `1170..1390`（211 帧）**；
+   13 张连拍逐帧量像素，岛的填充每帧都是屏幕 `1170..1390`（中间断开处是时钟的亮字），
+   甲板与图标行的暗色范围整段不动（`1097..1629`）。
+3. **纸条回归**（同脚本 `-Strip` 阶段，给**运行中**的栏发一条真通知，不打扰用户）：
+   岛仍然左右展宽到 420（屏幕约 `1070..1490`），`纸条验证` 完整居中显示在纸条里，
+   日志 `notification: [?] 纸条验证` + `taskbar: state=notice-strip` + `state: notice-strip`。
+
+快照：`backups/…-anchor-box-height`。证据文件：`captures/anchor-new-*.png`（13 帧）、
+`captures/anchor-new.log`、`captures/strip-350ms.png`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"比胶囊宽、比卡片窄"的判据** | 卡片自己的生长动画整段满足它（高度 36→125 DIP = 前 40%） | 用**属性**代替状态名是对的方向（动画中间帧必须被识别），但属性要选**只有目标形态独占**的那一条：这里宽度不独占，高度独占 |
+| **两个端点的断言全绿，中间全坏** | 自检只查了胶囊/纸条/卡片/满宽栏四个整形态 | **过渡本身要有断言**：把插值走成若干步、逐帧断言；"两端都过"不等于"路上没事" |
+| **用户猜"是通知那条改动"** | 方向对、模块对，只是不是他以为的那一半（他以为是变宽，其实是同一次一起改的锚定盒） | 报告里说"好像是 X 影响的"，X 通常是**最近那次改动的名字**，值得当真、先去查 |
+| **日志每次运行被重写**（本轮踩到） | `Log.cpp` 用 `"w"` 打开："日志描述的是当前这次运行"；我用"记下行数、只读新增"的办法取证据，结果被下一次启动清空了 | 要留下某一次运行的日志，就在**下一次启动之前**把它复制走（脚本里已经这么做） |
+| **PowerShell 的 `$home` 是只读自动变量**（本轮踩到） | 赋值直接抛 `Cannot overwrite variable HOME` | 任务相关的变量名一律避开系统变量（`$barDir` 而不是 `$home`）—— 与 6.x 的"`.ps1` 必须纯 ASCII"是同一类纪律 |
+
+### 8.08 **通话条按参考图重做：头像 + 绿色计时器 + 电平条** ✅
+
+用户给了 iPhone 灵动岛通话态截图：「微信通话应该做成这样的」——左边圆形头像、绿色 `01:09` 计时器、
+右边电平/声波条。
+
+#### 一、三样东西都是真读数，不是装饰
+
+| 参考图上的 | 我们的实现 |
+|---|---|
+| 圆形头像 | **来电者照片读不到**（微信自绘、无辅助功能树），换成**进程自己的图标**（Weixin.exe，圆形裁切）—— 诚实替代品，和通知行用的是同一套图标路径 |
+| 绿色 `01:09` | **真实通话时长**，从"watcher 看到通话开始"那一刻算起（不是从本帧算起：中途重启栏不会让计时器归零）。`CallTimerText()` 是纯函数，自检覆盖 0 秒 / 个位数补零 / 61 秒 / 超过一小时 |
+| 电平条 | **真实电平**：新增 `IAudioMeterInformation` 峰值读数（`AudioVolume::Peak`）。有人说话就动、没人说话就静止。形状=固定剪影×电平（`CallBarFraction()`，纯函数、可断言），避免"每根柱子乱跳"的噪声感 |
+
+#### 二、两个工程细节
+
+* **峰值计的采样率**：worker 的等待从 500 ms 改成 33 ms（30 Hz）——电平条按 500 ms 走就不是电平条了；
+  而"读音量"（会打开设备）仍走自己的 500 ms 时钟，所以没有把 30 Hz 的成本转嫁给它。
+  峰值计接口只获取一次并缓存（30 Hz 重新打开端点会比整个类其他工作加起来还贵）。
+* **重绘**：通话条是全栏唯一"没有事件也会变"的东西，给它自己的重绘理由，**20 Hz**（0.4 秒一次看着像坏了，
+  60 Hz 是一个看不出来的电平条，却让循环在长达一小时的通话里永不空闲）。
+
+#### 三、验证
+
+自检 646 → **654** 项全绿（计时器 4 条 / 电平条 2 条 / 通话窗口判定 4 条…）。实测截图
+`captures/call-strip-zoom.png`：绿色圆形微信图标 + 绿色 `00:05` + 右侧橙色电平条，与参考图同一结构。
+日志：`call announced as '通话中' (notification 1)` → `call icon from '...Weixin.exe' -> 32x32` →
+`volume: peak meter acquired`。
+
+#### 四、与参考图的两处不同（有意）
+
+1. **头像**：来电者照片无法读取，用应用图标代替（上面已说明）。
+2. **高度**：胶囊保持本栏的 36 DIP（参考图是 iOS 的更高胶囊）。改高度会牵动 deck/图标行的垂直居中与区域，
+   收益只是"更像 iOS"，不值得。
+### 8.07 **微信通话上岛（"微信 · 通话中"）** ✅
+
+用户要求：「微信通话 也应该在灵动岛 上」。
+
+#### 一、判据：通话窗口有标题，消息弹窗没有
+
+消息弹窗和通话窗口是**两个不同的窗口**，而且这一点恰好让它们可以被分开：
+
+* 通话窗口：`Qt51514QWindowIcon`，**标题 `微信音视频通话 `**（带一个尾空格，是微信自己的写法），
+  尺寸 376×648 —— 实测在通话期间一直可见；
+* 消息弹窗：`Qt51514QWindowIcon`，**标题为空**，尺寸 176×199。
+
+所以 `LooksLikeWeChatCall(title, visible)` 是一个独立于消息判断的纯函数（子串匹配"音视频通话"，不用相等，
+因为那个尾空格不是契约）。自检 642 → **646** 项，四条断言都用微信**真实的标题字符串**。
+
+#### 二、通话是"状态"，消息是"事件"
+
+* 消息：推一条普通通知，6 秒后自己消失（内容由 `ActiveDisplay` 的时间窗管）。
+* 通话：推一条 **sticky** 通知 —— store 的语义里 sticky 会一直显示到被标记为已读，
+  于是岛**保持宽着**显示"微信 · 通话中"，直到通话结束。
+* 结束时**只标记这一条**：新增 `NotificationStore::MarkRead(id)`。用 `MarkAllRead()` 的话会把当时所有未读
+  消息一起吞掉 —— 这是"通话结束"不该有的副作用。
+* 用户点一下岛（= 已读）可以在通话期间把它收起来，符合"通知可被忽略"的一贯行为。
+
+#### 三、实测
+
+用户机上正好有一条通话窗口，装上即生效，日志：
+
+```
+wechat: call window <window> '微信音视频通话 ' appeared
+wechat: call announced as '通话中' (notification 1)
+state: notice-strip (pointer inside=0, resting=collapsed)     <- 常驻
+```
+
+#### 四、已知风险（已告知用户）
+
+判据是"窗口可见"，而**无法从窗口本身区分"正在通话"与"微信留着这个窗口"**。若用户不在通话时岛上也显示
+通话中，下一步可用的更强信号是：要求该窗口处于前台、或改认来电弹窗（另一个窗口），或读它的子窗口状态。
+这一点在用户下次反馈时即可定位 —— 因为日志会写出通话状态每一次变化的时间点。
+
+### 8.09 **微信消息通道：最后靠"声音"打通（用户实测确认）** ✅
++
++前三条路全部走死（都是实测，别重走）：Windows 通知平台 ✗、独立弹窗 ✗、托盘图标（在替换任务栏模式下不在屏幕上）✗。
++用户一句「不需要读微信信息里有什么 就是来微信的时候有个通知就行」把范围收紧到"只要一个信号"，于是声音这条路成立：
++
++* **实测**：微信安静时 `sessions 0`（它根本不持有音频会话）→ 响一声时会话**出现**并转 Active ✓
++* 判据 `ShouldAnnounceWeChatSound()`（纯函数，5 条断言）：上升沿（会话出现 **或** active 由 0→1）、**首次只记基线**（否则栏一启动就误报）、5 秒去抖、不是上升沿不报
++* 采样：`SoundOutput` 轮询 1000 → **250 ms**（提示音约 1 秒，1 秒轮询可能整段落在两次读取之间）；并且从"打开混音器才启动"改成**随栏启动** —— 这一条是个真 bug：之前那个 worker 只在"声音输出"页被打开时才跑，声音通道等于没数据源
++* 实测链路：`audio changed sessions 1 (was 0), active 1` → `announced 有新消息` → `state: notice-strip` → 声音结束后**不再重复报** ✓
++
++**已知边界（天生，不是 bug）**：自己发消息、播放语音消息也会出声 → 会误报；微信关掉提示音或免打扰 → 不报。
++若以后嫌吵，收紧方向：只在微信不在前台时报、或要求会话持续 >N ms。
+
+用户要求：「不用显示微信通知里面的 就显示微信 · 有新消息就可以」。
+
+#### 一、先把微信的实际情况查清楚（都是实测）
+
+装的是 **Weixin 4.1.15.50（新版微信，Qt + 自绘 MMUI）**：
+
+* **不接 Windows 通知平台**：不在 `HKCU\...\Notifications\Settings`（本机该键下列出了 200 多个应用，
+  Codex/Defender/我的测试在内，微信不在）；`wpndatabase.db` 里全机只有 Codex / 我的测试 / Defender 发过 toast；
+  也不用托盘气泡 → **现有两条通道永远看不到微信**。
+* **UI Automation 读不到内容**：它的窗口只暴露一层 `MMUIRenderSubWindow` 自绘表面，没有聊天名也没有正文。
+* **但两条可行的路都验证过了**：`PrintWindow` 能成功拍下它的窗口；Windows 自带 OCR 引擎可用且**装了中文识别器**
+  （`zh-Hans-CN`）。用户选了简单方案，OCR 这条路留在手里没做。
+
+#### 二、做法：认"它弹出来的那个窗口"
+
+新增 `WeChatWatch.{h,cpp}`：每 500 ms 扫一次微信进程的**顶层窗口 + 子窗口**（自绘 UI 也可能把弹窗挂在主窗口下），
+判据是一个**纯函数** `LooksLikeWeChatToast()`：
+
+* 必须**可见**、尺寸落在 toast 区间（140..720 × 48..340）；
+* **不在屏幕正中**（居中的是对话框，不是角落弹窗）；
+* 排除已知不是它的类：托盘图标消息窗口、消息专用窗口、`Chrome_*`、`IME` 系列。
+
+命中就推一条通知（`app=微信`、`title=有新消息`，UTF-8）→ 复用**同一个** store：纸条 / 卡片 / 已读 / 自动消失
+全部不变。去抖 5 秒（一串消息只提示一次）。
+
+#### 三、自检：8 条断言，用的都是**这台机器真实存在的窗口**
+
+主窗口（400×700，居中）、音视频窗口（376×648）、托盘图标窗口（1920×1035，隐藏）、0×0 消息窗口 —— 都断言
+**不是**通知；合成的"角落里 toast 尺寸"窗口断言**是**；"屏幕正中的 toast 尺寸"与本机那个居中的
+176×199 隐藏对话框一样被拒绝。自检 634 → **642** 项全绿。
+
+#### 四、可自证的日志
+
+每有一个**新出现的**微信窗口，就记一行它的类名/位置/尺寸/可见性 + 判决：
+
+```
+wechat: window appeared 3542626 'Qt51514WxTrayIconMessageWindowClass' (130,162) 1920x1035 visible=0 -> NOT a notification
+wechat: window appeared <新句柄> 'Qt51514QWindowIcon' (2200,1250) 320x110 visible=1 -> counted as a notification
+wechat: announced '有新消息' (window <句柄>, 1 in total)
+```
+
+**这是我敢在没收到真消息的情况下交付的原因**：判据对不对、微信到底弹的是哪个窗口，用户下一次收到消息时日志
+会直接写出来。唯一我没把握的是**弹窗位置**（我假设在屏幕角落；若它出现在正中会被判为对话框而漏掉）——
+那种情况下日志里会有 `-> NOT a notification` 一行，照着放宽即可，不用用户描述现象。
+
+#### 五、明确不做的事
+
+不读微信本地数据库（加密，且要从进程内存里抠密钥 —— 等于翻用户私聊）、不注入、不子类化它的窗口。
+只枚举窗口（公开信息）。OCR 那条路（读"谁说了什么"）引擎和中文识别器都在，随时可加。
+
+### 8.05 **通知：岛变宽，消息显示在岛里（左右对称外扩）** ✅
+
+用户报告（附截图，圈的是胶囊里那行字）：「有通知的时候 灵动岛变宽 在里面显示」，随后补充
+「**是左右宽展**」。
+
+#### 一、过去的做法与新做法
+
+过去通知到达时**直接开大卡片**（520×250 挂在栏下）——那不是一个"瞥一眼"的形状，而且会挡住下面的内容。
+现在：**岛变宽，消息显示在岛里**；卡片改成"鼠标移到岛上"才展开（全文在那里读），点岛 = 已读并收起。
+
+#### 二、新增 `IslandState::NoticeStrip`（这是本项目第一次"两种形状之外再加一种"）
+
+* 尺寸：**高度不变（36），宽度 420 DIP**。盒子居中，所以**左右各外扩 100 DIP** ——
+  自检直接量出来：`pill [1170..1390] -> strip [1070..1490]`，两侧中心都是 1280 ✓。
+* 内容：一行 `应用名 · 标题`（复用车歌词那行的绘制，太长会自己滚动）。
+* 让位是**自动**的，这也是这次敢做宽形状的原因：deck 按钮（开始 / 系统）挂在岛的**左边缘**、
+  图标行挂在**右边缘**，所以岛一变宽它们就跟着让开。当年"宽纸条盖住开始按钮"的事故不会再发生 ——
+  那时按钮是按窗口边距摆的，与岛无关。
+* 新增 `RowAnchorBox(current, pill)`：**只有"比胶囊宽、比卡片窄、也不高"的形状**才带动图标行与这些控件；
+  卡片（太宽太高）和全屏条（太宽）都排除在外 —— 写成性质而不是写成状态名，未来加形状不会悄悄把图标行拖走。
+
+#### 三、自检当场抓到一个真 bug（本仓库最典型的那个坑）
+
+加上 `NoticeStrip` 后策略测试立刻红了：**"通知过期后没有任何规则匹配"** →
+`ShouldAdoptNewResting` 的名单里没有这个新形状 → 岛会**永远停在那条宽纸条上**。
+这正是这个文件开头写的那类漏洞（"一条没被规则覆盖的形状会永久留在屏幕上"）。修好后 631 项全绿。
+
+#### 四、顺带修掉两个真问题
+
+1. **`--notify` 的中文进不来**：`main(int, char**)` 的 argv 是**控制台 ANSI 代码页（本机 GBK）**，
+   "构建完成"变成 8 个字节 → 岛上是 `DSH ·` 加**八个方框**（8 个无法解码的字节就是这个样子）。
+   同一条消息走**通知平台**（真 toast）则完全正常 —— 正是这个对比把"是文字坏了还是绘制坏了"分开的。
+   修法：`RunNotify` 从 `CommandLineToArgvW` 重新取宽命令行，再转成 UTF-8（程序其余部分都是 UTF-8）。
+2. **推送通道日志里的中文是乱码**（窄重载把 UTF-8 逐字节加宽），现在转宽再打。
+
+#### 五、验证
+
+* 自检 631 项全绿，新增 4 条：对称外扩 / 比胶囊宽且同高 / 图标行让开纸条 / 卡片与全屏条不带动图标行。
+* 端到端两条通道都拍了：`captures/notice-strip-toast.png`（真 Windows toast → `ToastTest · 构建完成`
+  在宽岛里）与 `captures/notice-push-fixed.png`（`--notify` → `DSH · 构建完成`）。
+* 日志：通知到达时主机打 `state: notice-strip`。
+
+#### 六、用户复报「没有动画啊」→ 真因：岛的**填充**根本不在动
+
+第一次做完，岛上的文字确实跑到纸条宽度上了，但**胶囊本身没有变宽**。真因在渲染器里：
+
+```cpp
+const RoundedBox& pillBox = (frame.restingPill ...) ? frame.restingPill : pill.box;
+```
+
+这条规则当初是对的（卡片状态下动画盒子是 520×250，用"岛的近黑填充"去涂它会横跨屏幕一条黑带），
+但它同时意味着**岛永远不能变宽**：填充恒等于静止胶囊（220），而文字是从**动画盒子**里画的 ——
+于是屏幕上出现的是"220 宽的胶囊 + 一行溢到桌面上的字"。之前我贴的两张截图之所以看着像变宽，
+是因为文字后面正好是壁纸的深色区域 —— 那是**假象**，用户是对的。
+
+**修法**（一处）：`pillBox` 改用 `RowAnchorBox(pill.box, frame.restingPill)` —— 和图标行、deck、
+区域、命中判定**同一条规则**：比胶囊宽、比卡片窄、也不高的形状才是纸条；卡片与全屏条被排除，
+所以那条黑带回不来。
+
+**量出来的证据**：抓一帧逐像素扫过岛的那一行，颜色从 x≈1090 到 1470 都是岛自己的 (12,14,17)，
+两侧才是壁纸（在此之前同一条扫描给出的是 220 宽）。
+
+**并且补了一条自检**（这正是"没有动画"这类报告该由自检兜住的）：
+`pill 220 -> mid 395 -> strip 420，duration 0.22 s` —— 断言"纸条是一个**有时长**的过渡"以及
+"中途的形状严格落在两端之间"。原来的两条漏洞（时长为 0 / 盒子动了但没人从它画）各有一种表现，
+这条断言覆盖的是"过渡确实在跑"，而"从哪个盒子画"是由渲染器改用同一条锚定规则来保证的。
+
+### 8.04 **第二条通知通道：读 Windows 自己的 toast 数据库（C → A）** ✅
+
+用户：「做通知吧」。这一项从路线图第一天就写着，一直卡在"要不要引入 SQLite"。
+
+#### 一、不用引入 SQLite —— Windows 自带引擎
+
+**`C:\Windows\System32\winsqlite3.dll`（本机 3.51.1）导出标准 sqlite3 API**，运行时
+`LoadLibrary` + `GetProcAddress` 绑定即可：不 vendor 9 MB amalgamation、不在配置期联网、
+DLL 不在的机器上如实降级（日志说明，推通道完全不受影响）。项目里那段 `FetchContent` 下 amalgamation
+的 CMake 因此**没有被用到**，也不需要用到。
+
+#### 二、数据库的实际情况（都是实测，不是照着博客写的）
+
+* 文件：`%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`（WAL 模式，服务常驻持有）。
+  **只读打开成功**，不需要先拷副本（失败时回落到 %TEMP% 副本这条路留在代码里）。
+* 表：`Notification(Order, Id, HandlerId, ActivityId, Type, Payload, Tag, Group, ExpiryTime,
+  ArrivalTime, DataVersion, PayloadType, BootId, ExpiresOnReboot)`；
+  `NotificationHandler(RecordId, PrimaryId, WNSId, HandlerType, ...)`。
+* **`Payload` 就是 UTF-8 的 toast XML，前面没有任何二进制头**（第一个字节就是 `3C 74 6F 61 73 74`
+  = `<toast`）。这条是拿真实行验的：猜错的话会去剥一个不存在的长度前缀，然后永远解析不出内容。
+* `HandlerId` → `NotificationHandler.PrimaryId` 是 AppUserModelID
+  （`OpenAI.Codex_2p2nqsd0c76g0!App` → 显示名 **Codex**）。
+
+#### 三、接入方式
+
+* **第一次只记录"当前最大 Id"**，不重放历史 —— 否则每次启动都会把过去几天的通知一次性倒进卡片。
+* 之后**每 2 秒**一条 `SELECT ... WHERE Id > ?`（索引查询），新行送进**同一个** `NotificationStore`：
+  卡片、已读、6 秒自动消失、点击收起全部复用，推通道的行为一点没变。
+* 读失败不致命：日志说明、通道不可用，bar 照常运行。
+
+#### 四、诊断与验证
+
+* 新命令 **`--toast-dump [n]`**：真机实测打印出真实 toast ——
+  `#103 [Codex] 检索项目 -- 修好了，而且原因和你直觉一致…`
+  （也就是说：**我之前的回复本身就成了系统 toast**，这正是这条通道要抓的东西）。
+* 自检 623 → **630** 项。新增 7 条全是纯函数断言：UTF-8 解码 / 实体（`&amp; &lt;`）/ 第二个 text 作正文 /
+  无 text 拒绝 / **超长正文截断而不是丢失** / AUMID→名字 / exe 路径→文件名。
+* **两个坑，都是"看着像数据库坏了、其实是解码"**：
+  1. **UTF-8 按字节加宽**：第一版逐字节转宽字符，中文全变成 `æ£ç´¢é¹ç®` 这种拉丁假字。
+     真机 dump 一眼看出来（自检里现在有这条断言）。
+  2. **转换缓冲区太小 → 整段消失**：`MultiByteToWideChar` 在显式长度 + 缓冲区不够时**返回 0**，
+     不是截断。于是长正文（用户真实消息动辄上千字）全部变成 `(no body)`。现在中间缓冲 8K 并允许截断。
+* `scripts/toast-test.ps1`（用通知平台真发一条 toast）与 `scripts/toast-card-test.ps1`（整条链路：
+  起栏→发 toast→等轮询→截图→读日志→把用户的栏起回来）。**这两个脚本在本环境里跑不完**：
+  沙箱里的进程/单实例/权限限制让内联的 `Start-Process` 型命令反复卡住（同一个问题也让前几轮几次
+  测试看起来"什么都没发生"）。所以端到端那一步留给用户观察：**下一条系统 toast 出现时，卡片应当自己弹出来**。
+
+#### 五、端到端已经实测过了（本节写完的当天）
+
+`scripts/toast-test.ps1` 单独跑通了（它不启动栏，只有 `Start-Process` 栏的那些内联命令才会卡）：
+它造出一条真 toast，而**正在运行的用户栏**在下一秒把它收下：
+
+```
+[20:53:21.058]   toasts: 1 new system toast(s), 1 taken in total
+```
+
+`--toast-dump 2` 同时能看到 `#104 [ToastTest] IslandBar 测试 -- 这是一条真实系统通知`。
+所以这条通道是 **A**：真 toast → 卡片，全链路有人见过。
+
+#### 六、手工自测清单独立成 `TESTING.md`
+
+用户问「我怎么测试」。把"只有真人能做"的那些项整理成 `..\TESTING.md`（项目根目录）：
+每一项写清 **做什么 → 应该看到什么 → 日志里找哪一行**，含系统通知、面板六项交互、音乐卡控制键、
+开始按钮、推通道通知。日志路径与"边点边看"的命令也在最上面。
+
+### 8.03 **通知卡片画出来源图标（C → A），并把"没做的清单"重新盘了一遍** ✅
+
+用户问「看看现在还有什么没有做的」。盘完之后按他点头的方向做了两件低风险的事，这一节记第一件：
+
+#### 来源图标：协议收下了字段，渲染层从来没画
+
+`Notification::iconPath` 从协议第一天就在，**从来没有画过**。而现在做成两件事：
+
+* **谁发的就用谁自己的图标**。管道服务端现在用 `GetNamedPipeClientProcessId` 记下发送进程，
+  帧循环按这个 pid 解析 exe 路径取图标 —— 因为**几乎没有发送方会去填 icon 字段**，
+  而"工具发的通知显示那个工具的图标"正是系统自己 toast 的做法。
+* `icon` 字段仍然优先：`.png` 按图片解码，其它（exe/快捷方式/.ico）交给 shell 取图标。
+
+图标画在**第一行**的左侧（原生 toast 的位置），文字相应右移；没有应用名那一行时画在标题旁边，
+而不是丢掉。位图按 revision 缓存（一条通知只解码上传一次）。
+
+#### 逻辑搬进 `NotificationIcon.{h,cpp}`，就是为了能被断言
+
+这两条规则（**从哪儿取**、**怎么解码**）错了在屏幕上都是"没有图标"，而"机器上本来没有图标"也是同一个样子。
+放在 main.cpp 里无法从自检调用，所以搬成独立文件。自检 617 → **623** 项，新增 6 条：
+具名路径优先 / 没具名时取发送进程 / 都没有时如实说没有 / 真实 exe 能解码成像素 /
+**卡片真的画了它**（量图标自己的那一列：有图标 104.21，没有 12.46，差 +91.75）。
+最后一条第一次是红的 —— 因为我把采样带取在了 60% 高度以下，而图标属于第一行（约 52%）：
+**测量区域取错，读到的当然是"没有图标"**，这个坑本身值得记。
+
+新诊断：`--notify <标题> [--icon <路径>]`（原来只支持 `--app/--body/--urgency/--sticky`）。
+
+### 8.02 **点卡片里的东西，音乐卡会闪一下** ✅
+
+用户报告：「点击卡片里的时 音乐卡片会闪一下」。
+
+#### 根因：关掉"请求"没有关掉"形状"
+
+点面板里的瓦片时，代码只做了 `systemPanelOpen = false`（撤销**请求**），而形状还停在卡片上 ——
+因为指针还在栏上、音乐还在播，政策里没有任何一条把它拉回胶囊。于是每帧重新选卡片归属
+（`NextCardOwner`，"还想要卡片 + 面板不再请求"）时，答案落到了 **MEDIA** 上：**音乐卡顶替了面板**，
+在指针停在那里的整段时间里都挂着。用户看到的就是"点一下，音乐卡闪出来"。
+
+（只有正在播放时才出现 —— 没在播放时 `musicPresent` 为假，归属保持面板，卡片正常收回。这也解释了
+为什么这个现象时有时无。）
+
+#### 修法：一个出口，两件事一起做
+
+新增 `dismissPanel()`：撤销请求的**同时**把状态交回 `resting`。这样 `cardWanted` 从那一刻起为假，
+`NextCardOwner` **保持**原归属（`if (!cardWanted) return current;`），面板被完整画着收回，
+不会再有别的东西顶上来。
+
+**六个**关闭面板的地方全部改走这一个出口：瓦片"带你去别处"、投影、齿轮、"点栏上别处"、
+"点栏外"（8.01 新增）、以及拍照用的自动开关诊断。以前是六份手写的状态清理，其中任何一份漏掉
+都会重新长出同一个 bug —— 这类"一个动作、多处实现"正是本仓库反复付学费的地方。
+
+自检 617 项全绿（本次改的是帧循环里的时序，几何未动）。
+
+### 8.01 **点卡片外面就应该收起 —— 而那个点击从来没到过我们这里** ✅（实现已装，端到端验证受限，见下）
+
+用户报告（附面板截图）：「点击展开后 当鼠标点击别的地方不在卡片上是 应该收回去 关闭」。
+
+#### 根因：窗口在卡片之外是"点击穿透"的
+
+面板本来就有"点别处收起"的分支，但它只在**点击到达本进程**时才跑：窗口除胶囊与卡片之外一律
+`HTTRANSPARENT`，所以用户点桌面、点别的应用、点托盘时，那个点击被系统直接送给被点的窗口，
+**我们连消息都收不到** —— 面板看起来就卡在那儿。用户截图里正是：面板开着，鼠标已经点进下面的
+Codex 窗口。
+
+#### 修法：看按钮，不等消息
+
+面板开着时，帧循环每帧读一次 `GetAsyncKeyState(VK_LBUTTON)`，取**按下的那一帧**（边沿，不是"按着"），
+把指针位置交给**窗口自己的命中判定**（`HitTestScreen`，与决定窗口要不要接受指针的是同一个函数）：
+
+* 按在栏上（胶囊 / 图标行 / 卡片列 / 卡片）→ 什么都不做，那是点击处理器的事；
+* 按在**外面** → 关掉面板（连同子页、拖动状态一起清）。
+
+原生浮层也是这个行为：外面的那一下既收起浮层，也照常作用在被点的窗口上。
+
+**为什么不用 `WH_MOUSE_LL`**：全局鼠标钩子能第一时间看到点击，但代价是**这台机器上所有点击**都要
+经过我们、且要常开（这程序一跑就是几天）。为一个浮层做这件事不成比例，也是容易被安全软件盯上的写法。
+
+#### 验证：这条我没有做到端到端（如实记下）
+
+* 我的测试进程（Codex 沙箱提权后）**比用户栏的完整性级别低**：我注入的鼠标点击在到达用户栏之前就被
+  Windows 丢掉（`integrity: LOWER than the shell's`），所以"从外面点一下"这件事我**没法从脚本里制造**。
+  同样的原因让前几轮有两三次测试看起来"什么都没发生"（其实是我的输入被丢弃）。
+* 试过让**栏自己点自己**（新诊断 `ISLANDBAR_CLICK_AT="x,y"`，栏在启动 3 秒后自己合成一次点击）：
+  同一进程发的合成输入它自己一定看得见。但这条测试要求先停掉用户的栏（单实例），而测试进程又反复
+  卡住，最后没拿到干净的证据。
+* 因此**留下了可自证的日志**：面板开着时，每一次按下都会打印
+  `system panel: a press at (x,y) on/outside the bar`，命中后紧跟 `closed (a click outside the bar)`。
+  用户下一次点别处时，日志会直接说明是哪一半失败：**按下没被看见**（→ 下一步换钩子），
+  还是**被判成"在栏上"**（→ 下一步修命中判定）。
+* 脚本 `scripts/dismiss-test.ps1` 已经写好（停掉用户的栏 → 开测试实例 → 让栏自己点外面 → 读日志 →
+  把用户的栏起回来），留给下一个能用的环境跑。
+
+### 8.00 **音量条还要顺滑：音乐卡的条也能拖了，而且手柄有过渡（用户第二次报"卡卡的"）** ✅
+
+用户复报：「调节声音的还是卡卡的 没有动画过渡」。
+
+上一轮（7.99）修的是**面板那一条**，这一轮把"调节声音"的三条滑条都补齐，并补上**动画过渡**：
+
+#### 一、漏掉的是**音乐卡**上那条
+
+卡片上的音量条（喇叭点开的那条）此前**只有点击**：按住不动、松手才跳一下 —— 而这正是用户最常碰的一条
+（悬停胶囊就出来，一步就到）。现在它和另外两条一样：
+
+* `WM_LBUTTONDOWN` 就设值并进入拖动；`SetCapture` 期间跟着指针走；`LeftButtonDown()` 决定何时结束。
+* **分数只取 x**（新 `VolumeFractionForDrag`）：拖动是"按这里、挪到哪儿都算"，指针一毫秒内就离开那 4 DIP
+  的细条，若还要求"压在条上"就会中途冻住 —— 那才是"卡卡的"的来源。
+* 三条滑条（面板 / 音乐卡 / 合成器）全部改走 x-only 的取值（`PanelSliderFractionForDrag`、
+  `MixerSliderFractionForDrag`、`VolumeFractionForDrag`）。
+
+#### 二、拖动期间卡片不再缩回去
+
+策略里没有"正在拖动"这个概念：指针一旦离开卡片，卡片就按规则收回 —— 手柄正好在用户盯着看的时候冻住。
+新增一条守卫（和"通知握住卡片"同型）：**拖动进行中，状态保持 Expanded**。
+
+#### 三、"没有动画过渡"：手柄现在会**走过去**
+
+手柄过去画的是读数本身，所以凡是不是拖出来的变化（点一下轨道、键盘音量键、系统浮层）都是**瞬移**。
+现在绘制值以 **0.12 秒**的指数追赶读数（`kVolumeChaseSeconds`，`shownVolume`）：
+
+* **拖动时用指针的值，不做追赶** —— 跟手必须 1:1，否则会觉得"拖着一块重东西"；
+* 追赶只作用于绘制，设备值仍然是立刻写入的；
+* 三条滑条的手柄（面板 / 音乐卡 / 合成器设备行）都用这个绘制值。
+
+#### 四、验证
+
+* 自检 614 → **617** 项全绿（新增 3 条：`VolumeFractionForDrag` 的中点=0.5、两端钳位、只按 x 取值）。
+* `scripts/click-test.ps1` 新增 `-Scenario sweep`（按下后分 9 步移动再松开，模拟真手）。实测日志里
+  出现连续多行 `volume: dragging -> N%`，说明手柄确实逐点跟随；只有"按下"和"松开"两行才是冻结的表现。
+* 新诊断 `ISLANDBAR_VOLUME_OPEN=1`（卡片音量控件默认是关的，不打开就拍不到，也无法断言）。
+* 这一轮的实测受到**用户本人同时在操作音量**的干扰（日志里出现两次 press、拖动被真实点击提前结束），
+  所以"逐点跟随"的结论以 sweep 的那几行 + 自检的纯函数断言为准。
+
+### 7.99 **面板要"有状态"、点完自动收回、滑条顺滑、滚轮翻页（四条实测修复）** ✅
+
+用户一次报了四条（附两张截图）：
+
+> 「这里面的 按钮都应该有状态，点击应该其中一个默认应该可以自动收回去，声音进度条那个不顺滑，
+> 然后 声音输出的位置应该可以用鼠标滚轮控制」
+
+#### 一、"不顺滑"是两个原因叠在一起
+
+1. **手柄读的是 2 秒前的采样值**。面板的音量把手画的是 `status.volumePercent`，而 `SystemStatus`
+   **每两秒**才采一次 —— 拖动期间把手要么两秒跳一格，要么拖完才动。改成用 `AudioVolume` 的实时读数
+   （`SetLevel` 当场就发布新值），`BuildSystemPanel` 因此多了 `volumeKnown/volume/muted` 三个参数，
+   没有实时读数时仍回落到采样值。
+2. **拖动只在"松开"时生效**。旧代码只处理 `WM_LBUTTONUP`，而拖动是"按下—移动—松开"：
+   表现就是松手瞬间跳一下、过程中纹丝不动。修法：
+   * 新增 `WM_LBUTTONDOWN` 处理 + `TakePress()`；按下就设值并进入拖动状态；
+   * `SetCapture` / `ReleaseCapture` —— 不加捕获，指针一离开窗口就收不到后续消息，
+     而滑条本来就要求"按在这儿、拖到哪儿都算"；
+   * 按钮是否还按着，用**窗口自己的消息**（`LeftButtonDown()`）判断，
+     不用 `GetAsyncKeyState` —— 实测它在一次 synthetic 按下**5 毫秒后**就报"已松开"；
+   * 值只在**分数变化**时才推给设备（60 Hz 每帧一次 COM 写会把音频层挤成一串滞后的更新）。
+
+证据（`scripts/click-test.ps1 -Scenario drag`，真人级按下—移动—松开）：
+`volume: press on the slider -> 49%` → `volume: dragging -> 85%` → `volume: drag ended at 85%`。
+
+#### 二、滚轮：一个偏移量有两个主人
+
+窗口收到了 `WM_MOUSEWHEEL` 并自己改了 `soundScroll_`，而帧循环每帧又用**它自己的**（没变的）
+偏移量 `SetSoundPage(page, scroll)` 写回去 —— 于是滚轮的效果当场被覆盖，页面根本滚不动。
+改成：**窗口只报"滚了几个格"，偏移量归帧循环**（`TakeSoundWheel()` / `SoundScrollJumpFor()`），
+钳位仍由窗口算（它才知道有多少行）。实测日志：`sound page: wheel -2 -> scroll 120`、
+`wheel -1 -> scroll 180`。
+
+#### 三、点完自己收回
+
+瓦片/齿轮/脚注这类"把你送到别处去"的动作，执行完把面板收起来（原生快速设置就是这个行为）；
+**在原地生效的开关不收**（`飞行模式`、音量行），这样它的新状态就在眼前，也能连着拨几个。
+实测：点 `投影` 后截图，卡片已经交还给音乐卡（面板那一层收掉了）。
+
+#### 四、"按钮都应该有状态"：飞行模式成了真开关
+
+* **`飞行模式` 现在真的切无线电**：`WlanSetInterface(..., wlan_intf_opcode_radio_state, ...)`，
+  瓦片点亮 = 无线电已关，旁边的 Wi-Fi 瓦片同时变成 `已关闭`。状态是**读回来**的，不是本地翻的。
+* 这块踩了一个坑值得记：**同一次调用有三种结构形态**。传"完整 `WLAN_RADIO_STATE`"和传
+  "查询返回的那个长度"都是 **ERROR_INVALID_PARAMETER (87)**，只有传**单个 `WLAN_PHY_RADIO_STATE`**
+  才成功。三种都试、三种都记日志，因为"驱动作废"和"参数没给对"从瓦片上看一模一样。
+* **蓝牙没有公开的切换接口**（只有需要包身份 + `radios` 能力声明的 WinRT Radios API），所以
+  `飞行模式` 只切 Wi-Fi，日志里明写 `Bluetooth is NOT switched -- no documented interface`。
+  宁可在日志里说清楚，也不假装整个无线电组都关了。
+* 其余瓦片的状态照旧**能读就读、读不到就不猜**：Wi-Fi（可用/未连接/已关闭）、蓝牙（未连接/关）、
+  节能模式（开/关）、辅助功能/实时字幕/夜间模式/移动热点/就近共享（无公开开关，保留"打开对应页面"）。
+
+#### 五、顺带抓到一个把日志吞掉的 bug（本仓库第 6.7 之后最值得记的一个）
+
+改完瓦片后点它，"瓦片没反应"——日志里**什么都没有**。真因在 `Log.cpp`：
+`LogAndPrint(const char*)` 这个窄重载是把窄字符串**逐字节加宽**的，而我把中文标签用 `%ls` 传了进去
+→ 无效转换 → CRT 把**整行清空**，只留下换行。于是"日志里一行空白"= 看起来什么都没发生。
+**瓦片的代码其实一直在正常工作**（自动收起、无线电切换都在跑），只是它自己的那一行被吞了。
+
+规则已写进 `Log.h`：**凡是有参数可能是中文/设备名/窗口标题，必须用宽重载 `L"..."`**。
+本轮把瓦片、设备名、混音器行等 5 处调用点都改成宽重载（改完日志里能正常看到 `扬声器`、
+`飞行模式`、`投影` 这些中文了）。
+
+**同一个坑的另一半（已知，未改）**：窄重载也会把 **UTF-8 的 `%s`** 打成乱码
+（`music: [QQMusic.exe] çå¡ - å¤±ç ç`）。这是老问题、本轮没动，因为修它要逐个调用点做
+UTF-8→宽字符转换（音乐/歌词/通知那几行）。知道它不是"编码坏了"，是**同一个重载的同一个毛病**。
+
+#### 六、验证与证据
+
+* 自检 **614 项全绿**（几何未变，本轮改的是交互与状态）。
+* `scripts/click-test.ps1` 扩成四个场景：`controls`（喇叭/滑条/设备按钮/返回）、`drag`（按下—移动—松开）、
+  `wheel`（滚轮）、`tile`（瓦片），并新增 `-RestorePercent`（测完把系统音量恢复原值）。
+* 新诊断：`--volume-set <0-100>`（直接设系统音量并读回，因为**合成鼠标输入在会话锁屏/休眠时会被丢弃**，
+  这条命令是本轮用来把用户音量恢复成 18% 的手段）；`ISLANDBAR_PANEL_LOCK`（拍照时锁住面板）。
+* 点一下瓦片就能看到的中间证据：`click: tile 2 '飞行模式' action=5 chevron=0`、
+  `wifi radio: WlanSetInterface single=0 full=87 counted=87`、
+  `tile 2 '飞行模式' -> Wi-Fi radio off (result 1, error 0; ...)`，再点一次变成 `on`（说明状态真的读回来了）。
+
+#### 七、还没做
+
+* 蓝牙开关、夜间模式、实时字幕：**Windows 没给普通桌面进程公开的写入接口**（WinRT Radios 需要包身份，
+  夜间模式只有未公开的注册表 blob，实时字幕要靠 AppX 激活）。它们现在提供真实状态 + 打开对应页面，
+  不假装能切。
+* 合成器滑条的手柄位置仍来自 1 秒一次的会话采样（设备主音量那行是实时的）；拖动本身是实时的。
+
+### 7.98 **和原生截图对齐：瓦片补齐 + 音量行 + "声音输出"子页（第三步，做完了）** ✅
+
+用户报告：「**你先做的 不全和我给你图片上的功能不一致**」。7.96/7.97 只是"照着截图挑了几处改"，
+这一轮把四张截图**逐项对齐**，并把上一轮明确列为"第三步"的子页面真正做出来。
+
+#### 一、审计出来的四处不一致（对照截图逐张看）
+
+| 截图上的东西 | 我们当时的样子 | 现在 |
+|---|---|---|
+| **箭头只出现在"会展开列表"的瓦片上**（Wi-Fi / 蓝牙 / 辅助功能 / 有线显示器 / 投影） | 画在**所有有动作**的瓦片上 | `SystemPanelTile::chevron` 变成**逐瓦片的数据**，不再从 `action` 推 |
+| **第二页是 5 个瓦片**（夜间模式 / 移动热点 / 就近共享 / **有线显示器** / **投影**） | 只有 3 个 | 补齐 5 个，`投影` 发 **Win+P**（原生就是这条路），`有线显示器` 开 `ms-settings:display` |
+| **音量行右边有"输出设备"按钮（图标 + `>`）** | 那块是空的 | 手绘该标记（一条带旋钮的横线 + 喇叭 + 两道弧），点击进子页面 |
+| **拖动音量时显示百分比** | 没有 | 拖动 / 悬停 / 改变后 1.2 秒内显示数字 |
+
+#### 二、字形码位全部**画出来验证**（本仓库的老规矩）
+
+查了 `Segoe Fluent Icons`：`E8B2` 是**胶片**不是热点（7.97 猜错了），`E83E` 是电池不是叶子。
+现在：热点 `E704`、节能模式 `E8BE`（叶子）、投影 `E7C4`（两块叠屏）、有线显示器 `E7F4`（显示器）、
+耳机 `E7F6`。`投影`/`有线显示器`/`移动热点`/`节能模式` 四个都对着截图比过。
+
+#### 三、"声音输出"子页面（截图 3 与截图 4 **是同一页**的上下两半）
+
+一开始把它当两页设计 —— 两张图的**页头和页脚完全相同**，是同一页滚动到不同位置。所以做成
+**一页可滚动列表**（页头/页脚固定，中间滚动 + 右侧滚动条），和原生一致：`SoundPageFor()` 一处出全部几何，
+`SoundPageHitFor()` 一份命中判定，`DrawSoundPage()` 一次画完。
+
+* **输出设备**：`IMMDeviceEnumerator` 真实枚举（本机实测列出 Realtek Digital Output / LG ULTRAGEAR /
+  扬声器），当前设备**加左侧高亮条 + 行底色**（和原生一样），图标按 `EndpointFormFactor` 选。
+* **切换默认设备**：未公开的 `IPolicyConfig`（`{294935CE-…}`，CLSID `{870af99c-…}`），手写接口声明
+  （vtable 顺序错会调用到别的函数，所以整块写在一起并注明），三个 role 一起设。**失败就沉默降级**：
+  只在日志里写 HRESULT，页面上不假装成功。
+* **空间音效**：`关` / `用于耳机的 Windows Sonic` 两行照画、`关` 带高亮条；**没有公开 API 可读可写**，
+  点击只在日志里说明，绝不假装切了。
+* **音量合成器**：`IAudioSessionManager2` → 每会话 `ISimpleAudioVolume`，**真的能读能写**（这是四张图里
+  唯一能完全做真的一段）。第一行是**设备本身**（走 `AudioVolume` 的 master），后面每行一个应用，
+  图标用进程 exe 的图标（`SHGetFileInfo` + PNG，和音乐卡同一条路），按 pid 缓存、1 秒轮询、
+  只在 revision 变化时重新解码上传位图。
+* 交互：单击设值 + **按住拖动**（面板音量条和合成器滑块都是），底部 `更多音量设置` 和合成器齿轮开
+  `ms-settings:sound`。
+
+#### 四、新文件与线程
+
+`src/SoundOutput.h/.cpp`：设备 + 会话 + 图标的**工作线程**（枚举会碰音频服务和磁盘，和 `AudioVolume`
+同一个理由：不能让帧循环卡）。帧循环只 `Snapshot()` 一份快照来画。**页面第一次打开时才启动**它。
+
+#### 五、点测（这一轮最有价值的部分）
+
+几何断言只能证明"画在哪"，证明不了"按那儿真的会动"。新增 `scripts/click-test.ps1`：保存指针位置 →
+依次真按 **喇叭(静音) / 喇叭(取消静音) / 滑条 60% / 输出设备按钮 / 返回箭头** → 恢复指针。
+日志逐条对上：
+
+```
+click at screen (877,243) → volume: muted
+click at screen (877,243) → volume: unmuted
+click at screen (1145,243) → volume: set to 60% (drag begins) / drag ended at 60%
+click at screen (1339,243) → sound page: open  +  sound page: audio enumeration ready
+click at screen (880,74)  → sound page: back to the panel
+```
+
+测完把系统音量**恢复到原来的 40%**（`-RestorePercent 40`）。
+
+#### 六、点测当场抓到一个真 bug（7.82 时代留下的）
+
+**第一次点击被"吃掉"**：指针进入栏的那一帧，边沿处理分支无条件 `SetState(Hover)`（它只考虑
+"有通知 / 没有通知"），而 `SystemPanelHitAtScreen` 要求 `motion_.Target() == Expanded` → 那一瞬间
+**所有面板命中判定都返回 None**，于是点击被当成"点外面"把面板收了。表现就是"第一下点不动，
+第二下才行"。修法：面板（或它的子页）开着时，边沿分支不再抢状态。这条以前没人报过，因为
+真人用的时候指针一般已经在栏上了。
+
+#### 七、验证与证据
+
+自检 593 → **614** 项全绿（新增 21 条：音量行的滑条/喇叭/设备按钮命中与分档取值、子页每行都在视口内、
+滚动上限与钳位、末尾行滚得到、返回/脚注/空间音效/滑块命中、滚动条与滑块在卡片内、**滚出视口的行不可点**）。
+截图：`captures/panel-p1-final.png`（第一页 + 音量行 + 页码列）、`captures/panel-p2-final.png`（第二页 5 个瓦片）、
+`captures/sound-top.png`（输出设备 + 空间音效）、`captures/sound-mid.png`（空间音效到合成器）、
+`captures/sound-mixer2.png`（合成器真实应用图标 + 滑条）。
+新诊断：`ISLANDBAR_SOUND_PAGE`、`ISLANDBAR_SOUND_SCROLL`、`ISLANDBAR_PANEL_LOCK`（拍照时锁住面板，
+免得机器上别人的点击把卡片收回。**它只锁"面板开着"，不锁子页**，否则子页自己的按钮没法点）。
+脚本：`scripts/shot-panel.ps1`（一张静止截图）、`scripts/click-test.ps1`（真人级点测）。
+
+#### 八、还没做 / 已知取舍
+
+* **卡片高度 250 DIP**：原生那页有 520 px 高，所以我们这页装不下 —— 用**滚动**解决（原生同样是同一页
+  滚动，滚动条也画了）。不改成"打开子页就变高"，因为卡片高度是运动/区域/锚点的公共输入。
+* 截图上页头右侧那个 `⊞ Ctrl V` 小挂件**没画**：它不是控件，是原生页面自己的提示位。
+* 切换默认设备**没有真人按过**（会改用户的音频输出，没敢动）。代码路径、日志、降级都在，
+  但按 FEATURES 的规矩它只能是 **B**。
+
+### 7.97 **向原生快速设置看齐（第二步：翻页 + 齿轮动作）** ✅
+
+用户给了四张原生快速设置截图并说"全做了吧"。第一步（7.96）做的是**瓦片样式**，这一轮做**翻页**和
+**齿轮**；子页面（音量合成器 / 声音输出）是下一轮。
+
+#### 翻页
+
+* **页码列**：卡片右侧留出 20 DIP 的窄列 —— 中间是两个**页点**（当前页更亮），上面一个**上箭头**、
+  下面一个**下箭头**（`\uE70E` / `\uE70D`），栅格宽度相应收窄。位置、绘制、命中判定仍然出自
+  `SystemPanelFor` 一处。
+* **第二页**：`BuildSystemPanel` 现在构建**整组**瓦片（`kMaxSystemPanelTiles` = 18 的上限）再按页切出
+  当前页（每页 6 个），所以"页"是同一组数据上的窗口，不是两套数据。第二页放
+  `夜间模式`（`E708`）/ `移动热点`（`E8B2`）/ `就近共享`（`E72D`），三个都只做"打开对应设置页"，
+  因为这三项的状态在本进程里**读不到** —— 猜一个比不写更糟。
+* 面板每次打开都回到第一页；点上下箭头循环翻页，日志记 `system panel: page N of M`。
+
+#### 命中判定收成一处
+
+新增 `SystemPanelTarget` / `SystemPanelHit` / `SystemPanelHitFor(...)`：**瓦片、翻页箭头、齿轮**共用
+一个命中函数；窗口只暴露一个 `SystemPanelHitAtScreen()`。`SystemTileAt` 保留为它的薄封装 ——
+一个几何量一个实现，这是本仓库反复付过学费的那条规矩。
+
+#### 齿轮终于有动作了
+
+它从面板做出来那天起就画着，但**既没有命中判定也没有动作**。现在它打开 `ms-settings:sound`
+（这个面板自己的内容所在），并把 `ShellExecute` 的返回值写进日志。
+
+#### 两个自己踩的坑，都记下来
+
+1. **页点画在了卡片底色之前** —— 第一次截图里页点和箭头**一个都看不见**：绘制顺序错了，底色把它们盖了。
+   （同一个文件里已经有一段注释在讲"decks 必须最后画"，我又犯了一次。）
+2. **一次 patch 只删了 `if` 头行、留下函数体** —— 于是 `layout` 未声明，编译报 6 个错。教训很直白：
+   删代码块要连块一起删。
+
+#### 验证
+
+自检 588 → **593** 项全绿，新增 5 条：翻页会预留窄列且栅格收窄 / 页码列在卡片内 / 上箭头命中上箭头 /
+下箭头命中下箭头 / 齿轮命中齿轮。证据：`docs/panel-page-1.png`（页码列）、`docs/panel-page-2.png`
+（第二页三个新瓦片，图标是**画出来看过的** —— 这是本仓库验证字形码位的做法，`E708` 是对的）。
+新诊断 `ISLANDBAR_PANEL_PAGE=0|1`（不动指针就能拍第二页）。
+
+#### 还没做（第三步，已经明确到可以照着做）
+
+* **子页面外壳**：左上返回箭头 + 标题 + 底部"更多音量设置"脚注。
+* **音量合成器**（原生第四张图）：`IAudioSessionManager2` 能列出各应用会话并**真正设置它们的音量**，
+  是四张图里**唯一能完全做真**的子页面。交互沿用现有的"点一下按位置设值"（面板/音乐卡都是这样，
+  没有拖拽）。
+* **声音输出**（原生第三张图）：设备**列表**用 `IMMDeviceEnumerator` 可以；**切换默认设备**只有
+  未公开的 `IPolicyConfig`（`{294935CE-F637-4E7C-A41B-AB255460B862}`）一条路 —— 用户已授权
+  （"全做了吧"），实现时会**在接口缺失时静默降级**（列表照画、不假装切换成功）。
+* `空间音效`：没有公开的可写 API，不做（或只读显示）。
+
+### 7.96 **系统面板向 Win11 原生快速设置看齐（第一步：瓦片样式）** ✅
+
+用户给了四张 Win11 原生快速设置的截图，要求"根据这些改造系统按钮点击出来的弹窗卡片里的功能"。
+分两步做，这一轮是**瓦片样式**（截图里最明显的差别）：
+
+#### 原生的瓦片长什么样，我们原来长什么样
+
+| | 原生 | 我们（改前） |
+|---|---|---|
+| 方框 | 图标**在左、垂直居中** +（会打开子面板的）**右侧箭头** | 图标在左上角，**名字写在框内下沿** |
+| 说明 | 在方框**外面、正下方居中**：有状态就写状态（`可用`/`未连接`），没有就写名字（`辅助功能`） | 没有说明这一层 |
+
+#### 改法
+
+* 一个"槽位" = **框 + 框下的说明**（`captionHeight` 18、`captionGap` 5、框 = 槽位减去这两项），
+  栅格仍然平分可用高度 —— 所以上一轮的"填满、无空带"性质保留（自检仍量到 `band between is 10.0 DIP`）。
+* 图标移到框的**左侧垂直居中**；`action != None` 的瓦片在框**右侧画一个箭头**（`\uE76C`）。
+* 说明 **水平+垂直居中**，内容是 `stateText`（新字段）优先，否则是 `label`。
+* 状态文案与无状态瓦片的名字按用户系统的语言写成中文（**用 `\uXXXX` 转义**，遵守仓库规则）：
+  `未连接`/`已连接`/`无 Wi-Fi`（Wi-Fi）、`开`/`关`（蓝牙、节能）、`飞行模式`、`辅助功能`、`实时字幕`。
+* 顺手修掉一个**悬垂指针**：输入法瓦片与新增的电量百分比把指针指向**块内局部数组**（同一类问题，
+  项目里已有规矩"文字要复制进帧自己的缓冲"）→ 改用 `static` 缓冲并注明原因。
+* 顺手删掉 `OuterCardRevealDip` 里的除零守卫：两个端点是编译期常量、相差 214，编译器自己报了
+  **C4127（条件表达式是常量）** —— 按项目规矩**删掉而不是压掉**。
+
+自检 587 → **588** 项全绿（新增"说明在框下方""图标在框左侧而不是角上"；两条旧断言按新契约更新为
+用说明框的下沿来量"填满到滑块"）。证据：`docs/panel-native-style.png`。
+
+#### 还没做（第二步，需要你点头）
+
+1. **第二页 + 页码点 + 上下翻页箭头**（原生第一张图右上角那组），第二页放
+   `夜间模式 / 移动热点 / 就近共享 / 投影` 这类"打开某个设置页"的瓦片。
+2. **子页面**（原生第三、四张图）：
+   * **音量合成器**：**可以真正做**（`IAudioSessionManager2` 能列出各应用的会话并**设置它们的音量**）。
+   * **声音输出**：能**列出**输出设备（`IMMDeviceEnumerator`），但**切换默认设备**只有未公开的
+     `IPolicyConfig` 一条路 —— 要不要用这个 hack 需要你拍板。
+   * `空间音效`：没有可写 API，只能只读或不做。
+3. **左上角的返回箭头 + 标题 + "更多音量设置"脚注**（子页面的外壳）。
+4. 齿轮按钮目前**还是没有动作**（画了但没接命中）—— 可以顺手接成打开声音设置。
+
+### 7.95 **系统面板美化：瓦片分满可用高度，名字锚到瓦片底部** ✅
+
+用户原话（附面板截图）：
+
+> **今天在做最后一个把这个美化美化就行**
+
+#### 看到的问题
+
+* 瓦片高度是**写死的 46 DIP**，而卡片固定 250 DIP —— 网格到滑块之间因此有 **56 DIP 的空白**
+  （用户截图里那一大片黑就是它）。面板看起来像"控件做了一半"。
+* 名字紧跟在图标下方，于是高瓦片的**下半部分空着**，像漏画了东西。
+
+#### 改动（四处，都是这一个函数/调用点）
+
+| 项 | 前 | 后 |
+|---|---|---|
+| 瓦片高度 | 固定 46（只有放不下才缩） | **平分可用高度**：`(available - gaps) / rows` = **73 DIP**，上限 76（`kSystemTileMaxHeightDip`，防止很高的卡片把瓦片拉成大板子） |
+| 名字位置 | 图标下方 1 DIP 起、向下铺满 | **锚到瓦片底部**（下边距 8，框高 20）—— 图标左上、名字左下，就是 Windows 自己那样子 |
+| 瓦片圆角 | 6 | 8（瓦片变高后，方角与卡片本身的圆角不像一套） |
+| 瓦片图标 | 18 | 20（配合更高的瓦片；18 在 73 DIP 的瓦片里像个小点） |
+
+#### 自检新增两条（都是性质，不是数字）
+
+* **网格最后一行必须贴到滑块行**：实测 `last row ends at 174, slider starts at 184, the band between is
+  10.0 DIP` —— 10 就是设计里的间隔，而不是修前的 56。
+* **名字的框必须落在瓦片底部**（距底 4–12 DIP）。
+
+自检 585 → **587** 项全绿。证据：`docs/panel-beautified.png`（与用户给的截图对比：空白消失、瓦片撑满、
+名字贴底）。快照：`backups/…-panel-beautified`。
+
+### 7.94 **穿过"栏与卡片之间那 8 DIP"时空隙，卡片被收走了** ✅
+
+用户：「**还是我上面说的问题**」（鼠标移到卡片上就消失）。同一症状修了两次都没成 —— 值得写清楚为什么。
+
+#### 我的验证跳过了用户真实走过的那段路
+
+7.93 的验证是：指针"在胶囊上"→ 直接切到"在卡片上"。**而真实鼠标是走过去的**，中间要经过
+**胶囊底边（42）与卡片顶边（50）之间的 8 DIP**。在那个空隙里：
+
+* `pointerOnIsland` = false（不在胶囊上）
+* `pointerOnCard` = false（还没到卡片）—— 而且 `ShouldAcceptPointer` 也**不接受**这里：
+  卡片分支是从**卡片顶边** 50 开始算的
+
+于是那 8 DIP 里指针被判定为"**离开了栏**"，卡片被收走 —— 用户看到的正是"鼠标移到卡片上就消失"。
+**断言全绿、真机仍然失败**，因为断言走的是我假设的路径，不是用户走的路径。
+
+#### 修法：地盘的形状是"列"，不是"卡片"
+
+新增 `CardColumnFor(restingPill, cardLeftDip)`：**从栏的下沿**（不是卡片顶边）到卡片底边、宽度等于卡片
+的那一列 —— 空隙与卡片一起算。两处都用它：
+
+* `ShouldAcceptPointer` 的卡片分支（否则那 8 DIP 仍然"不属于栏"）
+* 窗口的"指针在卡片列里"（供策略判断是否该收起）
+
+#### 实测（两半都走一遍）
+
+| 3 秒后把指针放到 | 日志 |
+|---|---|
+| **空隙里**（栏下沿与卡片顶边之间） | `expanded` → 进入空隙 → **之后无状态变化，卡片留着** ✓ |
+| **卡片上** | `expanded` → **同样留着** ✓ |
+
+自检 581 → **585** 项全绿。新增 4 条（空隙算栏内 / 卡片顶算 / 卡片底算 / 卡片**旁边**不算）——
+其中"空隙算栏内"这条在修前**必然失败**，它就是这次的回归测试。新诊断：
+`ISLANDBAR_FORCE_CARD_MS` + `ISLANDBAR_FORCE_CARD_MODE=3|4`（卡片上 / 空隙里）。
+快照：`backups/…-card-column`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **测试必须走用户真实走的那条路** | 我从 A 直接跳到 B；用户是从 A **经过** A 与 B 之间的每一处走到 B | 凡是"指针从 X 移向 Y"的问题，用例要**逐点走** X→Y，特别是两段几何之间的缝 |
+| 两个相邻矩形的**缝隙**是最容易漏的一处 | 胶囊 42、卡片 50 —— 8 DIP 属于谁都没人管 | 定义"某东西的地盘"时，先问"从这里走到那里，路上的每一处都算数吗" |
+
+### 7.93 **指针移到卡片上，卡片不能消失** ✅
+
+用户原话：
+
+> **现在是鼠标只移到胶囊上才出卡片 ，但是 鼠标移到卡片上 就消失了 这样不对啊 卡片上的操作按钮就点不了了**
+
+#### 根因：我上一轮把谓词收紧过头，把"卡片自己"漏在了外面
+
+7.92 把条件从"在栏上"收紧成"在**岛上**"，但**卡片是挂在栏下方的** —— 指针从胶囊往卡片走的那几像素
+就"离开了岛"，于是卡片被收起，按钮自然点不到。**收紧谓词时只检查了"多出来的那些"，没有检查
+"原本合法的情形还在不在里面"。**
+
+#### 修法：领地的定义是"胶囊 ∪ 卡片"
+
+* 窗口新增 `pointerOnCard_`：用 `PlacedCardFor(...)`（7.86 那个"卡片被放在哪"的唯一实现）判断指针是否
+  落在**卡片矩形**内；诊断模式 `ISLANDBAR_FORCE_INSIDE=3` 表示"在卡片上"。
+* `PointerContext::pointerOnCard`，`ShouldGiveUpCard` 改成"在岛上**或**在卡片上就不收"。
+
+#### 实测（指针先在胶囊上，3 秒后移到卡片上）
+
+```
+diagnostic: the pointer is treated as on the pill
+state: hover (pointer inside=1, resting=collapsed)
+state: expanded (pointer inside=1, resting=music-strip)     ← 卡片打开
+diagnostic: the pointer is treated as ON the card at 3000 ms
+                                                             ← 之后再无状态变化：卡片留着 ✓
+```
+
+自检 580 → **581** 项全绿（新增"指针在卡片上，卡片保持自己"）。新诊断 `ISLANDBAR_FORCE_CARD_MS`。
+快照：`backups/…-card-keeps-itself`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **收紧谓词时要检查"还剩什么"** | 从"在栏上"收到"在岛上"，漏掉了卡片自己 | 改一个谓词的范围时，列一遍**它原来覆盖的每一类情形**，逐条确认还在里面 —— 否则就会像这次：修好一个、弄坏一个，用户得再报一次 |
+
+### 7.92 **只有指针进入胶囊才显示卡片 —— "在栏上"和"在岛上"是两个问题** ✅
+
+用户原话（截图把**图标行右侧的空白处**圈出来）：
+
+> **鼠标放在红框的位置 音乐卡片也会弹出来 ，应该是只有鼠标移入灵动岛 才显示卡片**
+
+#### 根因：开卡的条件问的是"在栏上"，而栏上的一切都接受指针
+
+`ShouldPromoteToCard` 的条件是 `pointerInside` —— 而 `ShouldAcceptPointer` 把**整条栏**都算作"在栏上"：
+图标行、左侧组的两个按钮、以及**图标行右侧的空白**（7.85 为了让撑开按钮的标题不被裁掉，把区域放宽到
+整行最宽处）。于是"在栏上"≡"在岛上"这个等式不成立，三个非岛区域各自报过一次 bug：图标（7.90）、
+空白处（这一次）。
+
+#### 修法：把谓词收紧到它本来应该描述的东西
+
+新增 `PointerContext::pointerOnIsland`（窗口计算：指针是否落在**胶囊**的矩形内），于是：
+
+* **开卡**：`pointerInside && pointerOnIsland` ✓ —— 只有胶囊才算"移入灵动岛" ✓
+* **收卡**：`pointerInside && !pointerOnIsland` ✓ —— 在栏上但不在岛上就收起
+
+一条判断同时覆盖了图标、左侧按钮、右侧空白 —— **替换掉** 7.90/7.91 里逐个列举的那几条（它们现在都是
+它的特例，留着就是死代码）。通知仍不依赖指针（消息不能被鼠标位置藏掉），面板仍由自己的开关握着卡片。
+
+顺带把五个参数的旧 `NextShape` 形式里的 `pointerOnIsland` 设为 `pointerInside`：那个形式没有图标行也
+没有左侧组，"指针在内"只可能意味着"在岛上"。它是**先红了 5 条**才让我注意到这个区别是新的 ——
+测试表如实反映了旧契约。
+
+#### 实测（`ISLANDBAR_FORCE_INSIDE` 两种模式，音乐都在播放）
+
+| 模式 | 日志 |
+|---|---|
+| `1` 指针在**胶囊**上 | `state: expanded (resting=music-strip)` —— 卡片打开 ✓ |
+| `2` 指针在**栏上、不在岛上**（红框那处） | `state: hover`，之后**再无变化** —— **卡片不开** ✓ |
+
+自检 579 → **580** 项全绿。快照：`backups/…-card-only-on-island`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个几何谓词的范围要恰好等于它描述的东西** | `pointerInside` 说的是"在栏上"，卡片要的是"在岛上"；差集里的每一块都报过一次 bug | 当用户说"**只有**做 X 才应该 Y"时，检查你用的谓词是不是**恰好**是 X —— 更宽的那个会以"每次只差一小块"的形式反复回来 |
+| 谓词收紧后，逐个列举的判断该删 | 图标、左侧按钮的守卫都成了新谓词的子集 | 收紧一个谓词时，顺手删掉它已经覆盖的特例判断，否则下次又多一条要同步的 |
+
+### 7.91 **指针离开胶囊就收起卡片（图标 / 左侧按钮）** ✅
+
+用户原话：
+
+> **移到图标上就收起，还有鼠标移到左侧的也收起来**
+
+#### 规则
+
+新增 `ShouldGiveUpCard`：**卡片还开着**（形状 = 展开态）时，只要指针落在**不是胶囊**的两处 ——
+应用图标（那是在问"这个窗口"）或左侧组的按钮（开始 / 面板开关，它们是各自的控件）—— 就把卡片交给
+休息态。**只有卡片会被收起**：休息态不受影响（"指针在图标上"对休息态早就由 `ShouldPromoteToTaskbar`
+处理，在这里再动它会把它从刚请求的悬停态里拽出来）。
+
+`PointerContext` 增加 `pointerOnDeck`，由窗口给出（只有它知道那两个按钮在哪：
+`SystemButtonHovered() || StartHovered()`）。**两个显式请求仍然优先**：通知不能被鼠标位置藏掉，
+面板是"故意打开的"。
+
+#### 我先量出了一个抖动，再修的
+
+第一版只加了"收起"这一条，于是和"开卡"那条打架：
+
+```
+[03:06:20.550] state: expanded
+[03:06:20.914] state: music-strip     ← 收起
+[03:06:21.156] state: expanded        ← 又开
+[03:06:21.520] state: music-strip
+[03:06:21.762] state: expanded
+```
+
+**每秒六次**。因为 `ShouldPromoteToCard` 只知道"图标在问别的"，不知道左侧按钮也是。修法是把同一个
+判断加到两条规则上（图标 + 左侧按钮，两处对称），并让 `ShouldPromoteToTaskbar` 也不为左侧按钮
+切到悬停态（那样会把歌词换成时钟）。
+
+#### 实测（左侧悬停用"第 N 毫秒开始"的诊断，才测得到这个过渡）
+
+| 时序 | 日志 |
+|---|---|
+| 指针在胶囊上 | `hover` → `expanded (resting=music-strip)` —— 卡片打开 ✓ |
+| 3 秒后指针移到左侧按钮 | `expanded` → **`music-strip`**，**之后不再变化** ✓ 收起一次，稳定 ✓ |
+
+新增诊断 `ISLANDBAR_FORCE_DECK_MS`（按毫秒触发，因为要测的是**过渡**，启动时还没有卡片）。
+自检 572 → **579** 项全绿（新增：图标上收起 / 左侧按钮上收起 / 胶囊上保持 / 通知与面板仍然优先 /
+左侧按钮与图标都不再触发任何提升）。快照：`backups/…-card-give-up-on-deck`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"收起"和"打开"必须共用同一个前提** | 一条问"指针在图标上吗"，另一条只问"指针在栏上吗" | 让两条规则用同一份"指针在问别的"的判断（图标 **和** 左侧按钮），否则会抖动 |
+| **抖动可能完全看不见** | 两种状态的**形状一样**（都是胶囊），截图看不出任何差别 | 状态抖动要看**日志的状态行**：`expanded/music-strip` 交替出现，一秒六次 |
+
+### 7.90 **指针在图标上不该弹音乐卡 —— 少了一个"别在图标上"的判断** ✅
+
+用户原话（截图把胶囊圈出来）：
+
+> **应该是鼠标移到这个区域 才显示出音乐卡片的 而不是移到图标也有**
+
+#### 根因：7.87 给"播放时悬停开卡"加的规则漏了图标判断
+
+`ShouldPromoteToCard` 只检查了 `pointerInside`，没有排除"指针在应用图标上"：
+
+```cpp
+if (!c.pointerInside) return false;          // ← 就这些，图标算"在栏上"
+...  return c.resting == IslandState::MusicStrip;   // 播放中 → 开卡
+```
+
+于是**停在图标上**（那是在问"这个窗口"）也会把媒体卡打开 —— 与图标自己的行为互相打架：
+图标本该只放大自己、岛的形状不变。而 `ShouldPromoteToTaskbar` 里一直有这个判断
+（`if (PointerIsOnIcon(c)) return false;`），这一处没有，只因为这条分支以前只对通知开放
+（通知**优先于**图标行，消息不能被鼠标位置藏掉）。
+
+#### 修法
+
+```cpp
+if (PointerIsOnIcon(c) && !c.notificationActive) return false;
+```
+
+通知仍优先（消息来了，即使指针停在图标上也必须显示），其余情况"指针在图标上"一律不开卡。
+
+#### 实测（同一份 exe，两个用例，指针由诊断强制）
+
+| 指针位置 | 日志结果 |
+|---|---|
+| 在**图标**上（`ISLANDBAR_HOVER_ICON=2`） | `state: hover` —— 音乐**正在播放**，但状态一直没变，卡片没开 ✓ |
+| 在**胶囊**上（无强制图标） | `state: expanded (resting=music-strip)` —— 卡片打开 ✓ |
+
+自检新增 3 条：指针在图标上不开卡 / 同一个指针离开图标就开 / 通知仍能在图标上开卡。
+自检 569 → **572** 项全绿。快照：`backups/…-icon-guard`。
+
+#### 一个留给用户决定的细节
+
+卡片**开着**的时候把指针移到图标上：按现在的规则它**不会收起来**（指针仍在栏上，而且
+"指针还在栏上就保持"是有意的）。如果希望"移到图标上就收起"，那是另一条规则，需要你确认。
+
+### 7.89 **卡片上的来源名印的是 exe 名 —— 显示名早就解析好了，只是没被读** ✅
+
+用户确认要修。根因是一行：
+
+```cpp
+text.app = frame.music->app;   // "QQMusic.exe" —— SMTC 的 app id
+```
+
+而 `MusicInfo::appName`（把 exe 的版本信息里 `ProductName` 取出来、转成 UTF-8 的那个字段）**早就填好了**
+—— 同一个 exe 的日志明明打印着 `icon: app='QQMusic.exe' name='QQ音乐'`。所以这是"算好了没人读"，
+不是"没实现"。
+
+**修法**：`text.app = frame.music->appName[0] ? frame.music->appName : frame.music->app;`
+（解析失败才回落到 exe 名）。**实测**（真的有播放会话 + 强制指针在栏上）：卡片左上角显示
+`QQ音乐` ✓，见 `docs/media-card-app-name.png`。
+
+自检 **569 项全绿**（这条是"人眼确认"类，自检覆盖不到，所以证据是截图）。
+FEATURES 里该项从 **D** 改回 **A**。
+
+#### 顺带的两点观察（未改）
+
+* 卡片背景那层"模糊封面"在亮色封面上会出现明显**色带**（它其实是把封面缩放后拉伸，不是真模糊）。
+  不影响可读性，但不好看 —— 想做的话是一次真正的降采样 + 模糊。
+* 卡的封面缩略图与背景取自同一张图，尺寸小时会显得糊。同上。
+
+### 7.88 **音乐卡挂错了地方 —— 卡片挂在哪，取决于它是哪张卡** ✅
+
+用户原话（截图里红框把整张音乐卡圈出来，卡片明显在**灵动岛左侧、系统按钮下面**）：
+
+> **这个应该在灵动岛下面 而不是在这个下面**
+
+#### 根因：7.76 只讨论了"面板"，但改的是全部三张卡
+
+`frame.cardLeftDip` 只有一处计算，用的是**系统按钮的中心**：
+
+```cpp
+const island::RectF systemButton = island::SystemButtonFor(anchorIsland);
+const float buttonCentre = (systemButton.left + systemButton.right) * 0.5f;
+const float anchorLeft  = buttonCentre - kExpandedWidthDip * 0.5f;   // ← 所有卡片都用这个
+```
+
+7.76 那一轮的问题是"面板该居中于按钮还是贴近按钮"，用户选了居中于按钮 —— 那是**面板**的正确位置
+（按下哪个按钮，面板就从哪个按钮下面出来）。但音乐卡与通知卡**不是**从按钮打开的：音乐卡是胶囊自己的
+详情视图，通知是"关于栏本身"的消息，它们原本**居中挂在胶囊下面**（docs/ 里那个阶段的截图正是如此）。
+三张卡共用一个位置，于是跟着面板一起搬到了按钮下面。
+
+#### 修法：按归属选锚点
+
+```cpp
+const float islandCentre = (anchorIsland.rect.left + anchorIsland.rect.right) * 0.5f;
+const float anchorCentre = (cardOwner == island::CardOwner::SystemPanel) ? buttonCentre
+                                                                        : islandCentre;
+```
+
+一处改动同时管住**绘制 / 窗口区域 / 命中判定**三件事，因为它们本来就都读 `cardLeftDip`
+（7.86 把命中判定改成用 `PlacedCardFor(cardLeftDip)` 之后，三者的口径已经统一）。
+
+自检把两个位置都量了出来：
+
+```
+island centre 1280 -> card x 1020..1540      ← 居中对齐 ✓
+button centre 1113 -> card x 853..1373       ← 面板仍在按钮下 ✓
+```
+
+截图：`docs/media-card-under-island.png`（卡片居中于胶囊之下；封面、曲名 `第二颗子弹`、艺人、
+`00:29 / 02:36`、进度条、三个控制键都完整）。
+
+自检 567 → **569** 项全绿。快照：`backups/…-media-card-under-island`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一次"哪个位置对"的讨论被应用到了三张卡** | 用户回答的是面板的问题，代码里是"所有卡片" | 一个共用的几何量被**多类东西**读时，先问"它们真的共用同一个答案吗"，再改 |
+| 顺带：这个 bug 让 7.86 的命中判定修复显得更值 | 命中判定原来按"居中"算，而卡片被搬到按钮下 → 167 DIP 的错位 | 位置和命中判定必须**同源**；这次的改动只改了一个值，三处自动跟上 |
+
+### 7.87 **悬停不再弹出音乐卡 —— 把"悬停 = 详情"这条路恢复了** ✅
+
+用户原话（附截图，红框圈着胶囊）：
+
+> **还是显示的是歌曲 而且现在鼠标驶入没有 详细音乐信息卡片了**
+
+两句是同一件事：胶囊里仍然只有那一行歌词/曲名，而**指针移到栏上不再出详情卡**。
+
+#### 根因：悬停→卡片这条路被关闭了，而 7.82 又拿掉了最后一条"意外通道"
+
+`StatePolicy.h` 里写着当时的决定：
+
+> Only for a NOTIFICATION now. The card used to be what a hover produced, ... Hover is the taskbar --
+> the list of open windows -- so a hover asks for that instead, and the card is reserved for a message.
+
+于是悬停只会到 `Hover`（那**已经**是图标行所在的胶囊），**不会**到卡片。而在此之前，音乐卡还剩下一条
+**偶然**的路：通知被点掉/过期时，若指针还在栏上，收起的规则一条都不匹配 → 状态**留在** `Expanded` →
+卡片就变成了音乐卡。**7.82 修面板时把那条"没有规则匹配"的缝补上了**（`Expanded` + 指针在内 → `Hover`），
+于是音乐卡**彻底不可达** —— 用户报告的正是这个。
+
+而且 README 从第一阶段就承诺过另一种行为：
+
+> Hover -> Expanded: art, title, artist, and previous / play-pause / next
+
+#### 修法：把悬停→详情这条路**按 README 的承诺**接回来
+
+* `ShouldPromoteToCard`：**正在播放**时，指针在栏上也打开卡片。判据用的是 `resting == MusicStrip`
+  —— 主循环里"播放中才把休息态设成歌词条"（暂停的会话休息态是普通胶囊），所以**暂停不会展开**，
+  正好避开文档里担心过的"暂停一下就弹卡"。而卡片就是胶囊的展开形态（与系统面板同一状态），
+  所以打开它**不增加任何几何**。
+* `ShouldPromoteToTaskbar`：给"正在播放"开一个例外 —— 卡片还开着时不要先收回再打开
+  （那会是一次可见的抖动）。
+
+#### 验证（指针在脚本里动不了，所以加了诊断）
+
+新增 `ISLANDBAR_FORCE_INSIDE=1`：把"指针在栏上"强制为真。配合你正在播放的 QQ 音乐：
+
+```
+diagnostic: the pointer is treated as ON the bar
+state: hover (pointer inside=1, resting=collapsed)
+music: [QQMusic.exe] 晚月moon - 月光落成河 (合唱版) (playing)
+state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
+```
+
+截图为证：`docs/media-card-on-hover.png` —— 模糊封面背景、`月光落成河 (合唱版)`、艺人行、
+`01:42 / 02:58` 与进度条、以及**三个控制键**（这三个键在 7.86 之前根本按不到）。
+
+自检：策略表里 4 条期望按新契约更新（"从歌词条进入指针"→ 卡片、"已在栏上且在播放"→ 卡片、
+"卡片失去理由但音乐在播"→ **不**收回）。
+
+#### 顺带看到的一个真问题（已记录，未改）
+
+卡片的来源名印的是 **`QQMusic.exe`**（进程名），而同一个 exe 的解析日志明明成功了
+(`icon: app='QQMusic.exe' name='QQ音乐'`)。FEATURES 里这一项原先是 B（"未用真人眼睛确认"），
+现在**用眼睛确认了：它显示的是 exe 名**，已改成 **D**。修它只需让卡片用已解析出的显示名。
+
+自检 **567 项全绿**。快照：`backups/…-hover-card-restored`。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **一个功能可以靠"规则没覆盖到"活着** | 音乐卡的旧通路是"没有规则匹配 → 状态留在 Expanded" | 修一条规则时要问：**有没有东西正靠这条缝活着**？（7.82 修面板时没问） |
+| **文档承诺与代码行为漂移** | README 一直写着"Hover → Expanded: 封面/曲名/艺人/控制" | 文档里的承诺是**需求**，不是历史描述；用户会按它期待 |

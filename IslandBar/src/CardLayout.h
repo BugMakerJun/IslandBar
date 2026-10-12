@@ -1,0 +1,1028 @@
+// =====================================================================
+//  CardLayout.h
+//  Where the interactive parts of the expanded card are.
+//
+//  This lives apart from both the window and the renderer because three different
+//  places need to agree on it exactly:
+//
+//    * the renderer draws the transport button,
+//    * WM_NCHITTEST decides whether a click lands on the card at all,
+//    * the frame loop decides whether a click was the transport button or
+//      somewhere else on the card.
+//
+//  If those disagree, the button is either unpaintable or unclickable, and the
+//  symptom looks like a rendering bug. One definition, one source of truth --
+//  the same rule that Geometry.h's rounded-rectangle test follows.
+// =====================================================================
+#pragma once
+
+#include "Geometry.h"
+
+namespace island {
+
+// --- the lower band of the card --------------------------------------
+//
+// The card's top half carries the clock and date. Everything below is content:
+// either a notification or the now-playing display. Both start at the same line so
+// the card does not appear to jump when one replaces the other.
+inline constexpr float kCardContentTopFraction    = 0.52f;
+inline constexpr float kCardContentBottomFraction = 0.94f;
+
+// Album art: a square at the left of the content band.
+inline constexpr float kArtworkSizeDip = 44.0f;
+inline constexpr float kArtworkInsetDip = 14.0f;
+
+// The transport buttons: three squares at the right of the content band, sized to
+// be comfortable click targets rather than to match the text.
+inline constexpr float kTransportButtonDip = 26.0f;
+inline constexpr float kTransportGapDip = 2.0f;
+
+// The progress bar, drawn as a hairline across the bottom of the content band.
+inline constexpr float kProgressBarHeightDip = 3.0f;
+
+// Window-local DIPs, derived from the pill's box.
+struct CardContentLayout {
+    RectF content;      // the whole lower band
+    RectF artwork;      // album art square (empty when there is no art)
+    RectF text;         // where title and secondary line go, right of the artwork
+    RectF previous;     // previous track
+    RectF playPause;    // play/pause
+    RectF next;         // next track
+    RectF progress;     // the progress bar
+};
+
+// Which control a point landed on.
+enum class CardControl {
+    None = 0,
+    Previous,
+    PlayPause,
+    Next,
+};
+
+// Which card the bar is showing. One card, four answers: nothing, the panel, a message, or what is playing.
+//
+// Declared HERE rather than in Renderer.h, where it used to live, because it is not the renderer's business
+// alone: the WINDOW needs it too (the cursor is decided there and has to know which card's controls are the
+// ones on screen -- see IslandWindow::SetCardOwner), and a window header that had to include the renderer to
+// name a card would be the wrong way round. This header is the one thing they all already share.
+enum class CardOwner {
+    None = 0,
+    SystemPanel,   // opened deliberately from the left deck
+    Notification,  // a message that arrived
+    Music,         // what is playing, shown once no message is in the way
+};
+
+inline CardContentLayout CardContentFor(const RoundedBox& cardBox) {
+    const float height = cardBox.rect.bottom - cardBox.rect.top;
+    const float top = cardBox.rect.top + height * kCardContentTopFraction;
+    const float bottom = cardBox.rect.top + height * kCardContentBottomFraction;
+
+    CardContentLayout layout;
+
+    // The progress bar is carved off the bottom first, so the artwork and the text
+    // are sized against what is left rather than overlapping it.
+    layout.progress.left = cardBox.rect.left + kArtworkInsetDip;
+    layout.progress.right = cardBox.rect.right - kArtworkInsetDip;
+    layout.progress.bottom = bottom;
+    layout.progress.top = bottom - kProgressBarHeightDip;
+
+    layout.content.left = cardBox.rect.left + kArtworkInsetDip;
+    layout.content.right = cardBox.rect.right - kArtworkInsetDip;
+    layout.content.top = top;
+    layout.content.bottom = layout.progress.top - 4.0f;
+
+    // Artwork on the left, square, aligned to the top of the band.
+    layout.artwork.left = layout.content.left;
+    layout.artwork.top = layout.content.top;
+    layout.artwork.right = layout.artwork.left + kArtworkSizeDip;
+    layout.artwork.bottom = layout.artwork.top + kArtworkSizeDip;
+
+    // Three buttons on the right, in reading order: previous, play/pause, next.
+    const float rowWidth = kTransportButtonDip * 3.0f + kTransportGapDip * 2.0f;
+    const float rowLeft = layout.content.right - rowWidth;
+    const float rowTop = layout.content.top +
+                         (kArtworkSizeDip - kTransportButtonDip) * 0.5f;
+    const float rowBottom = rowTop + kTransportButtonDip;
+
+    layout.previous.left = rowLeft;
+    layout.previous.right = rowLeft + kTransportButtonDip;
+    layout.playPause.left = layout.previous.right + kTransportGapDip;
+    layout.playPause.right = layout.playPause.left + kTransportButtonDip;
+    layout.next.left = layout.playPause.right + kTransportGapDip;
+    layout.next.right = layout.next.left + kTransportButtonDip;
+
+    layout.previous.top = rowTop;
+    layout.previous.bottom = rowBottom;
+    layout.playPause.top = rowTop;
+    layout.playPause.bottom = rowBottom;
+    layout.next.top = rowTop;
+    layout.next.bottom = rowBottom;
+
+    // Text fills what is between the artwork and the buttons.
+    layout.text.left = layout.artwork.right + 10.0f;
+    layout.text.right = layout.previous.left - 10.0f;
+    layout.text.top = layout.content.top;
+    layout.text.bottom = layout.content.bottom;
+
+    return layout;
+}
+
+// Which control, if any, a window-local DIP point lands on.
+inline CardControl ControlAt(const RoundedBox& cardBox, float x, float y) {
+    const CardContentLayout layout = CardContentFor(cardBox);
+    const auto inside = [x, y](const RectF& rect) {
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    };
+    if (inside(layout.previous)) return CardControl::Previous;
+    if (inside(layout.playPause)) return CardControl::PlayPause;
+    if (inside(layout.next)) return CardControl::Next;
+    return CardControl::None;
+}
+
+// True when a window-local DIP point is inside any transport button.
+inline bool HitsTransportButton(const RoundedBox& cardBox, float x, float y) {
+    return ControlAt(cardBox, x, y) != CardControl::None;
+}
+
+// --- the lyric strip -------------------------------------------------
+
+// Above this many DIPs of text the strip scrolls instead of centring.
+//
+// ONE predicate, used by both the renderer to decide how to place the line and by
+// the frame loop to decide whether to keep advancing the scroll. They used to work
+// it out separately, from slightly different numbers, which meant the renderer could
+// centre a line while the loop scrolled it -- the text would jump sideways for no
+// visible reason. A line that fits is centred and still; a longer one scrolls.
+inline bool LyricNeedsScroll(float textWidthDip, float stripWidthDip) {
+    return textWidthDip > stripWidthDip - 24.0f;
+}
+
+// How far inside each end of the strip a SCROLLING line fades out.
+//
+// A line too long for the strip scrolls, and the strip clips it to its own STADIUM shape -- so the
+// character leaving on the left is cut by a curve, mid-glyph, and the line reads as chopped rather than as
+// moving. Reported with a screenshot of exactly that ("歌词 长的话能不能会这样", the leading "na" sliced in
+// half at the island's left edge). The words still have to leave the strip; what changes is that they fade
+// over the last few DIP first, so the two ends read as a slide instead of a cut. Asked for in the iOS
+// vocabulary the rest of this bar is built in.
+//
+// Capped at a quarter of the strip per end, so a narrow strip still has a readable middle: two fades that
+// met would dim the whole line rather than its edges.
+inline float LyricEndFadeDip(float stripWidthDip) {
+    if (stripWidthDip <= 0.0f) return 0.0f;
+    constexpr float kWantedDip = 20.0f;
+    const float limit = stripWidthDip * 0.25f;
+    return kWantedDip < limit ? kWantedDip : limit;
+}
+
+// --- the music card --------------------------------------------------
+//
+// Laid out to match the Windows 11 media flyout, which is what the user asked for
+// and what the rest of the system already looks like:
+//
+//   +--------------------------------------------------+
+//   | [icon] QQ Music                          70% [v] |   app row
+//   |  +------+  涓滃ぇ琛?                                 |
+//   |  | art  |  寮犺秴娲?路 涓滃ぇ琛?                         |   art + title
+//   |  +------+                                         |
+//   |  01:33 [=========================] 05:40          |   times + progress
+//   |            [|<]     ( > )     >|                  |   controls
+//   +--------------------------------------------------+
+//
+// These are the dimensions the reference image measures out to, scaled to the card.
+
+// The card's own padding, used by both the layout and the background artwork so the
+// art lines up with the scrim it sits under.
+inline constexpr float kMusicCardPadDip = 16.0f;
+
+inline constexpr float kMusicAppRowHeightDip  = 22.0f;
+// Sized from the reference image's PROPORTIONS, not by eye.
+//
+// The reference card is 384 DIP wide and its cover is 111 DIP -- 29% of the width. The cover here
+// was 80 DIP against a 520 DIP card, which is 15%: half the reference's share, and the single
+// biggest reason the card was reported as looking unfinished. The cover is the card's largest
+// element and it was being drawn as a thumbnail.
+inline constexpr float kMusicArtworkSizeDip   = 96.0f;
+inline constexpr float kMusicGapAfterArtDip   = 18.0f;
+inline constexpr float kMusicTimeRowDip       = 16.0f;
+inline constexpr float kMusicProgressBarDip   = 4.0f;
+// The source icon, in the same proportion: the reference draws it at about 12% of the card width.
+inline constexpr float kMusicAppIconSizeDip   = 22.0f;
+// The controls' row and the click target are the SAME constant.
+//
+// They used to be separate (a 40 DIP row holding a 38 DIP target), which the layout
+// test caught: the buttons were taller than the size they advertise, so a click just
+// outside the drawn disc was still accepted.
+inline constexpr float kMusicControlSizeDip   = 38.0f;
+inline constexpr float kMusicControlGapDip    = 32.0f;
+
+// Where everything on the music card goes.
+//
+// The vertical order is the reference image's, and it is load-bearing: app row, then the
+// cover and text, then the time row with the progress bar, then the controls. An earlier
+// version put the time row alongside the cover, and the elapsed time ended up drawn
+// underneath the album art.
+//
+// THE CARD HAS NO VOLUME CONTROL. It used to: a speaker at the row's right-hand end that opened a
+// percentage and a 64 DIP bar, and three rectangles (`volumeIcon`, `volumeReadout`, `volumeBar`) plus
+// `MusicVolumeAt` / `VolumeFractionAt` / `VolumeFractionForDrag` to hit-test and drag it. The user asked for
+// the speaker to go ("把音乐卡片里右上角的图标去掉吧"), and the whole control went with it, because the speaker
+// was its only handle -- a bar that nothing can open is not a control, it is a dead hit region. Nothing was
+// lost: the level it moved was the DEVICE's master volume, which the system panel's own slider still owns,
+// and the 声音输出 page's mixer still moves a single application's volume (ISimpleAudioVolume) -- which is the
+// one place a player's own level can actually be reached from.
+struct MusicCardLayout {
+    RectF artBackground;   // the whole card, for the blurred artwork
+    RectF appRow;          // the source strip along the top: the application's icon and name
+    RectF appIcon;         // the source application's own icon
+    RectF appText;         // "QQ闊充箰"
+    float appIconSize = 0.0f;
+    RectF artwork;         // the album cover
+    RectF title;           // track title
+    RectF subtitle;        // artist 路 album
+    RectF elapsed;         // "01:33", left of the bar
+    RectF remaining;       // "05:40", right of the bar
+    RectF progress;        // the bar itself
+    RectF controls;        // the row of three buttons
+    RectF previous;
+    RectF playPause;
+    RectF next;
+};
+
+// Where the card goes horizontally.
+//
+// The card is NOT centred on the screen. It opens from the control that was pressed, the way a
+// flyout does -- pressing a button on the far left of the bar and getting a panel in the middle of
+// the screen reads as unrelated to the thing that was clicked.
+//
+// `anchorLeftDip` is the left edge of the control the user pressed, in window coordinates. The card
+// is placed so that edge lines up with the card's own left edge, then pushed back inside the window
+// if that would run it off the right side. A control far enough right that neither alignment fits
+// gets the card clamped to the right margin, which is the best available answer and still keeps the
+// whole card on screen.
+inline float CardLeftFor(float anchorLeftDip, float cardWidthDip, float windowWidthDip) {
+    constexpr float kMargin = 8.0f;
+
+    float left = anchorLeftDip;
+    if (left + cardWidthDip > windowWidthDip - kMargin) {
+        left = windowWidthDip - kMargin - cardWidthDip;
+    }
+    if (left < kMargin) left = kMargin;
+    return left;
+}
+
+// --- the system panel --------------------------------------------------------------
+//
+// What the row of system indicators summarises, opened out. Its structure follows the shell's own
+// quick-settings flyout, because that is the shape a user already knows for this content:
+//
+//     [ tile ] [ tile ] [ tile ]     2 rows of 3
+//     [ tile ] [ tile ] [ tile ]
+//     [ speaker  -----------o----- ]  the volume slider
+//     [                        (gear) ] the settings button
+//
+// The tiles have an ON and an OFF appearance rather than being a list of readings. A row that says
+// "Wi-Fi: not connected" tells the user something; a tile that is dark tells them the same thing AND
+// what pressing it will do.
+//
+// Like the music card, this is one CARD -- same state, same shape, same radius -- because it is the
+// same kind of thing: something that opens downward from the bar to show more than the bar has room
+// for.
+//
+// THE HEIGHT, because the window is a fixed 240 DIP and nothing may be clipped:
+//
+//     padding top                      14
+//     2 rows of 46 tiles + 8 gap       100
+//     gap                              10
+//     slider row                       22
+//     gap                               8
+//     settings row                     28
+//     padding bottom                   14
+//                                     ----
+//                                     196
+//
+// and the card starts at the pill's margin of 6, so it ends at 202 with 38 DIP to spare. The music
+// card uses the same 212 DIP height, since both are the same state and the outline must not jump
+// between them.
+inline constexpr float kSystemTileHeightDip = 46.0f;
+inline constexpr float kSystemTileGapDip = 8.0f;
+
+// The tallest a tile is allowed to become when the card has room to spare.
+//
+// The tiles SHARE the space that is left rather than taking their designed height and leaving the rest empty
+// -- see the grid in SystemPanelFor -- and this keeps a very tall card from turning them into slabs.
+inline constexpr float kSystemTileMaxHeightDip = 76.0f;
+
+inline constexpr int kSystemTileColumns = 3;
+inline constexpr int kSystemTileRows = 2;
+inline constexpr int kMaxSystemTiles = kSystemTileColumns * kSystemTileRows;
+
+// How many tiles the panel can HOLD, as against how many it shows at once: the shell's flyout pages through
+// its tiles, and this is the ceiling on the whole set.
+inline constexpr int kMaxSystemPanelTiles = 3 * kMaxSystemTiles;
+
+struct SystemPanelLayout {
+    // The tile's BOX -- the rounded square the glyph sits in. Its caption is `tileLabels`, which is BELOW this
+    // rectangle, not inside it: that is how the shell's own flyout is built (the box carries the glyph and,
+    // where the tile opens something, a chevron; the caption under it carries the state or the name).
+    RectF tiles[kMaxSystemTiles];
+    RectF tileIcons[kMaxSystemTiles];
+    RectF tileLabels[kMaxSystemTiles];   // the CAPTION box, under the tile
+    RectF sliders[2];         // the volume slider, and the brightness slider if there is one
+    RectF speakerIcon;        // at the left of the first slider
+    // The output-device button at the RIGHT of the volume slider: the device glyph and the chevron
+    // that opens the "声音输出" page, which is what the shell's own flyout puts there.
+    RectF volumeButton;
+    RectF gearButton;         // bottom right
+    // The paging column, on the grid's right: the dots and the two arrows that page the tiles, as the shell's
+    // own flyout has them. Empty when there is only one page.
+    RectF pageDots[4];
+    RectF pageUp;
+    RectF pageDown;
+    int pageDotCount = 0;
+    int pageIndex = 0;
+    int tileCount = 0;
+    int sliderCount = 0;
+};
+
+// The panel's geometry for a card box and a number of tiles, laid out from the bottom up.
+//
+// Bottom-up for the same reason the music card is: the slider and the settings button are pinned to
+// the card's lower edge, and the tile grid takes whatever room is left above them. Laying it out
+// top-down would mean the slider moved whenever a tile was added, and the slider is the control a
+// finger goes straight for.
+inline SystemPanelLayout SystemPanelFor(const RoundedBox& box, int tileCount, int sliderCount,
+                                        bool paging = false, int pageIndex = 0, int pageCount = 1) {
+    SystemPanelLayout layout;
+
+    if (tileCount < 0) tileCount = 0;
+    if (tileCount > kMaxSystemTiles) tileCount = kMaxSystemTiles;
+    if (sliderCount < 0) sliderCount = 0;
+    if (sliderCount > 2) sliderCount = 2;
+    layout.tileCount = tileCount;
+    layout.sliderCount = sliderCount;
+
+    const float pad = 14.0f;
+    const float left = box.rect.left + pad;
+    const float right = box.rect.right - pad;
+
+    // The paging column is reserved OUT of the grid, the way the shell's flyout does it: the dots and the two
+    // arrows sit in a narrow strip against the card's right edge, and the tiles stop short of it.
+    const float pagingWidth = paging ? 20.0f : 0.0f;
+    const float gridRight = right - pagingWidth;
+    const float innerWidth = gridRight - left;
+
+    // The output-device button, at the right of the volume row. Part of the row rather than of the
+    // slider, so the slider can stop short of it. The shell's own flyout has exactly this: a slider,
+    // then the device that is playing out of it, then an arrow into the page that lists the others.
+    // 40 DIP: the mark is a 20 DIP square and the chevron needs its own 14 beside it. Measured off the
+    // first version at 34 -- the two overlapped into one blob.
+    const float deviceButtonWidth = 40.0f;
+
+    // The settings button, on the card's bottom right.
+    const float gearSize = 28.0f;
+    layout.gearButton.right = right;
+    layout.gearButton.left = right - gearSize;
+    layout.gearButton.bottom = box.rect.bottom - pad;
+    layout.gearButton.top = layout.gearButton.bottom - gearSize;
+
+    // The sliders, stacked upward from the gear row.
+    const float sliderHeight = 22.0f;
+    const float sliderGap = 8.0f;
+
+    for (int i = sliderCount - 1; i >= 0; --i) {
+        const float bottom = layout.gearButton.top - sliderGap -
+                             static_cast<float>(sliderCount - 1 - i) * (sliderHeight + sliderGap);
+        layout.sliders[i].left = left + 26.0f;   // clear of the speaker glyph
+        // Stops short of the output-device button, which owns the right end of this row.
+        layout.sliders[i].right = right - deviceButtonWidth - 6.0f;
+        layout.sliders[i].bottom = bottom;
+        layout.sliders[i].top = bottom - sliderHeight;
+    }
+
+    // The speaker glyph, at the left of the first slider.
+    if (sliderCount > 0) {
+        const float centreY = (layout.sliders[0].top + layout.sliders[0].bottom) * 0.5f;
+        layout.speakerIcon.left = left;
+        layout.speakerIcon.right = left + 20.0f;
+        layout.speakerIcon.top = centreY - 10.0f;
+        layout.speakerIcon.bottom = centreY + 10.0f;
+
+        layout.volumeButton.right = right;
+        layout.volumeButton.left = right - deviceButtonWidth;
+        layout.volumeButton.top = centreY - 12.0f;
+        layout.volumeButton.bottom = centreY + 12.0f;
+    }
+
+    // The tile grid, filling the space that is left above the controls.
+    const int rows = (tileCount + kSystemTileColumns - 1) / kSystemTileColumns;
+    if (rows > 0) {
+        const float gridBottom =
+            (sliderCount > 0 ? layout.sliders[0].top : layout.gearButton.top) - 10.0f;
+        const float gridTop = box.rect.top + pad;
+        const float available = gridBottom - gridTop;
+
+        // The paging column: the dots in the middle of the grid, the up arrow above them and the down arrow
+        // below, so the group is centred on the grid it pages.
+        if (paging) {
+            const float centreY = (gridTop + gridBottom) * 0.5f;
+            const float dotRadius = 2.5f;
+            const float dotGap = 9.0f;
+            const int dots = pageCount < 4 ? pageCount : 4;
+            layout.pageDotCount = dots;
+            layout.pageIndex = pageIndex;
+            const float dotsTop = centreY - (static_cast<float>(dots - 1) * dotGap) * 0.5f;
+            const float columnCentreX = gridRight + pagingWidth * 0.5f;
+            for (int i = 0; i < dots; ++i) {
+                const float cy = dotsTop + static_cast<float>(i) * dotGap;
+                layout.pageDots[i].left = columnCentreX - dotRadius;
+                layout.pageDots[i].right = columnCentreX + dotRadius;
+                layout.pageDots[i].top = cy - dotRadius;
+                layout.pageDots[i].bottom = cy + dotRadius;
+            }
+            const float arrow = 14.0f;
+            layout.pageUp.left = columnCentreX - arrow * 0.5f;
+            layout.pageUp.right = columnCentreX + arrow * 0.5f;
+            layout.pageUp.bottom = dotsTop - 6.0f;
+            layout.pageUp.top = layout.pageUp.bottom - arrow;
+            layout.pageDown.left = layout.pageUp.left;
+            layout.pageDown.right = layout.pageUp.right;
+            layout.pageDown.top = dotsTop + static_cast<float>(dots - 1) * dotGap + 6.0f;
+            layout.pageDown.bottom = layout.pageDown.top + arrow;
+        }
+        // The tiles SHARE the space that is left, instead of taking their designed height and leaving the
+        // remainder empty.
+        //
+        // The designed height was being used as a ceiling. On the card's fixed 250 DIP the six tiles needed
+        // 98 of the 154 DIP available, so the panel wore a 56 DIP band of nothing between the grid and the
+        // slider -- which is the difference between "a grid of controls" and "a grid of controls with a hole
+        // under it". Sharing the space is also what the shell's own quick settings does: the tiles are as
+        // tall as the flyout allows.
+        float tileHeight =
+            (available - static_cast<float>(rows - 1) * kSystemTileGapDip) / static_cast<float>(rows);
+        if (tileHeight < 20.0f) tileHeight = 20.0f;
+        if (tileHeight > kSystemTileMaxHeightDip) tileHeight = kSystemTileMaxHeightDip;
+
+        const float tileWidth = (innerWidth -
+                                 static_cast<float>(kSystemTileColumns - 1) * kSystemTileGapDip) /
+                                static_cast<float>(kSystemTileColumns);
+
+        // A slot is a BOX with a CAPTION under it, which is how the shell's own quick settings is built: the
+        // box carries the glyph (and a chevron where the tile opens something) and the caption under it carries
+        // the state or the name.
+        const float captionHeight = 18.0f;
+        const float captionGap = 5.0f;
+        const float boxHeight = tileHeight - captionHeight - captionGap;
+
+        for (int i = 0; i < tileCount; ++i) {
+            const int row = i / kSystemTileColumns;
+            const int column = i % kSystemTileColumns;
+            const float tileLeft =
+                left + static_cast<float>(column) * (tileWidth + kSystemTileGapDip);
+            const float slotTop =
+                gridTop + static_cast<float>(row) * (tileHeight + kSystemTileGapDip);
+
+            layout.tiles[i].left = tileLeft;
+            layout.tiles[i].right = tileLeft + tileWidth;
+            layout.tiles[i].top = slotTop;
+            layout.tiles[i].bottom = slotTop + boxHeight;
+
+            // The glyph at the box's LEFT, vertically centred -- not in a corner. The box is a control, and its
+            // picture belongs where the eye starts reading it.
+            const float glyphSize = 20.0f;
+            const float boxCentreY = (layout.tiles[i].top + layout.tiles[i].bottom) * 0.5f;
+            layout.tileIcons[i].left = tileLeft + 12.0f;
+            layout.tileIcons[i].right = layout.tileIcons[i].left + glyphSize;
+            layout.tileIcons[i].top = boxCentreY - glyphSize * 0.5f;
+            layout.tileIcons[i].bottom = layout.tileIcons[i].top + glyphSize;
+
+            // The caption, CENTRED under the box, filling the rest of the slot.
+            layout.tileLabels[i].left = tileLeft;
+            layout.tileLabels[i].right = tileLeft + tileWidth;
+            layout.tileLabels[i].top = layout.tiles[i].bottom + captionGap;
+            layout.tileLabels[i].bottom = slotTop + tileHeight;
+        }
+    }
+
+    return layout;
+}
+
+// Which panel tile a point lands on, or -1.
+//
+// Answered from the SAME layout the drawing uses, so a click cannot land beside the tile that was
+// clicked. The card passed in must already be the PLACED card -- the tiles are laid out inside it, and
+// the card is moved to hang from its button before either drawing or hit testing.
+//
+// Declared after SystemPanelFor because it calls it; a forward use of a function defined below does not
+// compile in a header that is included in this order.
+// What a point on the panel lands on.
+//
+// One function rather than a growing pile of `...AtScreen` accessors on the window: the panel has several kinds
+// of target now (the tiles, the paging arrows, the settings button) and every one of them has to be answered
+// from the SAME layout the drawing uses. That rule is why this file exists; a second copy of any of this
+// arithmetic is a second chance for a control to be painted where it cannot be pressed.
+enum class SystemPanelTarget {
+    None = 0,
+    Tile,
+    PageUp,
+    PageDown,
+    Gear,
+    // The output-device button at the right of the volume row: it opens the "声音输出" page, which is
+    // where the devices and the per-application mixer live.
+    VolumeDevice,
+    // The speaker glyph at the left of the slider. It is a control, not decoration: pressing it mutes,
+    // which is what the shell's own flyout does with it.
+    Speaker,
+    // The slider's track. `fraction` in the hit says where along it the press landed.
+    Slider,
+};
+
+struct SystemPanelHit {
+    SystemPanelTarget target = SystemPanelTarget::None;
+    int index = -1;      // the tile, when the target is a tile
+    float fraction = 0.0f;   // 0..1 along the track, when the target is the slider
+};
+
+inline SystemPanelHit SystemPanelHitFor(const RoundedBox& card, int tileCount, int sliderCount,
+                                        int pageIndex, int pageCount, float x, float y) {
+    SystemPanelHit hit;
+    const bool paging = pageCount > 1;
+    const SystemPanelLayout layout = SystemPanelFor(card, tileCount, sliderCount, paging, pageIndex,
+                                                    pageCount);
+    const auto inside = [x, y](const RectF& r) {
+        return r.right > r.left && r.bottom > r.top && x >= r.left && x <= r.right && y >= r.top &&
+               y <= r.bottom;
+    };
+
+    for (int i = 0; i < layout.tileCount; ++i) {
+        if (inside(layout.tiles[i])) {
+            hit.target = SystemPanelTarget::Tile;
+            hit.index = i;
+            return hit;
+        }
+    }
+    if (paging && inside(layout.pageUp)) {
+        hit.target = SystemPanelTarget::PageUp;
+        return hit;
+    }
+    if (paging && inside(layout.pageDown)) {
+        hit.target = SystemPanelTarget::PageDown;
+        return hit;
+    }
+    if (inside(layout.volumeButton)) {
+        hit.target = SystemPanelTarget::VolumeDevice;
+        return hit;
+    }
+    if (inside(layout.speakerIcon)) {
+        hit.target = SystemPanelTarget::Speaker;
+        return hit;
+    }
+    for (int i = 0; i < layout.sliderCount; ++i) {
+        // The track's own height is 4 DIP, which is far too thin to aim at. The row it sits in is the
+        // target, and the fraction is taken from the track -- so a press near the edge of the row still
+        // lands somewhere sensible on the bar instead of being ignored.
+        const RectF& track = layout.sliders[i];
+        const RectF row = {track.left, track.top, track.right, track.bottom};
+        if (x >= row.left && x <= row.right && y >= row.top && y <= row.bottom) {
+            const float width = track.right - track.left;
+            float fraction = width > 0.0f ? (x - track.left) / width : 0.0f;
+            if (fraction < 0.0f) fraction = 0.0f;
+            if (fraction > 1.0f) fraction = 1.0f;
+            hit.target = SystemPanelTarget::Slider;
+            hit.index = i;
+            hit.fraction = fraction;
+            return hit;
+        }
+    }
+    if (inside(layout.gearButton)) {
+        hit.target = SystemPanelTarget::Gear;
+    }
+    return hit;
+}
+
+// The tile a point lands on, or -1. Kept as a convenience for the callers that only care about the tiles, and
+// defined in terms of SystemPanelHitFor so there is still exactly one piece of arithmetic behind it.
+inline int SystemTileAt(const RoundedBox& card, int tileCount, float x, float y) {
+    const SystemPanelHit hit = SystemPanelHitFor(card, tileCount, 1, 0, 1, x, y);
+    return hit.target == SystemPanelTarget::Tile ? hit.index : -1;
+}
+
+// =====================================================================
+//  The "声音输出" page -- the panel's second level
+//
+//  Reached from the output-device button at the right of the volume row, and it is the shell's own page:
+//  a back arrow and a title, then 输出设备 (the list, with the current one marked), 空间音效, and 音量合成器
+//  (one slider per application that is playing), with 更多音量设置 along the bottom.
+//
+//  ONE page that scrolls, not three pages: the reference pictures that were handed over are the top and
+//  the bottom of the SAME page -- the header and the footer are identical in both -- so the cards are
+//  built as one column whose height is allowed to exceed the card, with a scrollbar where the shell has
+//  one. Splitting it into three pages would have been a different product.
+//
+//  Geometry for a page, laid out from the top down: unlike the panel, whose slider is pinned to the
+//  bottom, this is a list. The header and the footer do NOT scroll -- they are the page's frame -- and
+//  everything between them does.
+// =====================================================================
+
+inline constexpr int kMaxSoundDevices = 8;    // output devices listed
+inline constexpr int kMaxSoundSessions = 10;  // application rows in the mixer
+inline constexpr int kSoundSpatialRows = 2;   // 关, and 用于耳机的 Windows Sonic
+// The mixer's rows: the output device itself, which the shell lists first, and then one per application.
+inline constexpr int kMaxSoundMixRows = kMaxSoundSessions + 1;
+
+inline constexpr float kSoundHeaderHeightDip = 40.0f;
+inline constexpr float kSoundFooterHeightDip = 34.0f;
+inline constexpr float kSoundSectionHeightDip = 28.0f;   // a section's own label row
+inline constexpr float kSoundDeviceRowHeightDip = 40.0f;
+inline constexpr float kSoundSpatialRowHeightDip = 34.0f;
+inline constexpr float kSoundMixerRowHeightDip = 36.0f;
+inline constexpr float kSoundIndentDip = 14.0f;
+
+struct SoundPageLayout {
+    RectF backButton;          // the arrow, top left
+    RectF title;               // "声音输出"
+    RectF headerRule;          // the hairline under the header
+
+    RectF deviceLabel;         // "输出设备"
+    RectF deviceRows[kMaxSoundDevices];
+    RectF deviceIcons[kMaxSoundDevices];
+    RectF deviceLabels[kMaxSoundDevices];
+    RectF deviceMarks[kMaxSoundDevices];   // the accent bar down the left of the current device
+
+    RectF spatialLabel;        // "空间音效"
+    RectF spatialRows[kSoundSpatialRows];
+    RectF spatialMarks[kSoundSpatialRows];
+    RectF spatialLabels[kSoundSpatialRows];
+
+    RectF mixerLabel;          // "音量合成器"
+    RectF mixerGear;           // the settings glyph at the section's right
+    RectF mixerRows[kMaxSoundMixRows];
+    RectF mixerIcons[kMaxSoundMixRows];
+    RectF mixerTracks[kMaxSoundMixRows];   // the slider's own rect; the hit takes the fraction from it
+
+    RectF footer;              // "更多音量设置"
+    RectF footerRule;
+
+    // The scrollbar, on the card's right edge inside the viewport.
+    RectF scrollTrack;
+    RectF scrollThumb;
+
+    // The region the content scrolls in -- between the header and the footer. Everything above and below
+    // it is the frame and stays put.
+    RectF viewport;
+
+    int deviceCount = 0;
+    int sessionCount = 0;
+    float contentHeight = 0.0f;   // how tall the whole list is, for clamping the scroll
+    float scroll = 0.0f;          // the offset that was applied to the rects above
+};
+
+// The layout, declared here because the scroll limit below is derived from it: the limit is not a second
+// piece of arithmetic, it is "the content's height minus the window it is shown in", read off the one
+// layout function every other caller uses.
+inline SoundPageLayout SoundPageFor(const RoundedBox& card, int deviceCount, int mixerRowCount,
+                                    float scroll);
+
+// How far the page can scroll for a given card and content.
+inline float SoundPageScrollLimit(const RoundedBox& card, int deviceCount, int mixerRowCount) {
+    const SoundPageLayout probe = SoundPageFor(card, deviceCount, mixerRowCount, 0.0f);
+    const float limit = probe.contentHeight - (probe.viewport.bottom - probe.viewport.top);
+    return limit > 0.0f ? limit : 0.0f;
+}
+
+inline SoundPageLayout SoundPageFor(const RoundedBox& card, int deviceCount, int mixerRowCount,
+                                    float scroll) {
+    SoundPageLayout layout;
+    if (deviceCount < 0) deviceCount = 0;
+    if (deviceCount > kMaxSoundDevices) deviceCount = kMaxSoundDevices;
+    if (mixerRowCount < 0) mixerRowCount = 0;
+    if (mixerRowCount > kMaxSoundMixRows) mixerRowCount = kMaxSoundMixRows;
+    layout.deviceCount = deviceCount;
+    layout.sessionCount = mixerRowCount;
+
+    const float left = card.rect.left + kSoundIndentDip;
+    const float right = card.rect.right - kSoundIndentDip;
+
+    // --- the frame: header and footer, both fixed ---
+    layout.headerRule = {card.rect.left, card.rect.top + kSoundHeaderHeightDip - 1.0f,
+                         card.rect.right, card.rect.top + kSoundHeaderHeightDip};
+
+    const float backSize = 26.0f;
+    const float headerCentre = card.rect.top + (kSoundHeaderHeightDip - 1.0f) * 0.5f;
+    layout.backButton = {left, headerCentre - backSize * 0.5f, left + backSize,
+                         headerCentre + backSize * 0.5f};
+    // The title starts clear of the arrow, at the same indent the sections use.
+    layout.title = {left + backSize + 8.0f, card.rect.top + 2.0f, right,
+                    card.rect.top + kSoundHeaderHeightDip - 3.0f};
+
+    layout.footerRule = {card.rect.left, card.rect.bottom - kSoundFooterHeightDip,
+                         card.rect.right, card.rect.bottom - kSoundFooterHeightDip + 1.0f};
+    layout.footer = {card.rect.left, card.rect.bottom - kSoundFooterHeightDip, card.rect.right,
+                     card.rect.bottom};
+
+    layout.viewport = {card.rect.left, card.rect.top + kSoundHeaderHeightDip, card.rect.right,
+                       card.rect.bottom - kSoundFooterHeightDip};
+
+    // --- the content, laid out as a column from the viewport's top, then moved by the scroll ---
+    const float contentTop = layout.viewport.top;
+    const float contentRight = right - 6.0f;   // clear of the scrollbar
+    float y = contentTop;
+
+    layout.deviceLabel = {left, y, contentRight, y + kSoundSectionHeightDip};
+    y += kSoundSectionHeightDip;
+    for (int i = 0; i < deviceCount; ++i) {
+        const RectF row = {card.rect.left, y, contentRight, y + kSoundDeviceRowHeightDip};
+        layout.deviceRows[i] = row;
+        // The accent bar: a short rounded rule against the card's left edge, which is how the shell marks
+        // the device that is in use.
+        layout.deviceMarks[i] = {card.rect.left + 3.0f, y + 9.0f, card.rect.left + 6.0f,
+                                 y + kSoundDeviceRowHeightDip - 9.0f};
+        const float iconSide = 20.0f;
+        const float rowCentre = (row.top + row.bottom) * 0.5f;
+        layout.deviceIcons[i] = {left + 8.0f, rowCentre - iconSide * 0.5f, left + 8.0f + iconSide,
+                                 rowCentre + iconSide * 0.5f};
+        layout.deviceLabels[i] = {left + 8.0f + iconSide + 10.0f, row.top, contentRight, row.bottom};
+        y += kSoundDeviceRowHeightDip;
+    }
+
+    layout.spatialLabel = {left, y, contentRight, y + kSoundSectionHeightDip};
+    y += kSoundSectionHeightDip;
+    for (int i = 0; i < kSoundSpatialRows; ++i) {
+        const RectF row = {card.rect.left, y, contentRight, y + kSoundSpatialRowHeightDip};
+        layout.spatialRows[i] = row;
+        layout.spatialMarks[i] = {card.rect.left + 3.0f, y + 7.0f, card.rect.left + 6.0f,
+                                  y + kSoundSpatialRowHeightDip - 7.0f};
+        layout.spatialLabels[i] = {left + 8.0f, row.top, contentRight, row.bottom};
+        y += kSoundSpatialRowHeightDip;
+    }
+
+    layout.mixerLabel = {left, y, contentRight, y + kSoundSectionHeightDip};
+    // The gear sits at the section's right, level with its label.
+    const float gearSide = 20.0f;
+    layout.mixerGear = {contentRight - gearSide, y + (kSoundSectionHeightDip - gearSide) * 0.5f,
+                        contentRight, y + (kSoundSectionHeightDip + gearSide) * 0.5f};
+    y += kSoundSectionHeightDip;
+    for (int i = 0; i < mixerRowCount; ++i) {
+        const RectF row = {card.rect.left, y, contentRight, y + kSoundMixerRowHeightDip};
+        layout.mixerRows[i] = row;
+        const float iconSide = 22.0f;
+        const float rowCentre = (row.top + row.bottom) * 0.5f;
+        layout.mixerIcons[i] = {left + 6.0f, rowCentre - iconSide * 0.5f, left + 6.0f + iconSide,
+                                rowCentre + iconSide * 0.5f};
+        // The track runs from clear of the icon to the card's right indent. The slider's own height is the
+        // row's, as everywhere else in this file: a 4 DIP bar is not something to aim at.
+        layout.mixerTracks[i] = {left + 6.0f + iconSide + 14.0f, y, contentRight,
+                                 y + kSoundMixerRowHeightDip};
+        y += kSoundMixerRowHeightDip;
+    }
+    layout.contentHeight = y - contentTop;
+
+    // --- the scroll ---
+    const float viewportHeight = layout.viewport.bottom - layout.viewport.top;
+    float limit = layout.contentHeight - viewportHeight;
+    if (limit < 0.0f) limit = 0.0f;
+    if (scroll < 0.0f) scroll = 0.0f;
+    if (scroll > limit) scroll = limit;
+    layout.scroll = scroll;
+
+    // Everything that scrolls moves here, in one place, so a row's rectangle can never be drawn at one
+    // offset and hit-tested at another.
+    if (scroll != 0.0f) {
+        const auto shift = [scroll](RectF& r) {
+            r.top -= scroll;
+            r.bottom -= scroll;
+        };
+        shift(layout.deviceLabel);
+        for (int i = 0; i < deviceCount; ++i) {
+            shift(layout.deviceRows[i]);
+            shift(layout.deviceIcons[i]);
+            shift(layout.deviceLabels[i]);
+            shift(layout.deviceMarks[i]);
+        }
+        shift(layout.spatialLabel);
+        for (int i = 0; i < kSoundSpatialRows; ++i) {
+            shift(layout.spatialRows[i]);
+            shift(layout.spatialMarks[i]);
+            shift(layout.spatialLabels[i]);
+        }
+        shift(layout.mixerLabel);
+        shift(layout.mixerGear);
+        for (int i = 0; i < mixerRowCount; ++i) {
+            shift(layout.mixerRows[i]);
+            shift(layout.mixerIcons[i]);
+            shift(layout.mixerTracks[i]);
+        }
+    }
+
+    // The scrollbar: a hairline track down the inside of the card's right edge, with a thumb as tall as
+    // the visible fraction of the content. Drawn whether or not there is anything to scroll, which is
+    // what the shell does -- its own thumb is a fixed short bar rather than a proportional one.
+    const float barWidth = 3.0f;
+    layout.scrollTrack = {card.rect.right - 6.0f, layout.viewport.top,
+                          card.rect.right - 6.0f + barWidth, layout.viewport.bottom};
+    const float trackHeight = layout.scrollTrack.bottom - layout.scrollTrack.top;
+    const float fraction =
+        layout.contentHeight > 0.0f ? viewportHeight / layout.contentHeight : 1.0f;
+    float thumbHeight = trackHeight * (fraction < 1.0f ? fraction : 1.0f);
+    const float minThumb = 28.0f;
+    if (thumbHeight < minThumb) thumbHeight = minThumb;
+    if (thumbHeight > trackHeight) thumbHeight = trackHeight;
+    const float travel = trackHeight - thumbHeight;
+    const float position = limit > 0.0f ? (layout.scroll / limit) * travel : 0.0f;
+    layout.scrollThumb = {layout.scrollTrack.left, layout.scrollTrack.top + position,
+                          layout.scrollTrack.right, layout.scrollTrack.top + position + thumbHeight};
+
+    return layout;
+}
+
+// What a point on the sound page lands on.
+enum class SoundPageTarget {
+    None = 0,
+    Back,
+    Device,        // one row of the output-device list
+    Spatial,       // one of the 空间音效 rows
+    MixerSlider,   // a slider in 音量合成器
+    MixerGear,     // the gear beside 音量合成器's label
+    Footer,        // 更多音量设置
+    Scrollbar,
+};
+
+struct SoundPageHit {
+    SoundPageTarget target = SoundPageTarget::None;
+    int index = -1;
+    float fraction = 0.0f;   // where along the slider, for MixerSlider
+};
+
+inline SoundPageHit SoundPageHitFor(const RoundedBox& card, int deviceCount, int mixerRowCount,
+                                    float scroll, float x, float y) {
+    SoundPageHit hit;
+    const SoundPageLayout layout = SoundPageFor(card, deviceCount, mixerRowCount, scroll);
+    const auto inside = [x, y](const RectF& r) {
+        return r.right > r.left && r.bottom > r.top && x >= r.left && x <= r.right && y >= r.top &&
+               y <= r.bottom;
+    };
+
+    // The frame first: it is outside the viewport, so it cannot be scrolled past.
+    if (inside(layout.backButton)) {
+        hit.target = SoundPageTarget::Back;
+        return hit;
+    }
+    if (inside(layout.footer)) {
+        hit.target = SoundPageTarget::Footer;
+        return hit;
+    }
+    if (inside(layout.mixerGear)) {
+        hit.target = SoundPageTarget::MixerGear;
+        return hit;
+    }
+    if (inside(layout.scrollTrack)) {
+        hit.target = SoundPageTarget::Scrollbar;
+        return hit;
+    }
+
+    // ... and then only inside the viewport, because a row scrolled out of it is not on screen and must
+    // not be clickable through the header.
+    const RectF& view = layout.viewport;
+    if (x < view.left || x > view.right || y < view.top || y > view.bottom) return hit;
+
+    for (int i = 0; i < layout.deviceCount; ++i) {
+        if (inside(layout.deviceRows[i])) {
+            hit.target = SoundPageTarget::Device;
+            hit.index = i;
+            return hit;
+        }
+    }
+    for (int i = 0; i < kSoundSpatialRows; ++i) {
+        if (inside(layout.spatialRows[i])) {
+            hit.target = SoundPageTarget::Spatial;
+            hit.index = i;
+            return hit;
+        }
+    }
+    for (int i = 0; i < layout.sessionCount; ++i) {
+        const RectF& track = layout.mixerTracks[i];
+        if (inside(track)) {
+            const float width = track.right - track.left;
+            float fraction = width > 0.0f ? (x - track.left) / width : 0.0f;
+            if (fraction < 0.0f) fraction = 0.0f;
+            if (fraction > 1.0f) fraction = 1.0f;
+            hit.target = SoundPageTarget::MixerSlider;
+            hit.index = i;
+            hit.fraction = fraction;
+            return hit;
+        }
+    }
+    return hit;
+}
+
+inline MusicCardLayout MusicCardFor(const RoundedBox& box) {
+    MusicCardLayout layout;
+    const float pad = kMusicCardPadDip;
+
+    layout.artBackground = box.rect;
+
+    // Laid out from the bottom up, so the controls and the bar always sit on the
+    // card's lower edge regardless of how tall it is, and the cover takes the space
+    // that is left.
+    const float bottom = box.rect.bottom - pad;
+
+    layout.controls.left = box.rect.left + pad;
+    layout.controls.right = box.rect.right - pad;
+    layout.controls.bottom = bottom;
+    layout.controls.top = bottom - kMusicControlSizeDip;
+
+    layout.progress.left = box.rect.left + pad;
+    layout.progress.right = box.rect.right - pad;
+    layout.progress.bottom = layout.controls.top - 10.0f;
+    layout.progress.top = layout.progress.bottom - kMusicProgressBarDip;
+
+    // The times sit ABOVE the bar, one at each end, which is where the reference image
+    // puts them. Below it they landed on the card's lower edge and read as clipped.
+    layout.elapsed.left = layout.progress.left;
+    layout.elapsed.right = layout.elapsed.left + 56.0f;
+    layout.elapsed.bottom = layout.progress.top - 4.0f;
+    layout.elapsed.top = layout.elapsed.bottom - kMusicTimeRowDip;
+
+    layout.remaining.right = layout.progress.right;
+    layout.remaining.left = layout.remaining.right - 56.0f;
+    layout.remaining.top = layout.elapsed.top;
+    layout.remaining.bottom = layout.elapsed.bottom;
+
+    // The app row is the top strip, inside the padding: the source application's own icon and
+    // name, left aligned, which is the reference image's arrangement and leaves the row's rest
+    // free for the cover that starts just below it.
+    //
+    // The volume control that used to sit at this row's right-hand end was removed on request
+    // (see the note above MusicCardLayout): the row is the source's again, and the name is given
+    // the width the readout and bar used to hold.
+    layout.appRow.left = box.rect.left + pad;
+    layout.appRow.right = box.rect.right - pad;
+    layout.appRow.top = box.rect.top + pad;
+    layout.appRow.bottom = layout.appRow.top + kMusicAppRowHeightDip;
+
+    const float rowCentreY = (layout.appRow.top + layout.appRow.bottom) * 0.5f;
+
+    // Source, at the left: the application's own icon, then the name.
+    layout.appIconSize = kMusicAppIconSizeDip;
+    layout.appIcon.left = layout.appRow.left;
+    layout.appIcon.top = rowCentreY - layout.appIconSize * 0.5f;
+    layout.appIcon.right = layout.appIcon.left + layout.appIconSize;
+    layout.appIcon.bottom = layout.appIcon.top + layout.appIconSize;
+
+    layout.appText.left = layout.appIcon.right + 10.0f;
+    layout.appText.right = layout.appRow.right;
+    layout.appText.top = layout.appRow.top;
+    layout.appText.bottom = layout.appRow.bottom;
+
+    // Artwork takes the space between the app row and the time row, square.
+    layout.artwork.left = box.rect.left + pad;
+    layout.artwork.top = layout.appRow.bottom + 8.0f;
+    layout.artwork.right = layout.artwork.left + kMusicArtworkSizeDip;
+    layout.artwork.bottom = layout.artwork.top + kMusicArtworkSizeDip;
+
+    // Title and subtitle to the right of the artwork, vertically centred against it.
+    layout.title.left = layout.artwork.right + kMusicGapAfterArtDip;
+    layout.title.right = box.rect.right - pad;
+    layout.title.top = layout.artwork.top + 16.0f;
+    layout.title.bottom = layout.title.top + 28.0f;
+
+    layout.subtitle.left = layout.title.left;
+    layout.subtitle.right = layout.title.right;
+    layout.subtitle.top = layout.title.bottom + 2.0f;
+    layout.subtitle.bottom = layout.subtitle.top + 20.0f;
+
+    // Three buttons, centred as a group.
+    const float groupWidth = kMusicControlSizeDip * 3.0f + kMusicControlGapDip * 2.0f;
+    const float groupLeft = (box.rect.left + box.rect.right) * 0.5f - groupWidth * 0.5f;
+
+    layout.previous.left = groupLeft;
+    layout.previous.right = groupLeft + kMusicControlSizeDip;
+    layout.playPause.left = layout.previous.right + kMusicControlGapDip;
+    layout.playPause.right = layout.playPause.left + kMusicControlSizeDip;
+    layout.next.left = layout.playPause.right + kMusicControlGapDip;
+    layout.next.right = layout.next.left + kMusicControlSizeDip;
+
+    const auto setVertical = [&](RectF& r) {
+        r.top = layout.controls.top;
+        r.bottom = layout.controls.bottom;
+    };
+    setVertical(layout.previous);
+    setVertical(layout.playPause);
+    setVertical(layout.next);
+
+    return layout;
+}
+
+// Which music-card control a window-local DIP point lands on.
+inline CardControl MusicControlAt(const RoundedBox& box, float x, float y) {
+    const MusicCardLayout layout = MusicCardFor(box);
+    const auto inside = [x, y](const RectF& r) {
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+    if (inside(layout.previous)) return CardControl::Previous;
+    if (inside(layout.playPause)) return CardControl::PlayPause;
+    if (inside(layout.next)) return CardControl::Next;
+    return CardControl::None;
+}
+
+} // namespace island

@@ -1,0 +1,170 @@
+﻿ISLANDBAR - READ THIS FIRST
+===========================
+
+Full cross-session handoff document:
+
+    FEATURES.md  (same folder) -- WHAT IS ACTUALLY DONE. Read this first.
+                                    README.md overstates progress; FEATURES.md
+                                    marks every feature A/B/C/D with its evidence.
+
+    HANDOFF.md   (same folder as this file, written in Chinese)
+
+It contains, in order:
+
+    1. Project objective and the decisions already locked in
+    2. Verified environment facts (MSVC, Windows SDK, CMake paths)
+    3. Directory layout
+    4. The rename that was done, the cleanup that followed, and the sandbox
+       ACL trap that makes directories undeletable until it is repaired
+    5. Build, self-test and run commands
+    6. Pitfalls already hit, with rules to avoid repeating them
+    7. Completed work with evidence
+    8. Roadmap, with the next step (phase 1) and its entry points
+    9. Open items awaiting the user's decision
+
+
+QUICK COMMANDS
+--------------
+
+Build and run the smoke test:
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.ps1" -Config Debug -RunSmoke
+
+Build, then run the runtime self-test (exit code 0 == all passed):
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.ps1" -Config Debug
+    .\IslandBar\build\Debug\src\Debug\island_bar.exe --self-test
+
+Show the bar (hides the shell taskbar; restores it on exit):
+
+    .\IslandBar\build\Debug\src\Debug\island_bar.exe
+
+Other flags:
+
+    --keep-taskbar    leave the native taskbar alone
+    --demo            cycle collapsed/hover/expanded with no input needed
+    --probe-taskbar   report whether this process may hide the shell taskbar
+    --no-console      behave as if there were no console (diagnostic)
+    --help            print the same list, plus how to run it from each shell
+
+PHOTOGRAPH AN ANIMATION, FRAME BY FRAME (no pointer needed):
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\capture-card.ps1" `
+        -Exe ".\IslandBar\build\Debug\src\Debug\island_bar.exe"
+
+Three environment settings drive it, and they are the only way to watch a
+transition on this machine -- a script cannot move the pointer, so the bar has to
+perform the transition on a timer:
+
+    ISLANDBAR_PANEL_MS       open the system panel after N ms, close it at
+                             ISLANDBAR_PANEL_CLOSE_MS (see the script's -CloseMs)
+    ISLANDBAR_PANEL_CYCLE_MS after the first close, toggle the panel every N ms --
+                             the later transitions are where the faults live, so a
+                             single open proves very little (see -CycleMs)
+    ISLANDBAR_SLOWMO         multiply every transition's DURATION -- never the
+                             frame interval, which is the quantity being measured
+    ISLANDBAR_TRACE_CARD=1   one log line per frame of a card transition: interval,
+                             eased progress, card rectangle, content opacity, window
+                             region
+    ISLANDBAR_HOVER_ICON=n   treat icon n of the application row as hovered, so a button
+                             that only ever opens under the pointer can be photographed
+                             (-1 = the last icon). The script cannot move the pointer.
+    ISLANDBAR_START_MS       press the START button after N ms, and every
+                             ISLANDBAR_START_CYCLE_MS after that. The Start button is the
+                             one control that has to inject input into the shell, so it
+                             cannot be tried by hand from a script -- it needs a click.
+                             ISLANDBAR_START_ROUTE=1..5 picks how the menu is asked for:
+                             1 SendInput Ctrl+Esc, 2 the same held 40 ms, 3 keybd_event
+                             Ctrl+Esc, 4 keybd_event Win, 5 activate the Start menu's own
+                             application. Measured 2026-10-11: NONE of the five works
+                             from a sandboxed session -- see HANDOFF 7.84.
+
+Two facts about running the bar at all, both learned the hard way:
+
+  * It is a GUI-subsystem binary and CANNOT start inside the restricted sandbox:
+    it dies with STATUS_DLL_INIT_FAILED (0xC0000142), which looks like a broken
+    program rather than a restricted one. Run it from a normal shell.
+  * Start-Process may then refuse with "cannot be run completely because the system
+    cannot find all the information required", naming no file and no reason. Use the
+    .NET Process API with an explicit WorkingDirectory instead.
+
+READ THE LOG, NOT THE CONSOLE:
+
+    %TEMP%\island_bar.log      timestamped, written every run, flushed per line
+
+The console is unreliable for this program. It is a GUI-subsystem binary, and
+with no console attached the CRT's stdout has an invalid descriptor (-1);
+writing to it trips a debug assertion in lowio\isatty.cpp (dialog box) instead
+of printing nothing. All console output therefore goes through a guard in
+Log.cpp -- never call std::printf / std::wprintf directly in this project.
+`--no-console` reproduces the console-less path on purpose.
+
+The exit code of --probe-taskbar is meaningful: 0 = can hide the taskbar,
+1 = blocked by UIPI, 2 = the taskbar failed to restore.
+
+NOTE ON SHELLS: `& "path"` is PowerShell syntax. In cmd.exe, `&` is a command
+separator, so `& "path"` fails with "& was unexpected at this time" and the
+program never runs. In cmd, quote the path directly or use `start /wait ""`.
+
+Verify the toolchain (read-only):
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\verify-toolchain.ps1"
+
+
+THREE RULES THAT COST REAL TIME TO LEARN
+----------------------------------------
+
+0. RUN THE EXE FROM OUTSIDE THE PROJECT FOLDER. Anything whose image lives under
+   C:\PROJECT\Taskbar is started at LOW integrity by this environment, whatever
+   launches it -- double-click, Win+R, even Task Scheduler. At low integrity UIPI
+   discards every window message and synthetic keystroke aimed at Explorer, so the
+   bar cannot hide the native taskbar and the Start button does nothing, with no
+   error anywhere. The same exe copied to C:\Users\<you>\IslandBar\ runs at MEDIUM
+   and both work. The log says which you got: a line starting "integrity: " near the
+   top, "same as the shell's" or "LOWER than the shell's". See HANDOFF 7.84.
+
+1. Keep every .ps1 file pure ASCII. Windows PowerShell 5.1 reads scripts with
+   the system ANSI codepage unless they have a UTF-8 BOM, so any non-ASCII
+   literal inside a script gets corrupted. Never hardcode a non-ASCII path in a
+   script; derive it from $PSCommandPath.
+
+2. There is no pwsh on this machine, only powershell.exe 5.1. Avoid PowerShell 7
+   syntax such as ?? , ternary operators, -Parallel.
+
+3. DirectComposition opacity must go through IDCompositionEffectGroup.
+   DCompositionCreateDevice returns the first-generation device, whose visuals
+   do not implement IDCompositionVisual3.
+
+
+TWO MORE THAT WILL BITE WHEN YOU DELETE OR DRAW
+-----------------------------------------------
+
+4. If "Remove-Item -Recurse" reports access denied on a directory in this
+   workspace, the files are NOT locked. The sandbox denies
+   DeleteSubdirectoriesAndFiles to Everyone and some directories are missing the
+   current user's WRITE_OWNER. Do not hand-edit permissions and do not retry:
+   run the one-shot diagnose-and-repair command from the
+   diagnose-windows-sandbox-acl skill with -Path set to the failing directory,
+   -AllowRoot 'C:\PROJECT\Taskbar', and -Out pointing at a persistent folder.
+   That command needs write access, so it runs under full access with the user's
+   approval. See HANDOFF.md 4.1.
+
+5. ID2D1RenderTarget::FillRoundedRectangle and DrawRoundedRectangle take an
+   ID2D1Brush, not a D2D1_COLOR_F; passing a colour fails to compile with C2665.
+   Also: setvbuf(stdout, nullptr, _IOLBF, 0) trips a CRT assertion dialog. See
+   HANDOFF.md 6.5 for these and the other C++ traps already hit.
+
+
+AND ONE THAT WILL BITE WHEN YOU TRY TO RUN IT
+---------------------------------------------
+
+6. `& "path"` only works in PowerShell. cmd.exe treats `&` as a command
+   separator, so `& "path" --flag` dies with "& was unexpected at this time"
+   before the program starts. In cmd, quote the path directly or use
+   `start /wait "" "path" --flag`.
+
+7. Actions on the shell taskbar (hiding it, ABM_SETSTATE) are blocked by UIPI
+   whenever this process runs at a lower integrity level than Explorer -- which
+   is exactly what happens inside the DSH sandbox. The calls return 0 and no
+   error is reported. `island_bar.exe --probe-taskbar` diagnoses it. See
+   HANDOFF.md 7.5.

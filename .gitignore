@@ -1,0 +1,80 @@
+# =====================================================================
+#  What is NOT in this repository, and why.
+#
+#  The working tree is around 180 MB; the source and the documents that
+#  describe it are about 2 MB. Everything else here is a build product, a
+#  machine-local snapshot, or a screenshot dump -- and all of it can be
+#  regenerated from what IS committed:
+#
+#      build/         rebuilt by scripts\build.ps1 (54 MB)
+#      backups/       timestamped local snapshots from scripts\snapshot.ps1 (15 MB)
+#      captures/      frame dumps written by the app while it runs (28 MB)
+#      docs/*.png     screenshots; the drawings they show come from the source
+#
+#  The PNGs are the awkward case. They are genuinely useful -- they are how
+#  the panel's layout was verified against what the shell does -- but 204 of
+#  them are 80 MB, and a repository that takes a minute to clone is a
+#  repository nobody clones. They stay on the machine. If a screenshot is
+#  needed to explain something, attach it to the issue or the release, where
+#  it costs the clone nothing.
+#
+#  Getting this right BEFORE the first commit is the whole point: a file
+#  that has been committed stays in the history for ever, and taking it out
+#  later rewrites every commit that followed.
+# =====================================================================
+
+# --- build output -----------------------------------------------------
+build/
+out/
+[Oo]ut/
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.res
+*.tlog
+*.lastbuildstate
+*.log
+.vs/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.vcxproj*
+*.sln
+CTestTestfile.cmake
+
+# --- local snapshots and runtime dumps --------------------------------
+backups/
+captures/
+IslandBar/backups/
+IslandBar/captures/
+
+# --- screenshots ------------------------------------------------------
+# The documentation itself is text and IS committed; only the images are not.
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+docs/*.gif
+docs/*.bmp
+
+# --- scratch files ----------------------------------------------------
+# Written while diagnosing something; they are empty or machine-specific.
+selftest_check.txt
+trace.txt
+__st.txt
+appbar-run.log
+*.tmp
+*.bak
+*~
+
+# --- editors ----------------------------------------------------------
+.vscode/
+.idea/
+*.user
+*.suo
+*.swp

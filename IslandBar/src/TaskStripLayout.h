@@ -1,0 +1,588 @@
+// =====================================================================
+//  TaskStripLayout.h
+//  The island, the two buttons on its left, and the row of application
+//  icons on its right.
+//
+//  The bar has one shape and three things anchored to it:
+//
+//      [ system ][ Start ]   island   [ icon ] [ icon ] [ icon ] ...
+//
+//  The SYSTEM button is leftmost and the Start button is between it and the
+//  island. Both sit immediately against the island's left edge rather than out
+//  at the window's margin, so the cluster reads as part of the island: the
+//  island is the bar, and these are the controls attached to it.
+//
+//  The system indicators used to live here too -- up to four of them, out at the
+//  window's left margin. They were removed: the request was that the deck hold
+//  the Start and system buttons and nothing else, and a volume or battery glyph
+//  beside a Start button says less than the panel behind the system button
+//  already says. Their reader, their drawing and their hit test went with them
+//  rather than being left as dead code.
+//
+//  The island does not move. That is deliberate and it is the point of the
+//  design: an island that shifted sideways every time an application was opened
+//  would be worse than useless. The icon row grows to the right from a fixed
+//  left edge, so the island is a fixed point and the icons are what change.
+//
+//  Everything here is arithmetic over a rectangle, so it is tested directly
+//  rather than by looking at a screenshot.
+// =====================================================================
+#pragma once
+
+#include "Geometry.h"
+#include "Motion.h"
+
+#include <algorithm>
+
+namespace island {
+
+// The icon row.
+//
+// A button is square while at rest and widens on hover to reveal a title, which is why there are
+// two widths: the resting icon and the hovered button that contains it.
+inline constexpr float kTaskIconButtonDip = 30.0f;   // the square, at rest
+inline constexpr float kTaskIconSizeDip   = 20.0f;   // the icon inside it
+inline constexpr float kTaskIconGapDip    = 4.0f;
+inline constexpr float kTaskIconPadDip    = 8.0f;    // between the island and the first icon
+
+// The widened button on hover: icon, gap, then a title.
+// The narrowest title box worth drawing a title in.
+//
+// Below this the text is trimmed to a lone ellipsis, so a button that is still opening would show
+// ... and nothing else -- which is what was reported. A title that cannot be read is worse than no
+// title: it reads as a rendering fault.
+inline constexpr float kTaskTitleMinWidthDip = 44.0f;
+
+inline constexpr float kTaskWideButtonDip = 132.0f;
+
+// How many icons are shown.
+//
+// Bounded because the row must not reach past the monitor, and because a bar that shrinks its
+// icons without limit ends up with a row nobody can read or hit.
+//
+// This is the CEILING, not the answer. The real limit is whatever fits between the island and the
+// right-hand edge of the window, which depends on the monitor width -- so TaskIconsThatFit is what
+// callers should use, and this is the absolute cap that exists so a 16K display does not produce a
+// forty-button row.
+//
+// 20 rather than 12: with the row sized on the RESTING button (see TaskIconsThatFitInWidth) a 2560-wide
+// screen has room for about thirty, and the cap is not meant to be the thing that decides -- it was 12,
+// and the user's "8 icons and no more" turned out to come from the arithmetic below, not from here.
+inline constexpr int kMaxTaskIcons = 20;
+
+// The row a button occupies, given the width everything before it used up.
+//
+// One function for both kinds of button, because they are the same button: the offsets are the
+// running sum of the widths, exactly as TaskIconButtonAtAmounts does it, and keeping one
+// implementation is what stops the two halves of the row from drifting apart by a pixel each.
+inline RectF RowButtonAt(float rowLeft, float centreY, const float* widths, int index) {
+    float x = rowLeft;
+    for (int i = 0; i < index; ++i) {
+        x += widths[i] + kTaskIconGapDip;
+    }
+    RectF box;
+    box.left = x;
+    box.right = x + widths[index];
+    box.top = centreY - kTaskIconButtonDip * 0.5f;
+    box.bottom = box.top + kTaskIconButtonDip;
+    return box;
+}
+
+// How much room the row has, given where it starts and how wide the window is.
+//
+// The right margin is not decoration: a button flush against the window's edge would have its
+// hover-widened title clipped, and the window's own rounded edge would cut it.
+inline constexpr float kRowRightMarginDip = 8.0f;
+
+// The margin at the window's left edge, for the same reason as the right one.
+inline constexpr float kRowLeftMarginDip = 16.0f;
+
+// --- the left deck's button size ---------------------------------------------------
+//
+// Deliberately the SAME SIZE as a resting icon button. A button that looks like the app buttons is
+// read as part of the same control group, which is what it is -- the bar's decks hold the same kind
+// of thing.
+inline constexpr float kStartButtonDip = kTaskIconButtonDip;
+inline constexpr float kStartIconDip   = kTaskIconSizeDip;
+
+// --- the left deck: the system button and the Start button, against the island -------------
+//
+// The deck is anchored to the ISLAND's left edge and grows leftwards from it:
+//
+//      [ system ][ Start ]   island
+//
+// System first, then Start, then the island. Read left to right that is "what the machine is doing |
+// start something | the bar itself", and it puts the control that opens the panel furthest from the
+// island's content, so pressing it cannot be confused with pressing something on the island.
+//
+// Anchoring to the island rather than to the window's margin is what makes the cluster read as part of
+// the bar. At the window's margin the two buttons floated alone in a wide empty strip; against the
+// island they are attached to the thing they belong to.
+//
+// Everything on the left is derived from the island's left edge, so the island's own position never
+// depends on how many controls the deck holds.
+inline float DeckRight(const RoundedBox& island) {
+    return island.rect.left - kTaskIconPadDip;
+}
+
+// The rectangle of the nth button on the left deck, counted RIGHT to LEFT from the island.
+//
+// Index 0 is the button nearest the island (Start) and index 1 is the next one left (system), which is
+// the order they are read in. Counting from the island rather than from the window's margin means a
+// button cannot move because something was added at the far end of the deck.
+inline RectF DeckButtonFor(const RoundedBox& island, int index) {
+    RectF box;
+    box.right = DeckRight(island) - static_cast<float>(index) * (kStartButtonDip + kTaskIconGapDip);
+    box.left = box.right - kStartButtonDip;
+    const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
+    box.top = centreY - kStartButtonDip * 0.5f;
+    box.bottom = box.top + kStartButtonDip;
+    return box;
+}
+
+// The Start button: nearest the island on its left.
+inline RectF StartButtonFor(const RoundedBox& island) {
+    return DeckButtonFor(island, 0);
+}
+
+// The system panel's toggle: leftmost, immediately before the Start button.
+inline RectF SystemButtonFor(const RoundedBox& island) {
+    return DeckButtonFor(island, 1);
+}
+
+// Whether a window-local DIP point is on the system panel's toggle.
+inline bool SystemButtonHit(const RoundedBox& island, float x, float y) {
+    const RectF box = SystemButtonFor(island);
+    return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+}
+
+// Whether a window-local DIP point is on the Start button.
+inline bool StartButtonHit(const RoundedBox& island, float x, float y) {
+    const RectF box = StartButtonFor(island);
+    return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+}
+
+inline float RowAvailableWidthDip(float monitorWidthDip, float rowLeft) {
+    const float available = monitorWidthDip - kRowRightMarginDip - rowLeft;
+    return available > 0.0f ? available : 0.0f;
+}
+
+// The width a button occupies when the pointer is on it and it has opened to show its title.
+//
+// This is the width the row has to be sized against, NOT the resting 30 DIP. A deck sized at rest
+// fits 12 icons on a 2560 monitor and then, the moment the pointer touches one, the row grows by
+// 102 DIP and either runs off the window or shoves its neighbours sideways. Sizing against the
+// opened width means the row's outer edge never moves, which is what "a bar that does not jump"
+// actually requires.
+// (kRowSlotWidestDip is gone: it was the slot width with EVERY button open, and sizing the row on it was
+// the defect -- see TaskIconsThatFitInWidth.)
+
+// How many buttons fit in `availableWidthDip`, allowing for ONE of them being open.
+//
+// THE RESTING WIDTH, PLUS ONE OPEN ONE. It used to spend the OPENED width on every slot:
+// kTaskWideButtonDip is 132 because an open button shows its TITLE, so the row was reserving four times
+// the room it uses -- and that was the cap the user hit. Their bar's own log says it in one line:
+//
+//   "taskbar: state=hover, 8 buttons from 9 windows listed"   (1162 DIP free, 272 DIP used)
+//
+// Reported as "灵动岛 右侧现在只能显示8个 再开个窗口就不显示了".
+inline int TaskIconsThatFitInWidth(float availableWidthDip) {
+    const float slot = kTaskIconButtonDip + kTaskIconGapDip;
+    const float openExtra = kTaskWideButtonDip - kTaskIconButtonDip;
+    // `+ gap` because N slots have N-1 gaps between them; `- openExtra` because one of the N is open.
+    const float room = availableWidthDip - openExtra + kTaskIconGapDip;
+    if (room <= 0.0f) return 0;
+    int fit = static_cast<int>(room / slot);
+    if (fit > kMaxTaskIcons) fit = kMaxTaskIcons;
+    return fit;
+}
+
+// How many application icons fit on the right deck.
+//
+// Sized against kRowSlotWidestDip, so the count is the number of buttons that fit with the pointer on
+// any one of them. The consequence is a smaller cap than the resting geometry would allow -- 12 icons
+// fit at rest and 7 fit opened -- and the smaller one is the honest answer, because the larger one is
+// only true while nobody is pointing at anything.
+//
+// The `indicatorCount` parameter is gone with the indicators themselves. It used to reserve their
+// width here first, which was correct while they shared this row; keeping the parameter would have
+// subtracted room for controls that no longer exist.
+inline int TaskIconsThatFit(float availableWidthDip) {
+    return TaskIconsThatFitInWidth(availableWidthDip);
+}
+
+// The furthest right any button in the row can reach, including the one that is widened.
+//
+// Kept here rather than in the renderer because the input region needs the same answer: a row
+// whose drawing and whose clickable area disagree produces clicks that land beside the thing
+// that was clicked, which is a defect that is invisible in a screenshot.
+inline float RowRightEdgeDip(float rowLeft, const float* widths, int count) {
+    float right = rowLeft;
+    for (int i = 0; i < count; ++i) {
+        right += widths[i];
+        if (i + 1 < count) right += kTaskIconGapDip;
+    }
+    return right;
+}
+
+// The widths of every button in the row: the application icons, and nothing else.
+//
+// `widths` is filled with `taskCount` entries, all the resting width -- the row is laid out at rest
+// and the HOVERED button is the one that widens, which is why the layout takes the resting widths and
+// the position of the hovered button separately.
+inline void RowWidths(int taskCount, float* widths) {
+    for (int i = 0; i < taskCount; ++i) widths[i] = kTaskIconButtonDip;
+}
+
+// Where the island itself goes: centred, regardless of how many icons there are.
+inline RoundedBox IslandBoxFor(float monitorWidthDip, float pillWidthDip, float pillHeightDip) {
+    const float centreX = monitorWidthDip * 0.5f;
+
+    RoundedBox box;
+    box.rect.left = centreX - pillWidthDip * 0.5f;
+    box.rect.top = kPillTopMarginDip;
+    box.rect.right = box.rect.left + pillWidthDip;
+    box.rect.bottom = box.rect.top + pillHeightDip;
+    box.radiusX = std::min(pillHeightDip * 0.5f, pillWidthDip * 0.5f);
+    box.radiusY = box.radiusX;
+    return box;
+}
+
+// The row of icons, in window-local DIPs, given the island's own box.
+//
+// `hovered` picks the widened buttons. The row's LEFT edge is fixed either way, so the icons grow
+// to the right on hover rather than pushing the island or shuffling sideways.
+struct TaskIconRow {
+    float left = 0.0f;      // the row's left edge, where the first button starts
+    float top = 0.0f;
+    float bottom = 0.0f;
+    bool  valid = false;
+};
+
+inline TaskIconRow TaskRowFor(const RoundedBox& island, int count, float cardLeftDip = 0.0f,
+                              float cardWidthDip = 0.0f) {
+    TaskIconRow row;
+    if (count <= 0) return row;
+
+    (void)cardLeftDip;
+    (void)cardWidthDip;
+
+    // The row does NOT move for the card, and that is a decision with a history.
+    //
+    // The panel first opened to the RIGHT of the system button, 520 DIP wide, which put its body
+    // straight over this row -- so the row was pushed past the card to stay visible, and the user
+    // reported the icons "all squeezed out". The panel now opens to the LEFT of the island instead, so
+    // its body never reaches this row and nothing has to move for it.
+    //
+    // The parameters are kept because the input region and the hit test share this signature: removing
+    // them would leave two call sites computing the row's start by different rules, which is the defect
+    // this whole file exists to prevent.
+    row.left = island.rect.right + kTaskIconPadDip;
+
+    // Vertically centred on the island, so the row reads as belonging to it.
+    const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
+    row.top = centreY - kTaskIconButtonDip * 0.5f;
+    row.bottom = row.top + kTaskIconButtonDip;
+    row.valid = true;
+    return row;
+}
+
+// One icon button's rectangle, from EVERY button's own opening amount.
+//
+// This is the real definition; everything else is a convenience over it.
+//
+// The width of each button comes from its own amount, and each button starts after the running sum of
+// the ones before it. That is the whole design, and it is stated as a rule because both shortcuts
+// failed:
+//
+//  * Offsetting from the ONE hovered button ignores a button that is still CLOSING. A button closes
+//    over about 160 ms, so while the pointer moves along the row one button opens and its neighbour is
+//    still shrinking. Making room only for the hovered one let the opening button draw straight over
+//    its closing neighbour. The LIVE check caught it:
+//
+//      OVERLAP: button 5 ends at 1641.0 but button 6 starts at 1632.7 (amounts 0.42 / 0.30)
+//
+//    The unit tests missed it because they only ever passed ONE non-zero amount -- which is precisely
+//    the case that cannot occur in the live bar. A test that cannot express the failing case will not
+//    find it, however many assertions it contains.
+//
+//  * A second animated value deciding the push (there used to be one, `shiftAmount`) agreed with the
+//    width at rest and at the end, and disagreed for the whole middle of the transition.
+//
+// Both are the same mistake: laying the row out from a notion of "the" open button instead of from the
+// widths the buttons actually have.
+inline RectF TaskIconButtonAtAmounts(const RoundedBox& island, int index, int count,
+                                     const float* amounts, float cardLeftDip = 0.0f,
+                                     float cardWidthDip = 0.0f) {
+    if (index < 0 || index >= count || !amounts) return RectF{};
+
+    const TaskIconRow row = TaskRowFor(island, count, cardLeftDip, cardWidthDip);
+    if (!row.valid) return RectF{};
+
+    const auto widthAt = [&](int i) {
+        float amount = amounts[i];
+        if (amount < 0.0f) amount = 0.0f;
+        if (amount > 1.0f) amount = 1.0f;
+        return kTaskIconButtonDip + (kTaskWideButtonDip - kTaskIconButtonDip) * amount;
+    };
+
+    float left = row.left;
+    for (int i = 0; i < index; ++i) left += widthAt(i) + kTaskIconGapDip;
+
+    RectF box;
+    box.left = left;
+    box.right = left + widthAt(index);
+    box.top = row.top;
+    box.bottom = row.bottom;
+    return box;
+}
+
+// One icon button's rectangle, from ONE animated index and how far it has opened.
+//
+// A convenience over `TaskIconButtonAtAmounts`, which is the real definition. Kept because most callers
+// have a single hovered button, and because the unit tests express their cases this way.
+inline RectF TaskIconButtonAt(const RoundedBox& island, int index, int count, int hoveredIndex,
+                              float hoveredAmount = 1.0f, float cardLeftDip = 0.0f,
+                              float cardWidthDip = 0.0f) {
+    float amounts[kMaxTaskIcons] = {};
+    const int shown = count < kMaxTaskIcons ? count : kMaxTaskIcons;
+
+    float amount = hoveredAmount;
+    if (amount < 0.0f) amount = 0.0f;
+    if (amount > 1.0f) amount = 1.0f;
+    // Every button at rest, except the one named.
+    for (int i = 0; i < shown; ++i) amounts[i] = (i == hoveredIndex) ? amount : 0.0f;
+
+    return TaskIconButtonAtAmounts(island, index, count, amounts, cardLeftDip, cardWidthDip);
+}
+
+// The icon's square inside a button.
+//
+// The icon's square inside a button, given that button's rectangle.
+//
+// The icon is POSITIONED FROM THE BUTTON IT BELONGS TO, so it travels with it. That sounds obvious and
+// it was not what the code did: the icon was placed from the button's RESTING rectangle while the
+// button itself was placed from its animated one, so as soon as the row made room for a neighbour the
+// button slid away and left its icon behind. On screen that reads as the background moving while the
+// icons stay put, which is how it was reported.
+//
+// The reason it was written that way was a real concern -- an icon that drifted sideways while the
+// pointer was on it would move the very thing being pointed at. That concern is answered elsewhere:
+// the button being pointed at keeps its own left edge (only the buttons AFTER it are pushed along), so
+// its icon does not move either. See TaskIconButtonAtAmounts.
+inline RectF TaskIconInBox(const RectF& button) {
+    if (button.right <= button.left) return RectF{};
+
+    const float centreY = (button.top + button.bottom) * 0.5f;
+    RectF icon;
+    icon.left = button.left + (kTaskIconButtonDip - kTaskIconSizeDip) * 0.5f;
+    icon.top = centreY - kTaskIconSizeDip * 0.5f;
+    icon.right = icon.left + kTaskIconSizeDip;
+    icon.bottom = icon.top + kTaskIconSizeDip;
+    return icon;
+}
+
+// The icon's square inside a button, for callers that have the button's rectangle.
+inline RectF TaskIconAtInButton(const RoundedBox& island, int index, int count) {
+    return TaskIconInBox(TaskIconButtonAt(island, index, count, -1));
+}
+
+// Where a title goes, using each button's own opening amount.
+//
+// The box grows with the button, so it is derived from the same widths the button is drawn with. Using
+// one "hovered" amount instead would place the title against a row that is not the row on screen.
+inline RectF TaskTitleAtAmounts(const RoundedBox& island, int index, int count, const float* amounts,
+                               int hoveredIndex, float cardLeftDip = 0.0f,
+                               float cardWidthDip = 0.0f) {
+    if (index != hoveredIndex || !amounts) return RectF{};
+
+    const RectF button =
+        TaskIconButtonAtAmounts(island, index, count, amounts, cardLeftDip, cardWidthDip);
+    const RectF icon = TaskIconInBox(button);
+    if (button.right <= button.left) return RectF{};
+
+    RectF title;
+    title.left = icon.right + 8.0f;
+    title.right = button.right - kTaskIconPadDip;
+    title.top = button.top;
+    title.bottom = button.bottom;
+    return title;
+}
+
+// The icon's square inside a button, from the button's own animated rectangle.
+//
+// Same geometry as `TaskIconInBox`, reached from an index and an amount so the callers that describe a
+// single hovered button can use it.
+inline RectF TaskIconAt(const RoundedBox& island, int index, int count, int hoveredIndex = -1,
+                        float hoveredAmount = 1.0f) {
+    return TaskIconInBox(TaskIconButtonAt(island, index, count, hoveredIndex, hoveredAmount));
+}
+
+// Where the title goes, inside the growing button.
+inline RectF TaskTitleAt(const RoundedBox& island, int index, int count, int hoveredIndex,
+                         float hoveredAmount = 1.0f, float cardLeftDip = 0.0f,
+                         float cardWidthDip = 0.0f) {
+    if (index != hoveredIndex) return RectF{};
+
+    const RectF button = TaskIconButtonAt(island, index, count, hoveredIndex, hoveredAmount,
+                                          cardLeftDip, cardWidthDip);
+    const RectF icon = TaskIconInBox(button);
+    if (button.right <= button.left) return RectF{};
+
+    RectF title;
+    title.left = icon.right + 8.0f;
+    title.right = button.right - kTaskIconPadDip;
+    title.top = button.top;
+    title.bottom = button.bottom;
+    return title;
+}
+
+// How wide the row is with a given button widened.
+//
+// Used to check that a widened button cannot push the row off the monitor, and to size the hover
+// strip so the shape does not change when the pointer moves along the row.
+inline float TaskRowWidthDip(int count, int hoveredIndex) {
+    if (count <= 0) return 0.0f;
+    float total = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        total += (i == hoveredIndex) ? kTaskWideButtonDip : kTaskIconButtonDip;
+        if (i + 1 < count) total += kTaskIconGapDip;
+    }
+    return total;
+}
+
+// Which icon a window-local DIP point lands on, or -1.
+//
+// The whole button is the target rather than just the icon: a button that can only be hit on its
+// picture is a button that feels broken.
+inline int TaskIconHit(const RoundedBox& island, int count, int hoveredIndex, float hoveredAmount,
+                       float x, float y) {
+    for (int i = 0; i < count; ++i) {
+        const RectF button = TaskIconButtonAt(island, i, count, hoveredIndex, hoveredAmount);
+        if (button.right <= button.left) continue;
+        if (x >= button.left && x <= button.right && y >= button.top && y <= button.bottom) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Which icon the pointer is CHOOSING, decided on the RESTING layout.
+//
+// This is deliberately not TaskIconHit with the animated layout, and the difference is the whole
+// point.
+//
+// Deciding "which icon is the pointer on" from a layout that has already moved for the current
+// answer therefore closes a loop: the pointer moves towards the second icon, but the first one's
+// growth has pushed the second one further along, so the pointer is still inside the first one's
+// extent -- the first stays open and the second can never be reached. The reported symptom was
+// exactly that: the pointer arrives at the second icon and something else opens.
+//
+// On the resting layout the answer is a function of the pointer's position alone and does not depend
+// on the answer it is about to produce.
+inline int TaskIconUnderPointer(const RoundedBox& island, int count, float x, float y) {
+    return TaskIconHit(island, count, -1, 0.0f, x, y);
+}
+
+// Whether a point is anywhere on the row, on the resting layout.
+//
+// Used by the window's hit test, which decides whether the bar accepts the pointer at all. It must
+// use the resting layout for the same reason the choice above does: a hit test whose geometry moves
+// as the pointer moves makes the bar flicker in and out of click-through.
+inline bool TaskRowContains(const RoundedBox& island, int count, float x, float y,
+                             float cardLeftDip = 0.0f, float cardWidthDip = 0.0f) {
+    if (count <= 0) return false;
+    // The row's vertical extent, taken from the widest case so a widened button's title is included.
+    const TaskIconRow row = TaskRowFor(island, count, cardLeftDip, cardWidthDip);
+    if (!row.valid) return false;
+    if (y < row.top || y > row.bottom) return false;
+
+    // Horizontally: from the row's left edge to past the last resting button. A widened button
+    // extends further right, and that extra is included so the title is part of the bar.
+    const float lastRestingRight =
+        TaskIconButtonAt(island, count - 1, count, -1, 0.0f).right;
+    const float lastWideRight =
+        TaskIconButtonAt(island, count - 1, count, count - 1, 1.0f).right;
+    const float right = lastWideRight > lastRestingRight ? lastWideRight : lastRestingRight;
+    return x >= row.left && x <= right;
+}
+
+// The icon to keep open, given where the pointer is and whichever icon is already open.
+//
+// The resting layout says which button the pointer has MOVED ON TO, but it cannot say whether the
+// pointer is STILL on the row once the row has opened: opening pushes everything after the open
+// button to the right, so the button that was under the pointer moves out from under it. Judging only
+// from the resting layout therefore reports "the pointer is between buttons" and closes the button
+// the user is pointing at -- which showed up as the row flickering and, worse, as the island
+// expanding, because "not on an icon" is what permits the island to open.
+//
+// So the two questions are separated:
+//
+//   * the resting layout says which button the pointer has ARRIVED at;
+//   * the row's full extent says whether the pointer is still on the ROW at all.
+//
+// `current` is kept unless the pointer has genuinely arrived at a different button. That is the
+// hysteresis which stops the two layouts from fighting each other.
+inline int TaskIconToKeepOpen(const RoundedBox& island, int count, int current, float x, float y) {
+    if (count <= 0) return -1;
+
+    const int arrived = TaskIconUnderPointer(island, count, x, y);
+    if (arrived >= 0) return arrived;
+
+    // Not on a resting button, but still on the row -- including the extra room a grown button takes,
+    // so the pointer resting on an open button's title counts as still being on it.
+    if (current >= 0 && TaskRowContains(island, count, x, y)) return current;
+
+    return -1;
+}
+
+// How long an icon takes to arrive or to leave the row.
+//
+// The row's membership changes in a single frame otherwise: a window opens and its icon is simply THERE,
+// a window closes and it is simply gone. Reported as "灵动岛右侧 图标出现和消失有点太突兀了没有动画".
+inline constexpr float kTaskIconAppearSeconds = 0.22f;
+
+// One step of an icon's appearance. `amount` moves towards 1 while the window is listed and towards 0
+// while it is not, at a fixed rate, so arrivals and departures take the same time.
+//
+// A pure function because the defect it fixes cannot be seen in a still: "an icon that jumps in" and "an
+// icon that fades in" are the same picture once the fade is over.
+inline float TaskIconAppearStep(float amount, bool arriving, float dtSeconds) {
+    const float dt = dtSeconds > 0.1f ? 0.1f : (dtSeconds < 0.0f ? 0.0f : dtSeconds);
+    const float step = dt / kTaskIconAppearSeconds;
+    const float target = arriving ? 1.0f : 0.0f;
+    if (amount < target) {
+        const float next = amount + step;
+        return next > target ? target : next;
+    }
+    if (amount > target) {
+        const float next = amount - step;
+        return next < target ? target : next;
+    }
+    return amount;
+}
+
+// How many icons fit before the row would leave the monitor, allowing for ONE widened button.
+//
+// The widened button is what has to fit, not the resting one: the row must not run off the screen
+// when the pointer lands on its last icon, which is exactly when it is at its widest.
+//
+// `wanted` is clamped rather than ignored: the caller says how many windows there are and this says
+// how many of them can be shown, so the answer is the smaller of the two. Only the OPENED width is
+// spent here -- the row is sized so that any single button can open without the row growing.
+inline int TaskIconsThatFit(float monitorWidthDip, int wanted) {
+    if (wanted <= 0) return 0;
+
+    // The island is centred, so the row has everything from the island's right edge to the monitor's
+    // right edge, less the padding and a small margin.
+    const float centreX = monitorWidthDip * 0.5f;
+    const float islandRight = centreX + (kCollapsedWidthDip * 0.5f);
+    const float available = monitorWidthDip - islandRight - kTaskIconPadDip - 8.0f;
+    if (available <= 0.0f) return 0;
+
+    int fit = TaskIconsThatFitInWidth(available);
+    if (fit < 1) fit = 1;   // one icon always fits; a row that shows nothing is worse
+    return fit < wanted ? fit : wanted;
+}
+
+} // namespace island
