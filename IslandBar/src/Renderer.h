@@ -299,6 +299,17 @@ static constexpr int kMaxTaskButtons = 32;
     // knows where the pointer is.
     int taskHoveredIndex = -1;
 
+    // THE SYSTEM TRAY: the applications' own tray icons, at the right-hand end of the bar.
+    //
+    // The list is owned by the frame loop (it reads the registry on a timer) and borrowed here; the count
+    // is what the loop was told fits, and `trayRevision` is the list's own so the decoded bitmaps in the
+    // text layer survive from frame to frame. See TrayIcons.h for where the icons come from and
+    // TaskStripLayout.h for why the group is anchored to the monitor rather than to the row beside it.
+    const TrayIcon* trayIcons = nullptr;
+    int             trayIconCount = 0;
+    unsigned long long trayRevision = 0;
+    int             trayHoveredIndex = -1;
+
     // Whether the pointer is on the Start button, which lives on the other side of the
     // island from the application icons.
     bool startHovered = false;

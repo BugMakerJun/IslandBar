@@ -683,4 +683,56 @@ inline float StatusStripFadeStep(float amount, bool wanted, float dtSeconds) {
     return amount;
 }
 
+// --- the system tray: the applications' own tray icons, at the right-hand END of the bar -------
+//
+// WHERE IT GOES, and why it is anchored to the MONITOR rather than to the row beside it. The
+// application icon row grows and shrinks with the windows that are open, so a tray hung off its right
+// edge would slide sideways every time a window opened -- and the tray is the one part of this bar whose
+// position the user learns by muscle memory. Anchored to the monitor's right edge it never moves, which
+// is also how the shell's own tray behaves.
+//
+// The two groups still have to not collide, and that is the row's problem: the row is sized from the
+// room left over after this much is reserved (see TaskIconsThatFitInWidth's caller in main.cpp).
+inline constexpr float kTrayIconDip         = 22.0f;   // the button; the picture inside is smaller
+inline constexpr float kTrayPictureDip      = 16.0f;
+inline constexpr float kTrayGapDip          = 2.0f;
+inline constexpr float kTrayRightMarginDip  = 6.0f;
+// Bounded because a row of every icon an application ever registered is a row nothing can be read from.
+inline constexpr int   kMaxTrayIcons        = 10;
+
+inline float TrayWidthDip(int count) {
+    if (count <= 0) return 0.0f;
+    return count * kTrayIconDip + (count - 1) * kTrayGapDip + kTrayRightMarginDip;
+}
+
+// One tray icon's rectangle, in window-local DIPs. `index` counts from the LEFT of the group, which is
+// how the list is ordered; the group as a whole is flush with the monitor's right margin.
+inline RectF TrayIconBoxFor(const RoundedBox& island, float monitorWidthDip, int index, int count) {
+    if (count <= 0 || index < 0 || index >= count) return RectF{};
+
+    const float groupRight = monitorWidthDip - kTrayRightMarginDip;
+    const float groupWidth = TrayWidthDip(count) - kTrayRightMarginDip;
+    const float left = groupRight - groupWidth + static_cast<float>(index) * (kTrayIconDip + kTrayGapDip);
+
+    RectF box;
+    box.left = left;
+    box.right = left + kTrayIconDip;
+    // On the island's own line, like the deck buttons and the application icons: one row, one centre.
+    const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
+    box.top = centreY - kTrayIconDip * 0.5f;
+    box.bottom = box.top + kTrayIconDip;
+    return box;
+}
+
+// Which tray icon a window-local DIP point is on, or -1.
+inline int TrayIconUnderPointer(const RoundedBox& island, float monitorWidthDip, int count, float x,
+                                float y) {
+    for (int i = 0; i < count; ++i) {
+        const RectF box = TrayIconBoxFor(island, monitorWidthDip, i, count);
+        if (box.right <= box.left) continue;
+        if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return i;
+    }
+    return -1;
+}
+
 } // namespace island

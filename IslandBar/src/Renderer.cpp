@@ -288,6 +288,21 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
                          frame.taskButtonCount, cardLeftDip, cardWidthDip,
                          frame.taskButtonAppearValid ? frame.taskButtonAppear : nullptr);
 
+    // THE TRAY, at the far right of the bar -- after the application icons, so the two groups read as
+    // "what I have open" then "what is running quietly", which is the order the shell's own taskbar has.
+    //
+    // Not gated on `fullscreenApp` here: that is handled where the whole deck is skipped (the caller),
+    // because while a game has the screen the tray is not the bar either.
+    if (frame.trayIconCount > 0 && frame.trayIcons) {
+        // The monitor's width, from the island's own box: every shape on this bar is centred on the
+        // monitor's centre (see IslandBoxFor), so the left and right edges add up to it whatever state the
+        // bar is in -- which is why the tray's anchoring needs no field of its own in the frame.
+        const float monitorWidthDip = island.rect.left + island.rect.right;
+        text_->DrawTrayIcons(d2dContext_, island, monitorWidthDip, frame.trayIcons,
+                             frame.trayIconCount, frame.trayRevision, frame.contentOpacity,
+                             frame.trayHoveredIndex);
+    }
+
     // What the row was actually asked to draw, and where it put it.
     //
     // Reported on change of the answer, so the log has one line per movement rather than one per frame.

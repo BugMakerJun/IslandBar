@@ -22,6 +22,8 @@
 #include "Geometry.h"      // RoundedBox: the text is laid out inside the pill's box
 #include "MusicSession.h"  // the now-playing field capacities
 #include "CardLayout.h"    // where the card's controls go
+#include "TaskStripLayout.h"  // where the tray sits, and how many icons fit
+#include "TrayIcons.h"     // the icons themselves
 
 namespace island {
 
@@ -101,6 +103,19 @@ public:
     // instead of popping in at full strength.
     void DrawClock(ID2D1DeviceContext2* context, const RoundedBox& box,
                    ClockStyle style, float opacity);
+
+    // The system tray, at the right-hand end of the bar: the applications' own tray icons, drawn from
+    // the PNG the shell stores for each of them (see TrayIcons.h for where they come from).
+    //
+    // `revision` is the list's own, so a decoded bitmap is kept until the icons themselves change: the
+    // bar draws at the compositor's rate and a PNG decode per frame per icon would be the most expensive
+    // thing on the bar.
+    //
+    // `hoveredIndex` gets the same wash the application buttons get, so "this is under the pointer" looks
+    // the same wherever it happens.
+    void DrawTrayIcons(ID2D1DeviceContext2* context, const RoundedBox& island, float monitorWidthDip,
+                       const TrayIcon* icons, int count, unsigned long long revision, float opacity,
+                       int hoveredIndex);
 
     // --- the date, the weekday, the time and the weather: one line, two homes ----
     //
@@ -582,6 +597,18 @@ private:
         unsigned long long revision = 0;
     };
     SoundIconSlot soundIcons_[SoundPageText::kMaxMixRows];
+
+    // The tray icons, one decoded bitmap each, kept until the list's revision changes.
+    //
+    // The REVISION is what makes the index a safe key: the list bumps it when its contents change, and
+    // its contents include which icon sits at which index (an application starting shifts the order), so
+    // a bitmap cached under index 3 cannot survive into a list where index 3 is a different icon.
+    struct TrayIconSlot {
+        ID2D1Bitmap1* bitmap = nullptr;
+        unsigned long long revision = 0;
+        int index = -1;
+    };
+    TrayIconSlot trayIconSlots_[kMaxTrayIcons];
 
     // The bitmap for one mixer row's icon. The PNG is decoded and uploaded only when that row's revision
     // changes, so a steady page costs nothing per frame.

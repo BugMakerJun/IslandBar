@@ -5270,6 +5270,65 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
 | **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
 | **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
+### 8.56 **系统托盘：岛右侧显示应用托盘图标** ✅（**点击**待用户定，见末节）
+
+用户要：「**做系统托盘吧 在灵动岛右侧**」。
+
+#### 先探针：老路已死，新路是 UIA + 注册表
+
+文档里早有结论：**标准做法（读 `Shell_TrayWnd` 里 `ToolbarWindow32` 的按钮）在 Win11 26220 上不存在**。所以新写了 `scripts\probe-tray-uia.ps1` 把两件事一次问清：
+
+**① UI Automation 能读到整个托盘**（名字、矩形、`Invoke` 能力）：
+
+```
+Button "显示隐藏的图标"        id="SystemTrayIcon" 2416,0 24x32 [Invoke]
+Button "音量 扬声器: 28%"      id="SystemTrayIcon" 2488,0 24x32 [Invoke]
+Button "时钟 19:23 2026/10/12" id="SystemTrayIcon" 2512,0 24x32 [Invoke]
+```
+
+但**任务栏被我们的栏藏起来时，这棵子树是空的** —— 所以 UIA 只能用来"按"，不能用来"画"。（探针里踩到三件事：`param()` 必须是脚本第一条语句；`LegacyIAccessiblePattern` 在本机 PowerShell 里不存在；以及**栏自己每 5 秒把任务栏藏回去**（`native taskbar: re-hidden`），探针得在栏停着时跑。）
+
+**② 图标本体在注册表里**，而且**不需要显示任务栏**：
+
+```
+HKCU\Control Panel\NotifyIconSettings\<hash>
+    ExecutablePath  ...\Weixin.exe        IconSnapshot = PNG!（magic 89 50 4E 47）
+    InitialTooltip  "QQ音乐 听我想听"      IsPromoted   = 1（在托盘常显区）
+```
+
+27 条记录，按"**这套 exe 有进程在跑**"过滤后 16 条 ✓（Progman/僵尸安装条目被滤掉，这就是"托盘"与"旧安装墓地"的区别）。
+
+#### 实现：新模块 `TrayIcons` + 布局 + 绘制
+
+* `TrayIcons.h/.cpp`：读上面那个键，取 `IconSnapshot` 的 PNG 字节 + 名字（工具提示，空则用文件名）+ `IsPromoted`，按"进程在跑"过滤，**最近的写在最前**；每 5 秒刷新一次（`kTrayRefreshMs`），内容变了才 `++revision`（渲染层按 revision 缓存解码后的位图，否则每帧每图标解一次 PNG 是本条栏最贵的操作）。
+* 布局在 `TaskStripLayout.h`：`TrayIconBoxFor(island, monitorWidthDip, i, count)` —— **锚在显示器右边距**，不是锚在应用图标行右边。行会随开窗增减而伸缩，托盘挂上去就会跟着左右滑动，而托盘的位置是用户靠肌肉记忆记的。
+* 绘制在 `TextRenderer::DrawTrayIcons`：22 DIP 的按钮、16 DIP 图标、悬停给同样的白色 wash；`--tray-dump` 可以从命令行核对枚举结果。
+* 应用图标行的**名额先扣掉托盘的宽度**（`TaskIconsThatFit(monitorWidth - TrayWidthDip(n), wanted)`）：两个实时控件的重叠不是观感问题，是同一批像素被两边同时认领。
+
+#### 两个真 bug（都被证据抓住）
+
+| 症状 | 真因 |
+|---|---|
+| 日志说 16 个图标、帧也收到了，**屏幕上什么都没有** | **输入区域比绘制窄 → 被裁剪**（这个文件的第五条同类教训）：区域右边界只到应用图标行，而托盘在它右边 238 DIP。`InputRegionFor` 加 `trayIconCount` 参数把右边界推过去 |
+| `draw tray: icon 1 has a 18374403900871474942 byte PNG` | 我把 `&entries_[0].icon` 交给渲染器，渲染器按 `icons[i]` **步进 TrayIcon 大小** —— 而这些 TrayIcon 分散在 `Entry`（含 `wstring`+`vector`）里，`icons[1]` 踩进了 entry 0 的中间，读到调试堆的 `0xFE` 填充。改成维护**独立连续数组** `list_`，`At()` 从它取 |
+
+#### 实测
+
+```
+tray: 16 icon(s) from the registry (27 entr(ies), 402 process(es) seen)
+draw tray: count=10, monitor 2560 DIP, first icon x [2316, 2338] y [13, 35], 528 byte PNG
+```
+
+截图 `captures/tray-bar-right-zoom.png`（4 倍放大）：右端一排 10 个托盘图标（微信、QQ音乐、Steam、Clash、NVIDIA、Razer…），左端应用图标行正常。**注意**：截图是用新诊断开关 `ISLANDBAR_NO_FULLSCREEN=1` 拍的 —— 因为这台机器一直有游戏全屏，栏会按 8.54/8.55 的规则退场，根本拍不到栏（这个开关就是为这种取证加的，START-HERE 已记）。
+
+自检 **819 → 837** 项：托盘锚在右边距、图标互不重叠、在显示器内、与岛同一条线、**应用行在任意开窗数量下都结束于托盘之前**（含展开那一个按钮的最宽情形）、托盘自己的命中测试、**区域必须覆盖托盘**、以及"没有托盘时窗口不接受那个点"。
+
+#### 还没做的：**点击**（要用户拍板）
+
+托盘图标目前是**只读**的：点它没有任何反应（它的菜单属于 shell，只能请 shell 打开）。可行链路已实测：**显示任务栏 → UIA Invoke 那个图标（或"显示隐藏的图标"箭头）→ 再藏起来**，面板会留在原地（`TopLevelWindowForOverflowXamlIsland 2311,32 234x154`）。代价是**系统任务栏会闪约 310 毫秒**（实测 UIA 树 310 ms 就绪）。
+
+所以这条要问一句：**接受"点一下闪 0.3 秒任务栏"吗？** 接受就接上（大概一百行 COM UIA）；不接受，托盘就保持"看得见、点不动"，或者另想一个不显示任务栏的招（例如把任务栏窗口临时移出屏幕再 UIA —— 未验证）。
+
 ### 8.55 **全屏时"只要岛"：左右两侧（deck、图标行、日期时间行）都不画、也不响应** ✅
 
 8.54 之后用户补一句：「**玩游戏的时候 有通知和通话时 只要显示灵动岛就行 左右两侧的不用显示**」。

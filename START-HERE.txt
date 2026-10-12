@@ -74,6 +74,12 @@ perform the transition on a timer:
                              runs all day, so this is the only way to photograph the IDLE
                              island -- where the pill itself carries the date, the weekday,
                              the time and the weather (see HANDOFF 8.46).
+    ISLANDBAR_NO_FULLSCREEN=1
+                             ignore a full-screen application in front. While a game has the
+                             screen the bar stands down by design (HANDOFF 8.54), so on a
+                             machine that is always playing one there is no way to
+                             photograph the bar itself -- its tray, its row, its status line.
+                             This is what the tray's own screenshot was taken with.
     ISLANDBAR_START_MS       press the START button after N ms, and every
                              ISLANDBAR_START_CYCLE_MS after that. The Start button is the
                              one control that has to inject input into the shell, so it

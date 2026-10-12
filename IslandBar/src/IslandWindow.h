@@ -170,11 +170,21 @@ public:
     // lets the self-test ask about both answers.
     static bool ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                     POINT screenPoint, IslandState state, int iconCount = 0,
-                                    float cardLeftDip = 0.0f, bool fullscreenApp = false);
+                                    float cardLeftDip = 0.0f, bool fullscreenApp = false,
+                                    int trayIconCount = 0);
 
     // Told by the frame loop, which measures it (see island::FullScreenAppInFront). The hit test is
     // answered here, so it has to be told the same thing the renderer was.
     void SetFullscreenApp(bool fullscreenApp);
+
+    // How many tray icons are on the bar, so the window can tell whether the pointer is on one -- the
+    // same arrangement as the application icon count, and for the same reason: the count comes from a
+    // list the window does not own.
+    void SetTrayIconCount(int count);
+    int  TrayIconCount() const { return trayIconCount_; }
+    // The tray icon under the pointer, or -1. Chosen here because this is the only place that knows where
+    // the pointer is; the geometry comes from TaskStripLayout, so the hit test and the drawing agree.
+    int  TrayHoveredIcon() const { return hoveredTrayIcon_; }
 
     // Tells the window how many application icons are on screen.
     //
@@ -334,7 +344,7 @@ public:
                                const IslandAnchor& anchor,
                                const RoundedBox& current = RoundedBox{},
                                float cardLeftDip = 0.0f, int taskIconCount = -1,
-                               float statusStripWidthDip = 0.0f);
+                               float statusStripWidthDip = 0.0f, int trayIconCount = 0);
 
     // The anchor the current box geometry is derived from.
     IslandAnchor CurrentAnchor() const;
@@ -520,6 +530,9 @@ private:
     // Whether a full-screen application is in front, as measured by the frame loop. Held here because the
     // hit test is answered here: while it is set, only the island is the bar. See SetFullscreenApp.
     bool fullscreenApp_ = false;
+    // The tray, for the same reason: how many icons are on the bar, and which one the pointer is on.
+    int trayIconCount_ = 0;
+    int hoveredTrayIcon_ = -1;
     // Which card the frame loop says is up: what the cursor's hit tests are gated on. See SetCardOwner.
     CardOwner cardOwner_ = CardOwner::None;
     // The last value written to the log, so the hover trace reports changes rather than every poll.

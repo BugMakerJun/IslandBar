@@ -5972,6 +5972,134 @@ void TestMusicCardLayout() {
             if (source) DestroyWindow(source);
         }
 
+        // The system tray: the applications' own tray icons, at the right-hand end of the bar.
+        //
+        // WHY IT IS ANCHORED TO THE MONITOR and not to the row beside it: the row grows and shrinks with
+        // the windows that are open, so a tray hung off its right edge would slide sideways every time a
+        // window opened. The properties below are all statements about that decision -- the group does not
+        // move, and it is the ROW that has to give way.
+        {
+            const float trayMonitor = 2560.0f;
+            const RoundedBox trayIsland =
+                IslandBoxFor(trayMonitor, kCollapsedWidthDip, kCollapsedHeightDip);
+
+            wchar_t trayDetail[256];
+            for (int count : {1, 3, kMaxTrayIcons}) {
+                const RectF first = TrayIconBoxFor(trayIsland, trayMonitor, 0, count);
+                const RectF last = TrayIconBoxFor(trayIsland, trayMonitor, count - 1, count);
+                std::swprintf(trayDetail, 256,
+                              L"%d icons: x [%.0f, %.0f], each %.0f wide, island centre %.0f",
+                              count, first.left, last.right, first.right - first.left,
+                              (trayIsland.rect.top + trayIsland.rect.bottom) * 0.5f);
+
+                // The group ends at the monitor's right margin, whatever it holds.
+                Check(Nearly(last.right, trayMonitor - kTrayRightMarginDip, 0.01f),
+                      L"the tray ends at the monitor's right margin", trayDetail);
+                // Inside the monitor, on both axes.
+                Check(first.left > 0.0f && last.right <= trayMonitor,
+                      L"the tray is on the screen at every size", trayDetail);
+                Check(Nearly((first.top + first.bottom) * 0.5f,
+                             (trayIsland.rect.top + trayIsland.rect.bottom) * 0.5f, 0.01f),
+                      L"the tray is on the island's own line", trayDetail);
+                // And its icons are laid out left to right without overlapping.
+                bool ordered = true;
+                for (int i = 0; i + 1 < count; ++i) {
+                    const RectF a = TrayIconBoxFor(trayIsland, trayMonitor, i, count);
+                    const RectF b = TrayIconBoxFor(trayIsland, trayMonitor, i + 1, count);
+                    if (a.right > b.left + 0.01f) ordered = false;
+                }
+                Check(ordered, L"the tray's icons do not overlap each other", trayDetail);
+            }
+
+            // THE ROW GIVES WAY, AND THAT IS THE POINT OF THE RESERVATION.
+            //
+            // The count of application icons that fit is computed from the room left after the tray's strip
+            // (see the frame loop): what has to hold is that the row, laid out with that count, ends before
+            // the tray begins -- for every number of windows, which is what makes this a property rather
+            // than a coincidence for today's.
+            {
+                const int trayCount = kMaxTrayIcons;
+                const float reserved = TrayWidthDip(trayCount);
+                const RectF firstTray = TrayIconBoxFor(trayIsland, trayMonitor, 0, trayCount);
+                bool clear = true;
+                for (int wanted : {1, 4, 12, 40}) {
+                    const int fits = TaskIconsThatFit(trayMonitor - reserved, wanted);
+                    if (fits <= 0) continue;
+                    float rowAmounts[FrameState::kMaxTaskButtons] = {};
+                    for (int i = 0; i < fits; ++i) rowAmounts[i] = 0.0f;
+                    const RectF lastIcon = TaskIconButtonAtAmounts(trayIsland, fits - 1, fits, rowAmounts);
+                    // The WIDEST case: that last button opened, which is what the row is sized against.
+                    const RectF lastIconOpen =
+                        TaskIconButtonAt(trayIsland, fits - 1, fits, fits - 1, 1.0f);
+                    if (lastIcon.right > firstTray.left || lastIconOpen.right > firstTray.left) {
+                        clear = false;
+                        std::swprintf(trayDetail, 256,
+                                      L"%d windows -> %d icons, row ends at %.0f (open: %.0f), tray starts "
+                                      L"at %.0f",
+                                      wanted, fits, lastIcon.right, lastIconOpen.right, firstTray.left);
+                    }
+                }
+                Check(clear, L"the application row ends before the tray begins, however many windows are "
+                             L"open",
+                      trayDetail);
+            }
+
+            // The tray's own hit test, and the window's: a tray icon that could not be reached would be
+            // drawn and completely inert -- the defect the application icons had before the union was
+            // extended for them.
+            {
+                const RectF third = TrayIconBoxFor(trayIsland, trayMonitor, 2, 5);
+                const float centreX = (third.left + third.right) * 0.5f;
+                const float centreY = (third.top + third.bottom) * 0.5f;
+                const int hit = TrayIconUnderPointer(trayIsland, trayMonitor, 5, centreX, centreY);
+                const int missLeft = TrayIconUnderPointer(trayIsland, trayMonitor, 5, third.left - 4.0f,
+                                                          centreY);
+                std::swprintf(trayDetail, 256, L"third icon x [%.0f, %.0f] -> %d, just left of it -> %d",
+                              third.left, third.right, hit, missLeft);
+                Check(hit == 2 && missLeft != 2,
+                      L"a point on a tray icon is that icon and its neighbour is not", trayDetail);
+
+                MonitorGeometry trayMon;
+                trayMon.screen = {0, 0, 2560, 1440};
+                trayMon.work = {0, 32, 2560, 1408};
+                trayMon.dpi = 96;
+                trayMon.dpiY = 96;
+                const RECT trayWindow = {0, 0, 2560, 320};
+                const POINT onTheTray = {static_cast<LONG>(centreX), static_cast<LONG>(centreY)};
+                std::swprintf(trayDetail, 256, L"tray icon centre %ld,%ld", onTheTray.x, onTheTray.y);
+                Check(IslandWindow::ShouldAcceptPointer(trayMon, trayWindow, onTheTray,
+                                                        IslandState::Collapsed, 0, 0.0f, false, 5),
+                      L"the window accepts the pointer on the tray", trayDetail);
+                Check(!IslandWindow::ShouldAcceptPointer(trayMon, trayWindow, onTheTray,
+                                                         IslandState::Collapsed, 0, 0.0f, false, 0),
+                      L"and does not when there is no tray there", trayDetail);
+            }
+
+            // THE WINDOW REGION MUST COVER IT, or the tray is drawn and clipped -- measured on the way to
+            // this feature: sixteen icons found, handed to the frame, and not one pixel on screen, because
+            // the region stopped at the application row.
+            {
+                MonitorGeometry trayMon;
+                trayMon.screen = {0, 0, 2560, 1440};
+                trayMon.work = {0, 32, 2560, 1408};
+                trayMon.dpi = 96;
+                trayMon.dpiY = 96;
+                const IslandAnchor trayAnchor = AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f);
+                const RECT withTray = IslandWindow::InputRegionFor(
+                    trayMon, IslandState::Collapsed, trayAnchor, RoundedBox{}, 0.0f, 0, 0.0f,
+                    kMaxTrayIcons);
+                const RECT withoutTray = IslandWindow::InputRegionFor(
+                    trayMon, IslandState::Collapsed, trayAnchor, RoundedBox{}, 0.0f, 0, 0.0f, 0);
+                std::swprintf(trayDetail, 256, L"region right edge: with a tray %ld px, without %ld px",
+                              withTray.right, withoutTray.right);
+                Check(withTray.right > withoutTray.right,
+                      L"asking for the tray widens the region to cover it", trayDetail);
+                Check(withTray.right >=
+                          static_cast<LONG>(2560.0f - kTrayRightMarginDip) - 1,
+                      L"and the region reaches the tray's own right edge", trayDetail);
+            }
+        }
+
         // The input region must be as tall as the shape that is DRAWN, including the card.
         //
         // The region is what the window manager uses to decide which pixels belong to the bar, so a

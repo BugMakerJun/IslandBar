@@ -33,6 +33,7 @@ add_executable(island_bar
     TextRenderer.cpp
     ThumbnailPreview.cpp
     ToastStore.cpp
+    TrayIcons.cpp
     Weather.cpp
     WeChatWatch.cpp
     WicImage.cpp

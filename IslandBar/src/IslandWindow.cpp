@@ -285,7 +285,7 @@ bool IslandWindow::TakePress(POINT* screenPoint) {
 RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState state,
                                   const IslandAnchor& anchor, const RoundedBox& current,
                                   float cardLeftDip, int taskIconCount,
-                                  float statusStripWidthDip) {
+                                  float statusStripWidthDip, int trayIconCount) {
     // The bounding box of what the bar actually DRAWS, in window pixels.
     //
     // Horizontally it runs from the left of the state's own shape to the right of the longest icon row
@@ -432,6 +432,19 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     }
     if (rowRight > right) right = rowRight;
 
+    // THE TRAY, at the monitor's right-hand margin.
+    //
+    // The fifth time this file has had to say it, and the first time it was learned the hard way on this
+    // feature: the region is what decides which pixels this window owns, so a region that stops short of
+    // the tray CLIPS it. Measured: the icons were found (16 of them), the frame was handed them, and the
+    // bar drew nothing -- because the tray's strip is 238 DIP to the right of everything else the region
+    // covered. See InputRegionFor's other notes for the same rule applied to the card, the deck and the
+    // status strip.
+    if (trayIconCount > 0) {
+        const float trayRight = widthDip - kTrayRightMarginDip;
+        if (trayRight > right) right = trayRight;
+    }
+
     RECT region = {};
     region.left = static_cast<LONG>(left * scale);
     region.top = 0;
@@ -477,7 +490,7 @@ void IslandWindow::ApplyInputRegion() {
     // only the renderer knows about is a plan the clickable area cannot keep up with.
     const RECT region =
         InputRegionFor(monitor_, motion_.Target(), anchor, motion_.Current(), cardLeftDip_,
-                       taskButtonCount_, statusStripWidthDip_);
+                       taskButtonCount_, statusStripWidthDip_, trayIconCount_);
 
     // Skipped when it is the same rectangle as last time.
     //
@@ -594,11 +607,15 @@ int IslandWindow::IconAtScreen(POINT screenPoint) const {
 
 bool IslandWindow::HitTestScreen(POINT screenPoint) const {
     return ShouldAcceptPointer(monitor_, rect_, screenPoint, motion_.Target(),
-                               RowButtonCount(), cardLeftDip_, fullscreenApp_);
+                               RowButtonCount(), cardLeftDip_, fullscreenApp_, trayIconCount_);
 }
 
 void IslandWindow::SetFullscreenApp(bool fullscreenApp) {
     fullscreenApp_ = fullscreenApp;
+}
+
+void IslandWindow::SetTrayIconCount(int count) {
+    trayIconCount_ = count < 0 ? 0 : count;
 }
 
 void IslandWindow::SetSystemPanel(const TextRenderer::SystemPanelText& panel, float cardLeftDip) {
@@ -793,7 +810,7 @@ IslandAnchor IslandWindow::CurrentAnchor() const {
 
 bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                        POINT screenPoint, IslandState state, int iconCount,
-                                       float cardLeftDip, bool fullscreenApp) {
+                                       float cardLeftDip, bool fullscreenApp, int trayIconCount) {
     // THE BAR IS NOT THERE WHILE A FULL-SCREEN APPLICATION IS IN FRONT.
     //
     // Nothing of it is drawn in that state (see Renderer::RenderFrame), so there is nothing to point at
@@ -849,6 +866,15 @@ bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const REC
         // The state's own shape as well as the resting island, for the reason the union above gives: a
         // message widens the island, and the widened strip is what the pointer is on.
         return inside(island, localX, localY) || inside(shape, localX, localY);
+    }
+
+    // The tray is the bar, exactly as the application icons are: it is drawn beside the island, outside
+    // every one of the state's shapes, so a tray icon the pointer could not reach would be drawn and
+    // completely inert -- the defect the application icons had before this same union was extended for
+    // them.
+    if (trayIconCount > 0 &&
+        TrayIconUnderPointer(island, widthDip, trayIconCount, localX, localY) >= 0) {
+        return true;
     }
 
     if (iconCount > 0 && TaskRowContains(island, iconCount, localX, localY)) {
@@ -1025,6 +1051,14 @@ void IslandWindow::UpdatePointerState() {
             hovered = TaskIconToKeepOpen(island, RowButtonCount(), hoveredIcon_, localX, localY);
         }
         hoveredIcon_ = hovered;
+
+        // The tray, from the monitor's own width: the group is anchored to the right-hand edge rather than
+        // to the row, so the row growing must not move it (see TrayIconBoxFor).
+        hoveredTrayIcon_ =
+            trayIconCount_ > 0
+                ? TrayIconUnderPointer(island, PixelsToDip(rect_.right - rect_.left, monitor_.dpi),
+                                       trayIconCount_, localX, localY)
+                : -1;
 
         // The Start button is on the other end, from the same island box.
         startHovered_ = StartButtonHit(island, localX, localY);

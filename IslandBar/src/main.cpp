@@ -42,6 +42,7 @@
 #include "NotificationIcon.h"
 #include "NotificationPipe.h"
 #include "ToastStore.h"
+#include "TrayIcons.h"
 #include "WeChatWatch.h"
 #include "StatePolicy.h"
 #include "SoundOutput.h"
@@ -631,6 +632,22 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     // GetForegroundWindow, GetWindowRect and a class name, which is nothing next to a frame.
     constexpr unsigned long long kFullscreenCheckMs = 250;
 
+    // ISLANDBAR_NO_FULLSCREEN=1 makes the bar ignore a full-screen application in front.
+    //
+    // A DIAGNOSTIC, and one this project kept needing: while a game has the screen the bar stands down by
+    // design, so there is no way to photograph the bar itself -- its tray, its row, its status line -- on a
+    // machine where a game is running. That is exactly the machine this bar is developed on. Read once, at
+    // startup.
+    wchar_t noFullscreenSetting[8] = {};
+    const bool noFullscreen =
+        GetEnvironmentVariableW(L"ISLANDBAR_NO_FULLSCREEN", noFullscreenSetting, 8) > 0 &&
+        noFullscreenSetting[0] == L'1';
+
+    // How often the system tray is re-read. The registry plus a process snapshot, a few milliseconds; the
+    // thing it describes -- which applications have a tray icon -- changes on the scale of starting and
+    // stopping applications.
+    constexpr unsigned long long kTrayRefreshMs = 5000;
+
     // Whether the system panel is open. It is a TOGGLE, like the shell flyout it mirrors.
     bool systemPanelOpen = forcedSystemPanel;
     // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
@@ -776,6 +793,12 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     // shell (see FullScreenAppInFront). Polled: three cheap calls, four times a second.
     bool fullscreenAppInFront = false;
     unsigned long long lastFullscreenCheck = 0;
+    // The tray is re-read on its own slow cadence: it touches the registry and a process snapshot, and
+    // what it describes -- which applications are running -- changes on that scale.
+    unsigned long long lastTrayRefresh = 0;
+    // -1 rather than the count read above: the first refresh in the loop then reports the tray's size
+    // once, at startup, which is the line to look for when the tray is empty.
+    int lastTrayCount = -1;
 
     island::IslandWindow window;
     if (!window.Create(monitor, /*show=*/true)) {
@@ -971,6 +994,20 @@ unsigned long long lastMusicMeterMs = 0;
     island::LogAndPrint(previewReady
                             ? "  preview: resting on a task icon shows a live thumbnail"
                             : "  preview: DISABLED (the preview window could not be created)");
+    std::fflush(stdout);
+
+    // --- the system tray ------------------------------------------------------
+    //
+    // Read from the registry rather than from the shell's tray: the classic route through
+    // Shell_TrayWnd/ToolbarWindow32 does not exist on Windows 11, and UI Automation only answers while
+    // the taskbar is visible -- which this bar hides. See TrayIcons.h.
+    //
+    // Read here once so the first frame has icons, and refreshed from the frame loop on a timer: the tray
+    // changes when applications start and stop, which is a scale of seconds, not frames.
+    island::TrayIcons trayIcons;
+    const int trayAtStart = trayIcons.Refresh();
+    island::LogAndPrint("  tray: %d icon(s) from the registry (%d entr(ies), %d process(es) seen)",
+                        trayAtStart, trayIcons.Examined(), trayIcons.ProcessesSeen());
     std::fflush(stdout);
 
     // --- the taskbar's window list ---
@@ -1571,7 +1608,8 @@ float musicWavePhase = 0.0f;
                 // configuration.
                 if (GetTickCount64() - lastFullscreenCheck >= kFullscreenCheckMs) {
                     lastFullscreenCheck = GetTickCount64();
-                    const bool measured = island::FullScreenAppInFront(monitor.screen);
+                    const bool measured =
+                        !noFullscreen && island::FullScreenAppInFront(monitor.screen);
                     if (measured != fullscreenAppInFront) {
                         fullscreenAppInFront = measured;
                         // ... and the WINDOW is told, because the hit test is answered there: while an
@@ -2893,6 +2931,29 @@ float musicWavePhase = 0.0f;
                 // only the island is drawn (see FrameState::fullscreenApp).
                 frame.fullscreenApp = fullscreenAppInFront;
 
+                // --- the tray, on its own cadence --------------------------------------------
+                //
+                // Refreshed here and not at the top of the loop so the count the frame draws, the count the
+                // row's sizing spent room on and the count the window hit-tests are all the same number.
+                if (GetTickCount64() - lastTrayRefresh >= kTrayRefreshMs) {
+                    lastTrayRefresh = GetTickCount64();
+                    const int trayNow = trayIcons.Refresh();
+                    if (trayNow != lastTrayCount) {
+                        lastTrayCount = trayNow;
+                        island::LogAndPrint("  tray: %d icon(s) (%d of %d registered applications are "
+                                            "running)",
+                                            trayNow, trayIcons.RunningApps(), trayIcons.Examined());
+                        std::fflush(stdout);
+                    }
+                }
+                frame.trayIcons = trayIcons.Count() > 0 ? &trayIcons.At(0) : nullptr;
+                frame.trayIconCount =
+                    trayIcons.Count() < island::kMaxTrayIcons ? trayIcons.Count()
+                                                              : island::kMaxTrayIcons;
+                frame.trayRevision = trayIcons.Revision();
+                frame.trayHoveredIndex = window.TrayHoveredIcon();
+                window.SetTrayIconCount(frame.trayIconCount);
+
                 frame.systemPanelOpen = systemPanelOpen;
 
                 // Who owns the card for this frame. The panel keeps it until the card is gone.
@@ -3078,7 +3139,18 @@ float musicWavePhase = 0.0f;
                 const float monitorWidthDip =
                     static_cast<float>(window.Monitor().screen.right -
                                        window.Monitor().screen.left) / window.Scale();
-                int listed = island::TaskIconsThatFit(monitorWidthDip, taskWindows.Count());
+                // ... AND THE TRAY'S ROOM IS SPENT FIRST.
+                //
+                // The tray is anchored to the monitor's right edge and does not move, so the application
+                // row is what has to give way: the row is sized for the room that is left once the tray
+                // has taken its strip. Without this the two overlap on a machine with many windows open --
+                // and an overlap of two live controls is not a cosmetic problem, it is two things claiming
+                // the same pixels and the same clicks.
+                const int trayShown =
+                    trayIcons.Count() < island::kMaxTrayIcons ? trayIcons.Count()
+                                                              : island::kMaxTrayIcons;
+                const float rowWidthDip = monitorWidthDip - island::TrayWidthDip(trayShown);
+                int listed = island::TaskIconsThatFit(rowWidthDip, taskWindows.Count());
 
                 // EACH ICON'S ARRIVAL, and the row as the UNION of what is listed and what is leaving.
                 //
@@ -4083,6 +4155,27 @@ int RunToastDump(int limit) {
     return rows > 0 ? 0 : 1;
 }
 
+// Prints the tray icons the bar would draw, and where each one comes from.
+//
+// A command line for the same reason --toast-dump is one: "there is no tray" and "the bar could not read
+// the tray" look identical on screen, and they are different problems. The registry key and the PNG
+// magic are printed so the answer can be checked against regedit by hand.
+int RunTrayDump() {
+    island::TrayIcons icons;
+    const int count = icons.Refresh();
+    island::LogAndPrint(L"tray dump: %d icon(s) with a running application, from %ls\n", count,
+                        island::TrayIcons::SettingsKeyPath());
+    island::LogAndPrint(L"  (looked at %d entr(ies) in the key, %d process(es) in the snapshot, %d of "
+                        L"those matched a running application)\n",
+                        icons.Examined(), icons.ProcessesSeen(), icons.RunningApps());
+    for (int i = 0; i < count; ++i) {
+        const island::TrayIcon& icon = icons.At(i);
+        island::LogAndPrint(L"  [%d] %ls -- %zu byte PNG, promoted=%d, %ls\n", i, icon.name,
+                            icon.pngSize, icon.promoted ? 1 : 0, icons.ExePathAt(i));
+    }
+    return count > 0 ? 0 : 1;
+}
+
 // Sets the system output volume to a percentage and reports what the device says afterwards.
 //
 // A command line rather than a click, because the click cannot be delivered from every context: the bar
@@ -4907,6 +5000,11 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--toast-dump") == 0) {
             const int count = (i + 1 < argc) ? static_cast<int>(std::strtol(argv[++i], nullptr, 10)) : 10;
             const int dumpResult = RunToastDump(count);
+            island::CloseLog();
+            return dumpResult;
+        }
+        if (std::strcmp(argv[i], "--tray-dump") == 0) {
+            const int dumpResult = RunTrayDump();
             island::CloseLog();
             return dumpResult;
         }
