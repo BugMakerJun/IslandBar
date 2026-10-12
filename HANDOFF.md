@@ -5975,7 +5975,7 @@ inline StatusPlacement StatusPlacementFor(bool islandLineTaken);
 
 ```
 17:27:00.376  weather: polling Open-Meteo for the city in weather.txt
-17:27:00.377  weather: city '北京' from C:\Users\18340\IslandBar\weather.txt
+17:27:00.377  weather: city '北京' from %USERPROFILE%\IslandBar\weather.txt
 17:27:02.037  state: music-strip (pointer inside=0, resting=music-strip)
 17:27:02.377  weather: 北京 -> 39.9075, 116.3972
 17:27:04.892  weather: 19.4 C, code 3 -> 阴 19°
