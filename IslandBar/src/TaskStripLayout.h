@@ -709,19 +709,21 @@ inline constexpr int   kMaxTrayIcons        = 10;
 // shell itself does (the chevron over the notification area), and it keeps the bar's right-hand end a
 // fixed, readable width however many applications are running.
 //
-// The BUTTON is anchored to the MONITOR's right margin, and NOT to the end of the application row, even
-// though that is where the red box in the report sat (the row was full, so its end and the margin were
-// the same place). A control glued to a row that grows and shrinks with the windows that are open would
-// move every time one opened -- and this bar's rule, from its first day, is that nothing on it moves
-// because a window did.
-inline float TrayButtonRightDip(float monitorWidthDip) {
-    return monitorWidthDip - kTrayRightMarginDip;
-}
-
-inline RectF TrayButtonFor(const RoundedBox& island, float monitorWidthDip) {
+// The BUTTON stands immediately to the RIGHT of the island, mirroring the deck on its left:
+//
+//     [ system ][ Start ]   island   [ tray ]  [ icon ] [ icon ] ...
+//
+// Anchored to the island's own right edge, exactly as the Start and system buttons are anchored to its
+// left edge, so the bar's cluster reads as one thing. Asked for twice: first "在红框位置创建一个按钮" (the
+// red box was at the end of a FULL application row, which made it look like the right-hand margin), and
+// then "位置不对 应该放在灵动岛右侧".
+//
+// It is NOT at the window's right margin: that version was built and looked like a stray control floating
+// at the far end of the bar, away from everything it belongs to.
+inline RectF TrayButtonFor(const RoundedBox& island) {
     RectF box;
-    box.right = TrayButtonRightDip(monitorWidthDip);
-    box.left = box.right - kTrayIconDip;
+    box.left = island.rect.right + kTaskIconPadDip;
+    box.right = box.left + kTrayIconDip;
     // On the island's own line, like the deck buttons and the application icons: one row, one centre.
     const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
     box.top = centreY - kTrayIconDip * 0.5f;
@@ -729,12 +731,26 @@ inline RectF TrayButtonFor(const RoundedBox& island, float monitorWidthDip) {
     return box;
 }
 
-inline bool TrayButtonHit(const RoundedBox& island, float monitorWidthDip, float x, float y) {
-    const RectF box = TrayButtonFor(island, monitorWidthDip);
+inline bool TrayButtonHit(const RoundedBox& island, float x, float y) {
+    const RectF box = TrayButtonFor(island);
     return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
 }
 
-// The room the button takes on the right, for the row's own sizing: the button plus its margin.
-inline float TrayButtonReservedDip() { return kTrayIconDip + kTrayRightMarginDip; }
+// The room the button takes beside the island, for the row's own sizing.
+inline float TrayButtonReservedDip() { return kTrayIconDip + kTaskIconGapDip; }
+
+// The box the application icon row is laid out from, given that the tray button stands between the island
+// and the row.
+//
+// ONE number, and everything the row does -- its left edge, every button, every hit test and every
+// assertion -- follows from it, because they all measure from this box's right edge. That is why the
+// button needed no parameter threaded through the row's own functions: the row is told where it starts,
+// and where it starts is now one button further along.
+inline RoundedBox RowAnchorWithTray(const RoundedBox& island, bool trayButtonShown) {
+    if (!trayButtonShown) return island;
+    RoundedBox out = island;
+    out.rect.right += TrayButtonReservedDip();
+    return out;
+}
 
 } // namespace island

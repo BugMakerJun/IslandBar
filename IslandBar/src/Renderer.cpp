@@ -283,7 +283,11 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     const float cardLeftDip = frame.outerCardUp ? frame.cardLeftDip : 0.0f;
     const float cardWidthDip = frame.outerCardUp ? kExpandedWidthDip : 0.0f;
 
-    text_->DrawTaskIcons(d2dContext_, island, taskButtons_, frame.taskButtonCount,
+    // THE ROW STARTS AFTER THE TRAY BUTTON, which stands immediately to the right of the island. Told to
+    // the row as one moved edge rather than as a parameter through every one of its functions -- see
+    // RowAnchorWithTray.
+    const RoundedBox rowIsland = RowAnchorWithTray(island, frame.trayIconCount > 0);
+    text_->DrawTaskIcons(d2dContext_, rowIsland, taskButtons_, frame.taskButtonCount,
                          frame.taskHoveredIndex, frame.contentOpacity, rowAmounts,
                          frame.taskButtonCount, cardLeftDip, cardWidthDip,
                          frame.taskButtonAppearValid ? frame.taskButtonAppear : nullptr);
@@ -295,13 +299,8 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     // Not gated on `fullscreenApp` here: that is handled where the whole deck is skipped (the caller),
     // because while a game has the screen the tray is not the bar either.
     if (frame.trayIconCount > 0) {
-        // The monitor's width, from the island's own box: every shape on this bar is centred on the
-        // monitor's centre (see IslandBoxFor), so its left and right edges add up to that width whatever
-        // state the bar is in -- which is why the tray's anchoring needs no field of its own in the frame.
-        const float monitorWidthDip = island.rect.left + island.rect.right;
-        text_->DrawTrayButton(d2dContext_, TrayButtonFor(island, monitorWidthDip),
-                              frame.trayButtonHovered, frame.trayPageOpen, frame.pill.fill,
-                              frame.contentOpacity);
+        text_->DrawTrayButton(d2dContext_, TrayButtonFor(island), frame.trayButtonHovered,
+                              frame.trayPageOpen, frame.pill.fill, frame.contentOpacity);
     }
 
     // What the row was actually asked to draw, and where it put it.
