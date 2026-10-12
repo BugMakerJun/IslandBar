@@ -2151,7 +2151,9 @@ float musicWavePhase = 0.0f;
                         case island::IslandWindow::StartHitTarget::PickerRow: {
                             if (startHit.index >= 0 && startHit.index < startAppCount) {
                                 const island::StartApp& app = startApps.ListAt(startHit.index);
-                                const bool added = startApps.Pin(app.target);
+                                // The shortcut is NAMED after the application, which is also what the tile
+                                // will show: renaming the file in Explorer renames the tile.
+                                const bool added = startApps.Pin(app.target, app.name);
                                 island::LogAndPrint("  start: %ls '%ls' (%d pinned now)\n",
                                                     added ? "pinned" : "already pinned", app.name,
                                                     startApps.PinCount());

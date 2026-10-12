@@ -5279,6 +5279,42 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
 | **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
 | **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
+### 8.67 **固定区改成"一个装快捷方式的文件夹"（用户提的），并修掉吞掉它的竞态** ✅
+
+用户：「**开始菜单里的内容 我之前添加完了 你更新后就没有了 这是没有记录啊 要不你创建一个文件夹 然后在里面放快捷方式 这样每次都还在 但是这个文件夹 可以修改位置**」。
+
+#### 为什么"没了"——不是没记，是我不读它
+
+`start_pins.txt` 里 **14 条都在**（23:47 写下的），但 `LoadPins` 拿"121 个应用列表"去校验每一条，而那张表是 **worker 在 300 ms 后才填好的**：
+
+```
+00:02:31.363  start: pinned target is not in shell:AppsFolder: ...   ×14
+00:02:31.363  start: 0 pinned application(s) from ...\start_pins.txt
+00:02:31.659  start: 121 application(s) in shell:AppsFolder          ← 300 ms 之后
+```
+
+→ 全部判成"不在列表里"丢掉。**竞态**：启动时主线程读文件、worker 读列表，谁先谁后不定。这是这一批里第二次被"读的时候另一份数据还没到"咬到（第一次是托盘的 rect，见 8.61）。
+
+#### 改成用户提的形态：文件夹 + 快捷方式
+
+* **固定区 = 一个文件夹里的 `.lnk`**（默认 `%USERPROFILE%\IslandBar\Start`）。**文件夹本身就是记录** —— 没有任何东西需要跟它"一致"，所以那类竞态不可能再发生；而且它能在资源管理器里看、复制、改名、排序。
+* **位置可改**：旁边的 `start_folder.txt` 一行就是路径（首次运行自动写出，注释里写了用法）。文件夹不存在会自动建。
+* **磁贴名字 = 快捷方式文件名**（在资源管理器里改名就等于给磁贴改名 ✓）；**顺序按名字**（`01-`、`02-` 前缀就是排序 ✓）。
+* **写快捷方式**用的是 AppsFolder 条目的 **IDList**（shell 自己的开始菜单就是这么存的）+ 打包应用的 **AppUserModelID**（任务栏认这个），所以 `.lnk` 三种形态（exe / `{GUID}\name.exe` / `...!App`）都能用**同一个** `ShellExecute` 启动。
+* **右键取消固定 = 删到回收站**（`FOF_ALLOWUNDO`），不是真删。
+* **一次迁移**：老的 `start_pins.txt` 逐行写成快捷方式，然后把文件改名成 `start_pins.txt.migrated`（所以那 14 个回来了，而且只会迁一次）。
+
+#### 证据
+
+```
+start: shortcut 'written' -> C:\Users\18340\IslandBar\Start\CC Switch.lnk   （×14）
+start: migrated 14 pin(s) from start_pins.txt into C:\Users\18340\IslandBar\Start
+start: 14 pinned application(s) from C:\Users\18340\IslandBar\Start
+start: 121 application(s) in shell:AppsFolder
+```
+
+实拍 `captures/pins-restored.png`：14 个磁贴（图标也回来了，包括 UWP 的「设置」「计算器」）+ 底部头像/名字/电源。自检 886 项全绿（这次的改动落在文件与 shell 交互上，几何断言不变）。
+
 ### 8.66 **胶囊左端缺了一角：输入区域比画的短 4 DIP** ✅
 
 用户拍了张照片：「**看一下 这个地方缺了一角**」（红框圈在 deck 左下角）。
