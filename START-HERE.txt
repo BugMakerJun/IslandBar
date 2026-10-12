@@ -183,9 +183,10 @@ THREE RULES THAT COST REAL TIME TO LEARN
    lines to look for -- and the work STAYS LOCAL until they say it is good. Committing
    locally is fine (it is how the work is kept safe, together with scripts\snapshot.ps1);
    `git push` waits for their word. If they report a problem, iterate locally: nothing
-   unverified reaches GitHub. The remote is github.com/BugMakerJun/IslandBar (public),
-   and `gh` is installed at C:\Users\<you>\gh-cli\bin\gh.exe, authenticated as
-   BugMakerJun (scopes gist/repo/workflow).
+   unverified reaches GitHub. The remote is
+   github.com/BugMakerJun/IslandBar-DynamicIsland (public; the old IslandBar URL still
+   redirects to it). `gh` is installed at C:\Users\<you>\gh-cli\bin\gh.exe,
+   authenticated as BugMakerJun (scopes gist/repo/workflow).
 
 
 TWO MORE THAT WILL BITE WHEN YOU DELETE OR DRAW
