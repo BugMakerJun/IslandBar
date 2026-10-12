@@ -4358,7 +4358,12 @@ void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
     const island::TrayPressRequest request =
         MakeTrayPressRequest(icons.At(cell), icons.ExePathAt(cell));
     wchar_t flat[128] = {};
-    island::LogAndPrint("  tray press: cell %d '%ls'%ls\n", cell,
+    // `%s`, not `%ls`: LogAndPrint uses the wide format engine, and a NARROW argument given to `%ls` is an
+    // invalid conversion that prints an EMPTY LINE while still writing the newline -- so the log showed a
+    // blank line where a right click's "tray press: cell 5 'Weixin.exe' (right click)" should have been,
+    // and the only trace of the click was the press that followed it. The project has this noted in
+    // HANDOFF (6.7's neighbourhood); it has now been paid for once more.
+    island::LogAndPrint("  tray press: cell %d '%ls'%s\n", cell,
                         FlatName(icons.At(cell).name, flat, 128),
                         rightClick ? " (right click)" : "");
     std::fflush(stdout);
