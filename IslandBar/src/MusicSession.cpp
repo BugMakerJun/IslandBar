@@ -697,6 +697,9 @@ void MusicSession::Run() {
     // When the cover was last asked for while it was missing: the retry for a thumbnail that the player
     // publishes after the track's own metadata. See the artwork block in the poll below.
     DWORD lastArtworkTry = 0;
+    // How many times the CURRENT track has been asked for a cover it has not published, for the bounded
+    // retry log. See kArtworkRetryLogLimit.
+    int artworkRetries = 0;
     // When the track last changed, for the chase that follows ANY track change -- see NextPollIntervalMs.
     DWORD lastTrackChange = 0;
     // THE ARTWORK REVISION, monotonic across tracks.
@@ -865,13 +868,23 @@ void MusicSession::Run() {
                                                              kMusicArtworkCapacity);
                             if (fresh.artworkSize > 0) {
                                 fresh.artworkRevision = artworkSerial++;
+                                artworkRetries = 0;
                                 // Worth its own line: it is the case this retry exists for, and the one the
                                 // user could only see by restarting the bar ("切歌就没有了，关闭后再打开就能查到").
                                 if (!trackChanged) {
                                     LogLine(L"  music: cover arrived late (%zu bytes)",
                                             fresh.artworkSize);
                                 }
+                            } else if (!trackChanged && artworkRetries < kArtworkRetryLogLimit) {
+                                // "A manual track change does not fetch the cover" is a claim about WHO is not
+                                // asking, and until this line existed there was no way to tell the two causes
+                                // apart: a bar that stopped asking, and a player that has nothing to give. A
+                                // few lines per track is enough to point at one or the other.
+                                ++artworkRetries;
+                                LogLine(L"  music: cover retry %d -> the player still has none",
+                                        artworkRetries);
                             }
+                            if (trackChanged) artworkRetries = 0;
                         } else {
                             // Keep what we already had.
                             fresh.artworkSize = previous.artworkSize;

@@ -237,7 +237,11 @@ inline constexpr unsigned long long kSkipPollWindowMs = 6000;
 // the track has none.
 inline constexpr unsigned long long kArtworkRetryMs = 1000;
 inline constexpr unsigned long long kArtworkRetryWindowMs = 15000;   // the fast stretch, then:
-inline constexpr unsigned long long kArtworkRetrySlowMs = 5000;
+inline constexpr unsigned long long kArtworkRetrySlowMs = 2000;
+// How many failed retries for one track are logged before the retrying goes quiet. The line answers "does the
+// bar even ask?", which otherwise cannot be told from "the player has nothing"; more than a handful per track
+// would be noise in a log that a person reads.
+inline constexpr int kArtworkRetryLogLimit = 5;
 
 // Whether this poll should ask the player for the cover.
 //
