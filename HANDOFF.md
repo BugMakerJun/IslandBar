@@ -5262,6 +5262,57 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
 | **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
 | **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
+### 8.47 **天气改用系统定位（不是 IP）** ✅
+
+用户问：「**天气的能不能调用定位 而不是根据ip**」。
+
+#### 先量，再设计：Windows 的定位在这台"走代理"的机器上到底答什么
+
+IP 定位在这台机器上是错的（8.45 实测：`ip-api.com` 答 Tokyo，时钟却是 Asia/Shanghai，流量从代理出去）。Windows 自己的定位服务是另一条路（WiFi 接入点 + 卫星），**必须实测**才知道它是否可靠，所以先写了探针 `tools/geoprobe`（C++/WinRT，和 `gsmtcprobe` 同一套 CMake 设置）：
+
+```
+--- Windows location ---
+  system location switch: (cannot read)
+  consent               : Allowed (asked in 31 ms)
+  status before asking  : NotInitialized
+  asking for a position (up to 15 s)...
+  latitude / longitude  : 41.775868, 123.442435      <- 沈阳
+  accuracy              : 187.0 m
+  position source       : WiFi
+```
+
+→ **系统定位可用、精度 187 米、来源是 WiFi**（不是 IP），城市正确。于是天气改成以它为主。
+
+> 探针本身也有两条要记住的坑：枚举里是 **`PositionStatus::Initializing`**（不是 `Initialized`），精度枚举叫 **`PositionAccuracy`**（不是 `GeolocationAccuracy`），而且这个 SDK 的投影里**没有** `IsLocationEnabledForUser` —— 第一次全写错、编译报"不是成员"，最后按 SDK 头文件 `windows.devices.geolocation.h` 逐个核对才过。**先查头文件，再写 API。**
+>
+> 另外：探针要**复制到项目目录外面**再跑（项目树里的 exe 在本环境是 LOW 完整性），而且 `RoInitialize` 需要显式 `#include <roapi.h>`。
+
+#### 代码里的三条来源，按"谁更明确"排序
+
+| 顺序 | 来源 | 什么时候用 |
+|---|---|---|
+| 1 | `weather.txt` 里的一行（城市名或 `lat,lon`） | 用户**明确写了**，就直接用它 —— 这是"我想固定看某个城市"的表达 |
+| 2 | **Windows 定位**（`Windows.Devices.Geolocation`，工作线程进 MTA 后调用） | 文件里没写（现在这是**默认**情况） |
+| 3 | 什么都没有 | 报出**原因**（`location is denied for this program` / `no fix (0x…)`）并 60 秒后重试；这一行就只显示日期+时间 |
+
+所以 `weather.txt` 从"必需"变成了"**覆盖项**"：我把用户那份文件里的 `北京` 改成注释，并写上说明（不写就用系统定位）。`Weather.cpp` 的头部注释、`ReadSettings` 的注释也跟着改成这个顺序。
+
+定位调用细节：先 `RequestAccessAsync()`（未打包的桌面程序第一次会弹系统同意框；**拒绝是正常答案**，不是错误）→ `GetGeopositionAsync(1 小时最大时效, 10 秒超时)`；工作线程用 `RoInitialize(RO_INIT_MULTITHREADED)`（与媒体会话 worker 同一做法），因为"问位置"可能阻塞数秒。**15 分钟一问**，位置变了才打一行日志（机器没动就不刷屏）。
+
+#### 实测（部署到用户的栏上，正在放音乐）
+
+```
+17:49:37.731  weather: position from Windows, forecast from Open-Meteo (weather.txt can pin a city instead)
+17:49:37.798  weather: position from Windows -> 41.775863, 123.442448
+17:49:39.116  weather: 16.7 C, code 51 -> 小雨 17°
+```
+
+截图 `captures/weather-by-location.png`：胶囊里是歌词，⌄ 左边是 `周一、10月12日 17:49 小雨 17°` —— **沈阳的天气**（北京那份已改成注释）。
+
+#### 自检仍是 786 项全绿
+
+定位这条**不进自检**：它要真机、要用户同意、还会随机器移动而变。它的证据是探针 + 运行日志这两行 —— 与其写一个"只会证明 API 存在"的假断言，不如把这一节写清楚。没进自检的部分在本节与 FEATURES 里都标明了。
+
 ### 8.46 **同一行的两个家：空闲时在岛内，被占用时挪到 ⌄ 左边** ✅
 
 8.45 把这条信息放在了 ⌄ 左边的空白带里，**只在岛被占用时**。用户当天补了一句：「**不是 是灵动岛不占用时 灵动岛内要这么显示**」—— 也就是说这条信息要**一直在**，只是位置换：空闲时在**岛内**（那里本来就只有一个 `hh:mm`），被占用时（胶囊那一行让给歌词/消息/来电）挪到 ⌄ 左边的带子上。

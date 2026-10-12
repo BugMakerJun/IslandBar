@@ -76,5 +76,14 @@ if(ISLANDBAR_BUILD_GSMTCPROBE)
     add_subdirectory(tools/gsmtcprobe)
 endif()
 
+# Asks Windows for the machine's own position. The weather on the status line needs
+# coordinates, and the two sources that can supply them are a city in weather.txt and
+# this -- so whether this works, and what it answers on a machine whose traffic leaves
+# through a proxy, has to be measured rather than assumed. See tools/geoprobe.
+option(ISLANDBAR_BUILD_GEOPROBE "Build the location capability probe" ON)
+if(ISLANDBAR_BUILD_GEOPROBE)
+    add_subdirectory(tools/geoprobe)
+endif()
+
 # The real bar: the DComp/D2D window foundation plus the phase 0-d self-test.
 add_subdirectory(src)

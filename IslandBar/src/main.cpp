@@ -938,7 +938,8 @@ unsigned long long lastMusicMeterMs = 0;
     island::WeatherReader weather;
     const bool weatherAvailable = weather.Start();
     island::LogAndPrint(weatherAvailable
-                            ? "  weather: polling Open-Meteo for the city in weather.txt"
+                            ? "  weather: position from Windows, forecast from Open-Meteo "
+                              "(weather.txt can pin a city instead)"
                             : "  weather: DISABLED (the worker could not start)");
     std::fflush(stdout);
 

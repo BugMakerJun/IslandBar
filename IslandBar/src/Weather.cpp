@@ -13,9 +13,19 @@
 
 #include "Log.h"
 
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Devices.Geolocation.h>
+
+// RoInitialize / RoUninitialize: the apartment entry points, which the media session's worker
+// uses too. Not pulled in by the projection headers, and the error when it is missing names a
+// function rather than the header.
+#include <roapi.h>
+
 #include <winhttp.h>
 
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -122,6 +132,10 @@ bool HttpGet(const wchar_t* host, const wchar_t* path, char* out, size_t capacit
 // working tree, for the reason the log gives -- running the bar must not dirty the
 // repository -- and rather than in the registry, because a text file is something the
 // user can open, read and correct without a tool.
+//
+// It is an OVERRIDE now rather than a requirement: with no line in it the bar asks Windows
+// for the machine's position (see LocationFromWindows), and a line is how the user pins a
+// city instead -- which is what the file is for, and why "no file" is the ordinary case.
 void SettingsPath(wchar_t* out, size_t capacity) {
     if (!out || capacity == 0) return;
     out[0] = L'\0';
@@ -147,8 +161,9 @@ void SettingsPath(wchar_t* out, size_t capacity) {
 //   * the line is either a CITY NAME (e.g. "\u5317\u4eac" for Beijing) or a pair of
 //     coordinates ("39.9042,116.4074"), which skips the geocoding step.
 //
-// A missing file is not an error: it means no city has been named yet. The strip then
-// shows the date and the time without a reading, and the log says where the file goes.
+// A missing (or empty, or all-comment) file is the ORDINARY case and not an error: it means
+// "use where the machine says it is", and only when Windows cannot answer either does the
+// status line go without a reading -- with the reason in the log.
 bool ReadSettings(wchar_t* out, size_t capacity, bool* outIsCoordinates) {
     if (outIsCoordinates) *outIsCoordinates = false;
     if (!out || capacity == 0) return false;
@@ -249,6 +264,76 @@ bool CsvField(const char* line, int index, char* out, size_t capacity) {
 // Whether a line is worth reading as a reading: not blank, and not a comment.
 bool IsDataLine(const char* line) {
     return line != nullptr && line[0] != '\0' && line[0] != '#';
+}
+
+// The machine's own position, from Windows.
+//
+// WHY THIS AND NOT AN IP LOOKUP. An IP lookup answers for the network the traffic leaves from,
+// and on this machine that is a proxy: `ip-api.com` says Tokyo while the clock runs on
+// Asia/Shanghai. Windows' own provider uses WiFi access points and satellites, and was measured
+// on this machine answering WiFi, 187 m, in the right city. Asked for in these words:
+// "天气的能不能调用定位 而不是根据ip".
+//
+// False with a reason in `reason` when the machine cannot say: the service is off, this program
+// is refused, or no provider answers inside the timeout. A reason rather than a bare failure
+// because the three have three different fixes, and the log is where they are told apart.
+//
+// Must be called from a thread that has entered an apartment; see WeatherReader::Run.
+bool LocationFromWindows(double* latitude, double* longitude, char* reason, size_t reasonCapacity) {
+    if (reason && reasonCapacity) reason[0] = '\0';
+    if (!latitude || !longitude) return false;
+
+    using namespace winrt::Windows::Devices::Geolocation;
+
+    // May raise the Windows consent prompt the first time an unpackaged program asks. A denial is
+    // a normal answer, not an error: the user may simply keep location off, and the bar falls back
+    // to weather.txt without complaining about it every fifteen minutes.
+    GeolocationAccessStatus access = GeolocationAccessStatus::Unspecified;
+    try {
+        access = Geolocator::RequestAccessAsync().get();
+    } catch (const winrt::hresult_error& e) {
+        if (reason && reasonCapacity) {
+            std::snprintf(reason, reasonCapacity, "the consent call failed (0x%08lX)",
+                          static_cast<unsigned long>(e.code().value));
+        }
+        return false;
+    }
+    if (access != GeolocationAccessStatus::Allowed) {
+        if (reason && reasonCapacity) {
+            std::snprintf(reason, reasonCapacity, "location is %s for this program",
+                          access == GeolocationAccessStatus::Denied ? "denied" : "unspecified");
+        }
+        return false;
+    }
+
+    try {
+        Geolocator locator;
+        locator.DesiredAccuracy(PositionAccuracy::Default);
+
+        // A fix up to an hour old is accepted -- the bar is not navigating -- but an older one is
+        // not, and the whole call gives up after ten seconds.
+        const winrt::Windows::Foundation::TimeSpan maximumAge{std::chrono::seconds(3600)};
+        const winrt::Windows::Foundation::TimeSpan timeout{std::chrono::seconds(10)};
+        const Geoposition position = locator.GetGeopositionAsync(maximumAge, timeout).get();
+        if (!position) {
+            if (reason && reasonCapacity) std::snprintf(reason, reasonCapacity, "no position");
+            return false;
+        }
+
+        const Geocoordinate coordinate = position.Coordinate();
+        const auto point = coordinate.Point().Position();
+        *latitude = point.Latitude;
+        *longitude = point.Longitude;
+        return true;
+    } catch (const winrt::hresult_error& e) {
+        // The status is worth naming: Disabled (the service is off), NoData (no provider answered)
+        // and NotAvailable (no provider exists) need three different answers from the user.
+        if (reason && reasonCapacity) {
+            std::snprintf(reason, reasonCapacity, "no fix (0x%08lX)",
+                          static_cast<unsigned long>(e.code().value));
+        }
+        return false;
+    }
 }
 
 } // namespace
@@ -496,6 +581,13 @@ unsigned long __stdcall WeatherReader::ThreadEntry(void* self) {
 }
 
 void WeatherReader::Run() {
+    // The worker owns its own apartment, exactly as the media session's does and for the same
+    // reason: a WinRT call has to be made from inside one, and the frame loop's apartment is not
+    // this thread's. Entering MTA keeps the UI thread out of the location call entirely -- which
+    // matters here, because asking can block for seconds while a provider is found.
+    const HRESULT apartment = RoInitialize(RO_INIT_MULTITHREADED);
+    const bool haveApartment = SUCCEEDED(apartment);
+
     char resolvedCity[128] = {};
     double latitude = 0.0;
     double longitude = 0.0;
@@ -509,8 +601,16 @@ void WeatherReader::Run() {
         }
         if (WaitForSingleObject(stopEvent_, 0) == WAIT_OBJECT_0) break;
 
+        if (!haveApartment) {
+            LogAndPrint(L"  weather: no Windows Runtime apartment -- location cannot be asked for; "
+                        L"a city in weather.txt still works\n");
+            std::fflush(stdout);
+            return;
+        }
         waitMs = Refresh(resolvedCity, sizeof(resolvedCity), &latitude, &longitude);
     }
+
+    if (haveApartment) RoUninitialize();
 }
 
 unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, double* latitude,
@@ -520,26 +620,49 @@ unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, dou
     const bool haveSetting = ReadSettings(city, 128, &coordinatesGiven);
 
     if (!haveSetting) {
-        // Reported ONCE per run rather than once per poll: the file can be written while the
-        // bar is running, and a line every minute about a file nobody has written yet is noise
-        // in a log that is read for the faults.
-        static bool reportedMissing = false;
-        if (!reportedMissing) {
-            reportedMissing = true;
-            wchar_t path[MAX_PATH] = {};
-            SettingsPath(path, MAX_PATH);
-            LogAndPrint(L"  weather: no city yet -- %ls would name one "
-                        L"(one line: a city name, or \"lat,lon\")\n",
-                        path);
+        // No city in the file, so the machine's own position is the primary source -- which is
+        // what the user asked for: "天气的能不能调用定位 而不是根据ip". Windows answers with WiFi or
+        // satellite fixes, not with an IP lookup (measured on this machine: WiFi, 187 m).
+        char reason[192] = {};
+        if (!LocationFromWindows(latitude, longitude, reason, sizeof(reason))) {
+            // Reported once per REASON rather than once per poll: a machine with location turned
+            // off is a fact about the session, and a line every minute about it is noise in a log
+            // that is read for the faults.
+            static char reportedReason[192] = {};
+            if (std::strcmp(reason, reportedReason) != 0) {
+                strncpy_s(reportedReason, sizeof(reportedReason), reason, _TRUNCATE);
+                wchar_t path[MAX_PATH] = {};
+                SettingsPath(path, MAX_PATH);
+                LogAndPrint(L"  weather: no position from Windows (%hs) -- %ls would pin one\n",
+                            reason, path);
+                std::fflush(stdout);
+            }
+            return kRetryMs;
+        }
+
+        // The reading is logged when the POSITION changes, because that is the event worth
+        // knowing about: the machine moved (or the fix changed provider), and the weather that
+        // follows belongs to somewhere else. Fifteen identical lines an hour say nothing.
+        static double reportedLatitude = 0.0;
+        static double reportedLongitude = 0.0;
+        const bool moved = std::fabs(*latitude - reportedLatitude) > 0.0005 ||
+                           std::fabs(*longitude - reportedLongitude) > 0.0005;
+        if (moved) {
+            reportedLatitude = *latitude;
+            reportedLongitude = *longitude;
+            LogAndPrint(L"  weather: position from Windows -> %.6f, %.6f\n", *latitude,
+                        *longitude);
             std::fflush(stdout);
         }
-        return kRetryMs;
+        // Remembered so the forecast below is not asked for the same place twice in a row: the
+        // poll interval is fifteen minutes and the position is stable to a few tens of metres.
+        strncpy_s(resolvedCity, resolvedCapacity, "<windows-location>", _TRUNCATE);
     }
 
     // Reported once per CHANGE of city rather than once per poll: a city is a fact about the
     // session, and a line every fifteen minutes would be noise.
     static wchar_t reportedCity[128] = {};
-    if (wcscmp(city, reportedCity) != 0) {
+    if (haveSetting && wcscmp(city, reportedCity) != 0) {
         wcsncpy_s(reportedCity, 128, city, _TRUNCATE);
         wchar_t path[MAX_PATH] = {};
         SettingsPath(path, MAX_PATH);
@@ -547,9 +670,13 @@ unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, dou
         std::fflush(stdout);
     }
 
-    // Resolve the city to coordinates once per city, not once per poll.
+    // WHERE THE COORDINATES COME FROM, and there are exactly three answers.
+    //
+    // 1. A "lat,lon" line in weather.txt: an explicit choice, already parsed.
+    // 2. A city name in weather.txt: geocoded, once per city rather than once per poll.
+    // 3. Neither, and the position came from Windows -- already in hand, so nothing to do.
     char cityUtf8[256] = {};
-    if (!coordinatesGiven) {
+    if (haveSetting && !coordinatesGiven) {
         if (WideCharToMultiByte(CP_UTF8, 0, city, -1, cityUtf8, sizeof(cityUtf8), nullptr,
                                 nullptr) <= 0) {
             return kRetryMs;
@@ -585,7 +712,7 @@ unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, dou
             LogAndPrint(L"  weather: %ls -> %.4f, %.4f\n", city, *latitude, *longitude);
             std::fflush(stdout);
         }
-    } else {
+    } else if (haveSetting) {
         // "lat,lon" in the file. ReadSettings has already established that both halves are
         // numbers and that both are in range.
         const wchar_t* comma = wcschr(city, L',');

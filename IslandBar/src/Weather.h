@@ -9,18 +9,26 @@
 //  was that the date, the weekday, the time and the weather move into the empty
 //  band to the left of the system button while that is the case.
 //
-//  WHERE THE READING COMES FROM, in two steps. Open-Meteo's forecast API is
-//  keyless but takes COORDINATES, so a city name has to become a latitude and a
-//  longitude first; Open-Meteo's own geocoder does that, also keyless. Both are
-//  plain HTTPS GETs, and the forecast is asked for as CSV so its numbers arrive
-//  on a line of their own and no JSON reader is needed for them.
+//  WHERE THE POSITION COMES FROM, and the order is deliberate:
 //
-//  IP GEOLOCATION IS DELIBERATELY NOT USED. Measured on this machine: the
-//  keyless IP services answer "Tokyo" while the same machine's clock runs on
-//  Asia/Shanghai, because the traffic leaves through a proxy. Wrong weather at
-//  the right time is worse than no weather, so the city is a setting --
-//  %USERPROFILE%\IslandBar\weather.txt, one line, either a city name or
-//  "lat,lon"; the file is described at ReadSettings.
+//   1. a line in %USERPROFILE%\IslandBar\weather.txt -- an explicit choice by the
+//      user, so it wins outright. Either a city name or "lat,lon"; the file is
+//      described at ReadSettings.
+//   2. WINDOWS' OWN LOCATION SERVICE, when the file says nothing. This is the
+//      primary source, asked for in as many words ("天气的能不能调用定位 而不是根据
+//      ip"): Windows uses WiFi access points and satellites, and on this machine
+//      it answers with the right city to 187 m.
+//   3. nothing, which is reported with a reason and retried.
+//
+//  AN IP LOOKUP IS DELIBERATELY NOT USED, and the measurement is why: the keyless
+//  IP services answer "Tokyo" on this machine while its clock runs on
+//  Asia/Shanghai, because the traffic leaves through a proxy. Wrong weather at the
+//  right time is worse than no weather.
+//
+//  FROM COORDINATES TO A READING is two HTTPS GETs to Open-Meteo, both keyless: the
+//  forecast API takes coordinates and answers the current block as CSV, and a city
+//  name (the file's other form) goes through Open-Meteo's geocoder first. CSV so
+//  the numbers arrive on a line of their own and no JSON reader is needed for them.
 //
 //  NOTHING HERE TOUCHES THE FRAME. The fetch runs on a worker and the frame loop
 //  only reads the last published reading -- the same split the lyrics take, and
