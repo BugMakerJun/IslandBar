@@ -45,6 +45,8 @@
 #include "Motion.h"
 #include "Renderer.h"
 #include "TextRenderer.h"
+#include "TrayIcons.h"
+#include "TrayPress.h"
 
 namespace island {
 namespace {
@@ -6296,6 +6298,117 @@ void TestMusicCardLayout() {
                 // Beside the ISLAND the button is between two things the region already covers, and the
                 // property that replaced it is the one asserted where the button is laid out: the row
                 // starts after the button.
+            }
+
+            // PRESSING AN ICON IN THE CARD: the identity, the position, and the test that picks the shell's
+            // button out of the ones on screen.
+            //
+            // The press itself cannot be exercised here -- it shows the shell's tray for a moment and
+            // presses a real application's icon, which a self-test has no business doing -- but its three
+            // ingredients can be, and they are where the defects were:
+            //
+            //   * every icon carries a shell identity (a UID or a GUID), or pressing it is impossible;
+            //   * the shell answers where the icons it displays ARE, and does not answer for the ones it
+            //     only has registered -- which is what tells a cell that can be pressed from one that
+            //     cannot;
+            //   * the rectangle the shell gives is matched to a UI Automation element by POSITION, and that
+            //     match has to be exact: a press on the wrong rectangle opens the wrong application.
+            {
+                TrayIcons live;
+                const int count = live.Refresh();
+                wchar_t detail[256];
+                std::swprintf(detail, 256, L"the live tray holds %d icon(s)", count);
+                Check(count > 0, L"the tray list has something in it to press", detail);
+
+                int withIdentity = 0;
+                int answered = 0;
+                int firstAnswered = -1;
+                RECT firstRect = {};
+                for (int i = 0; i < count; ++i) {
+                    const TrayIcon& icon = live.At(i);
+                    if (icon.hasUid || icon.hasGuid) ++withIdentity;
+                    TrayPressRequest request = {};
+                    request.uid = icon.uid;
+                    request.hasUid = icon.hasUid;
+                    request.hasGuid = icon.hasGuid;
+                    request.guid = icon.guid;
+                    wcsncpy_s(request.exePath, 260, live.ExePathAt(i), _TRUNCATE);
+                    RECT rect = {};
+                    if (ShellRectForTrayIcon(request, &rect)) {
+                        ++answered;
+                        if (firstAnswered < 0) {
+                            firstAnswered = i;
+                            firstRect = rect;
+                        }
+                    }
+                }
+                std::swprintf(detail, 256,
+                              L"%d of %d carry a UID or a GUID; %d the shell reports a rectangle for",
+                              withIdentity, count, answered);
+                Check(withIdentity == count,
+                      L"every icon in the card carries the identity the shell needs to place it",
+                      detail);
+                // WHERE the icons are can only be asked where the applications can be SEEN. A self-test
+                // started from the project tree inherits that directory's low integrity label, and its
+                // process snapshot then holds three processes instead of three hundred (measured: the log
+                // line for this very check said "3 of 3 carry a UID or a GUID; 0 the shell reports a
+                // rectangle for"). So the answer is asked for, printed, and only ASSERTED when the machine
+                // is visible to this process -- a check that quietly passes on a restricted snapshot would
+                // be worth less than this note.
+                //
+                // Deliberately not "all of them" either: an icon whose application is running but which the
+                // shell is not displaying has no rectangle, and that is a fact about the tray (four of the
+                // sixteen on this machine) rather than a failure.
+                if (live.ProcessesSeen() >= 50) {
+                    Check(answered > 0 && answered <= count,
+                          L"the shell places the icons it displays, and none of the ones it does not",
+                          detail);
+                } else {
+                    Info(L"the tray is not visible from this process",
+                         L"the process snapshot holds only a few processes (low integrity), so the shell "
+                         L"cannot be asked about these icons -- run the bar itself to see it answered");
+                }
+
+                // And the rectangle it gives is matched by POSITION, which is what replaces matching names
+                // (the shell calls WeChat's icon " 微信" while the bar calls it "Weixin.exe").
+                RECT candidates[4] = {};
+                candidates[0] = firstRect;
+                candidates[1] = firstRect;
+                candidates[2] = firstRect;
+                candidates[3] = firstRect;
+                candidates[1].left += 7;      // a different cell: seven pixels to the right
+                candidates[2].top += 40;      // a different row
+                candidates[3].left += 1;      // the same cell, one pixel out (the shell rounds)
+                std::swprintf(detail, 256,
+                              L"looking for %ld,%ld %ldx%ld among four candidates",
+                              firstRect.left, firstRect.top, firstRect.right - firstRect.left,
+                              firstRect.bottom - firstRect.top);
+                Check(IndexOfRectNear(candidates, 4, firstRect, 2) == 0 ||
+                          IndexOfRectNear(candidates, 4, firstRect, 2) == 3,
+                      L"the rectangle the shell gives matches the element that sits on it", detail);
+                Check(IndexOfRectNear(candidates, 1, candidates[1], 2) == -1,
+                      L"... and a cell seven pixels away is not that cell", detail);
+                Check(IndexOfRectNear(candidates, 1, candidates[2], 2) == -1,
+                      L"... nor is the one a row below", detail);
+                Check(IndexOfRectNear(candidates, 1, candidates[3], 2) == 0,
+                      L"... while a pixel of rounding is the same cell", detail);
+                Check(IndexOfRectNear(nullptr, 0, firstRect, 2) == -1,
+                      L"and nothing found is answered as nothing, not as the first", detail);
+            }
+            {
+                // Every result has a sentence, because these are what the log shows a user who asks why a
+                // press did not work. A case the switch forgot would print "?".
+                const TrayPressResult all[] = {
+                    TrayPressResult::Pressed,  TrayPressResult::NotInShell,
+                    TrayPressResult::NoWindow, TrayPressResult::NoElement,
+                    TrayPressResult::NoTaskbar, TrayPressResult::Refused,
+                };
+                bool named = true;
+                for (TrayPressResult result : all) {
+                    const wchar_t* text = TrayPressResultName(result);
+                    if (!text || !*text || std::wcscmp(text, L"?") == 0) named = false;
+                }
+                Check(named, L"every press result can be said in words");
             }
         }
 

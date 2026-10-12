@@ -34,6 +34,7 @@
 #include "Log.h"
 #include "Monitor.h"
 #include <dwmapi.h>
+#include <thread>
 #include "Motion.h"
 #include "MusicSession.h"
 #include "NativeTaskbar.h"
@@ -43,6 +44,7 @@
 #include "NotificationPipe.h"
 #include "ToastStore.h"
 #include "TrayIcons.h"
+#include "TrayPress.h"
 #include "WeChatWatch.h"
 #include "StatePolicy.h"
 #include "SoundOutput.h"
@@ -59,6 +61,15 @@
 #pragma comment(lib, "shcore.lib")
 
 namespace {
+
+// Declared here because the frame loop's click handler uses it: a click on a cell of the tray page hands
+// a press to a worker thread, and the request is a COPY of what the icon list said (see TrayPressRequest).
+// Defined further down with the other tray commands, where the reason for the copy is written out.
+island::TrayPressRequest MakeTrayPressRequest(const island::TrayIcon& icon, const wchar_t* exePath);
+
+// ... and an icon's name with its line breaks flattened, for a log line: five of the sixteen names on this
+// machine are multi-line tooltips, and printing one raw puts the rest of the line on a line of its own.
+const wchar_t* FlatName(const wchar_t* name, wchar_t* buffer, size_t capacity);
 
 // This is a Windows-subsystem executable (see src/CMakeLists.txt), so it has no
 // console of its own: launched by double-click it shows only the bar, which is
@@ -1415,7 +1426,10 @@ float musicWavePhase = 0.0f;
 
             if (hideNativeTaskbar && haveTaskbar && --taskbarCheckCountdown <= 0) {
                 taskbarCheckCountdown = 50;   // roughly every 5 s at an 8 ms tick
-                if (taskbar.EnsureHidden()) {
+                // ... unless a tray press is showing it this instant: the press needs the shell's taskbar
+                // to exist for about a fifth of a second, and re-hiding it in the middle of that would
+                // make roughly one press in twenty-five do nothing at all. See TrayPressInFlight.
+                if (!island::TrayPressInFlight() && taskbar.EnsureHidden()) {
                     island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
                 }
@@ -1936,6 +1950,42 @@ float musicWavePhase = 0.0f;
                     mixerSliderDragPid = 0;
                     island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
                     std::fflush(stdout);
+                } else if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0) {
+                    // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
+                    // thing about the tray this bar cannot do itself -- the menu or the window that
+                    // follows belongs to the application, and the shell is the one that knows how to ask
+                    // for it. See TrayPress for the route, and for why it is by POSITION rather than by
+                    // matching names.
+                    //
+                    // On a WORKER THREAD, because showing the shell's tray, opening its overflow and
+                    // pressing through UI Automation takes a few hundred milliseconds, and the bar draws
+                    // at the compositor's rate on this thread.
+                    const int cell = window.TrayCellHovered();
+                    if (cell < trayIcons.Count()) {
+                        const island::TrayPressRequest request =
+                            MakeTrayPressRequest(trayIcons.At(cell), trayIcons.ExePathAt(cell));
+                        wchar_t flat[128] = {};
+                        island::LogAndPrint("  tray press: cell %d '%ls'\n", cell,
+                                            FlatName(trayIcons.At(cell).name, flat, 128));
+                        std::thread([request]() {
+                            const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                            const island::TrayPressOutcome outcome =
+                                island::PressTrayIcon(request, true);
+                            island::LogAndPrint(
+                                "  tray press: '%ls' -> %ls (the shell calls it '%ls', rect %ld,%ld "
+                                "%ldx%ld), lookup %lld ms, press %lld ms\n",
+                                request.name, island::TrayPressResultName(outcome.result),
+                                outcome.shellName, outcome.rect.left, outcome.rect.top,
+                                outcome.rect.right - outcome.rect.left,
+                                outcome.rect.bottom - outcome.rect.top, outcome.lookupMs,
+                                outcome.pressMs);
+                            std::fflush(stdout);
+                            if (SUCCEEDED(comHr)) CoUninitialize();
+                        }).detach();
+                    }
+                    // The card goes with the press, which is what the shell does with its own flyout: the
+                    // application's window or menu is what the user is waiting for.
+                    dismissPanel();
                 } else if (window.SystemButtonAtScreen(cursor)) {
                     // The system panel is a TOGGLE, like the shell's own flyout: pressing the control
                     // again closes what it opened. Without that the only way out would be to click
@@ -4258,6 +4308,117 @@ int RunTrayDump() {
     return count > 0 ? 0 : 1;
 }
 
+// One icon's press request, copied out of the list: a press runs on a worker thread and the list refreshes
+// under it (see TrayPressRequest).
+island::TrayPressRequest MakeTrayPressRequest(const island::TrayIcon& icon, const wchar_t* exePath) {
+    island::TrayPressRequest request;
+    request.uid = icon.uid;
+    request.hasUid = icon.hasUid;
+    request.hasGuid = icon.hasGuid;
+    request.guid = icon.guid;
+    wcsncpy_s(request.exePath, 260, exePath ? exePath : L"", _TRUNCATE);
+    wcsncpy_s(request.name, 96, icon.name, _TRUNCATE);
+    return request;
+}
+
+// An icon's name with its line breaks flattened, for a log line.
+//
+// Five of the sixteen names on this machine are multi-line tooltips ("Steam - <something>", "NVIDIA
+// <driver>", the QQ Music one), and printing them raw put the REST of the log line on a line of its own --
+// which reads exactly like a missing answer. Measured while reading the first run of --tray-surface.
+const wchar_t* FlatName(const wchar_t* name, wchar_t* buffer, size_t capacity) {
+    size_t out = 0;
+    for (const wchar_t* p = name; p && *p && out + 1 < capacity; ++p) {
+        const wchar_t c = *p;
+        if (c == L'\r') continue;
+        buffer[out++] = (c == L'\n' || c == L'\t') ? L' ' : c;
+    }
+    buffer[out] = L'\0';
+    return buffer;
+}
+
+// Asks the shell where each of those icons is, which is the question a press depends on -- and the one
+// that says whether the card is drawing an icon the shell has at all.
+//
+// Worth having as its own command: the answer separates three things that look identical on screen. An
+// icon the shell answers for can be pressed. An icon the shell does not answer for is registered but not
+// displayed, and no amount of pressing will find it. An icon whose rectangle is in the taskbar BAND
+// rather than below it is in the tray proper, which the shell does not publish for UI Automation.
+int RunTraySurface() {
+    island::TrayIcons icons;
+    const int count = icons.Refresh();
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    RECT band = {};
+    if (taskbar) GetWindowRect(taskbar, &band);
+    island::LogAndPrint(L"tray surface: %d icon(s); taskbar %ls (band %ld..%ld)\n", count,
+                        taskbar ? L"present" : L"MISSING", band.top, band.bottom);
+
+    int answered = 0;
+    for (int i = 0; i < count; ++i) {
+        const island::TrayIcon& icon = icons.At(i);
+        const island::TrayPressRequest request = MakeTrayPressRequest(icon, icons.ExePathAt(i));
+        RECT rect = {};
+        const bool have = island::ShellRectForTrayIcon(request, &rect);
+        if (have) ++answered;
+        wchar_t flat[128] = {};
+        wchar_t identity[64] = {};
+        std::swprintf(identity, 64, L"uid %u", icon.uid);
+        if (have) {
+            island::LogAndPrint(L"  [%d] %ls (%ls) -- %ld,%ld %ldx%ld %ls\n", i,
+                                FlatName(icon.name, flat, 128),
+                                icon.hasGuid ? L"GUID" : identity, rect.left, rect.top,
+                                rect.right - rect.left, rect.bottom - rect.top,
+                                rect.top >= band.bottom - 2 ? L"(overflow)" : L"(tray proper)");
+        } else {
+            island::LogAndPrint(L"  [%d] %ls (%ls) -- the shell has no rectangle for it\n", i,
+                                FlatName(icon.name, flat, 128),
+                                icon.hasGuid ? L"GUID" : identity);
+        }
+    }
+    island::LogAndPrint(L"  %d of %d answer (the rest are registered but not displayed)\n", answered,
+                        count);
+    return answered > 0 ? 0 : 1;
+}
+
+// Presses one icon from the command line, for the same reason: a click cannot be delivered from a script
+// here. Everything the live click does is done, including the walk through the shell's tray, so what this
+// prints is what a click produces -- the difference being `--fire`, without which the button is found and
+// reported but not pressed.
+int RunTrayPress(int index, bool fire) {
+    island::TrayIcons icons;
+    const int count = icons.Refresh();
+    if (index < 0 || index >= count) {
+        island::LogAndPrint(L"tray press: [%d] is not one of the %d icon(s) on the card\n", index, count);
+        return 1;
+    }
+    const island::TrayIcon& icon = icons.At(index);
+    const island::TrayPressRequest request = MakeTrayPressRequest(icon, icons.ExePathAt(index));
+    island::LogAndPrint(L"tray press: [%d] '%ls' (%ls)\n", index, icon.name,
+                        icon.hasGuid ? L"registered by GUID" : L"registered by UID");
+
+    RECT rect = {};
+    if (!island::ShellRectForTrayIcon(request, &rect)) {
+        island::LogAndPrint(L"  the shell has no rectangle for it: registered, not displayed. Nothing "
+                            L"to press.\n");
+        return 1;
+    }
+    island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", rect.left, rect.top,
+                        rect.right - rect.left, rect.bottom - rect.top);
+
+    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Without --fire the whole route still runs -- the tray made invisible, the overflow flyout opened,
+    // the button found on the shell's rectangle -- and only the Invoke is left out.
+    const island::TrayPressOutcome outcome = island::PressTrayIcon(request, fire);
+    if (SUCCEEDED(comHr)) CoUninitialize();
+    island::LogAndPrint(L"  -> %ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
+                        island::TrayPressResultName(outcome.result), outcome.shellName,
+                        outcome.lookupMs, outcome.pressMs);
+    if (outcome.result == island::TrayPressResult::Pressed || outcome.result == island::TrayPressResult::Found) {
+        return 0;
+    }
+    return 1;
+}
+
 // Sets the system output volume to a percentage and reports what the device says afterwards.
 //
 // A command line rather than a click, because the click cannot be delivered from every context: the bar
@@ -5089,6 +5250,23 @@ int main(int argc, char** argv) {
             const int dumpResult = RunTrayDump();
             island::CloseLog();
             return dumpResult;
+        }
+        if (std::strcmp(argv[i], "--tray-surface") == 0) {
+            const int surfaceResult = RunTraySurface();
+            island::CloseLog();
+            return surfaceResult;
+        }
+        // --tray-press N: press the Nth icon of the card's list, exactly as a click on its cell does.
+        // The card's own cells cannot be clicked from a script on this machine (see ISLANDBAR_CLICK_AT),
+        // so this is how the press is exercised without a hand on the mouse. `--tray-press N --fire`
+        // presses; without `--fire` it only reports what it would press, which is the half worth
+        // checking repeatedly.
+        if (std::strcmp(argv[i], "--tray-press") == 0 && i + 1 < argc) {
+            const int wanted = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+            const bool fire = (i + 1 < argc) && std::strcmp(argv[i + 1], "--fire") == 0;
+            const int pressResult = RunTrayPress(wanted, fire);
+            island::CloseLog();
+            return pressResult;
         }
         if (std::strcmp(argv[i], "--icon-dump") == 0) {
             const char* appId = (i + 1 < argc) ? argv[i + 1] : "";

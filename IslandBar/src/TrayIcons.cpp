@@ -6,6 +6,9 @@
 #include "Log.h"
 
 #include <tlhelp32.h>
+// CLSIDFromString, for the registry's textual IconGuid: with WIN32_LEAN_AND_MEAN the COM declarations
+// are not part of windows.h.
+#include <objbase.h>
 
 #include <algorithm>
 #include <cwchar>
@@ -139,6 +142,35 @@ int TrayIcons::Refresh() {
                              reinterpret_cast<BYTE*>(&promoted), &promotedSize) == ERROR_SUCCESS &&
             type == REG_DWORD) {
             entry.icon.promoted = promoted != 0;
+        }
+
+        // THE SHELL'S OWN IDENTITY FOR THE ICON, which is what a press needs (see TrayPress). A UID and
+        // an IconGuid are the two ways an application registers an icon and each entry carries one or the
+        // other -- measured: `UID` is a DWORD, `IconGuid` a string "{...}".
+        {
+            DWORD uid = 0;
+            DWORD uidSize = sizeof(uid);
+            DWORD uidType = 0;
+            if (RegQueryValueExW(subKey, L"UID", nullptr, &uidType, reinterpret_cast<BYTE*>(&uid),
+                                 &uidSize) == ERROR_SUCCESS &&
+                uidType == REG_DWORD) {
+                entry.icon.uid = uid;
+                entry.icon.hasUid = true;
+            }
+            std::wstring guidText;
+            ReadStringValue(subKey, L"IconGuid", &guidText);
+            if (!guidText.empty()) {
+                GUID parsed = {};
+                // Through the string form rather than the bytes: the value is REG_SZ, braces and all.
+                std::wstring trimmed = guidText;
+                if (trimmed.size() >= 2 && trimmed.front() == L'{' && trimmed.back() == L'}') {
+                    trimmed = trimmed.substr(1, trimmed.size() - 2);
+                }
+                if (SUCCEEDED(CLSIDFromString((L"{" + trimmed + L"}").c_str(), &parsed))) {
+                    entry.icon.guid = parsed;
+                    entry.icon.hasGuid = true;
+                }
+            }
         }
         RegCloseKey(subKey);
 

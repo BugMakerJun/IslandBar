@@ -31,6 +31,13 @@
 //  EVER put an icon in the tray, and most of them are not running: on this machine 27
 //  entries, of which the 12 whose application is running are kept. That filter is the
 //  difference between a tray and a graveyard of old installs.
+//
+//  AND WHAT EACH ONE *IS*, for pressing it. The same registry entry the icon is drawn from carries the
+//  identity the shell itself uses for that icon -- an IconGuid, or a UID belonging to one of the
+//  application's windows -- and Shell_NotifyIconGetRect answers WHERE the icon is from that identity
+//  alone. That is what makes a click in the card possible without matching names: the shell's own name
+//  for an icon is the application's runtime tooltip (" 微信"), while the bar's is the registry's
+//  ("Weixin.exe"), and no amount of string work reconciles the two. See TrayPress.
 // =====================================================================
 #pragma once
 
@@ -54,6 +61,17 @@ struct TrayIcon {
     size_t pngSize = 0;
     // 1 when the shell shows it in the tray proper rather than in the overflow.
     bool promoted = false;
+    // The shell's own identity for this icon, straight out of the same registry entry: the `UID` of one
+    // of the registered application's windows, or an `IconGuid`. One of the two is always present, and
+    // TrayPress needs it to ask the shell where the icon is.
+    //
+    // `hasUid` is separate from `uid` because ZERO IS A REAL UID: WeChat registers with 0 on this
+    // machine, and reading "uid == 0" as "no UID" cost a round of debugging (its icon reported as "not
+    // displayed" while the shell was happily answering for it).
+    unsigned uid = 0;
+    bool hasUid = false;
+    bool hasGuid = false;
+    GUID guid = {};
 };
 
 // The live tray icons, newest registration first.
