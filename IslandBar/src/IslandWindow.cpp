@@ -22,6 +22,20 @@ namespace {
 
 std::unordered_map<HWND, IslandWindow*> g_windows;
 
+// The Start card's hover target, spelled out for the log: the names are the enum's own, so a reader can
+// follow one from the trace straight back into the code that produced it.
+const wchar_t* StartHitTargetName(IslandWindow::StartHitTarget target) {
+    switch (target) {
+        case IslandWindow::StartHitTarget::Pin:         return L"pin";
+        case IslandWindow::StartHitTarget::PickerRow:   return L"picker row";
+        case IslandWindow::StartHitTarget::PowerRow:    return L"power row";
+        case IslandWindow::StartHitTarget::PowerButton: return L"power button";
+        case IslandWindow::StartHitTarget::EmptyGrid:   return L"empty grid";
+        case IslandWindow::StartHitTarget::None:        break;
+    }
+    return L"none";
+}
+
 // How often the pointer is re-checked, in milliseconds.
 //
 // This is a poll, not an event, and that is a deliberate trade for phase 1. With
@@ -311,6 +325,13 @@ void IslandWindow::ScrollStartPicker(int notches) {
     if (lastFirstRow > 0 && moved > lastFirstRow) moved = lastFirstRow;
     if (startListCount_ <= rowsOnScreen + 1) moved = 0;
     startPickerScroll_ = moved;
+
+    // ... and the answer to "which row is under the pointer" is recomputed HERE rather than left for the
+    // next mouse move, because a wheel turn does not move the hand. The list slides under a stationary
+    // pointer, so the row that was under it is now a different application: a stale answer highlights the
+    // wrong row until the pointer happens to move again.
+    POINT cursor = {};
+    if (GetCursorPos(&cursor)) startHit_ = StartHitAtScreen(cursor);
 }
 
 IslandWindow::StartHit IslandWindow::StartHitAtScreen(POINT screenPoint) const {
@@ -1227,6 +1248,21 @@ void IslandWindow::UpdatePointerState() {
             }
         }
 
+        // Reported on change, like the icon row above and for the same reason: "the highlight is on the
+        // wrong row", "the highlight is on nothing", and "the highlight does not move at all" are three
+        // different defects that a screenshot cannot tell apart -- and the third is what "鼠标移上去卡卡的"
+        // turned out to be, with the pointer moving and the answer never changing because nothing redrew.
+        {
+            const int target = static_cast<int>(startHit_.target);
+            if (target != lastReportedStartTarget_ || startHit_.index != lastReportedStartIndex_) {
+                lastReportedStartTarget_ = target;
+                lastReportedStartIndex_ = startHit_.index;
+                LogLine(L"  start hover: %s #%d (pointer local %.0f,%.0f, page %d, scroll %d)",
+                        StartHitTargetName(startHit_.target), startHit_.index, localX, localY,
+                        startPage_, startPickerScroll_);
+            }
+        }
+
         // The Start button is on the other end, from the same island box.
         startHovered_ = StartButtonHit(island, localX, localY);
 
@@ -1517,8 +1553,15 @@ LRESULT IslandWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
 
             // Forwarded to the pointer position the frame loop will see anyway, so the two agree about
             // where the wheel happened.
-            const int notches = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+            //
+            // The delta ACCUMULATES before it becomes notches. Dividing each message by WHEEL_DELTA and
+            // discarding the remainder throws away every message a precision touchpad sends (they come in
+            // tens, not hundreds), and it also divides a coarse wheel's own motion into notches the list
+            // never sees. What is left over is kept for the next message.
+            soundWheelRemainder_ += GET_WHEEL_DELTA_WPARAM(wParam);
+            const int notches = soundWheelRemainder_ / WHEEL_DELTA;
             if (notches != 0) {
+                soundWheelRemainder_ -= notches * WHEEL_DELTA;
                 soundWheelNotches_ += notches;
                 return 0;
             }

@@ -551,6 +551,11 @@ private:
     bool  soundPageOpen_ = false;
     // Wheel notches seen over the card, waiting to be taken by the frame loop. Positive is up.
     int   soundWheelNotches_ = 0;
+    // The wheel's raw delta that has not yet added up to a notch. A precision touchpad, and a wheel that
+    // reports its motion in fractions of a notch, send deltas smaller than WHEEL_DELTA -- and an integer
+    // division by WHEEL_DELTA throws every one of those away, so the list stood still under a hand that
+    // was clearly scrolling. Kept here, with the notches, because the two are the same sentence.
+    int   soundWheelRemainder_ = 0;
     // Where the frame loop placed the card's LEFT edge, or 0 when no card is up. Named for the card and
     // not for the panel: every one of the three cards is placed the same way, and the name it had before
     // ("the system panel's card left") is part of why the music card's controls were hit-tested against
@@ -575,6 +580,11 @@ private:
     int  startListCount_ = 0;
     int  startPickerScroll_ = 0;
     StartHit startHit_ = {};
+    // The last hit reported to the log, so the card's hover trace reports changes rather than every poll.
+    // A separate pair from the icon row's: the two answers are about different things and one moving must
+    // not silence the other.
+    int  lastReportedStartTarget_ = -2;
+    int  lastReportedStartIndex_ = -2;
     // Which card the frame loop says is up: what the cursor's hit tests are gated on. See SetCardOwner.
     CardOwner cardOwner_ = CardOwner::None;
     // The last value written to the log, so the hover trace reports changes rather than every poll.

@@ -700,7 +700,6 @@ void TextRenderer::DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box
     const float strength = open ? 0.22f : 0.16f * wash;
     if (strength > 0.01f && opacity > 0.01f) {
         ID2D1SolidColorBrush* washBrush = nullptr;
-        const float amount = open ? 0.22f : 0.16f;
         if (SUCCEEDED(context->CreateSolidColorBrush(
                 D2D1::ColorF(1.0f, 1.0f, 1.0f, strength * opacity), &washBrush)) &&
             washBrush) {
@@ -3446,6 +3445,27 @@ void TextRenderer::DrawStartPage(ID2D1DeviceContext2* context, const RoundedBox&
             D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom), radius, radius};
         context->FillRoundedRectangle(&rounded, brush);
     };
+    // The highlight for one item: its own animated amount when the caller supplied them, and a hard 0/1
+    // otherwise (which keeps every other caller -- and the drawings the self-test makes -- unchanged).
+    const auto washAt = [&](const float* amounts, int index, int hovered) {
+        if (index < 0) return 0.0f;
+        if (amounts) return amounts[index];
+        return index == hovered ? 1.0f : 0.0f;
+    };
+    // A wash brush at a given strength, made per draw because the strength varies per item. Cheap: two
+    // fields, no geometry, and there are at most a handful of items on screen with a non-zero amount.
+    const auto fillWash = [&](const RectF& rect, float radius, float amount) {
+        if (!washBrush || amount <= 0.01f) return;
+        ID2D1SolidColorBrush* brush = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(
+                D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f * amount * opacity), &brush)) &&
+            brush) {
+            const D2D1_ROUNDED_RECT rounded = {
+                D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom), radius, radius};
+            context->FillRoundedRectangle(&rounded, brush);
+            brush->Release();
+        }
+    };
     const auto drawGlyph = [&](const wchar_t* glyph, const RectF& rect, ID2D1Brush* brush,
                                IDWriteTextFormat* format) {
         if (!brush || !format) return;
@@ -3459,7 +3479,7 @@ void TextRenderer::DrawStartPage(ID2D1DeviceContext2* context, const RoundedBox&
         for (int i = 0; i < 5; ++i) {
             const RectF row = island::StartPowerRowFor(card, i);
             if (row.right <= row.left) continue;
-            if (i == text.hoveredPowerRow) fillRounded(row, 8.0f, washBrush);
+            fillWash(row, 8.0f, washAt(text.powerWashes, i, text.hoveredPowerRow));
             // The three that lose work are ARMED rather than acted on: a mis-click on a list that appears
             // above a button the user was already reaching for must not sign him out.
             const bool armed = (text.powerConfirmRow == i);
@@ -3481,7 +3501,7 @@ void TextRenderer::DrawStartPage(ID2D1DeviceContext2* context, const RoundedBox&
             if (index < 0 || index >= text.listCount) break;
             const RectF row = island::StartPickerRowFor(card, visible);
             if (row.bottom > layout.grid.bottom) break;
-            if (index == text.hoveredPickerRow) fillRounded(row, 8.0f, washBrush);
+            fillWash(row, 8.0f, washAt(text.rowWashes, index, text.hoveredPickerRow));
             const island::StartApp& app = text.list[index];
             if (startRowFormat_ && inkBrush) {
                 const D2D1_RECT_F target =
@@ -3527,7 +3547,7 @@ void TextRenderer::DrawStartPage(ID2D1DeviceContext2* context, const RoundedBox&
         const int shown = text.pinCount < capacity ? text.pinCount : capacity;
         for (int i = 0; i < shown; ++i) {
             const RectF cell = island::StartPinCellFor(layout, i);
-            if (i == text.hoveredPin) fillRounded(cell, 10.0f, washBrush);
+            fillWash(cell, 10.0f, washAt(text.pinWashes, i, text.hoveredPin));
 
             const uint8_t* png = (text.pinIcons && i < static_cast<int>(sizeof(startPinBitmaps_) /
                                                                        sizeof(startPinBitmaps_[0])))

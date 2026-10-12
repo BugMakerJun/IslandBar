@@ -1073,8 +1073,28 @@ unsigned long long lastMusicMeterMs = 0;
     // the frame that points into it.
     std::vector<const uint8_t*> startIconPointers;
     std::vector<size_t> startIconSizes;
+    // One spring per item of the Start card's three lists, so a highlight fades in and out instead of
+    // switching: see FrameState::pinWashes. Sized to the list, which is a handful of tiles, up to 121
+    // picker rows and five power rows.
+    struct WashSlot {
+        float value = 0.0f;
+        float velocity = 0.0f;
+    };
+    std::vector<WashSlot> startPinWashes;
+    std::vector<WashSlot> startRowWashes;
+    std::vector<WashSlot> startPowerWashes;
+    std::vector<float> startPinWashValues;
+    std::vector<float> startRowWashValues;
+    std::vector<float> startPowerWashValues;
+    bool startWashAnimating = false;
     int startPinCount = 0;
     int startAppCount = 0;
+    // The pointer's position in the card, remembered so a CHANGE can ask for a redraw: the card's
+    // highlight is not a state the loop already watches (see needDraw), and without this the highlight
+    // moved only on the next clock tick -- up to a second late.
+    int lastStartHitTarget = 0;
+    int lastStartHitIndex = -2;
+    int lastStartScrollDip = -1;
     std::thread([&startApps]() {
         const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         startApps.RefreshList();
@@ -1330,6 +1350,12 @@ float musicWavePhase = 0.0f;
         DWORD lastStartTogglePhase = 0xFFFFFFFFul;   // no toggle has happened yet
         int whyAnimating = 0, whyClock = 0, whyNotification = 0, whyMusic = 0;
         int whyLyrics = 0, whyProgress = 0, whyFirst = 0, whyStatusStrip = 0;
+        // ... and the Start card's own two: the pointer moving over it, and the highlights it left behind
+        // settling. Counted separately because they are the ONLY terms that are neither a state the loop
+        // watches nor the clock -- and the defect they were added for ("鼠标移上去卡卡的") was exactly this:
+        // the card was drawn on the next clock tick, once a second, and the redraw report said `clock=4`
+        // with everything else at zero, which named the clock as the cause without naming the omission.
+        int whyStartHover = 0, whyStartWash = 0;
         FrameStats liveStats;
         liveStats.Start();
         unsigned long long lastMusicRevision = music.Revision();
@@ -3231,12 +3257,33 @@ float musicWavePhase = 0.0f;
                 volumeAvailable && (GetTickCount64() - lastMusicMeterMs >= 33);
             if (musicMeterDue) lastMusicMeterMs = GetTickCount64();
 
+            // The Start card's pointer and its scroll, as CHANGE rather than as state: the window answers
+            // where the pointer is, and only a different answer (or a different scroll offset) needs a
+            // frame. See the note in the condition below for what this cost.
+            bool startHoverChanged = false;
+            {
+                const island::IslandWindow::StartHit hit = window.StartHitHovered();
+                const int target = static_cast<int>(hit.target);
+                startHoverChanged = island::StartCardAsksForFrame(target, hit.index, startPickerScroll,
+                                                                 lastStartHitTarget,
+                                                                 lastStartHitIndex,
+                                                                 lastStartScrollDip);
+                lastStartHitTarget = target;
+                lastStartHitIndex = hit.index;
+                lastStartScrollDip = startPickerScroll;
+            }
+
             const bool needDraw = animating || clockChanged || notificationChanged ||
                                   musicChanged || lyricsScrolling || lyricLineChanged ||
                                   lyricLineAnimating || progressChanged || musicMeterDue ||
                                   iconAnimating || rowAppearAnimating || soundPageChanged ||
                                   callMeterDue || statusStripAnimating || weatherChanged ||
                                   controlWashAnimating ||
+                                  // ... and the Start card's own pointer and scroll. Neither is a state
+                                  // this loop watches anywhere else, and without them the highlight and the
+                                  // list moved only on the next clock tick -- measured, that is ONE redraw
+                                  // per second while idle, which is what "鼠标移上去卡卡的" was.
+                                  startHoverChanged || startWashAnimating ||
                                   !haveDrawn;
             if (needDraw) {
                 // Which condition forced this redraw, counted per report interval.
@@ -3255,6 +3302,8 @@ float musicWavePhase = 0.0f;
                 if (musicMeterDue) ++whyMusic;
                 if (progressChanged) ++whyProgress;
                 if (statusStripAnimating || weatherChanged) ++whyStatusStrip;
+                if (startHoverChanged) ++whyStartHover;
+                if (startWashAnimating) ++whyStartWash;
                 if (!haveDrawn) ++whyFirst;
 
                 haveDrawn = true;
@@ -3362,10 +3411,53 @@ float musicWavePhase = 0.0f;
                 // functions of the same geometry the drawing uses.
                 frame.startPageOpen = startPageShown;
                 {
-                    // The module's counts are read here rather than cached at startup: the list arrives
-                    // from a worker, and the pins change whenever the user adds one.
-                    startPinCount = startApps.PinCount();
-                    startAppCount = startApps.ListCount();
+                    // THE HIGHLIGHTS, spring-stepped, one per item -- see FrameState::pinWashes for why
+                    // they are per item and why they are springs. Sized to the lists, which change when a
+                    // pin is added or an application arrives.
+                    {
+                        // The module's counts are read here rather than cached at startup: the list arrives
+                        // from a worker, and the pins change whenever the user adds one. Read BEFORE the
+                        // highlights are sized, so a pin that was just added has a spring of its own in the
+                        // frame it appears in -- sizing them from the previous frame's counts left the
+                        // newest tile the one tile with no highlight.
+                        startPinCount = startApps.PinCount();
+                        startAppCount = startApps.ListCount();
+                        const island::IslandWindow::StartHit hover = window.StartHitHovered();
+                        const int pinHover = hover.target == island::IslandWindow::StartHitTarget::Pin
+                                                 ? hover.index
+                                                 : -1;
+                        const int rowHover =
+                            hover.target == island::IslandWindow::StartHitTarget::PickerRow ? hover.index
+                                                                                            : -1;
+                        const int powerHover =
+                            hover.target == island::IslandWindow::StartHitTarget::PowerRow ? hover.index
+                                                                                           : -1;
+                        const auto resize = [](std::vector<WashSlot>& slots,
+                                               std::vector<float>& values, int count) {
+                            if (static_cast<int>(slots.size()) != count) {
+                                slots.assign(static_cast<size_t>(count), WashSlot{});
+                                values.assign(static_cast<size_t>(count), 0.0f);
+                            }
+                        };
+                        resize(startPinWashes, startPinWashValues, startPinCount);
+                        resize(startRowWashes, startRowWashValues, startAppCount);
+                        resize(startPowerWashes, startPowerWashValues, 5);
+                        startWashAnimating = false;
+                        const auto step = [&](std::vector<WashSlot>& slots,
+                                              std::vector<float>& values, int hovered) {
+                            for (int i = 0; i < static_cast<int>(slots.size()); ++i) {
+                                if (island::ControlWashStep(&slots[static_cast<size_t>(i)].value,
+                                                            &slots[static_cast<size_t>(i)].velocity,
+                                                            i == hovered ? 1.0f : 0.0f, dt)) {
+                                    startWashAnimating = true;
+                                }
+                                values[static_cast<size_t>(i)] = slots[static_cast<size_t>(i)].value;
+                            }
+                        };
+                        step(startPinWashes, startPinWashValues, pinHover);
+                        step(startRowWashes, startRowWashValues, rowHover);
+                        step(startPowerWashes, startPowerWashValues, powerHover);
+                    }
                     const island::IslandWindow::StartHit startHit = window.StartHitHovered();
                     island::TextRenderer::StartCardText& card = frame.startCard;
                     card.pins = startPinCount > 0 ? &startApps.PinAt(0) : nullptr;
@@ -3387,6 +3479,10 @@ float musicWavePhase = 0.0f;
                     card.powerButtonHovered =
                         startHit.target == island::IslandWindow::StartHitTarget::PowerButton;
                     card.powerConfirmRow = startPowerConfirm;
+                    card.pinWashes = startPinWashValues.empty() ? nullptr : startPinWashValues.data();
+                    card.rowWashes = startRowWashValues.empty() ? nullptr : startRowWashValues.data();
+                    card.powerWashes =
+                        startPowerWashValues.empty() ? nullptr : startPowerWashValues.data();
                     card.accountName = accountName;
                     card.avatarPng = accountAvatarPng.empty() ? nullptr : accountAvatarPng.data();
                     card.avatarPngSize = accountAvatarPng.size();
@@ -4351,9 +4447,11 @@ float musicWavePhase = 0.0f;
                 island::LogAndPrint("  interval [%ls] %ls", island::StateName(window.State()),
                                     intervalSummary);
                 island::LogAndPrint("  redraws: animating=%d clock=%d notify=%d music=%d "
-                                    "lyrics=%d progress=%d strip=%d first=%d",
+                                    "lyrics=%d progress=%d strip=%d first=%d startHover=%d "
+                                    "startWash=%d",
                                     whyAnimating, whyClock, whyNotification, whyMusic,
-                                    whyLyrics, whyProgress, whyStatusStrip, whyFirst);
+                                    whyLyrics, whyProgress, whyStatusStrip, whyFirst,
+                                    whyStartHover, whyStartWash);
                 // Reported beside the frame intervals because the two are the same question: a region
                 // re-applied per frame is a window-manager call inside the animation's own loop. A
                 // hundred of them in a 4 s window containing one 0.36 s transition means the transition
@@ -4368,6 +4466,7 @@ float musicWavePhase = 0.0f;
                 liveStats.Reset();
                 whyAnimating = whyClock = whyNotification = whyMusic = 0;
                 whyLyrics = whyProgress = whyFirst = whyStatusStrip = 0;
+                whyStartHover = whyStartWash = 0;
             }
 
             // --- pace ---

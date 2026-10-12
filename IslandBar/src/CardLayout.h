@@ -547,6 +547,23 @@ inline bool StartRectHasPoint(const RectF& rect, float x, float y) {
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
+// Whether the Start card's pointer or its scroll has MOVED, which is a question about a change rather
+// than about a state -- and the one thing in this file that is not geometry.
+//
+// It lives here, and as a function rather than as an expression inside the frame loop, because of what
+// its absence cost: the frame loop's redraw condition listed the clock, the animations, the music, the
+// lyrics and the notification, and NOT these three numbers. The window was answering "which row is under
+// the pointer" every 8 ms and nobody was asking, so the highlight and the list moved only on the next
+// clock tick -- once a second, reported by the user as "鼠标移上去卡卡的 添加应用滚动也卡卡的", and visible
+// in the bar's own report as `redraws: clock=4` with every other term at zero while the wheel was turning.
+//
+// The three inputs are the ONLY things that change when the pointer moves over the card or its list
+// scrolls: what is under the pointer (`target`, `index`) and how far the list has moved (`scroll`).
+inline bool StartCardAsksForFrame(int target, int index, int scroll, int lastTarget, int lastIndex,
+                                  int lastScroll) {
+    return target != lastTarget || index != lastIndex || scroll != lastScroll;
+}
+
 inline int StartPinCellAt(const StartPageLayout& layout, int count, float x, float y) {
     if (!layout.valid) return -1;
     if (!StartRectHasPoint(layout.grid, x, y)) return -1;

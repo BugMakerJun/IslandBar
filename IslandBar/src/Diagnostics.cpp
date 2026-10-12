@@ -6379,6 +6379,30 @@ void TestMusicCardLayout() {
                 Check(StartPickerRowAt(card, 0, 40, layout.grid.left + 4.0f, layout.footer.top - 2.0f) ==
                           -1,
                       L"the footer's edge is not a row", trayDetail);
+
+                // ... AND THE SCROLL OFFSET IS PART OF THAT ANSWER, which is also what makes the card ask
+                // for a frame at all when the pointer moves or the wheel turns. The three checks below are
+                // three lines of arithmetic, and they are here because their absence was invisible: the
+                // condition that decides whether to draw did not mention these numbers, so the list and the
+                // highlight moved once a second and every geometry check still passed.
+                //
+                // Taken from the enum the frame loop casts, so the numbers here cannot drift from the ones
+                // the loop compares.
+                const int kNone = static_cast<int>(IslandWindow::StartHitTarget::None);
+                const int kPin = static_cast<int>(IslandWindow::StartHitTarget::Pin);
+                const int kPickerRow = static_cast<int>(IslandWindow::StartHitTarget::PickerRow);
+                Check(!StartCardAsksForFrame(kPickerRow, 3, 7, kPickerRow, 3, 7),
+                      L"a pointer that has not moved asks for nothing", trayDetail);
+                Check(StartCardAsksForFrame(kPickerRow, 4, 7, kPickerRow, 3, 7),
+                      L"another row under the same pointer is a change", trayDetail);
+                Check(StartCardAsksForFrame(kPin, 0, 7, kPickerRow, 0, 7),
+                      L"... and so is a different kind of control", trayDetail);
+                Check(StartCardAsksForFrame(kPickerRow, 3, 8, kPickerRow, 3, 7),
+                      L"one notch of wheel with the pointer standing still is a change too", trayDetail);
+                // The frame loop's own initialisers: "no target, no row, no scroll" against trackers that
+                // start at a value no hit can equal. The first frame of every run is this comparison.
+                Check(StartCardAsksForFrame(kNone, -1, 0, kNone, -2, -1),
+                      L"the first frame is a change (the trackers start unknown)", trayDetail);
             }
 
             // THE ROW GIVES WAY, AND THAT IS THE POINT OF THE RESERVATION.

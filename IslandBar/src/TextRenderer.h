@@ -143,6 +143,16 @@ public:
         int hoveredPickerRow = -1;
         int hoveredPowerRow = -1;
         bool powerButtonHovered = false;
+        // How far each item's highlight has come up, 0 to 1, one entry per item in the same order as
+        // `pins`, `list` and the power rows. Spring-animated by the frame loop, for the reason the deck's
+        // washes are (see ControlWashStep): a highlight that switches on in one frame reads as a hard edge,
+        // and moving the pointer across a grid of them then reads as flicker rather than as movement.
+        //
+        // Per ITEM rather than "the one being pointed at", because the highlight that is LEAVING has to
+        // fade out while the next one fades in -- with a single amount, the tile just left would blink off.
+        const float* pinWashes = nullptr;
+        const float* rowWashes = nullptr;
+        const float* powerWashes = nullptr;
         // The power row waiting for a second press (see the click handler): the three that lose unsaved
         // work do not act on the first click, and this is which one is armed.
         int powerConfirmRow = -1;
