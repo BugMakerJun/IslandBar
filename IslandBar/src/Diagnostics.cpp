@@ -1286,6 +1286,51 @@ void TestRenderer(IslandWindow& window) {
                 Check(measuredFill && measuredLine && withLine > fillOnly + 2.0f,
                       L"the pill still shows its own line while a card is up", pillDetail);
             }
+
+            // --- AND WHILE A FULL-SCREEN APPLICATION IS IN FRONT, NOTHING IS PAINTED AT ALL --------
+            //
+            // The state exists for that and for nothing else: the application has the screen. Painting
+            // the pill and its date-and-time line over a game is what was reported ("现在的灵动岛一行的在
+            // 玩游戏的时候也显示出来了"), and "the state is reached" says nothing about it -- the policy
+            // assertion above passes just as happily for a bar that fills the band. Only the pixels can
+            // tell the two apart.
+            {
+                FrameState standDown;
+                standDown.pill.box = BoxForState(IslandState::FullBar, window.CurrentAnchor());
+                standDown.pill.opacity = 1.0f;
+                standDown.state = IslandState::FullBar;
+                renderer.Render(standDown);
+                renderer.Render(standDown);
+
+                float bandInFullScreen = -1.0f;
+                const bool measuredFull =
+                    renderer.RegionLuminance(pillBox.rect.left, pillBox.rect.top,
+                                             pillBox.rect.right, pillBox.rect.bottom,
+                                             &bandInFullScreen);
+
+                // The same strip with the bar at rest: the pill IS there, which is what makes the reading
+                // above mean "nothing" rather than "the readback is broken".
+                FrameState resting;
+                resting.pill = standDown.pill;
+                resting.pill.box = pillBox;
+                resting.restingPill = pillBox;
+                resting.state = IslandState::Collapsed;
+                renderer.Render(resting);
+                renderer.Render(resting);
+                float bandAtRest = -1.0f;
+                const bool measuredRest =
+                    renderer.RegionLuminance(pillBox.rect.left, pillBox.rect.top,
+                                             pillBox.rect.right, pillBox.rect.bottom, &bandAtRest);
+
+                std::swprintf(pillDetail, 224, L"the island's own band: full-screen=%.2f, at rest=%.2f",
+                              bandInFullScreen, bandAtRest);
+                Check(measuredRest && bandAtRest > 2.0f,
+                      L"the island's band is painted at rest, so the next reading means something",
+                      pillDetail);
+                Check(measuredFull && bandInFullScreen < 1.0f,
+                      L"nothing of the bar is painted while a full-screen application is in front",
+                      pillDetail);
+            }
         }
 
         // --- a card must not dim the BAR -------------------------------------------
@@ -5113,6 +5158,80 @@ void TestMusicCardLayout() {
                   L"the full bar gives way to the resting shape when the application stops being "
                   L"full-screen",
                   dt);
+
+            // A CALL OR A MESSAGE STILL COMES UP OVER A FULL-SCREEN APPLICATION, and nothing else does.
+            //
+            // The order of those two rules was the other way round until the user reported the
+            // consequence: "现在的灵动岛一行的在玩游戏的时候也显示出来了，只有通话 或者 通知的时候 灵动岛
+            // 显示". Two things are asserted, because the second is the half that is easy to lose: a
+            // message during a game produces the STRIP, and a full-screen application produces no card
+            // even with the pointer sitting on the island and a player running -- "如果音乐的时候也显示那就
+            // 鼠标放灵动岛的时候 不要 显示出音乐卡片".
+            {
+                PointerContext notified;
+                notified.shape = IslandState::Collapsed;
+                notified.resting = IslandState::MusicStrip;
+                notified.fullscreenApp = true;
+                notified.notificationActive = true;
+                std::swprintf(dt, 224, L"full-screen + message -> %ls", StateName(NextShape(notified)));
+                Check(NextShape(notified) == IslandState::NoticeStrip,
+                      L"a message comes up even over a full-screen application", dt);
+
+                PointerContext hovered;
+                hovered.shape = IslandState::Collapsed;
+                hovered.resting = IslandState::MusicStrip;
+                hovered.fullscreenApp = true;
+                hovered.pointerInside = true;
+                hovered.pointerOnIsland = true;
+                hovered.musicPresent = true;
+                std::swprintf(dt, 224, L"full-screen + pointer on the island + a player -> %ls",
+                              StateName(NextShape(hovered)));
+                Check(NextShape(hovered) != IslandState::Expanded,
+                      L"a full-screen application never opens the details card", dt);
+            }
+
+            // AND THE BAR IS NOT THERE TO POINT AT in that state: every point is refused, including the
+            // middle of the pill, so the pointer crossing the top of the screen during a game cannot
+            // open anything.
+            {
+                MonitorGeometry fullMon;
+                fullMon.screen = {0, 0, 2560, 1440};
+                fullMon.work = {0, 32, 2560, 1408};
+                fullMon.dpi = 96;
+                fullMon.dpiY = 96;
+                const RECT windowRect = {0, 0, 2560, 320};
+                const RoundedBox pill = IslandBoxFor(2560.0f, kCollapsedWidthDip, kCollapsedHeightDip);
+                const POINT onThePill = {
+                    static_cast<LONG>((pill.rect.left + pill.rect.right) * 0.5f),
+                    static_cast<LONG>((pill.rect.top + pill.rect.bottom) * 0.5f)};
+                std::swprintf(dt, 224, L"pill centre %ld,%ld", onThePill.x, onThePill.y);
+                Check(!IslandWindow::ShouldAcceptPointer(fullMon, windowRect, onThePill,
+                                                        IslandState::FullBar, 8, 0.0f),
+                      L"a full-screen application leaves the bar accepting nothing", dt);
+                Check(IslandWindow::ShouldAcceptPointer(fullMon, windowRect, onThePill,
+                                                        IslandState::Collapsed, 8, 0.0f),
+                      L"and the same point is the island's once the application is not full-screen", dt);
+            }
+
+            // The rectangle test that decides whether an application has the screen. The near miss is the
+            // case that matters: a MAXIMIZED window covers the work area, which starts below the band, so
+            // its top edge is 32 px down the screen and it must not count.
+            {
+                const RECT monitor = {0, 0, 2560, 1440};
+                const RECT maximized = {0, 32, 2560, 1440};
+                const RECT game = {0, 0, 2560, 1440};
+                const RECT borderless = {-2, -2, 2562, 1442};
+                const RECT tallWindow = {100, 0, 2460, 1440};
+                std::swprintf(dt, 224, L"maximized %ld,%ld %ldx%ld against the monitor 0,0 2560x1440",
+                              maximized.left, maximized.top, maximized.right - maximized.left,
+                              maximized.bottom - maximized.top);
+                Check(!WindowCoversMonitor(maximized, monitor),
+                      L"a maximized window does NOT count as full-screen", dt);
+                Check(WindowCoversMonitor(game, monitor) && WindowCoversMonitor(borderless, monitor),
+                      L"an application covering the monitor does", dt);
+                Check(!WindowCoversMonitor(tallWindow, monitor),
+                      L"a window that is merely tall does not", dt);
+            }
         }
 
         // The Start button mirrors the icon row, and is inside the input region.

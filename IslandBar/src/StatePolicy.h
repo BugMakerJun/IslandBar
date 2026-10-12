@@ -218,17 +218,24 @@ inline bool ShouldAdoptNewResting(const PointerContext& c) {
 // shown -- an earlier version let the hover win, and the notification was cut off the instant the
 // pointer moved.
 inline IslandState NextShape(const PointerContext& c) {
-    // A full-screen application first, and above everything else.
+    // A FULL-SCREEN APPLICATION GETS THE SCREEN -- except for the two things that must not wait.
     //
-    // The band at the top of the screen is reserved by the shell's taskbar and cannot be claimed away
-    // from it -- a screen edge holds one AppBar and the hidden taskbar keeps its claim. So while an
-    // application is full-screen the bar becomes the full-width strip that occupies that band, which
-    // is the one arrangement in which nothing on screen is wasted.
+    // Asked for in these words: "现在的灵动岛一行的在玩游戏的时候也显示出来了，只有通话 或者 通知的时候
+    // 灵动岛显示". While a game is in front the bar paints NOTHING (see Renderer::RenderFrame) and accepts
+    // no pointer at all (see IslandWindow::ShouldAcceptPointer), so the island cannot appear over a game
+    // and a pointer crossing the top of the screen cannot open a card. A CALL OR A MESSAGE still comes up,
+    // because those are the two things a full-screen application is not allowed to swallow.
     //
-    // It outranks the notification because there is nowhere else to put a card: the whole point is
-    // that the application has the screen.
+    // The ORDER HERE IS THE CHANGE. The full-screen state used to outrank a message -- "because there is
+    // nowhere else to put a card" -- and that was written when the answer to a message WAS a card. It is a
+    // strip now, the strip fits in the band the full-screen application leaves, and the two rules no longer
+    // compete for the same space.
+    //
+    // And a full-screen application NEVER opens the details card, which is the second half of the report:
+    // "如果音乐的时候也显示那就鼠标放灵动岛的时候 不要 显示出音乐卡片". Nothing below this point is
+    // reached while it is in front, so hovering the island during a game cannot open the media card.
     if (c.fullscreenApp) {
-        return IslandState::FullBar;
+        return c.notificationActive ? IslandState::NoticeStrip : IslandState::FullBar;
     }
 
     // Leaving it: the full-width bar is not a shape any other rule knows about, so the state has to

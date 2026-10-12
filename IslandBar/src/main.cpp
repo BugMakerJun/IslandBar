@@ -33,6 +33,7 @@
 #include "IslandWindow.h"
 #include "Log.h"
 #include "Monitor.h"
+#include <dwmapi.h>
 #include "Motion.h"
 #include "MusicSession.h"
 #include "NativeTaskbar.h"
@@ -57,6 +58,42 @@
 #pragma comment(lib, "shcore.lib")
 
 namespace {
+
+// Whether a FULL-SCREEN APPLICATION is in front of the bar.
+//
+// OURS, and it has to be. The shell announces a full-screen application only to a bar that is REGISTERED
+// as an AppBar (ABN_FULLSCREENAPP), and this program is not one by default -- its own log says so on
+// every run ("appbar: not claimed"). So the flag the AppBar code maintains is false in the shipped
+// configuration, the bar never noticed a game, and it kept painting the island and its date-and-time
+// line over one. Reported as "现在的灵动岛一行的在玩游戏的时候也显示出来了".
+//
+// Deliberately blunt: the foreground window's rectangle against the monitor's. The exceptions are the
+// windows that cover the screen without being an application -- the desktop, the shell's taskbar, our own
+// -- and windows DWM has cloaked, which are not on screen at all (a UWP application on another virtual
+// desktop covers the monitor and nobody is looking at it).
+bool FullScreenAppInFront(HWND ownWindow, const RECT& monitor) {
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground || foreground == ownWindow) return false;
+    if (!IsWindowVisible(foreground) || IsIconic(foreground)) return false;
+
+    wchar_t className[64] = {};
+    GetClassNameW(foreground, className, 64);
+    if (::_wcsicmp(className, L"Progman") == 0 || ::_wcsicmp(className, L"WorkerW") == 0 ||
+        ::_wcsicmp(className, L"Shell_TrayWnd") == 0 ||
+        ::_wcsicmp(className, L"Shell_SecondaryTrayWnd") == 0) {
+        return false;
+    }
+
+    int cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(foreground, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+        cloaked != 0) {
+        return false;
+    }
+
+    RECT rect = {};
+    if (!GetWindowRect(foreground, &rect)) return false;
+    return island::WindowCoversMonitor(rect, monitor);
+}
 
 // This is a Windows-subsystem executable (see src/CMakeLists.txt), so it has no
 // console of its own: launched by double-click it shows only the bar, which is
@@ -626,6 +663,10 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     // passed. The shell's own taskbar uses about this figure.
     constexpr unsigned long long kThumbnailDwellMs = 350;
 
+    // How often the foreground window is asked whether it has the whole screen. Four times a second:
+    // GetForegroundWindow, GetWindowRect and a class name, which is nothing next to a frame.
+    constexpr unsigned long long kFullscreenCheckMs = 250;
+
     // Whether the system panel is open. It is a TOGGLE, like the shell flyout it mirrors.
     bool systemPanelOpen = forcedSystemPanel;
     // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
@@ -767,6 +808,10 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     // The full-screen state as of the last frame, so the transition is acted on once rather
     // than every frame.
     bool fullscreenLast = false;
+    // ... and whether a full-screen APPLICATION is in front, measured by us rather than announced by the
+    // shell (see FullScreenAppInFront). Polled: three cheap calls, four times a second.
+    bool fullscreenAppInFront = false;
+    unsigned long long lastFullscreenCheck = 0;
 
     island::IslandWindow window;
     if (!window.Create(monitor, /*show=*/true)) {
@@ -1557,7 +1602,29 @@ float musicWavePhase = 0.0f;
             // The reservation is released meanwhile, because holding it would be reserving space for a
             // bar that is not in its usual place.
             {
-                const bool fullscreenNow = appBar.IsFullscreenAppInFront();
+                // POLLED, and by us: the shell's announcement only reaches a registered AppBar (see
+                // FullScreenAppInFront), so this is the only signal that exists in the shipped
+                // configuration.
+                if (GetTickCount64() - lastFullscreenCheck >= kFullscreenCheckMs) {
+                    lastFullscreenCheck = GetTickCount64();
+                    const bool measured = FullScreenAppInFront(window.Handle(), monitor.screen);
+                    if (measured != fullscreenAppInFront) {
+                        fullscreenAppInFront = measured;
+                        // `%s` and not `%ls`: this is the NARROW overload of LogAndPrint, whose arguments
+                        // are widened a byte at a time, so a `%ls` here would read a `const char*` as a wide
+                        // string -- and the CRT answers an invalid conversion by emptying the whole line,
+                        // leaving a blank line in the log where the answer should be. (The project's own
+                        // note on that overload says the same thing; this is what it looks like when it is
+                        // ignored.)
+                        island::LogAndPrint(
+                            "  fullscreen: %s",
+                            measured ? "an application has the screen -- the bar stands down"
+                                     : "over -- the bar is back");
+                        std::fflush(stdout);
+                    }
+                }
+
+                const bool fullscreenNow = fullscreenAppInFront;
                 if (fullscreenNow != fullscreenLast) {
                     fullscreenLast = fullscreenNow;
 
@@ -1566,7 +1633,7 @@ float musicWavePhase = 0.0f;
                             appBar.Release();
                             island::LogAndPrint("  fullscreen: space released; the bar fills the band");
                         } else {
-                            island::LogAndPrint("  fullscreen: the bar fills the band");
+                            island::LogAndPrint("  fullscreen: the bar stands down");
                         }
                     } else if (appBarResult == island::AppBarResult::Registered) {
                         // Reclaimed only if it had been claimed: `--keep-taskbar` never claims, and
@@ -2489,7 +2556,7 @@ float musicWavePhase = 0.0f;
                 // ... and whether there is a player at all: a PAUSED session still opens the card, which
                 // is how the play button is reached after a pause (see ShouldPromoteToCard).
                 context.musicPresent = nowPlaying.present;
-                context.fullscreenApp = appBar.IsFullscreenAppInFront();
+                context.fullscreenApp = fullscreenAppInFront;
                 // The panel is a request for the CARD, so the policy has to know about it -- otherwise
                 // the state stays Hover and the card is never drawn. That was a whole debugging round:
                 // the flag was set, the renderer read it, and the shape never changed.

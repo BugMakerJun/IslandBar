@@ -790,6 +790,15 @@ IslandAnchor IslandWindow::CurrentAnchor() const {
 bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                        POINT screenPoint, IslandState state, int iconCount,
                                        float cardLeftDip) {
+    // THE BAR IS NOT THERE WHILE A FULL-SCREEN APPLICATION IS IN FRONT.
+    //
+    // Nothing of it is drawn in that state (see Renderer::RenderFrame), so there is nothing to point at
+    // -- and accepting the pointer anyway would mean the pointer crossing the top of the screen during a
+    // game opened the media card over it, which is the second half of what was reported: "如果音乐的时候也
+    // 显示那就鼠标放灵动岛的时候 不要 显示出音乐卡片". A call or a message is a different state (the notice
+    // strip), and that one is answered normally below.
+    if (state == IslandState::FullBar) return false;
+
     const float originX    = PixelsToDip(windowRect.left, monitor.dpi);
     const float originY    = PixelsToDip(windowRect.top, monitor.dpi);
     const float widthDip   = PixelsToDip(windowRect.right - windowRect.left, monitor.dpi);

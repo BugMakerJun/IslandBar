@@ -67,4 +67,18 @@ MonitorGeometry QueryMonitor(HMONITOR monitor);
 // the multi-monitor path even though the first release drives one monitor.
 int QueryAllMonitors(MonitorGeometry* out, int capacity);
 
+// Whether a window's rectangle covers the whole monitor: a full-screen APPLICATION rather than a
+// maximized window.
+//
+// Pure, and separate from the Win32 calls that feed it, because the interesting case is the NEAR MISS.
+// A maximized window covers the WORK AREA, which begins below the band the shell's taskbar reserves,
+// so its top edge sits a few tens of pixels below the monitor's. A test written "==" instead of
+// "<= / >=", or one that settled for "big enough", would call every maximized window full-screen --
+// and then the bar would stand down on an ordinary desktop, which is the one thing worse than standing
+// down on a game.
+inline bool WindowCoversMonitor(const RECT& window, const RECT& monitor) {
+    return window.left <= monitor.left && window.top <= monitor.top &&
+           window.right >= monitor.right && window.bottom >= monitor.bottom;
+}
+
 } // namespace island
