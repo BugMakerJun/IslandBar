@@ -868,10 +868,21 @@ unsigned long long lastMusicMeterMs = 0;
     // Polled on a worker thread; the frame loop only reads a snapshot. A failure
     // here is not fatal: the bar is a taskbar replacement, not a music player.
     island::MusicSession music;
-    const bool musicAvailable = music.Start();
+    //
+    // ISLANDBAR_NO_MEDIA=1 leaves the reader unstarted, which is how the bar looks on a machine
+    // where nothing is playing -- a state that cannot otherwise be photographed on this one, whose
+    // owner keeps a player running all day. It is the switch the idle island's own line needs: with
+    // no session the pill shows the date and the time, and with one it shows the lyric and the line
+    // stands beside the deck (see StatusPlacementFor).
+    wchar_t noMediaSetting[8] = {};
+    const bool noMedia = GetEnvironmentVariableW(L"ISLANDBAR_NO_MEDIA", noMediaSetting, 8) > 0 &&
+                         noMediaSetting[0] == L'1';
+    const bool musicAvailable = !noMedia && music.Start();
     island::LogAndPrint(musicAvailable
                             ? "  music: reading the system media session"
-                            : "  music: DISABLED (the media API is unavailable)");
+                            : (noMedia ? "  music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were"
+                                         " playing)"
+                                       : "  music: DISABLED (the media API is unavailable)"));
     std::fflush(stdout);
 
     // --- lyrics ---
@@ -953,16 +964,14 @@ unsigned long long lastMusicMeterMs = 0;
 // updated) and read by the next frame's redraw decision, so the arrival animation keeps running.
 bool rowAppearAnimating = false;
 
-// --- the status strip ----------------------------------------------------
+// --- the date / weekday / time / weather line -----------------------------
 //
-// How far its fade has run, 0 to 1, held across frames because it is an animation and not a state:
-// the strip fades in when the island becomes OCCUPIED (music resting, or a message / call up, which
-// is exactly when the pill's own line stops being the clock) and fades out when it stops being. See
-// StatusStripFadeStep and StatusStripFor.
+// How far the BESIDE-THE-DECK copy of it has faded in, 0 to 1, held across frames because it is an
+// animation and not a state. It follows the one rule that decides where the line goes: while the
+// pill's own line is free the line is INSIDE the pill (no fade -- the pill is always there), and
+// while the pill's line is taken (the lyric, a message, a call) the same words stand beside the
+// deck and fade in. See StatusPlacementFor for the rule and StatusStripFadeStep for the fade.
 float statusStripOpacity = 0.0f;
-// Whether the strip is asked for by this frame's state. Read by the window's own region call, which
-// runs outside the draw block.
-bool statusStripUp = false;
 // True while that fade is in flight, which is what asks for the next frame. Set inside the draw and
 // read by the next pass, like the two arrival flags above.
 bool statusStripAnimating = false;
@@ -3200,12 +3209,12 @@ float musicWavePhase = 0.0f;
                 // region applied one frame late keeps the CARD clipped to the pill's height for as long
                 // as the panel is open -- which is what "the panel is open but I only see its top edge"
                 // was. Harmless to call again: it returns immediately when the rectangle is unchanged.
-                // The status strip's own telling, before the region is applied: the width while it is
-                // up, zero while it is not. The window needs it because the region DECIDES which pixels
-                // belong to this window, so a strip outside it is clipped -- see SetStatusStripWidth.
-                // `statusStripOpacity` as well as the flag, because the strip is still on screen for the
-                // length of its fade out, after the island has stopped being occupied.
-                window.SetStatusStripWidth(statusStripUp || statusStripOpacity > 0.001f
+                // The strip's own telling, before the region is applied: the band's width while the line
+                // is beside the deck, zero while it is inside the pill. The window needs it because the
+                // region DECIDES which pixels belong to this window, so a strip outside it is clipped --
+                // see SetStatusStripWidth. Keyed on the FADE rather than on the placement flag, because
+                // the strip is still on screen for the length of its exit.
+                window.SetStatusStripWidth(statusStripOpacity > 0.001f
                                                ? island::kStatusStripWidthDip
                                                : 0.0f);
 
@@ -3362,24 +3371,27 @@ float musicWavePhase = 0.0f;
                 }
                 frame.lyricScrollDip = lyricsScrollDip;
 
-                // --- the STATUS STRIP: the date, the weekday, the time and the weather -------
+                // --- the date, the weekday, the time and the weather --------------------------
                 //
-                // IS THE ISLAND OCCUPIED? That is the whole question, and it is exactly "the pill's
-                // own line is not the clock" -- because that is the situation the strip exists for:
-                // while the pill says the lyric or the message, the bar carries no time at all.
+                // IS THE PILL'S OWN LINE TAKEN? That is the whole question, and it is exactly "the
+                // island has something else to say": a call, a message, or a lyric. The answer decides
+                // WHICH OF THE TWO HOMES the line is drawn in -- inside the pill, or beside the deck --
+                // and it is asked ONCE, in StatusPlacementFor, because the one thing that must not
+                // happen is the same words in both places at once.
                 //
-                // Written as that comparison and from the SAME three values the renderer chooses the
-                // pill's line from (the resting state with a line to show, the notice strip with a
-                // message or a call), so the strip cannot appear in a state where the pill is still
-                // showing the time. That would be the same clock printed twice on one bar.
-                const bool islandOccupied =
+                // The three values are the ones the renderer chooses the pill's own content from, so
+                // the two draw sites cannot disagree: a pill showing the lyric always has the line
+                // beside it, and a pill showing the date and the time never has.
+                const bool islandLineTaken =
                     (frame.restingState == island::IslandState::MusicStrip &&
                      (frame.lyricLine || frame.fallbackLine)) ||
                     (frame.state == island::IslandState::NoticeStrip &&
                      (frame.callUp || (frame.noticeLine && frame.noticeLine[0] != '\0')));
+                const island::StatusPlacement placement =
+                    island::StatusPlacementFor(islandLineTaken);
 
                 statusStripOpacity =
-                    island::StatusStripFadeStep(statusStripOpacity, islandOccupied, dt);
+                    island::StatusStripFadeStep(statusStripOpacity, placement.besideDeck, dt);
                 frame.statusStripOpacity = statusStripOpacity;
 
                 // The reading is COPIED into this scope's buffer rather than pointed at where the
@@ -3392,7 +3404,6 @@ float musicWavePhase = 0.0f;
 
                 // Read by the next pass's redraw decision, like the icon row's own arrival flags.
                 statusStripAnimating = statusStripOpacity > 0.001f && statusStripOpacity < 0.999f;
-                statusStripUp = islandOccupied;
 
                 // Progress, advanced locally between polls.
                 //

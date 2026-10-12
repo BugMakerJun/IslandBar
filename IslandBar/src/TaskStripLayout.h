@@ -588,10 +588,24 @@ inline int TaskIconsThatFit(float monitorWidthDip, int wanted) {
 // --- the status strip: the date, the weekday, the time and the weather --------
 //
 // WHY IT IS HERE. The island's one line holds the clock when the bar is idle and
-// something else -- the lyric, a message, a call -- when it is not, so for as long as
-// the island is OCCUPIED the bar carries no time at all. Asked for with a photograph of
-// the empty band left of the system button: "当放音乐或者灵动岛被占用的时候 就在我红框处显示日期
-// 时间星期天气".
+// something else -- the lyric, a message, a call -- when it is not, so while the island is
+// OCCUPIED the bar carries no time at all; and the date, the weekday and the weather have
+// never had anywhere to live. Asked for with a photograph of the empty band left of the
+// system button: "当放音乐或者灵动岛被占用的时候 就在我红框处显示日期时间星期天气".
+//
+// SHOWN EXACTLY ONCE, AND THE PILL COMES FIRST. The two places this line can live are the
+// island itself and this band, and they are exclusive: at rest the PILL shows the date, the
+// weekday, the time and the weather (there is nothing else for its one line to say), and the
+// moment that line is taken -- by the lyric, a message, a call -- this strip shows the same
+// words beside the deck instead. Asked for in two steps, an hour apart:
+//
+//     "当放音乐或者灵动岛被占用的时候 就在我红框处显示日期时间星期天气"   [the strip]
+//     "是灵动岛不占用时 灵动岛内要这么显示"                            [the pill]
+//
+// The first version had only the strip, so the date and the weather were visible while the
+// island was busy and nowhere at all while it was idle -- which is exactly backwards, and is
+// why this rule is now written down as a pair (StatusPlacementFor) rather than as a
+// condition at each of the two draw sites.
 //
 // ANCHORED TO THE SYSTEM BUTTON, like the deck it stands beside, and for the same
 // reason: that band belongs to the bar's left cluster rather than floating out at the
@@ -608,41 +622,54 @@ inline int TaskIconsThatFit(float monitorWidthDip, int wanted) {
 inline constexpr float kStatusStripWidthDip  = 268.0f;
 inline constexpr float kStatusStripHeightDip = 26.0f;
 inline constexpr float kStatusStripGapDip    = 10.0f;   // between the strip and the system button
-inline constexpr float kStatusStripPadDip    = 12.0f;   // the text's own padding inside the box
+// The line's own inset inside whichever box it is drawn in.
+//
+// 10 rather than 12, and the number is set by the PILL rather than by the band: the same line is
+// drawn inside a 220 DIP pill as well (see StatusPlacementFor), where 2 DIP of padding is 2 DIP of
+// room the widest line does not have. The strip is 268 wide, so its own inset hardly matters.
+inline constexpr float kStatusStripPadDip    = 10.0f;
 
 // The strip's rectangle, in window-local DIPs. Vertically centred on the island, like
 // the deck buttons, so the whole left cluster shares one line.
-inline RectF StatusStripFor(const RoundedBox& island) {
+//
+// A RoundedBox rather than a RectF, because this is also what the strip is DRAWN into and
+// the text layer takes one box: a caller that had to wrap it in a radius of its own would be
+// a second place that knows the shape is a stadium.
+inline RoundedBox StatusStripFor(const RoundedBox& island) {
     const RectF system = SystemButtonFor(island);
 
-    RectF box;
-    box.right = system.left - kStatusStripGapDip;
-    box.left = box.right - kStatusStripWidthDip;
+    RoundedBox strip;
+    strip.rect.right = system.left - kStatusStripGapDip;
+    strip.rect.left = strip.rect.right - kStatusStripWidthDip;
 
     const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
-    box.top = centreY - kStatusStripHeightDip * 0.5f;
-    box.bottom = box.top + kStatusStripHeightDip;
-    return box;
+    strip.rect.top = centreY - kStatusStripHeightDip * 0.5f;
+    strip.rect.bottom = strip.rect.top + kStatusStripHeightDip;
+    strip.radiusX = kStatusStripHeightDip * 0.5f;
+    strip.radiusY = strip.radiusX;
+    return strip;
 }
 
 // How long the strip takes to come and go.
 //
-// The strip is the newest of the things that appear and disappear on this bar (with the
-// icon row and the card), and the standing request on all of them is the same: nothing
-// here may appear in a single frame. 0.2 s is short enough that the strip is up by the
-// time the eye has moved to it, and long enough to read as a fade rather than a blit.
+// It has a fade of its own BECAUSE it is the one thing on this bar that comes and goes with
+// the ISLAND's line rather than with the bar: music starting moves the date and the time out
+// of the pill and into this band, and the user's standing request on every appearance on this
+// bar is the same -- nothing may appear in a single frame. 0.2 s is short enough that the
+// words have arrived by the time the eye moves to them, and long enough to read as a fade
+// rather than as a blit.
 inline constexpr float kStatusStripFadeSeconds = 0.20f;
 
-// One step of the strip's fade, from the same family as TaskIconAppearStep: `amount`
-// moves towards 1 while the island is occupied and towards 0 while it is not, at a fixed
-// rate, so appearing and disappearing take the same time.
+// One step of the strip's fade, from the same family as TaskIconAppearStep: `amount` moves
+// towards 1 while the pill's line is taken and towards 0 while it is free, at a fixed rate,
+// so the two directions take the same time.
 //
-// Pure, because "it pops in" and "it fades in" are the same picture once the fade is
-// over -- the only place the difference can be checked is in the arithmetic.
-inline float StatusStripFadeStep(float amount, bool occupied, float dtSeconds) {
+// Pure, because "it pops in" and "it fades in" are the same picture once the fade is over --
+// the only place the difference can be checked is in the arithmetic.
+inline float StatusStripFadeStep(float amount, bool wanted, float dtSeconds) {
     const float dt = dtSeconds > 0.1f ? 0.1f : (dtSeconds < 0.0f ? 0.0f : dtSeconds);
     const float step = dt / kStatusStripFadeSeconds;
-    const float target = occupied ? 1.0f : 0.0f;
+    const float target = wanted ? 1.0f : 0.0f;
     if (amount < target) {
         const float next = amount + step;
         return next > target ? target : next;

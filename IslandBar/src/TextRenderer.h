@@ -102,11 +102,11 @@ public:
     void DrawClock(ID2D1DeviceContext2* context, const RoundedBox& box,
                    ClockStyle style, float opacity);
 
-    // --- the status strip: what stands in for the clock while the island is busy ----
+    // --- the date, the weekday, the time and the weather: one line, two homes ----
     //
-    // The date, the weekday, the time and -- when there is a reading -- the weather, in the
-    // band to the left of the system button. See StatusStripFor for why it exists and where
-    // it stands.
+    // Inside the pill while the island is idle, and in the band left of the deck while the pill's
+    // own line is taken (the lyric, a message, a call). See StatusPlacementFor for the rule and
+    // StatusStripFor for where the band is.
 
     // The strip's one line, assembled from the three parts.
     //
@@ -116,18 +116,21 @@ public:
     static void ComposeStatusLine(const wchar_t* time, const wchar_t* date, const wchar_t* weather,
                                   wchar_t* out, size_t capacity);
 
-    // Draws the strip on the island's own line: an island-coloured capsule, so the words are
-    // legible over any wallpaper, with the line centred inside it.
+    // Draws that line centred in `box`, with the text inset by kStatusStripPadDip.
     //
-    // `opacity` is the strip's own fade (0 -> 1 as the island becomes occupied), and `fill` is
-    // the island's fill colour -- passed in rather than chosen here, for the reason TaskButton
-    // gives: a surface that picks its own shade drifts away from the bar it belongs to.
-    void DrawStatusStrip(ID2D1DeviceContext2* context, const RoundedBox& island, float opacity,
-                         const wchar_t* weather, const D2D1_COLOR_F& fill);
+    // ONE function for both homes, because it is one line and the two places must not be able to
+    // disagree about how it is set. What differs between them is only what it is drawn ON, and
+    // that is what `fill` says: the band passes the island's colour, so its capsule stands on the
+    // wallpaper, and the island's own copy passes a transparent fill, because the pill underneath
+    // has already been filled with exactly that colour. (The colour is passed in rather than
+    // chosen here for the reason TaskButton gives: a surface that picks its own shade drifts away
+    // from the bar it belongs to.)
+    void DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity,
+                        const wchar_t* weather, const D2D1_COLOR_F& fill);
 
-    // The drawn width of a composed status line, in DIPs. Needs Initialize(). Exists so the
-    // strip's fixed box can be shown to hold the longest line it will ever print (see the
-    // assertion in the self-test) rather than being sized by eye.
+    // The drawn width of a composed status line, in DIPs. Needs Initialize(). Exists so both boxes
+    // the line is drawn into -- the pill's and the band's -- can be shown to hold the longest line
+    // they will ever print (see the assertions in the self-test) rather than being sized by eye.
     float StatusLineWidth(const wchar_t* line) const;
 
     // Draws a notification's sender, title and body in the lower part of `box`.

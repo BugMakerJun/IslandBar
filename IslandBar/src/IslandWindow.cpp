@@ -376,7 +376,7 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     // the region but off the bar is still answered HTTRANSPARENT by WM_NCHITTEST, so clicks pass through
     // to whatever is underneath (see the note on the card's region below).
     if (statusStripWidthDip > 0.0f) {
-        const RectF strip = StatusStripFor(island);
+        const RectF strip = StatusStripFor(island).rect;
         if (strip.left < left) left = strip.left;
     }
     // A strip that would start left of the screen is cut by the display anyway; keeping the region on

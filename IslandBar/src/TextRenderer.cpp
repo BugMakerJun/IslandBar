@@ -421,27 +421,28 @@ void TextRenderer::ComposeStatusLine(const wchar_t* time, const wchar_t* date,
     // "\u5468\u65e5\u300112\u670828\u65e5" since it was written, and a second copy of the weekday
     // beside it would be the only repetition on the bar.
     //
-    // TWO spaces between the parts, not one: at 12.5 DIP a single space between two groups of
-    // digits reads as a separator and the three parts run together into one number.
+    // ONE space between the parts. Two read better in the wide band, but the same line is drawn
+    // inside the 220 DIP pill, where every DIP counts: measured in the self-test, one space is the
+    // difference between "the widest line fits with room to spare" and "it fits by 4 DIP".
     wchar_t line[192] = {};
     if (date && date[0] != L'\0') {
         wcsncpy_s(line, 192, date, _TRUNCATE);
     }
     if (time && time[0] != L'\0') {
-        if (line[0] != L'\0') wcsncat_s(line, 192, L"  ", _TRUNCATE);
+        if (line[0] != L'\0') wcsncat_s(line, 192, L" ", _TRUNCATE);
         wcsncat_s(line, 192, time, _TRUNCATE);
     }
     if (weather && weather[0] != L'\0') {
-        if (line[0] != L'\0') wcsncat_s(line, 192, L"  ", _TRUNCATE);
+        if (line[0] != L'\0') wcsncat_s(line, 192, L" ", _TRUNCATE);
         wcsncat_s(line, 192, weather, _TRUNCATE);
     }
 
     wcsncpy_s(out, capacity, line, _TRUNCATE);
 }
 
-void TextRenderer::DrawStatusStrip(ID2D1DeviceContext2* context, const RoundedBox& island,
-                                   float opacity, const wchar_t* weather,
-                                   const D2D1_COLOR_F& fill) {
+void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box,
+                                  float opacity, const wchar_t* weather,
+                                  const D2D1_COLOR_F& fill) {
     if (!context || !factory_ || !statusStripFormat_) return;
     if (opacity <= 0.01f) return;
 
@@ -450,17 +451,17 @@ void TextRenderer::DrawStatusStrip(ID2D1DeviceContext2* context, const RoundedBo
     wchar_t line[192] = {};
     ComposeStatusLine(timeText_, dateText_, weather, line, 192);
     if (line[0] == L'\0') return;
+    if (box.rect.right <= box.rect.left) return;
 
-    const RectF box = StatusStripFor(island);
-    if (box.right <= box.left) return;
-
-    // The capsule first, in the island's own colour: the same background the deck's buttons carry
-    // and for the same reason -- without it the words would sit on whatever the wallpaper happens
-    // to be under them, which is unreadable against a bright photograph. Its alpha follows the
-    // strip's own fade, so the strip fades in as a shape rather than as text appearing.
-    const float radius = (box.bottom - box.top) * 0.5f;
+    // The surface first, when there is one. In the band it is the island's own colour -- the same
+    // background the deck's buttons carry and for the same reason: without it the words sit on
+    // whatever the wallpaper happens to be, which is unreadable against a bright photograph. Its
+    // alpha follows the strip's own fade, so the strip arrives as a shape rather than as words
+    // appearing. Inside the pill the caller passes nothing, because the pill has been filled with
+    // exactly this colour already.
     const D2D1_ROUNDED_RECT rounded = {
-        D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
+        D2D1::RectF(box.rect.left, box.rect.top, box.rect.right, box.rect.bottom),
+        box.radiusX, box.radiusY};
     if (fill.a > 0.001f) {
         D2D1_COLOR_F background = fill;
         background.a = fill.a * opacity;
@@ -479,8 +480,9 @@ void TextRenderer::DrawStatusStrip(ID2D1DeviceContext2* context, const RoundedBo
         // The text is inset by the strip's padding and CENTRED inside what is left: the box is a
         // fixed width (see kStatusStripWidthDip) and the line is not, so centring keeps the padding
         // even whichever parts are present.
-        const D2D1_RECT_F textArea = D2D1::RectF(box.left + kStatusStripPadDip, box.top,
-                                                 box.right - kStatusStripPadDip, box.bottom);
+        const D2D1_RECT_F textArea = D2D1::RectF(box.rect.left + kStatusStripPadDip, box.rect.top,
+                                                 box.rect.right - kStatusStripPadDip,
+                                                 box.rect.bottom);
         context->DrawTextW(line, static_cast<UINT32>(std::wcslen(line)), statusStripFormat_,
                            textArea, textBrush);
         textBrush->Release();

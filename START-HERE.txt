@@ -69,6 +69,11 @@ perform the transition on a timer:
     ISLANDBAR_HOVER_ICON=n   treat icon n of the application row as hovered, so a button
                              that only ever opens under the pointer can be photographed
                              (-1 = the last icon). The script cannot move the pointer.
+    ISLANDBAR_NO_MEDIA=1     do not start the media reader at all, which is what the bar
+                             looks like when nothing is playing. On this machine a player
+                             runs all day, so this is the only way to photograph the IDLE
+                             island -- where the pill itself carries the date, the weekday,
+                             the time and the weather (see HANDOFF 8.46).
     ISLANDBAR_START_MS       press the START button after N ms, and every
                              ISLANDBAR_START_CYCLE_MS after that. The Start button is the
                              one control that has to inject input into the shell, so it

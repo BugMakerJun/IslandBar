@@ -161,24 +161,21 @@ struct FrameState {
 
     ClockStyle     clock = ClockStyle::Compact;
 
-    // --- the status strip: what stands in for the clock while the island is occupied ----
+    // --- the date, the weekday, the time and the weather ----
     //
-    // The island's one line holds the clock when the bar is idle and the lyric / the message when it
-    // is not, so for as long as the island is OCCUPIED there is no time on the bar at all. The strip
-    // in the band left of the system button is where it goes: the date, the weekday, the time, and the
-    // weather when there is a reading. See StatusStripFor.
+    // One line with two possible homes, and the island comes first: at rest it is drawn INSIDE the
+    // pill (where the clock has always been), and while the pill's one line is taken -- by the lyric,
+    // a message, a call -- the same words are drawn in the band left of the deck instead. See
+    // StatusPlacementFor, which is the rule, and StatusStripFor, which is where the band is.
     //
-    // Both fields are set by the frame loop, which owns both answers: whether the island is occupied
-    // (the same condition the pill's own line is chosen by) and the weather last published by the
-    // reader's worker.
+    // `statusStripOpacity` is the strip's own fade, 0 at rest and 1 while the words are beside the
+    // deck. The pill's copy needs no fade: it is the pill's own content, and the pill is always
+    // there.
     //
-    // `statusWeather` is "晴 19°" or null, and null is the ordinary case: the strip is then drawn with
-    // the date and the time alone, which is what it does before the first reading arrives and when no
-    // city has been named. Its storage belongs to the caller and must live as long as the frame.
+    // `statusWeather` is "晴 19°" or null, and null is the ordinary case: the line is then the date
+    // and the time alone, which is what it is before the first reading arrives and when no city has
+    // been named. Its storage belongs to the caller and must live as long as the frame.
     const wchar_t* statusWeather = nullptr;
-
-    // 0 at rest, 1 while the island is occupied, and the frames in between are the strip's fade --
-    // nothing on this bar appears in one frame. See StatusStripFadeStep.
     float          statusStripOpacity = 0.0f;
 
     // 0..1 strength of the BAR's own content: the deck, the icon row, the clock, the lyric / notice /

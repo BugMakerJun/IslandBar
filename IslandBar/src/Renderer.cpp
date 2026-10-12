@@ -565,45 +565,39 @@ void Renderer::RenderFrame(const FrameState& frame) {
                                      frame.contentOpacity);
                 }
             } else {
-                // THE CLOCK BELONGS TO THE PILL, WHICH IS STILL ON SCREEN BENEATH A CARD.
+                // THE DATE AND THE TIME, IN THE PILL, WHICH IS STILL ON SCREEN BENEATH A CARD.
                 //
-                // This branch used to run in every state and drew into `box` -- the ANIMATED shape, which
-                // in the card state is a card-sized rectangle still centred on the screen. So opening the
-                // panel produced a floating clock and date at the card's CENTRED position while the panel
-                // itself was pinned to its button: two card-like boxes on screen. It was reported four
-                // times as a second box under the island, and every previous explanation (another process,
-                // another window, a clipped region) was wrong because the question asked was "what else
-                // could draw this" instead of "what does this process draw in that state".
+                // This is the state the island is in when it has NOTHING ELSE TO SAY -- no call, no
+                // message, no lyric -- which is what makes it the home of the date / weekday / time /
+                // weather line. The strip beside the deck takes it the moment the pill's line is
+                // taken, and only then; the two are exclusive by construction (StatusPlacementFor).
                 //
-                // The cure at the time was to skip the clock in the card states, which removed the second
-                // box and left the PILL EMPTY -- the pill is drawn from its resting box in every state, so
-                // a card puts a hole in the middle of the bar where the time was. Reported as "after
-                // clicking the popup the island's time is gone". The pill's own box is the answer: the
-                // clock sits where it sits in every other state, the card hangs below it, and neither is
-                // drawn in the other's place.
+                // WHAT USED TO BE HERE, because both are still live rules:
                 //
-                // And the pill takes the COMPACT clock whatever the card is doing.
+                //   * the pill's own box, never the animated `box`. Drawn into `box` this branch put a
+                //     floating clock and date at the CARD's centred position while the panel hung from
+                //     its button -- two card-like boxes on screen, reported four times as "a second box
+                //     under the island".
+                //   * the pill is drawn from its RESTING box in every state, so a card puts a hole in
+                //     the middle of the bar where the time was, and skipping this draw in the card
+                //     states left that hole. Reported as "after clicking the popup the island's time is
+                //     gone". `lineBox` is the resting pill, so the line is where it has always been and
+                //     the card hangs below it.
                 //
-                // The card's style is two lines -- the time with the date under it -- and its layout is
-                // derived from the box it is given, which is the point of that function. Given a 36 DIP
-                // pill it draws both lines into a third of the height: measured on screen, the date and
-                // the time printed on top of each other. The date belongs to a card-sized box, and no card
-                // shows it any more, so the pill shows the time alone.
-                // `outerCardUp`, NOT `state == Expanded`.
+                // `intoPill` and `frame.clock` are no longer consulted: they existed to choose between
+                // the card's two-line clock style and the pill's one-line one, and the date line is now
+                // part of this one line rather than a second row under it.
                 //
-                // The state is the TARGET, so on the way out it is already the resting shape while the
-                // box is still card-sized -- and this test, written the other way round first, put the
-                // clock back in the middle of the animated card for the whole of the retraction, which is
-                // the floating duplicate all over again. `outerCardUp` is the file's own name for "the
-                // animated box is a card right now", which is the question being asked.
-                text_->DrawClock(d2dContext_, lineBox,
-                                 intoPill ? ClockStyle::Compact : frame.clock,
-                                 frame.contentOpacity);
+                // NO SURFACE: the pill has already been filled with exactly the colour the strip paints
+                // for itself.
+                text_->DrawStatusLine(d2dContext_, lineBox, frame.contentOpacity, frame.statusWeather,
+                                      D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
             }
 
 
-            // THE STATUS STRIP, while the island is occupied: the date, the weekday, the time and the
-            // weather, standing in the band left of the deck.
+            // THE SAME LINE, BESIDE THE DECK, while the pill's own line is taken -- by the lyric, a
+            // message, a call. This is the half of StatusPlacementFor that the pill cannot hold: the
+            // date and the time have to be somewhere, and the island's one line is busy.
             //
             // THE ANCHOR BOX, not `box`. In the card states `box` is a 520x250 rectangle, and while
             // the notice strip is up the island is 200 DIP wider than the pill -- and the strip stands
@@ -621,11 +615,12 @@ void Renderer::RenderFrame(const FrameState& frame) {
                     ? island::RowAnchorBox(box, frame.restingPill)
                     : box;
             if (frame.statusStripOpacity > 0.01f) {
-                // Multiplied by the BAR's own strength, so a card opening beneath the strip cannot
-                // dim it -- the same rule the deck is drawn under.
-                text_->DrawStatusStrip(d2dContext_, barIsland,
-                                       frame.statusStripOpacity * frame.contentOpacity,
-                                       frame.statusWeather, frame.pill.fill);
+                // Multiplied by the BAR's own strength, so a card opening beneath the strip cannot dim
+                // it -- the same rule the deck is drawn under -- and on the island's own colour, so the
+                // words stand on the bar rather than on the wallpaper.
+                text_->DrawStatusLine(d2dContext_, island::StatusStripFor(barIsland),
+                                      frame.statusStripOpacity * frame.contentOpacity,
+                                      frame.statusWeather, frame.pill.fill);
             }
 
             // The card hangs from the control that was pressed, so its LEFT edge is moved to where that

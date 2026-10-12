@@ -5272,24 +5272,26 @@ void TestMusicCardLayout() {
                   L"the icon row starts to the right of the island", dt4);
         }
 
-        // The status strip: the date, the weekday, the time and the weather, in the band to the
-        // left of the system button while the island is occupied.
+        // The date, the weekday, the time and the weather: one line, two homes.
         //
-        // WHY IT EXISTS. The island's own line is the clock when the bar is idle and the lyric or
-        // the message when it is not, so for as long as the island is occupied the bar carries no
-        // time at all. Asked for with a photograph of that empty band: "当放音乐或者灵动岛被占用的时候
-        // 就在我红框处显示日期时间星期天气".
+        // WHY IT EXISTS. The island's own line holds one thing -- the clock at rest, and the lyric or
+        // the message when there is one -- so the date, the weekday and the weather had nowhere to be
+        // at all, and while the island was busy the time had nowhere either. Asked for in two steps:
+        // the band left of the system button while the island is occupied ("当放音乐或者灵动岛被占用的
+        // 时候 就在我红框处显示日期时间星期天气"), and the ISLAND ITSELF at rest ("是灵动岛不占用时 灵动
+        // 岛内要这么显示").
         //
-        // The assertions are the three things a photograph of an empty band cannot say: that the
-        // strip cannot collide with the deck or leave the screen, that the LONGEST line it can be
-        // asked to print fits the fixed box it is drawn in, and that the input region covers it --
-        // the region is what decides which pixels this window owns, so a region that stopped at the
-        // deck would clip the strip's left end, on screen, with nothing in the log to explain it.
+        // The assertions are the things a photograph cannot say: that the line is placed in exactly one
+        // of the two homes, that the strip cannot collide with the deck or leave the screen, that the
+        // LONGEST line it can be asked to print fits BOTH boxes, and that the input region covers the
+        // band -- the region is what decides which pixels this window owns, so a region that stopped at
+        // the deck would clip the strip's left end, on screen, with nothing in the log to explain it.
         {
             const float stripMonitorWidth = 2560.0f;
             const RoundedBox stripIsland =
                 IslandBoxFor(stripMonitorWidth, kCollapsedWidthDip, kCollapsedHeightDip);
-            const RectF box = StatusStripFor(stripIsland);
+            const RoundedBox stripBox = StatusStripFor(stripIsland);
+            const RectF& box = stripBox.rect;
             const RectF systemButton = SystemButtonFor(stripIsland);
             const float midY = (stripIsland.rect.top + stripIsland.rect.bottom) * 0.5f;
 
@@ -5310,6 +5312,30 @@ void TestMusicCardLayout() {
                   L"the status strip is vertically centred on the island", stripDetail);
             Check(box.top >= 0.0f && box.bottom <= kWindowHeightDip,
                   L"the status strip is inside the window", stripDetail);
+
+            // EXACTLY ONE HOME, which is the rule both draw sites obey.
+            //
+            // While the pill's line is free the words are in the island; while it is taken -- a call, a
+            // message, a lyric -- the same words are beside the deck. Never both (two clocks on one bar)
+            // and never neither (the date and the weather were nowhere at all before this). The rule is
+            // written as a pair, and called by the frame loop and by nothing else, because neither draw
+            // site can check it on its own: each knows only its own half.
+            {
+                const StatusPlacement idle = StatusPlacementFor(false);
+                const StatusPlacement busy = StatusPlacementFor(true);
+                Check(idle.inIsland && !idle.besideDeck,
+                      L"an idle island keeps the date and the time inside the pill");
+                Check(!busy.inIsland && busy.besideDeck,
+                      L"a busy island shows them beside the deck instead");
+                const int idleHomes = (idle.inIsland ? 1 : 0) + (idle.besideDeck ? 1 : 0);
+                const int busyHomes = (busy.inIsland ? 1 : 0) + (busy.besideDeck ? 1 : 0);
+                wchar_t homesDetail[160];
+                std::swprintf(homesDetail, 160,
+                              L"an idle island draws it in %d place(s), a busy one in %d",
+                              idleHomes, busyHomes);
+                Check(idleHomes == 1 && busyHomes == 1,
+                      L"the line has exactly one home in both cases", homesDetail);
+            }
 
             // The fade. "It pops in" and "it fades in" are the same picture once the fade is over,
             // so the arithmetic is the only place the difference can be seen: it has to move by the
@@ -5360,13 +5386,13 @@ void TestMusicCardLayout() {
                 const wchar_t* date = L"\u5468\u4e09\u300112\u670828\u65e5";
                 TextRenderer::ComposeStatusLine(L"23:59", date, L"\u6674 21\u00b0", line, 192);
                 Check(std::wcscmp(line,
-                                  L"\u5468\u4e09\u300112\u670828\u65e5  23:59  \u6674 21\u00b0") == 0,
+                                  L"\u5468\u4e09\u300112\u670828\u65e5 23:59 \u6674 21\u00b0") == 0,
                       L"the status line reads date, time, then weather", line);
 
                 wchar_t withoutWeather[192] = {};
                 TextRenderer::ComposeStatusLine(L"23:59", date, nullptr, withoutWeather, 192);
                 Check(std::wcscmp(withoutWeather,
-                                  L"\u5468\u4e09\u300112\u670828\u65e5  23:59") == 0,
+                                  L"\u5468\u4e09\u300112\u670828\u65e5 23:59") == 0,
                       L"with no reading the line is the date and the time alone", withoutWeather);
 
                 TextRenderer stripText;
@@ -5374,7 +5400,7 @@ void TestMusicCardLayout() {
                     // The widest line that can occur: the longest weekday and month, a three-character
                     // weather word, and a negative two-digit temperature.
                     const wchar_t* widest =
-                        L"\u5468\u4e09\u300112\u670828\u65e5  23:59  \u5f3a\u9635\u96e8 -12\u00b0";
+                        L"\u5468\u4e09\u300112\u670828\u65e5 23:59 \u5f3a\u9635\u96e8 -12\u00b0";
                     const float measured = stripText.StatusLineWidth(widest);
                     const float available = kStatusStripWidthDip - kStatusStripPadDip * 2.0f;
 
@@ -5383,6 +5409,18 @@ void TestMusicCardLayout() {
                                   measured, available, kStatusStripWidthDip);
                     Check(measured > 0.0f && measured <= available,
                           L"the widest status line fits the strip's own box", fitDetail);
+
+                    // AND IT HAS TO FIT THE PILL, which is the tighter of the two boxes and the reason
+                    // the line was tightened to a single space between its parts. The pill is 220 DIP
+                    // wide and the line is drawn centred in it at the same size, so a line that outgrew
+                    // it would lose a word off each end -- on the one place on the bar that is always
+                    // visible. Measured rather than eyeballed, like the strip's own fit.
+                    const float pillAvailable = kCollapsedWidthDip - kStatusStripPadDip * 2.0f;
+                    std::swprintf(fitDetail, 224,
+                                  L"%.1f DIP drawn, %.1f DIP available in the %.0f pill", measured,
+                                  pillAvailable, kCollapsedWidthDip);
+                    Check(measured > 0.0f && measured <= pillAvailable,
+                          L"the same line fits inside the island itself", fitDetail);
                 }
             }
 

@@ -293,4 +293,34 @@ inline IslandState NextShape(IslandState shape, IslandState resting, bool pointe
     return NextShape(c);
 }
 
+// --- where the date, the weekday, the time and the weather go ------------------------
+//
+// TWO PLACES, EXACTLY ONE OF THEM, and which one depends on whether the island's own line is
+// free. That line holds one thing, and the bar's priority is "what the user would rather not
+// miss": a call, then a message, then the lyric. While one of those is up the date and the time
+// have nowhere to be on the island, so they stand beside the deck instead; while the island is
+// idle they sit in it, which is what the island's own clock has always been.
+//
+// Asked for in two steps an hour apart -- the strip while the island is occupied ("当放音乐或者
+// 灵动岛被占用的时候 就在我红框处显示日期时间星期天气"), and then the island itself at rest ("是灵动岛
+// 不占用时 灵动岛内要这么显示").
+//
+// A PAIR rather than one boolean, because the thing that must not happen is the same words in
+// both places at once. Written as one function so "shown exactly once" is a property of the
+// rule, and not of two draw sites that happen to agree today.
+struct StatusPlacement {
+    bool inIsland = true;    // the date, the weekday, the time and the weather, inside the pill
+    bool besideDeck = false; // ... or in the band left of the deck, while the pill is busy
+};
+
+// `islandLineTaken` is "the pill has something else to say": the lyric strip with words to show,
+// or the notice strip carrying a message or a call. The two callers that know this -- the frame
+// loop and the renderer -- must use this same test, or the words appear twice or nowhere.
+inline StatusPlacement StatusPlacementFor(bool islandLineTaken) {
+    StatusPlacement out;
+    out.inIsland = !islandLineTaken;
+    out.besideDeck = islandLineTaken;
+    return out;
+}
+
 } // namespace island
