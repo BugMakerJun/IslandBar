@@ -5279,13 +5279,13 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
 | **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
 | **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
-### 8.69 **打包成可安装的 exe + 默认开机自启** ✅（待用户装上试）
+### 8.69 **打包成可安装的 exe + 默认开机自启 + 能装到别的电脑上** ✅（待用户装上试）
 
 用户：「**把应用打包成可以安装的exe文件 默认开机自启 我安装上测测**」。
 
 #### 交付物
 
-`IslandBarSetup.exe`（3.6 MB，单文件，**自带 island_bar.exe** 作为资源）。双击即装，装
+`IslandBarSetup.exe`（**2.43 MB**，单文件，**自带 island_bar.exe** 作为资源）。双击即装，装
 **当前用户**，**不需要管理员**：
 
 | 动作 | 位置 |
@@ -5293,6 +5293,7 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | 程序 | `%USERPROFILE%\IslandBar\island_bar.exe`（**默认目录，见下**） |
 | 开机自启 | `…\Start Menu\Programs\Startup\IslandBar.lnk`（**默认开启**） |
 | 开始菜单 | `…\Start Menu\Programs\IslandBar.lnk` |
+| 开始菜单（安全） | `IslandBar (safe mode).lnk` —— 带 `--keep-taskbar`，**不隐藏系统任务栏**，给"拿到别的电脑上试"用 |
 | 卸载登记 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\IslandBar`（设置→应用里可见） |
 | 卸载程序 | `<安装目录>\IslandBarUninstall.exe`（安装程序自己的副本） |
 
@@ -5306,6 +5307,30 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 `Log.cpp`），所以**程序所在目录就是用户的设置目录**，固定区的快捷方式文件夹也在里面。
 装到别处=看起来像把他攒的东西弄丢了。这也正是开发脚本部署的位置，测试版和安装版落在一起，
 不会变成两条栏抢屏幕。
+
+#### 装到"别的电脑"上：**运行库必须静态链接，而且得是 Release**
+
+用户第二句是「**我要装在另一个电脑上看看效果**」—— 这把问题从"能装"变成"**在那台什么都没有的机器上
+能不能跑**"。查依赖（`dumpbin /dependents`）：
+
+```
+island_bar.exe (Debug)  → MSVCP140D.dll, VCRUNTIME140D.dll, VCRUNTIME140_1D.dll, ucrtbased.dll
+IslandBarSetup.exe      → 同上四个
+其余全是系统 DLL（api-ms-win-*、d2d1、d3d11、DWrite、dcomp、dwmapi、WINHTTP、wlanapi…）
+```
+
+那四个是**调试版运行库**：不可再分发，只有装了 VS 构建工具的机器才有。也就是说**第一版安装包在
+别人电脑上根本起不来**。改法：顶层 CMakeLists 设
+`CMAKE_MSVC_RUNTIME_LIBRARY = MultiThreaded$<$<CONFIG:Debug>:Debug>`（**Release 用 /MT、Debug 用 /MTd**），
+运行库进 exe。改完再查：**两个 exe 的导入表里一个 MSVC/ucrt 都没有了**，只剩系统 DLL。
+
+顺带：**发行的包换成 Release**。Debug 除了依赖调试运行库还慢一倍；Release 同一份代码，
+自检仍 **891 项全绿**，真机跑起来帧间隔 avg 15.7 ms / worst 37.8 ms / hitch 0
+（`captures/release-bar.png`：状态条 + 歌词胶囊 + 图标行都在）。体积 2.48 MB → **1.61 MB**，
+安装包 3.63 MB → **2.43 MB**。
+
+另外给 bar 补了 `src/island_bar.rc`（只有 VERSIONINFO，manifest 仍由链接器嵌入）：拿到别人机器上，
+"属性 → 详细信息"里该有名字和版本，而不是空白 —— 一个没有版本信息的 exe 正是"不该信任的文件"的样子。
 
 #### 为什么不用 Inno Setup / NSIS / WiX
 

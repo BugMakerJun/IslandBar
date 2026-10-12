@@ -79,6 +79,7 @@ endif()
 # a .rc file, because a resource script would need its own compiler pass and an
 # .rc that references one file is not worth the extra target.
 target_sources(island_bar PRIVATE island_bar.manifest)
+target_sources(island_bar PRIVATE island_bar.rc)
 
 if(MSVC)
     target_link_options(island_bar PRIVATE

@@ -7,6 +7,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# --- the C runtime is linked IN, not borrowed -----------------------------------------
+#
+# The bar is handed to people as a single executable, and the default on MSVC is a binary that
+# needs the Visual C++ runtime as a separate installation. That is survivable for a developer and
+# fatal for everyone else -- and worse in Debug, where the dependency is on the DEBUG runtime
+# (ucrtbased.dll, MSVCP140D.dll), which is not redistributable and exists only on machines with the
+# build tools. Measured with `dumpbin /dependents` on the first installer built here: the bar and
+# the installer both named all four of those DLLs.
+#
+# MultiThreaded$<$<CONFIG:Debug>:Debug> is "static for every configuration": /MT in Release,
+# /MTd in Debug. After this the only DLLs either binary imports are ones Windows already has.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # --- Global compile settings -----------------------------------------
 if(MSVC)
     add_compile_options(

@@ -71,6 +71,11 @@ constexpr wchar_t kProgramName[] = L"island_bar.exe";
 constexpr wchar_t kUninstallerName[] = L"IslandBarUninstall.exe";
 constexpr wchar_t kStartupShortcut[] = L"IslandBar.lnk";
 constexpr wchar_t kMenuShortcut[] = L"IslandBar.lnk";
+// A second Start Menu entry, with --keep-taskbar. It exists for the machine this program is
+// carried to: the bar hides the Windows taskbar on startup by design, and somebody trying it on an
+// unfamiliar machine needs a way to run it that leaves the shell alone -- without knowing that
+// `--keep-taskbar` is a thing. Named in ASCII so it cannot be mangled by a shell code page.
+constexpr wchar_t kSafeModeShortcut[] = L"IslandBar (safe mode).lnk";
 constexpr wchar_t kVersion[] = L"1.2";
 constexpr wchar_t kUninstallKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\IslandBar";
@@ -628,6 +633,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                                          : startupFolder + L"\\" + kStartupShortcut;
     const std::wstring menuLink =
         menuFolder.empty() ? L"" : menuFolder + L"\\" + kMenuShortcut;
+    const std::wstring safeLink =
+        menuFolder.empty() ? L"" : menuFolder + L"\\" + kSafeModeShortcut;
 
     if (!options.uninstall) {
         // --- install -----------------------------------------------------------------
@@ -685,6 +692,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             if (!menuLink.empty()) {
                 CreateShortcut(menuLink, programPath, L"", directory, L"IslandBar");
             }
+            if (!safeLink.empty()) {
+                CreateShortcut(safeLink, programPath, L"--keep-taskbar", directory,
+                               L"保留 Windows 系统任务栏，只当浮层用（排错）");
+            }
             if (options.autostart && !startupLink.empty()) {
                 CreateShortcut(startupLink, programPath, L"", directory,
                                L"Start IslandBar at logon");
@@ -716,6 +727,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 L"  program:   %s\n"
                 L"  autostart: %s\n"
                 L"  menu:      %s\n"
+                L"             %s\n"
                 L"  uninstall: %s\n\n"
                 L"Your settings and your pinned applications stay in:\n  %s\n\n"
                 L"To stop it for a while: end island_bar.exe in Task Manager and then run the\n"
@@ -724,6 +736,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 options.autostart ? L"on (a shortcut in your Startup folder)"
                                   : L"off (not requested)",
                 menuLink.empty() ? L"(no Start Menu folder)" : menuLink.c_str(),
+                safeLink.c_str(),
                 uninstallerPath.c_str(), directory.c_str());
         }
     } else {
@@ -747,6 +760,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         if (!menuLink.empty() && !DeleteFileQuietly(menuLink)) {
             SayError(L"removing the Start Menu shortcut failed", GetLastError());
         }
+        if (!safeLink.empty()) DeleteFileQuietly(safeLink);
 
         RemoveRegistryTree(HKEY_CURRENT_USER, kUninstallKey);
         RemoveRegistryTree(HKEY_CURRENT_USER, kSettingsKey);
