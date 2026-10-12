@@ -135,9 +135,15 @@ bool TextRenderer::Initialize() {
     };
     // The sizes are set by the tighter of the two boxes rather than by taste: the same run is drawn
     // inside a 220 DIP pill and in the 268 DIP band, and the pill -- less its padding -- is what
-    // these four numbers have to live within. Measured by the self-test, not chosen by eye.
-    makeStatusFormat(12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusWeekdayFormat_);
-    makeStatusFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &statusDayFormat_);
+    // these numbers have to live within. Measured by the self-test, not chosen by eye.
+    //
+    // TWO SIZES, not four. The line is `周一 10月12日 22:34 阴 15°` and it used to be set at 12 semibold,
+    // 11, 13 semibold and 11.5 -- four sizes with two weights in one 26 DIP band, which is what makes a
+    // line of small text read as assembled rather than as designed. The weekday, the date and the weather
+    // are one run at one size now, and the time is the only thing that is bigger and heavier, because it
+    // is the only thing being read at a glance.
+    makeStatusFormat(11.5f, DWRITE_FONT_WEIGHT_NORMAL, &statusWeekdayFormat_);
+    makeStatusFormat(11.5f, DWRITE_FONT_WEIGHT_NORMAL, &statusDayFormat_);
     makeStatusFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &statusTimeFormat_);
     makeStatusFormat(11.5f, DWRITE_FONT_WEIGHT_NORMAL, &statusWeatherFormat_);
 
@@ -689,9 +695,12 @@ void TextRenderer::DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box
     }
     const float cx = (box.left + box.right) * 0.5f;
     const float cy = (box.top + box.bottom) * 0.5f;
+    // The dots grow with the button: it is a 30 DIP square now, the same as an application icon, and the
+    // three marks were sized for a 22 DIP one -- on the bar they read as a control that had been scaled
+    // down rather than as one of the row's beads.
     for (int i = -1; i <= 1; ++i) {
-        const float x = cx + static_cast<float>(i) * 6.0f;
-        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), 2.2f, 2.2f), ink);
+        const float x = cx + static_cast<float>(i) * 7.5f;
+        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), 2.6f, 2.6f), ink);
     }
     ink->Release();
 }
@@ -2201,7 +2210,15 @@ void TextRenderer::DrawTaskIcons(ID2D1DeviceContext2* context, const RoundedBox&
                 iconBox.top = centreY - halfH;
                 iconBox.bottom = centreY + halfH;
             }
-            DrawBitmapRect(context, button.icon, iconBox, opacity * appear,
+            // ... AND A MINIMISED WINDOW'S ICON IS DIMMED, which nothing did before.
+            //
+            // The frame has carried `minimised` from the window list all along and no drawing code ever
+            // looked at it: measured, zero uses in the renderer. So with ten windows open a minimised one
+            // and a normal one were the same picture, and the only way to tell was to click it. The wash
+            // marks the window that is IN FRONT; this marks the ones that are put away, which is the other
+            // half of the same question.
+            const float iconStrength = button.minimised ? 0.55f : 1.0f;
+            DrawBitmapRect(context, button.icon, iconBox, opacity * appear * iconStrength,
                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         }
 

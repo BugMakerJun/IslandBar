@@ -299,8 +299,11 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     // Not gated on `fullscreenApp` here: that is handled where the whole deck is skipped (the caller),
     // because while a game has the screen the tray is not the bar either.
     if (frame.trayIconCount > 0) {
+        // No fill either, for the reason the deck's buttons have none: it stands on the same surface (see
+        // BarClusterFor). Its own hover wash and the three dots are what is drawn.
         text_->DrawTrayButton(d2dContext_, TrayButtonFor(island), frame.trayButtonHovered,
-                              frame.trayPageOpen, frame.pill.fill, frame.contentOpacity);
+                              frame.trayPageOpen,
+                              D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), frame.contentOpacity);
     }
 
     // What the row was actually asked to draw, and where it put it.
@@ -360,13 +363,17 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     //
     // Both come from the same deck function the hit tests use, so a click cannot land beside the button
     // that was clicked.
-    text_->DrawStartButton(d2dContext_, island, frame.startHovered, frame.pill.fill,
-                           frame.contentOpacity);
+    //
+    // NO FILL of their own: the surface they stand on is drawn once, wider, by the frame loop
+    // (BarClusterFor), and a button that painted its own rounded rectangle inside it would put the beads
+    // straight back. What is left is the mark itself and the hover wash, which is what a control should be.
+    const D2D1_COLOR_F onTheCluster = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f);
+    text_->DrawStartButton(d2dContext_, island, frame.startHovered, onTheCluster, frame.contentOpacity);
 
     // `open` points the chevron up, which is the one thing the control has to say by itself: whether
     // pressing it again will put away what is already there.
     text_->DrawSystemButton(d2dContext_, SystemButtonFor(island), frame.systemButtonHovered,
-                            frame.systemPanelOpen, frame.pill.fill, frame.contentOpacity);
+                            frame.systemPanelOpen, onTheCluster, frame.contentOpacity);
 }
 
 void Renderer::RenderFrame(const FrameState& frame) {
@@ -465,13 +472,27 @@ void Renderer::RenderFrame(const FrameState& frame) {
         // Assembled field by field rather than through D2D1::RoundedRect: that
         // helper takes a D2D1_SIZE_F, not a pair of radii, and it is easy to
         // pass two floats to it by mistake.
+        // ... AND THE ISLAND IS PART OF ONE SURFACE WITH THE CONTROLS AROUND IT, NOT A BEAD AMONG BEADS.
+        //
+        // The system button, the Start button, the island and the tray button are drawn as one rounded
+        // surface -- see BarClusterFor for why those four and not the icon row -- and the controls are then
+        // drawn ON it: their marks, their hover washes, the island's own line. That is why the fills handed
+        // to those three buttons further down are transparent now, and why this fill covers their boxes.
+        //
+        // Gated on the same condition as the decks themselves (content visible, no full-screen application
+        // in front), because the surface exists FOR them: with the decks skipped the case would be a wider
+        // pill with nothing in it at either end.
+        const bool decksDrawn = frame.contentOpacity > 0.01f && !frame.fullscreenApp;
+        const RoundedBox& shape =
+            decksDrawn ? island::BarClusterFor(pillBox, frame.trayIconCount > 0) : pillBox;
+
         D2D1_ROUNDED_RECT rounded = {};
-        rounded.rect.left    = pillBox.rect.left;
-        rounded.rect.top     = pillBox.rect.top;
-        rounded.rect.right   = pillBox.rect.right;
-        rounded.rect.bottom  = pillBox.rect.bottom;
-        rounded.radiusX      = std::max(0.0f, pillBox.radiusX);
-        rounded.radiusY      = std::max(0.0f, pillBox.radiusY);
+        rounded.rect.left    = shape.rect.left;
+        rounded.rect.top     = shape.rect.top;
+        rounded.rect.right   = shape.rect.right;
+        rounded.rect.bottom  = shape.rect.bottom;
+        rounded.radiusX      = std::max(0.0f, shape.radiusX);
+        rounded.radiusY      = std::max(0.0f, shape.radiusY);
 
         // Rounded-rectangle fills and strokes take an ID2D1Brush, not a colour
         // value. The brush is per-frame and cheap; it is deliberately not cached

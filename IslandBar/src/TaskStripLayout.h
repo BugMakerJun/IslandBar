@@ -693,7 +693,12 @@ inline float StatusStripFadeStep(float amount, bool wanted, float dtSeconds) {
 //
 // The two groups still have to not collide, and that is the row's problem: the row is sized from the
 // room left over after this much is reserved (see TaskIconsThatFitInWidth's caller in main.cpp).
-inline constexpr float kTrayIconDip         = 22.0f;   // the button; the picture inside is smaller
+// The tray's button, and it is a BEAD IN THE SAME ROW as the application icons: the same 30 DIP square
+// they use, so the row's rhythm does not break where the tray begins and so the smallest click target on
+// the bar is not the smallest thing on it. It was 22 -- one size down from everything else, measured
+// against a screenshot of the whole bar: the tray's three dots read as a bead that had been scaled down
+// by accident, and it was the one control whose target was smaller than Windows' own guidance.
+inline constexpr float kTrayIconDip         = 30.0f;   // the button; the picture inside is smaller
 inline constexpr float kTrayPictureDip      = 16.0f;
 inline constexpr float kTrayGapDip          = 2.0f;
 inline constexpr float kTrayRightMarginDip  = 6.0f;
@@ -736,8 +741,39 @@ inline bool TrayButtonHit(const RoundedBox& island, float x, float y) {
     return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
 }
 
-// The room the button takes beside the island, for the row's own sizing.
-inline float TrayButtonReservedDip() { return kTrayIconDip + kTaskIconGapDip; }
+// The room the button takes beside the island, for the row's own sizing: the button, the gap between it
+// and the icon row, AND the gap between the button and the edge of the one surface the fixed controls
+// stand on (see BarClusterFor). The last one is why this is not simply the button's own width plus a gap:
+// the row has to start clear of that surface, not 4 DIP inside its rounded end.
+inline float TrayButtonReservedDip() { return kTrayIconDip + kTaskIconGapDip * 2.0f; }
+
+// THE ONE SURFACE THE BAR'S FIXED CONTROLS STAND ON: the system button, the Start button, the island and
+// the tray button, as a single rounded rectangle.
+//
+// Those four never move relative to each other -- the deck hangs off the island's left edge and the tray
+// off its right -- so drawn separately they were four beads of the same colour with 4-8 DIP gaps, which
+// reads as a dotted line rather than as one object. iOS's island is one shape; this is the same idea
+// applied to the part of this bar whose geometry is fixed.
+//
+// The application icon row is deliberately NOT part of it: the row's length changes with the windows that
+// are open, and a surface whose edge grows and shrinks with them is the "things move on their own" this
+// project has been told off for twice.
+//
+// The pad is the row's own 4 DIP, so the cluster is one "block" in the bar's rhythm: 8 around the island
+// inside it, 4 everywhere else, and 4 DIP clear of it before the icon row (which is what
+// TrayButtonReservedDip adds the second `kTaskIconGapDip` for).
+inline RoundedBox BarClusterFor(const RoundedBox& island, bool trayButtonShown) {
+    RoundedBox out;
+    out.rect.left = SystemButtonFor(island).left - kTaskIconGapDip;
+    out.rect.right = (trayButtonShown ? TrayButtonFor(island).right : island.rect.right) + kTaskIconGapDip;
+    out.rect.top = island.rect.top;
+    out.rect.bottom = island.rect.bottom;
+    // A stadium, from the island's own height: the ends stay true semicircles whatever the height is, and
+    // the deck's 30 DIP buttons sit inside it with 3 DIP above and below.
+    out.radiusX = (out.rect.bottom - out.rect.top) * 0.5f;
+    out.radiusY = out.radiusX;
+    return out;
+}
 
 // The box the application icon row is laid out from, given that the tray button stands between the island
 // and the row.
