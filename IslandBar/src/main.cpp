@@ -653,11 +653,11 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     // The TRAY's own level of the same card: the icons behind the button at the right-hand end of the bar.
     // Kept beside the panel's flag because the two are two levels of one card (see the click handler).
     bool trayPageOpen = false;
-    // Whether the card that is up was opened by the TRAY button, so it stands under that button and not
-    // under the system button at the other end of the island. Held for the card's whole life, like the
-    // owner above it (see the frame loop): the two pages share one card, and a position read per frame
-    // would move the card sideways the instant the tray page was closed.
-    bool trayCardAnchor = false;
+    // Which level of the panel's card is showing -- the tiles, the 声音输出 page, or the tray page. Held
+    // for the card's whole life, like the owner: the card is on screen for the length of its own exit, so
+    // the level it was opened with is also what it leaves with (see NextPanelLevel, and the three places
+    // that read it: the content, the two page flags, and where the card stands).
+    island::PanelLevel panelLevel = island::PanelLevel::Tiles;
     // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
     // the whole set, and the arrows and dots are the controls for it.
     int systemPanelPage = 0;
@@ -1701,6 +1701,11 @@ float musicWavePhase = 0.0f;
             const auto dismissPanel = [&]() {
                 systemPanelOpen = false;
                 soundPageOpen = false;
+                // ... AND the tray's page, which is the third level of the same card. It used to be left
+                // set, which was harmless while the level was read from the request and is not now: a card
+                // put away by a click outside must take every level with it, exactly as a click on the
+                // system button does (see the click handler).
+                trayPageOpen = false;
                 panelSliderDrag = false;
                 mixerSliderDragRow = -1;
                 mixerSliderDragPid = 0;
@@ -2964,6 +2969,14 @@ float musicWavePhase = 0.0f;
                 // paid for that lesson four times, which is why this comment is this emphatic.
                 frame.outerCardUp = window.State() == island::IslandState::Expanded ||
                                     window.FromState() == island::IslandState::Expanded;
+                // WHICH LEVEL THE CARD SHOWS, decided here -- before anything reads it -- and held for the
+                // card's whole life. It has to be this early in the loop for the same reason
+                // `outerCardUp` is: a field set after the thing that reads it is a field one frame stale
+                // (see the note below, and the four times this project has paid for that lesson).
+                panelLevel = island::NextPanelLevel(panelLevel, frame.outerCardUp, systemPanelOpen,
+                                                    trayPageOpen, soundPageOpen);
+                const bool trayPageShown = panelLevel == island::PanelLevel::Tray;
+                const bool soundPageShown = panelLevel == island::PanelLevel::Sound;
                 // ... and whether the bar is in the picture at all: with a full-screen application in front
                 // only the island is drawn (see FrameState::fullscreenApp).
                 frame.fullscreenApp = fullscreenAppInFront;
@@ -2990,8 +3003,11 @@ float musicWavePhase = 0.0f;
                 frame.trayRevision = trayIcons.Revision();
                 frame.trayHoveredIndex = window.TrayCellHovered();
                 frame.trayButtonHovered = window.TrayButtonHovered();
-                frame.trayPageOpen = trayPageOpen;
-                frame.trayPageTitle = trayPageOpen ? L"\u6258\u76d8" : nullptr;   // 托盘
+                // The level the card is SHOWING, not the page that was asked for: the two differ for the
+                // whole of the exit, and drawing the request is what put the tiles under a shrinking tray
+                // page. See NextPanelLevel.
+                frame.trayPageOpen = trayPageShown;
+                frame.trayPageTitle = trayPageShown ? L"\u6258\u76d8" : nullptr;   // 托盘
                 window.SetTrayIconCount(frame.trayIconCount);
 
                 frame.systemPanelOpen = systemPanelOpen;
@@ -3037,11 +3053,12 @@ float musicWavePhase = 0.0f;
                 // card: the panel's contents disappeared first and a blank rounded rectangle shrank
                 // afterwards. Reported as the panel "appearing and disappearing" with the pointer.
                 const bool cardUp = frame.outerCardUp;
-                // Which control the card that is up stands under, held for the card's whole life -- see
-                // NextTrayCardAnchor, which is the rule and its four cases, asserted in Diagnostics.
-                trayCardAnchor = island::NextTrayCardAnchor(trayCardAnchor, cardUp, trayPageOpen);
                 if (cardUp) {
-                    if (soundPageOpen) {
+                    // The SHOWN level builds the content, not the request: the 声音输出 page has to keep its
+                    // rows while it leaves the screen, exactly as the tray page keeps its grid, or the exit
+                    // plays on an empty card (which is the other half of the defect above -- reported once
+                    // already, as the panel "appearing and disappearing").
+                    if (soundPageShown) {
                         // --- the panel's second level: the 声音输出 page ---
                         //
                         // The worker is already running -- it starts with the bar, because the WeChat sound
@@ -3126,7 +3143,7 @@ float musicWavePhase = 0.0f;
                     // function and not two lines: getting it from the wrong control is a card under the
                     // wrong end of the bar, which is what "点击托盘按钮 弹出的卡片不在这个按钮下面" was.
                     const float buttonCentre =
-                        island::DeckCardAnchorCentre(anchorIsland, trayCardAnchor);
+                        island::DeckCardAnchorCentre(anchorIsland, trayPageShown);
                     // WHICH THING THE CARD HANGS FROM DEPENDS ON WHICH CARD IT IS.
                     //
                     // The system panel hangs from the control that opened it: the user chose that

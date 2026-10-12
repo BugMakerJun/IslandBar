@@ -6149,24 +6149,35 @@ void TestMusicCardLayout() {
                       L"and that card is still on the screen", trayDetail);
             }
 
-            // ... AND THE CHOICE SURVIVES THE PAGE BEING CLOSED, which is the half that is easy to lose.
+            // WHICH LEVEL THE CARD SHOWS, INCLUDING WHILE IT IS PUT AWAY -- the half that is easy to lose.
             //
-            // All four rows of NextTrayCardAnchor's table, because the third one is the one a later change
-            // would drop: the card is still on screen for the length of its exit, and an answer taken per
-            // frame from the page would move it 296 DIP back to the other end of the bar while it shrank.
+            // Every row of NextPanelLevel's table, because the two "put away" rows are what a later change
+            // would drop: the card is still on screen for the length of its exit, so a level read per frame
+            // from the page that was asked for switches the CONTENT on the first frame of the retraction --
+            // the tiles appear under a shrinking tray page ("点击展开 再点击收回去 会显示出系统卡片的东西"),
+            // and the card would also slide 296 DIP back to the other end of the bar.
             {
-                const bool whenPanelOpens = NextTrayCardAnchor(false, true, false);
-                const bool whenTrayOpens = NextTrayCardAnchor(false, true, true);
-                const bool whileClosing = NextTrayCardAnchor(true, true, false);
-                const bool whenGone = NextTrayCardAnchor(true, false, false);
+                const PanelLevel panelOpen = NextPanelLevel(PanelLevel::Tiles, true, true, false, false);
+                const PanelLevel trayOpen = NextPanelLevel(PanelLevel::Tiles, true, true, true, false);
+                const PanelLevel soundOpen = NextPanelLevel(PanelLevel::Tiles, true, true, false, true);
+                const PanelLevel back = NextPanelLevel(PanelLevel::Sound, true, true, false, false);
+                const PanelLevel trayClosing = NextPanelLevel(PanelLevel::Tray, true, false, true, false);
+                const PanelLevel soundClosing = NextPanelLevel(PanelLevel::Sound, true, false, false, false);
+                const PanelLevel gone = NextPanelLevel(PanelLevel::Tray, false, false, false, false);
                 std::swprintf(trayDetail, 256,
-                              L"panel->%d tray->%d closing->%d gone->%d", whenPanelOpens ? 1 : 0,
-                              whenTrayOpens ? 1 : 0, whileClosing ? 1 : 0, whenGone ? 1 : 0);
-                Check(!whenPanelOpens && whenTrayOpens && whileClosing && !whenGone,
-                      L"the card's anchor follows the page it was opened with, and holds while it "
-                      L"closes", trayDetail);
-                Check(whileClosing == NextTrayCardAnchor(whileClosing, true, false),
-                      L"... held as long as the card is up, whatever the page flag says", trayDetail);
+                              L"tiles=%d tray=%d sound=%d back=%d trayClosing=%d soundClosing=%d gone=%d",
+                              static_cast<int>(panelOpen), static_cast<int>(trayOpen),
+                              static_cast<int>(soundOpen), static_cast<int>(back),
+                              static_cast<int>(trayClosing), static_cast<int>(soundClosing),
+                              static_cast<int>(gone));
+                Check(panelOpen == PanelLevel::Tiles && trayOpen == PanelLevel::Tray &&
+                          soundOpen == PanelLevel::Sound && back == PanelLevel::Tiles,
+                      L"a page that is asked for is the level the card shows", trayDetail);
+                Check(trayClosing == PanelLevel::Tray && soundClosing == PanelLevel::Sound,
+                      L"... and the panel being put away holds that level for the whole exit", trayDetail);
+                Check(gone == PanelLevel::Tiles && trayOpen != panelOpen,
+                      L"... released only when the card is gone, so the next open decides afresh",
+                      trayDetail);
             }
 
             // THE ROW GIVES WAY, AND THAT IS THE POINT OF THE RESERVATION.

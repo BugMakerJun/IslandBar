@@ -342,32 +342,43 @@ inline float CardLeftFor(float anchorLeftDip, float cardWidthDip, float windowWi
     return left;
 }
 
-// WHICH CONTROL THE CARD THAT IS UP STANDS UNDER, held for the card's whole life.
+// WHICH LEVEL OF THE PANEL'S CARD IS SHOWING, held for the card's whole life.
 //
-// The panel and the tray page are ONE card with ONE owner -- NextCardOwner sees only "a panel is asked
-// for" -- so where the card stands can only be chosen from the page, and the two controls that open those
-// pages are the island's two ends:
+// One card, three levels, and only one of them at a time: the tiles, the 声音输出 page the output-device
+// row opens, and the tray page the button beside the island opens. Every one of them is drawn in the same
+// card, at the same place, with the same animation -- and the card is on screen for the whole of its own
+// EXIT, which is where a per-frame answer goes wrong:
 //
-//     [ system ][ Start ]   island   [ tray ]  [ icon ] ...
+//   * CLOSING while the tray page is up switched the content on the first frame of the retraction: the
+//     panel's tiles appeared where the grid had been and then shrank away. Reported as "点击展开 再点击收
+//     回去 会显示出系统卡片的东西". The same thing happened closing from 声音输出.
 //
-// The tray page was centred on the SYSTEM button, which is a card under the wrong end of the bar:
-// reported as "点击托盘按钮 弹出的卡片不在这个按钮下面" (296 DIP of it, measured).
+// and in two more places that want the same answer: where the card STANDS (it hangs under the button that
+// opened it -- the tray button is at the island's right, the system button at its left, 296 DIP apart, so
+// the tray page's card was under the wrong end of the bar: "点击托盘按钮 弹出的卡片不在这个按钮下面") and
+// whether the tray grid is what the pointer is over.
 //
-// The held flag is the whole reason this is a function rather than one line in the frame loop:
+// So the LEVEL is what is held, and everything else follows from it. The requests stay authoritative while
+// the card is still wanted -- the 声音输出 page's Back control is a request to go back to the tiles with
+// the card still up, and it has to be obeyed -- and only the retraction holds:
 //
-//   * the panel is pressed   -> not under the tray button
-//   * the tray button is pressed -> under it, from that frame on
-//   * the tray page is CLOSED -> STILL under it, until the card is gone. Read per frame instead, the card
-//     would jump back under the system button on the first frame of its exit and slide 296 DIP sideways
-//     while it shrank -- which is a visible bug, not a tidiness problem.
-//   * the card is gone (`cardUp` false) -> released, so the next press decides afresh
+//   * card gone                       -> nothing is showing; the next open decides afresh
+//   * the panel has been put away     -> keep the level the card was opened with, for the whole exit
+//   * a page is asked for, card up    -> that page (and it replaces the other one, because one card cannot
+//                                        show two levels at once)
+//   * neither page asked, card up     -> the tiles (that is the Back control, and the panel's own button)
 //
 // `held` is the previous answer, so the caller feeds this back to itself exactly as it does with
-// NextCardOwner. Asserted in Diagnostics for all four rows of that table.
-inline bool NextTrayCardAnchor(bool held, bool cardUp, bool trayPageOpen) {
-    if (!cardUp) return false;
-    if (trayPageOpen) return true;
-    return held;
+// NextCardOwner. Every row of that table is asserted in Diagnostics.
+enum class PanelLevel { Tiles, Sound, Tray };
+
+inline PanelLevel NextPanelLevel(PanelLevel held, bool cardUp, bool panelWanted, bool trayWanted,
+                                 bool soundWanted) {
+    if (!cardUp) return PanelLevel::Tiles;
+    if (!panelWanted) return held;   // put away: the card keeps its level while it leaves the screen
+    if (trayWanted) return PanelLevel::Tray;
+    if (soundWanted) return PanelLevel::Sound;
+    return PanelLevel::Tiles;
 }
 
 // --- the system panel --------------------------------------------------------------
