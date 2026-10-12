@@ -3290,7 +3290,7 @@ void TextRenderer::DrawSoundPage(ID2D1DeviceContext2* context, const RoundedBox&
 }
 
 void TextRenderer::DrawStartButton(ID2D1DeviceContext2* context, const RoundedBox& island,
-                                   float wash, const D2D1_COLOR_F& fill, float opacity) {
+                                   float wash, bool open, const D2D1_COLOR_F& fill, float opacity) {
     // Reported on the FIRST call and on every change, so "never called" and "called and invisible" can
     // be told apart. A screenshot cannot separate those, and the difference decides whether to look at
     // the layout or at the drawing.
@@ -3334,12 +3334,16 @@ void TextRenderer::DrawStartButton(ID2D1DeviceContext2* context, const RoundedBo
     // ... AND IT COMES UP OVER ABOUT A TENTH OF A SECOND, not in one frame: the amount is the frame
     // loop's spring (FrameState::startWash). A wash that switches on reads as a hard edge, which is the
     // opposite of what a hover should feel like.
-    if (wash > 0.01f) {
+    // The wash, with the same two cases the tray button has: the pointer's own amount, or a full one when
+    // this is the control whose card is up.
+    const float strength = open ? 1.0f : wash;
+    if (strength > 0.01f) {
         const float radius = (box.bottom - box.top) * 0.5f;
         const D2D1_ROUNDED_RECT rounded = {
             D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
         ID2D1SolidColorBrush* washBrush = nullptr;
-        const D2D1_COLOR_F colour = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity * wash);
+        const float amount = open ? 0.16f : 0.16f * strength;
+        const D2D1_COLOR_F colour = D2D1::ColorF(1.0f, 1.0f, 1.0f, amount * opacity);
         if (SUCCEEDED(context->CreateSolidColorBrush(colour, &washBrush)) && washBrush) {
             context->FillRoundedRectangle(&rounded, washBrush);
             washBrush->Release();

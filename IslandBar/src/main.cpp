@@ -3341,6 +3341,16 @@ float musicWavePhase = 0.0f;
                 window.SetTrayIconCount(frame.trayIconCount);
 
                 frame.systemPanelOpen = systemPanelOpen;
+                // ... and WHICH CONTROL SHOULD LOOK OPEN, which is a question about the level and not about
+                // whether a card is up: every level sets `systemPanelOpen` (that is what makes the card
+                // exist), so asking that flag lit the SYSTEM button's chevron for the tray page, for the
+                // Start card and for everything else. Reported as "点击 ⊞ 系统按钮也跟着变".
+                {
+                    const island::ControlLit lit =
+                        island::ControlLitFor(panelLevel, frame.outerCardUp);
+                    frame.systemButtonOpen = lit.system;
+                    frame.startButtonOpen = lit.start;
+                }
 
                 // --- the Start card, told to the frame and to the window --------------------------
                 //

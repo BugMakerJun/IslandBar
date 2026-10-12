@@ -383,6 +383,47 @@ inline PanelLevel NextPanelLevel(PanelLevel held, bool cardUp, bool panelWanted,
     return PanelLevel::Tiles;
 }
 
+// WHICH CONTROL SHOWS THAT IT IS OPEN.
+//
+// One card, four levels, and three controls that can open one of them -- so "which button looks pressed"
+// is a question about the LEVEL, not about whether a card is up at all. Asked as three questions here, and
+// the self-test asserts that exactly one of them is true for every level: the user's report was the
+// symptom of them not being asked separately ("点击 ⊞ 系统按钮也跟着变") -- the system button's chevron
+// pointed up whenever ANY card was up, because the frame told it `systemPanelOpen`, which the bar sets for
+// every level so that the card exists at all.
+//
+// The sound page counts as the panel's own because it is reached from inside the panel, and the system
+// button is what puts it away.
+inline bool SystemButtonShowsOpen(PanelLevel level) {
+    return level == PanelLevel::Tiles || level == PanelLevel::Sound;
+}
+
+inline bool TrayButtonShowsOpen(PanelLevel level) { return level == PanelLevel::Tray; }
+
+inline bool StartButtonShowsOpen(PanelLevel level) { return level == PanelLevel::Start; }
+
+// ... AND NONE OF THEM WHEN NO CARD IS UP.
+//
+// The level alone cannot answer that: `Tiles` is both "the panel is showing its tiles" and "no page was
+// asked for", so the first version of this lit the system button's chevron on a bar that had just started
+// with no card on screen at all -- photographed, one command after the fix that made it light for the same
+// reason in reverse. `cardUp` is the frame's own `outerCardUp`, which is true for the whole of the exit as
+// well, so a control stays lit while the card it opened is still leaving the screen.
+struct ControlLit {
+    bool system = false;
+    bool tray = false;
+    bool start = false;
+};
+
+inline ControlLit ControlLitFor(PanelLevel level, bool cardUp) {
+    ControlLit lit;
+    if (!cardUp) return lit;
+    lit.system = SystemButtonShowsOpen(level);
+    lit.tray = TrayButtonShowsOpen(level);
+    lit.start = StartButtonShowsOpen(level);
+    return lit;
+}
+
 // --- the Start card -------------------------------------------------------------------------------
 //
 // The user's own words for what this is: "创建一个空白的卡片 然后里面只有红框里的 关机键 和用户头像,

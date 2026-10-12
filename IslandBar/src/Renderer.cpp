@@ -368,12 +368,13 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     // (BarClusterFor), and a button that painted its own rounded rectangle inside it would put the beads
     // straight back. What is left is the mark itself and the hover wash, which is what a control should be.
     const D2D1_COLOR_F onTheCluster = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f);
-    text_->DrawStartButton(d2dContext_, island, frame.startWash, onTheCluster, frame.contentOpacity);
+    text_->DrawStartButton(d2dContext_, island, frame.startWash, frame.startButtonOpen, onTheCluster,
+                           frame.contentOpacity);
 
     // `open` points the chevron up, which is the one thing the control has to say by itself: whether
     // pressing it again will put away what is already there.
     text_->DrawSystemButton(d2dContext_, SystemButtonFor(island), frame.systemButtonWash,
-                            frame.systemPanelOpen, onTheCluster, frame.contentOpacity);
+                            frame.systemButtonOpen, onTheCluster, frame.contentOpacity);
 }
 
 void Renderer::RenderFrame(const FrameState& frame) {

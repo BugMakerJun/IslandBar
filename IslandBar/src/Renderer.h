@@ -344,6 +344,12 @@ static constexpr int kMaxTaskButtons = 32;
     // of policy rules and a second transition, all for a shape that is already drawn.
     bool systemButtonHovered = false;
     float systemButtonWash = 0.0f;
+    // Whether that button -- and the Start button, and the tray button -- should LOOK open. One of them at
+    // most, decided by the level the card is showing (see SystemButtonShowsOpen and the two beside it),
+    // which is NOT the same question as "is a card up": `systemPanelOpen` is true for every level, so the
+    // system button's chevron used to point up whichever control had opened the card.
+    bool systemButtonOpen = false;
+    bool startButtonOpen = false;
     bool systemPanelOpen = false;
     TextRenderer::SystemPanelText systemPanel = {};
 

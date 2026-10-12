@@ -362,7 +362,12 @@ public:
     // would drift away from the island the first time either changed.
     // `wash` is how far the pointer's wash has come up, 0 to 1, spring-animated by the frame loop -- a
     // wash that switches on in one frame reads as hard rather than as responsive. See FrameState::startWash.
-    void DrawStartButton(ID2D1DeviceContext2* context, const RoundedBox& island, float wash,
+    //
+    // `open` is the other thing a control has to be able to say: that it is the one whose card is up
+    // (FrameState::startButtonOpen). It is a separate flag from the wash because being pressed and being
+    // the reason a card is on screen are different states -- and because the bar spent a version with
+    // every card lighting up the SYSTEM button instead.
+    void DrawStartButton(ID2D1DeviceContext2* context, const RoundedBox& island, float wash, bool open,
                          const D2D1_COLOR_F& fill, float opacity);
 
     // Which system indicator a row slot — or a panel tile — holds.

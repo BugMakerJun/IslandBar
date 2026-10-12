@@ -6252,6 +6252,45 @@ void TestMusicCardLayout() {
                 Check(gone == PanelLevel::Tiles && trayOpen != panelOpen,
                       L"... released only when the card is gone, so the next open decides afresh",
                       trayDetail);
+
+                // ... AND EXACTLY ONE CONTROL LOOKS OPEN, whichever level is showing -- the property the
+                // system button's chevron was getting wrong (it pointed up for every level, because it was
+                // asked `systemPanelOpen`, which is true whenever any card is up).
+                const PanelLevel every[] = {PanelLevel::Tiles, PanelLevel::Sound, PanelLevel::Tray,
+                                            PanelLevel::Start};
+                bool oneEach = true;
+                bool noneWithoutACard = true;
+                for (PanelLevel level : every) {
+                    const ControlLit lit = ControlLitFor(level, true);
+                    const int count = (lit.system ? 1 : 0) + (lit.tray ? 1 : 0) + (lit.start ? 1 : 0);
+                    if (count != 1) oneEach = false;
+                    // NO CARD AT ALL: nothing may be lit. This is the case the first version got wrong -- a
+                    // bar that had just started, with no card on screen, showed the system button's chevron
+                    // pointing up, because `Tiles` also means "nothing was asked for".
+                    const ControlLit off = ControlLitFor(level, false);
+                    if (off.system || off.tray || off.start) noneWithoutACard = false;
+                }
+                std::swprintf(trayDetail, 256,
+                              L"tiles: system=%d start=%d tray=%d | start: system=%d start=%d tray=%d | "
+                              L"no card: system=%d start=%d tray=%d",
+                              ControlLitFor(PanelLevel::Tiles, true).system ? 1 : 0,
+                              ControlLitFor(PanelLevel::Tiles, true).start ? 1 : 0,
+                              ControlLitFor(PanelLevel::Tiles, true).tray ? 1 : 0,
+                              ControlLitFor(PanelLevel::Start, true).system ? 1 : 0,
+                              ControlLitFor(PanelLevel::Start, true).start ? 1 : 0,
+                              ControlLitFor(PanelLevel::Start, true).tray ? 1 : 0,
+                              ControlLitFor(PanelLevel::Tiles, false).system ? 1 : 0,
+                              ControlLitFor(PanelLevel::Tiles, false).start ? 1 : 0,
+                              ControlLitFor(PanelLevel::Tiles, false).tray ? 1 : 0);
+                Check(oneEach,
+                      L"exactly one control shows that it is open, for every level", trayDetail);
+                Check(noneWithoutACard,
+                      L"... and none of them does when no card is up at all", trayDetail);
+                Check(SystemButtonShowsOpen(PanelLevel::Tiles) &&
+                          !SystemButtonShowsOpen(PanelLevel::Tray) &&
+                          !SystemButtonShowsOpen(PanelLevel::Start) &&
+                          StartButtonShowsOpen(PanelLevel::Start),
+                      L"the system button is not lit by the tray page or the Start card", trayDetail);
             }
 
             // THE START CARD'S OWN GEOMETRY, which is the whole of its layout: a grid that starts empty,
