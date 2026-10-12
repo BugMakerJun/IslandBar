@@ -5984,43 +5984,70 @@ void TestMusicCardLayout() {
                 IslandBoxFor(trayMonitor, kCollapsedWidthDip, kCollapsedHeightDip);
 
             wchar_t trayDetail[256];
-            for (int count : {1, 3, kMaxTrayIcons}) {
-                const RectF first = TrayIconBoxFor(trayIsland, trayMonitor, 0, count);
-                const RectF last = TrayIconBoxFor(trayIsland, trayMonitor, count - 1, count);
+            {
+                // THE BUTTON, at the monitor's right margin: one control, in the same place whatever the
+                // application row is doing (see TrayButtonFor).
+                const RectF button = TrayButtonFor(trayIsland, trayMonitor);
                 std::swprintf(trayDetail, 256,
-                              L"%d icons: x [%.0f, %.0f], each %.0f wide, island centre %.0f",
-                              count, first.left, last.right, first.right - first.left,
+                              L"button x [%.0f, %.0f] y [%.0f, %.0f], island centre %.0f", button.left,
+                              button.right, button.top, button.bottom,
                               (trayIsland.rect.top + trayIsland.rect.bottom) * 0.5f);
-
-                // The group ends at the monitor's right margin, whatever it holds.
-                Check(Nearly(last.right, trayMonitor - kTrayRightMarginDip, 0.01f),
-                      L"the tray ends at the monitor's right margin", trayDetail);
-                // Inside the monitor, on both axes.
-                Check(first.left > 0.0f && last.right <= trayMonitor,
-                      L"the tray is on the screen at every size", trayDetail);
-                Check(Nearly((first.top + first.bottom) * 0.5f,
+                Check(Nearly(button.right, trayMonitor - kTrayRightMarginDip, 0.01f),
+                      L"the tray button ends at the monitor's right margin", trayDetail);
+                Check(button.left > 0.0f && button.right <= trayMonitor,
+                      L"the tray button is on the screen", trayDetail);
+                Check(Nearly((button.top + button.bottom) * 0.5f,
                              (trayIsland.rect.top + trayIsland.rect.bottom) * 0.5f, 0.01f),
-                      L"the tray is on the island's own line", trayDetail);
-                // And its icons are laid out left to right without overlapping.
-                bool ordered = true;
-                for (int i = 0; i + 1 < count; ++i) {
-                    const RectF a = TrayIconBoxFor(trayIsland, trayMonitor, i, count);
-                    const RectF b = TrayIconBoxFor(trayIsland, trayMonitor, i + 1, count);
-                    if (a.right > b.left + 0.01f) ordered = false;
+                      L"the tray button is on the island's own line", trayDetail);
+            }
+
+            // THE CARD'S GRID: the icons behind the button, in a wrapping grid inside the SAME card the
+            // system panel opens -- three rows of five on a machine with sixteen icons, where the panel's own
+            // two rows of three would hold six.
+            {
+                const RoundedBox card =
+                    BoxForState(IslandState::Expanded,
+                                AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
+                for (int count : {1, 3, 6, kMaxTrayIcons}) {
+                    const TrayPageLayout page = TrayPageFor(card, count);
+                    bool inside = page.count == count && page.columns > 0 &&
+                                  page.columns <= kTrayPageColumns;
+                    bool noOverlap = true;
+                    for (int i = 0; i < page.count; ++i) {
+                        const RectF& cell = page.cells[i];
+                        if (cell.left < card.rect.left || cell.right > card.rect.right ||
+                            cell.top < card.rect.top || cell.bottom > card.rect.bottom) {
+                            inside = false;
+                        }
+                        for (int j = i + 1; j < page.count; ++j) {
+                            const RectF& other = page.cells[j];
+                            if (cell.left < other.right && other.left < cell.right &&
+                                cell.top < other.bottom && other.top < cell.bottom) {
+                                noOverlap = false;
+                            }
+                        }
+                    }
+                    std::swprintf(trayDetail, 256,
+                                  L"%d icons -> %d columns, first cell %.0f (w%.0f), last cell bottom %.0f",
+                                  count, page.columns, page.cells[0].left,
+                                  page.cells[0].right - page.cells[0].left,
+                                  page.cells[count - 1].bottom);
+                    Check(inside, L"every tray cell is inside the card it is drawn in", trayDetail);
+                    Check(noOverlap, L"no two tray cells overlap", trayDetail);
+                    Check(page.cells[0].top > card.rect.top + 30.0f,
+                          L"the grid starts below the page's heading", trayDetail);
                 }
-                Check(ordered, L"the tray's icons do not overlap each other", trayDetail);
             }
 
             // THE ROW GIVES WAY, AND THAT IS THE POINT OF THE RESERVATION.
             //
-            // The count of application icons that fit is computed from the room left after the tray's strip
+            // The count of application icons that fit is computed from the room left after the BUTTON
             // (see the frame loop): what has to hold is that the row, laid out with that count, ends before
-            // the tray begins -- for every number of windows, which is what makes this a property rather
+            // the button begins -- for every number of windows, which is what makes this a property rather
             // than a coincidence for today's.
             {
-                const int trayCount = kMaxTrayIcons;
-                const float reserved = TrayWidthDip(trayCount);
-                const RectF firstTray = TrayIconBoxFor(trayIsland, trayMonitor, 0, trayCount);
+                const float reserved = TrayButtonReservedDip();
+                const RectF button = TrayButtonFor(trayIsland, trayMonitor);
                 bool clear = true;
                 for (int wanted : {1, 4, 12, 40}) {
                     const int fits = TaskIconsThatFit(trayMonitor - reserved, wanted);
@@ -6031,33 +6058,46 @@ void TestMusicCardLayout() {
                     // The WIDEST case: that last button opened, which is what the row is sized against.
                     const RectF lastIconOpen =
                         TaskIconButtonAt(trayIsland, fits - 1, fits, fits - 1, 1.0f);
-                    if (lastIcon.right > firstTray.left || lastIconOpen.right > firstTray.left) {
+                    if (lastIcon.right > button.left || lastIconOpen.right > button.left) {
                         clear = false;
                         std::swprintf(trayDetail, 256,
-                                      L"%d windows -> %d icons, row ends at %.0f (open: %.0f), tray starts "
-                                      L"at %.0f",
-                                      wanted, fits, lastIcon.right, lastIconOpen.right, firstTray.left);
+                                      L"%d windows -> %d icons, row ends at %.0f (open: %.0f), the button "
+                                      L"starts at %.0f",
+                                      wanted, fits, lastIcon.right, lastIconOpen.right, button.left);
                     }
                 }
-                Check(clear, L"the application row ends before the tray begins, however many windows are "
+                Check(clear, L"the application row ends before the tray button, however many windows are "
                              L"open",
                       trayDetail);
             }
 
-            // The tray's own hit test, and the window's: a tray icon that could not be reached would be
-            // drawn and completely inert -- the defect the application icons had before the union was
-            // extended for them.
+            // The button's own hit test, and the card's: a control that could not be reached would be drawn
+            // and completely inert -- the defect the application icons had before the union was extended for
+            // them.
             {
-                const RectF third = TrayIconBoxFor(trayIsland, trayMonitor, 2, 5);
-                const float centreX = (third.left + third.right) * 0.5f;
-                const float centreY = (third.top + third.bottom) * 0.5f;
-                const int hit = TrayIconUnderPointer(trayIsland, trayMonitor, 5, centreX, centreY);
-                const int missLeft = TrayIconUnderPointer(trayIsland, trayMonitor, 5, third.left - 4.0f,
-                                                          centreY);
-                std::swprintf(trayDetail, 256, L"third icon x [%.0f, %.0f] -> %d, just left of it -> %d",
-                              third.left, third.right, hit, missLeft);
-                Check(hit == 2 && missLeft != 2,
-                      L"a point on a tray icon is that icon and its neighbour is not", trayDetail);
+                const RectF button = TrayButtonFor(trayIsland, trayMonitor);
+                const float centreX = (button.left + button.right) * 0.5f;
+                const float centreY = (button.top + button.bottom) * 0.5f;
+
+                // ... and a cell of the card's grid is a cell of that grid: two rows down and one along is
+                // icon number 6, and its neighbour to the left is a different one.
+                const RoundedBox card =
+                    BoxForState(IslandState::Expanded,
+                                AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
+                const TrayPageLayout page = TrayPageFor(card, kMaxTrayIcons);
+                const RectF& sixth = page.cells[6];
+                const int cellHit = TrayPageCellAt(card, kMaxTrayIcons,
+                                                   (sixth.left + sixth.right) * 0.5f,
+                                                   (sixth.top + sixth.bottom) * 0.5f);
+                const int cellMiss = TrayPageCellAt(card, kMaxTrayIcons, page.cells[0].left - 6.0f,
+                                                    page.cells[0].top + 4.0f);
+                std::swprintf(trayDetail, 256,
+                              L"button centre %ld,%ld; cell 6 centre -> %d, left of the grid -> %d",
+                              static_cast<LONG>(centreX), static_cast<LONG>(centreY), cellHit,
+                              cellMiss);
+                Check(cellHit == 6 && cellMiss < 0,
+                      L"a point on a tray cell is that icon and the margin beside it is not",
+                      trayDetail);
 
                 MonitorGeometry trayMon;
                 trayMon.screen = {0, 0, 2560, 1440};
@@ -6066,13 +6106,13 @@ void TestMusicCardLayout() {
                 trayMon.dpiY = 96;
                 const RECT trayWindow = {0, 0, 2560, 320};
                 const POINT onTheTray = {static_cast<LONG>(centreX), static_cast<LONG>(centreY)};
-                std::swprintf(trayDetail, 256, L"tray icon centre %ld,%ld", onTheTray.x, onTheTray.y);
+                std::swprintf(trayDetail, 256, L"tray button centre %ld,%ld", onTheTray.x, onTheTray.y);
                 Check(IslandWindow::ShouldAcceptPointer(trayMon, trayWindow, onTheTray,
-                                                        IslandState::Collapsed, 0, 0.0f, false, 5),
-                      L"the window accepts the pointer on the tray", trayDetail);
+                                                        IslandState::Collapsed, 0, 0.0f, false, 1),
+                      L"the window accepts the pointer on the tray button", trayDetail);
                 Check(!IslandWindow::ShouldAcceptPointer(trayMon, trayWindow, onTheTray,
                                                          IslandState::Collapsed, 0, 0.0f, false, 0),
-                      L"and does not when there is no tray there", trayDetail);
+                      L"and does not when there is no tray to show", trayDetail);
             }
 
             // THE WINDOW REGION MUST COVER IT, or the tray is drawn and clipped -- measured on the way to

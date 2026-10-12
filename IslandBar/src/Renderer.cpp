@@ -288,19 +288,20 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
                          frame.taskButtonCount, cardLeftDip, cardWidthDip,
                          frame.taskButtonAppearValid ? frame.taskButtonAppear : nullptr);
 
-    // THE TRAY, at the far right of the bar -- after the application icons, so the two groups read as
-    // "what I have open" then "what is running quietly", which is the order the shell's own taskbar has.
+    // THE TRAY BUTTON, at the far right of the bar: one control for every tray icon, with the icons behind
+    // it in the card (see DrawTrayButton). After the application icons, so the two read as "what I have
+    // open" then "what is running quietly", which is the order the shell's own taskbar has.
     //
     // Not gated on `fullscreenApp` here: that is handled where the whole deck is skipped (the caller),
     // because while a game has the screen the tray is not the bar either.
-    if (frame.trayIconCount > 0 && frame.trayIcons) {
+    if (frame.trayIconCount > 0) {
         // The monitor's width, from the island's own box: every shape on this bar is centred on the
-        // monitor's centre (see IslandBoxFor), so the left and right edges add up to it whatever state the
-        // bar is in -- which is why the tray's anchoring needs no field of its own in the frame.
+        // monitor's centre (see IslandBoxFor), so its left and right edges add up to that width whatever
+        // state the bar is in -- which is why the tray's anchoring needs no field of its own in the frame.
         const float monitorWidthDip = island.rect.left + island.rect.right;
-        text_->DrawTrayIcons(d2dContext_, island, monitorWidthDip, frame.trayIcons,
-                             frame.trayIconCount, frame.trayRevision, frame.contentOpacity,
-                             frame.trayHoveredIndex);
+        text_->DrawTrayButton(d2dContext_, TrayButtonFor(island, monitorWidthDip),
+                              frame.trayButtonHovered, frame.trayPageOpen, frame.pill.fill,
+                              frame.contentOpacity);
     }
 
     // What the row was actually asked to draw, and where it put it.
@@ -810,9 +811,14 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 // which is what it used to do -- laid its cover, title and controls out again on every
                 // frame of its own growth, which is the reflow 7.77 chased in the panel.
                 if (frame.cardOwner == CardOwner::SystemPanel) {
-                    // The panel has two levels, and which one is showing is the frame's business: the tiles,
-                    // or the 声音输出 page the output-device button opens. Same card, same frame around it.
-                    if (frame.soundPageOpen) {
+                    // The panel has THREE levels, and which one is showing is the frame's business: the
+                    // tiles, the 声音输出 page the output-device button opens, or the tray page the tray
+                    // button at the other end of the bar opens. Same card, same place, same animation.
+                    if (frame.trayPageOpen) {
+                        text_->DrawTrayPage(d2dContext_, panelCard, frame.trayPageTitle,
+                                            frame.trayIcons, frame.trayIconCount, frame.trayRevision,
+                                            frame.cardOpacity, frame.trayHoveredIndex);
+                    } else if (frame.soundPageOpen) {
                         text_->DrawSoundPage(d2dContext_, panelCard, frame.soundPage,
                                              frame.cardOpacity);
                     } else {

@@ -868,14 +868,12 @@ bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const REC
         return inside(island, localX, localY) || inside(shape, localX, localY);
     }
 
-    // The tray is the bar, exactly as the application icons are: it is drawn beside the island, outside
-    // every one of the state's shapes, so a tray icon the pointer could not reach would be drawn and
+    // The tray BUTTON is the bar, exactly as the application icons are: it is drawn beside the island,
+    // outside every one of the state's shapes, so a button the pointer could not reach would be drawn and
     // completely inert -- the defect the application icons had before this same union was extended for
-    // them.
-    if (trayIconCount > 0 &&
-        TrayIconUnderPointer(island, widthDip, trayIconCount, localX, localY) >= 0) {
-        return true;
-    }
+    // them. (The card's own grid needs nothing here: it is inside the card, and the card's column below
+    // already accepts the pointer.)
+    if (trayIconCount > 0 && TrayButtonHit(island, widthDip, localX, localY)) return true;
 
     if (iconCount > 0 && TaskRowContains(island, iconCount, localX, localY)) {
         return true;
@@ -941,6 +939,16 @@ bool IslandWindow::SystemButtonAtScreen(POINT screenPoint) const {
     float localY = 0.0f;
     ToLocalDip(screenPoint, &localX, &localY);
     return SystemButtonHit(LayoutIslandFor(), localX, localY);
+}
+
+bool IslandWindow::TrayButtonAtScreen(POINT screenPoint) const {
+    if (!hwnd_ || trayIconCount_ <= 0) return false;
+
+    float localX = 0.0f;
+    float localY = 0.0f;
+    ToLocalDip(screenPoint, &localX, &localY);
+    const float monitorWidthDip = PixelsToDip(rect_.right - rect_.left, monitor_.dpi);
+    return TrayButtonHit(LayoutIslandFor(), monitorWidthDip, localX, localY);
 }
 
 
@@ -1052,13 +1060,23 @@ void IslandWindow::UpdatePointerState() {
         }
         hoveredIcon_ = hovered;
 
-        // The tray, from the monitor's own width: the group is anchored to the right-hand edge rather than
-        // to the row, so the row growing must not move it (see TrayIconBoxFor).
-        hoveredTrayIcon_ =
-            trayIconCount_ > 0
-                ? TrayIconUnderPointer(island, PixelsToDip(rect_.right - rect_.left, monitor_.dpi),
-                                       trayIconCount_, localX, localY)
-                : -1;
+        // The tray, from the monitor's own width: the button is anchored to the right-hand edge rather than
+        // to the row, so the row growing must not move it (see TrayButtonFor).
+        const float monitorWidthDip = PixelsToDip(rect_.right - rect_.left, monitor_.dpi);
+        trayButtonHovered_ =
+            trayIconCount_ > 0 && TrayButtonHit(island, monitorWidthDip, localX, localY);
+
+        // ... and the icon under the pointer when its CARD is up. The card is placed by the frame loop, so
+        // this is the same placed rectangle the renderer drew into -- the same rule the music card's
+        // controls and the panel's tiles follow (see PlacedCardFor).
+        trayCellHovered_ = -1;
+        if (trayIconCount_ > 0 && cardLeftDip_ > 0.0f) {
+            // The anchor the window is laid out from, NOT a local one: the card is placed from the resting
+            // pill's box, and the frame loop placed it from this same anchor.
+            const RoundedBox card =
+                PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
+            trayCellHovered_ = TrayPageCellAt(card, trayIconCount_, localX, localY);
+        }
 
         // The Start button is on the other end, from the same island box.
         startHovered_ = StartButtonHit(island, localX, localY);

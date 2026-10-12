@@ -308,7 +308,16 @@ static constexpr int kMaxTaskButtons = 32;
     const TrayIcon* trayIcons = nullptr;
     int             trayIconCount = 0;
     unsigned long long trayRevision = 0;
+    // Which cell of the card's grid the pointer is on, and whether the button at the right-hand end is
+    // under it. Both are the window's answers, taken from the geometry in TrayPageFor/TrayButtonFor.
     int             trayHoveredIndex = -1;
+    bool            trayButtonHovered = false;
+    // Whether the card is showing the tray page rather than the panel's tiles. The same card, the same
+    // place, the same animation -- only the contents change (see TrayPageFor).
+    bool            trayPageOpen = false;
+    // The page's own heading. Supplied by the caller, because this class holds no user-facing strings of its
+    // own (see SoundPageText, which is here for the same reason). Empty means no heading.
+    const wchar_t*  trayPageTitle = nullptr;
 
     // Whether the pointer is on the Start button, which lives on the other side of the
     // island from the application icons.

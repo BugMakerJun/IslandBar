@@ -17,6 +17,9 @@
 #pragma once
 
 #include "Geometry.h"
+// The tray page's grid is bounded by the same limit the tray itself has (kMaxTrayIcons), so the two cannot
+// disagree about how many icons exist.
+#include "TaskStripLayout.h"
 
 namespace island {
 
@@ -71,6 +74,74 @@ enum class CardOwner {
     Notification,  // a message that arrived
     Music,         // what is playing, shown once no message is in the way
 };
+
+// --- the tray page: the applications' tray icons, inside the panel's own card ------------------
+//
+// A PAGE of the panel rather than a fourth card, for the same reason the 声音输出 page is one: it is the
+// same card in the same place with the same open/close animation, and only its contents change -- which is
+// what the shell's own flyouts do too, and it means no new card geometry, no new policy rule and no new
+// transition. See Renderer::RenderFrame's panel branch.
+//
+// A WRAPPING GRID, because the number of icons is whatever the user has running: three to a row in the
+// system panel's own tile size would hold six, and the machine this was built on has sixteen.
+inline constexpr int   kTrayPageColumns      = 5;
+inline constexpr float kTrayPageCellDip      = 48.0f;   // the cell a 16 DIP picture sits in
+inline constexpr float kTrayPageCellGapDip   = 6.0f;
+
+struct TrayPageLayout {
+    RectF title;          // the page's own line, at the top
+    RectF cells[kMaxTrayIcons];
+    int   count = 0;
+    int   columns = 0;
+};
+
+// Where the page's contents go, inside the card the renderer was given. Pure, so the hit test and the
+// drawing cannot disagree about which cell an icon is in.
+inline TrayPageLayout TrayPageFor(const RoundedBox& card, int iconCount) {
+    TrayPageLayout layout;
+    if (iconCount < 0) iconCount = 0;
+    if (iconCount > kMaxTrayIcons) iconCount = kMaxTrayIcons;
+    layout.count = iconCount;
+    if (iconCount == 0) return layout;
+
+    const float cardWidth = card.rect.right - card.rect.left;
+    const float titleHeight = 34.0f;
+    // 16 DIP, the music card's own padding, written here as a literal because that constant is declared
+    // further down this file and a page's heading is not worth reordering the file for.
+    layout.title.left = card.rect.left + 16.0f;
+    layout.title.right = card.rect.right - 16.0f;
+    layout.title.top = card.rect.top + 6.0f;
+    layout.title.bottom = layout.title.top + titleHeight - 8.0f;
+
+    const int columns = iconCount < kTrayPageColumns ? iconCount : kTrayPageColumns;
+    layout.columns = columns;
+    const float gridWidth = columns * kTrayPageCellDip + (columns - 1) * kTrayPageCellGapDip;
+    // Centred, so a page of four icons is not pinned to the left while a page of five fills the card.
+    float left = card.rect.left + (cardWidth - gridWidth) * 0.5f;
+    float top = card.rect.top + titleHeight + 8.0f;
+
+    for (int i = 0; i < iconCount; ++i) {
+        const int column = i % columns;
+        const int row = i / columns;
+        RectF cell;
+        cell.left = left + column * (kTrayPageCellDip + kTrayPageCellGapDip);
+        cell.top = top + row * (kTrayPageCellDip + kTrayPageCellGapDip);
+        cell.right = cell.left + kTrayPageCellDip;
+        cell.bottom = cell.top + kTrayPageCellDip;
+        layout.cells[i] = cell;
+    }
+    return layout;
+}
+
+// Which cell a card-local DIP point is on, or -1.
+inline int TrayPageCellAt(const RoundedBox& card, int iconCount, float x, float y) {
+    const TrayPageLayout layout = TrayPageFor(card, iconCount);
+    for (int i = 0; i < layout.count; ++i) {
+        const RectF& cell = layout.cells[i];
+        if (x >= cell.left && x <= cell.right && y >= cell.top && y <= cell.bottom) return i;
+    }
+    return -1;
+}
 
 inline CardContentLayout CardContentFor(const RoundedBox& cardBox) {
     const float height = cardBox.rect.bottom - cardBox.rect.top;

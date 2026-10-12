@@ -80,6 +80,10 @@ perform the transition on a timer:
                              machine that is always playing one there is no way to
                              photograph the bar itself -- its tray, its row, its status line.
                              This is what the tray's own screenshot was taken with.
+    ISLANDBAR_TRAY_PAGE=1    open the tray page (the card behind the three-dot button at
+                             the right-hand end of the bar) at startup. The card is behind
+                             a click on a control, and a script cannot click the bar on this
+                             machine, so this is the only way to photograph it.
     ISLANDBAR_START_MS       press the START button after N ms, and every
                              ISLANDBAR_START_CYCLE_MS after that. The Start button is the
                              one control that has to inject input into the shell, so it

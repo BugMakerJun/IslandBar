@@ -104,18 +104,25 @@ public:
     void DrawClock(ID2D1DeviceContext2* context, const RoundedBox& box,
                    ClockStyle style, float opacity);
 
-    // The system tray, at the right-hand end of the bar: the applications' own tray icons, drawn from
-    // the PNG the shell stores for each of them (see TrayIcons.h for where they come from).
+    // THE SYSTEM TRAY: one button at the right-hand end of the bar, and a card behind it.
     //
-    // `revision` is the list's own, so a decoded bitmap is kept until the icons themselves change: the
-    // bar draws at the compositor's rate and a PNG decode per frame per icon would be the most expensive
-    // thing on the bar.
+    // Asked for in these words: "在红框位置创建一个按钮 点击按钮弹出卡片 卡片里是这些托盘" -- a button and a
+    // card rather than the row of icons the first version drew along the bar.
     //
-    // `hoveredIndex` gets the same wash the application buttons get, so "this is under the pointer" looks
-    // the same wherever it happens.
-    void DrawTrayIcons(ID2D1DeviceContext2* context, const RoundedBox& island, float monitorWidthDip,
-                       const TrayIcon* icons, int count, unsigned long long revision, float opacity,
-                       int hoveredIndex);
+    // The button is deliberately NOT a chevron: the deck's own system button already carries one, and two
+    // identical marks at the two ends of the bar would read as the same control. Three dots say "there is
+    // more than fits", which is what this is.
+    void DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box, bool hovered, bool open,
+                        const D2D1_COLOR_F& fill, float opacity);
+
+    // The card's tray page: the icons in a wrapping grid, each with the wash the other buttons get.
+    //
+    // `revision` is the list's own, so a decoded bitmap is kept until the icons themselves change: the bar
+    // draws at the compositor's rate and a PNG decode per frame per icon would be the most expensive thing
+    // on it. `hoveredIndex` is a cell of the grid (see TrayPageFor).
+    void DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& card, const wchar_t* title,
+                      const TrayIcon* icons, int count, unsigned long long revision, float opacity,
+                      int hoveredIndex);
 
     // --- the date, the weekday, the time and the weather: one line, two homes ----
     //
@@ -627,6 +634,11 @@ private:
     CachedBitmapSlot callIcon_;
     ID2D1Bitmap1* CallIconBitmap(ID2D1DeviceContext2* context, const uint8_t* pixels, int width,
                                  int height, unsigned long long revision);
+
+    // The decoded bitmap for one tray icon, cached until the list's revision changes. One place knows how
+    // to turn a registry PNG into something drawable, and it is called by the tray page.
+    ID2D1Bitmap1* TrayIconBitmap(ID2D1DeviceContext2* context, int index, const TrayIcon& icon,
+                                 unsigned long long revision);
 
     IDWriteTextFormat*   dateFormat_  = nullptr;
     IDWriteTextFormat*   appFormat_   = nullptr;

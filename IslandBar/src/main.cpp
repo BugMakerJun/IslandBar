@@ -650,6 +650,9 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
 
     // Whether the system panel is open. It is a TOGGLE, like the shell flyout it mirrors.
     bool systemPanelOpen = forcedSystemPanel;
+    // The TRAY's own level of the same card: the icons behind the button at the right-hand end of the bar.
+    // Kept beside the panel's flag because the two are two levels of one card (see the click handler).
+    bool trayPageOpen = false;
     // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
     // the whole set, and the arrows and dots are the controls for it.
     int systemPanelPage = 0;
@@ -1219,6 +1222,15 @@ float musicWavePhase = 0.0f;
                 soundPageOpen = wcstol(setting, nullptr, 10) != 0;
                 systemPanelOpen = true;
                 island::LogAndPrint("  diagnostic: the sound page is opened at startup\n");
+                std::fflush(stdout);
+            }
+            // ... and the tray's page, for the same reason: it is behind a click on a control whose clicks
+            // cannot be synthesised from a script on this machine (see ISLANDBAR_CLICK_AT), so without this
+            // there is no way to photograph it.
+            if (GetEnvironmentVariableW(L"ISLANDBAR_TRAY_PAGE", setting, 32) > 0) {
+                trayPageOpen = wcstol(setting, nullptr, 10) != 0;
+                systemPanelOpen = trayPageOpen;
+                island::LogAndPrint("  diagnostic: the tray page is opened at startup\n");
                 std::fflush(stdout);
             }
             if (GetEnvironmentVariableW(L"ISLANDBAR_SOUND_SCROLL", setting, 32) > 0) {
@@ -1896,12 +1908,32 @@ float musicWavePhase = 0.0f;
                             "another application.\n");
                     }
                     std::fflush(stdout);
+                } else if (trayIcons.Count() > 0 && window.TrayButtonAtScreen(cursor)) {
+                    // THE TRAY BUTTON, at the other end of the bar from the system button, and a toggle
+                    // for the same reason: pressing it again puts away what it opened.
+                    //
+                    // It opens the SAME CARD as the system panel, one level down (see TrayPageFor), so the
+                    // two share a card, a position and an animation -- and the two flags have to be kept in
+                    // step: opening one closes the other, or the card would be asked to be two pages at
+                    // once.
+                    const bool opening = !trayPageOpen;
+                    trayPageOpen = opening;
+                    systemPanelOpen = opening;
+                    systemPanelPage = 0;
+                    soundPageOpen = false;
+                    panelSliderDrag = false;
+                    mixerSliderDragRow = -1;
+                    mixerSliderDragPid = 0;
+                    island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
+                    std::fflush(stdout);
                 } else if (window.SystemButtonAtScreen(cursor)) {
                     // The system panel is a TOGGLE, like the shell's own flyout: pressing the control
                     // again closes what it opened. Without that the only way out would be to click
                     // somewhere unrelated, which is not a way out a user can guess.
                     systemPanelOpen = !systemPanelOpen;
                     systemPanelPage = 0;   // always opens on the first page, like the shell's flyout
+                    // ... and the tray's page is a level of the same card, so it goes with it.
+                    trayPageOpen = false;
                     // The page is a LEVEL of the panel, so closing the panel closes it too -- and a drag
                     // left half-done is ended, or the next press anywhere would go on dragging a slider
                     // that is no longer on screen.
@@ -2951,7 +2983,10 @@ float musicWavePhase = 0.0f;
                     trayIcons.Count() < island::kMaxTrayIcons ? trayIcons.Count()
                                                               : island::kMaxTrayIcons;
                 frame.trayRevision = trayIcons.Revision();
-                frame.trayHoveredIndex = window.TrayHoveredIcon();
+                frame.trayHoveredIndex = window.TrayCellHovered();
+                frame.trayButtonHovered = window.TrayButtonHovered();
+                frame.trayPageOpen = trayPageOpen;
+                frame.trayPageTitle = trayPageOpen ? L"\u6258\u76d8" : nullptr;   // 托盘
                 window.SetTrayIconCount(frame.trayIconCount);
 
                 frame.systemPanelOpen = systemPanelOpen;
@@ -3149,7 +3184,7 @@ float musicWavePhase = 0.0f;
                 const int trayShown =
                     trayIcons.Count() < island::kMaxTrayIcons ? trayIcons.Count()
                                                               : island::kMaxTrayIcons;
-                const float rowWidthDip = monitorWidthDip - island::TrayWidthDip(trayShown);
+                const float rowWidthDip = monitorWidthDip - island::TrayButtonReservedDip();
                 int listed = island::TaskIconsThatFit(rowWidthDip, taskWindows.Count());
 
                 // EACH ICON'S ARRIVAL, and the row as the UNION of what is listed and what is leaving.

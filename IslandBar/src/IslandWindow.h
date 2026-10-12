@@ -177,14 +177,19 @@ public:
     // answered here, so it has to be told the same thing the renderer was.
     void SetFullscreenApp(bool fullscreenApp);
 
-    // How many tray icons are on the bar, so the window can tell whether the pointer is on one -- the
-    // same arrangement as the application icon count, and for the same reason: the count comes from a
-    // list the window does not own.
+    // The tray: how many icons the CARD holds, whether the pointer is on its button, and which cell of the
+    // card's grid the pointer is on. The count comes from a list the window does not own, which is why it
+    // is told rather than found out -- the same arrangement as the application icon count.
     void SetTrayIconCount(int count);
     int  TrayIconCount() const { return trayIconCount_; }
-    // The tray icon under the pointer, or -1. Chosen here because this is the only place that knows where
-    // the pointer is; the geometry comes from TaskStripLayout, so the hit test and the drawing agree.
-    int  TrayHoveredIcon() const { return hoveredTrayIcon_; }
+    bool TrayButtonHovered() const { return trayButtonHovered_; }
+    // Whether a screen point is on the tray button. The frame loop's click handler asks this, because the
+    // button is a control and the click has to land on the same rectangle that is drawn.
+    bool TrayButtonAtScreen(POINT screenPoint) const;
+    // The tray icon (a cell of the card's grid) under the pointer, or -1. Chosen here because this is the
+    // only place that knows where the pointer is; the geometry comes from TrayPageFor, so the hit test and
+    // the drawing agree.
+    int  TrayCellHovered() const { return trayCellHovered_; }
 
     // Tells the window how many application icons are on screen.
     //
@@ -532,7 +537,8 @@ private:
     bool fullscreenApp_ = false;
     // The tray, for the same reason: how many icons are on the bar, and which one the pointer is on.
     int trayIconCount_ = 0;
-    int hoveredTrayIcon_ = -1;
+    bool trayButtonHovered_ = false;
+    int trayCellHovered_ = -1;
     // Which card the frame loop says is up: what the cursor's hit tests are gated on. See SetCardOwner.
     CardOwner cardOwner_ = CardOwner::None;
     // The last value written to the log, so the hover trace reports changes rather than every poll.

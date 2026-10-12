@@ -700,23 +700,28 @@ inline constexpr float kTrayRightMarginDip  = 6.0f;
 // Bounded because a row of every icon an application ever registered is a row nothing can be read from.
 inline constexpr int   kMaxTrayIcons        = 10;
 
-inline float TrayWidthDip(int count) {
-    if (count <= 0) return 0.0f;
-    return count * kTrayIconDip + (count - 1) * kTrayGapDip + kTrayRightMarginDip;
+// ONE BUTTON, and the icons behind it, which is the second half of what the user asked for:
+//
+//     "在红框位置创建一个按钮 点击按钮弹出卡片 卡片里是这些托盘"
+//
+// The first version drew every tray icon inline at the right-hand end -- ten of them, and a machine with
+// more running applications than that had nowhere to put the rest. A button and a card is also what the
+// shell itself does (the chevron over the notification area), and it keeps the bar's right-hand end a
+// fixed, readable width however many applications are running.
+//
+// The BUTTON is anchored to the MONITOR's right margin, and NOT to the end of the application row, even
+// though that is where the red box in the report sat (the row was full, so its end and the margin were
+// the same place). A control glued to a row that grows and shrinks with the windows that are open would
+// move every time one opened -- and this bar's rule, from its first day, is that nothing on it moves
+// because a window did.
+inline float TrayButtonRightDip(float monitorWidthDip) {
+    return monitorWidthDip - kTrayRightMarginDip;
 }
 
-// One tray icon's rectangle, in window-local DIPs. `index` counts from the LEFT of the group, which is
-// how the list is ordered; the group as a whole is flush with the monitor's right margin.
-inline RectF TrayIconBoxFor(const RoundedBox& island, float monitorWidthDip, int index, int count) {
-    if (count <= 0 || index < 0 || index >= count) return RectF{};
-
-    const float groupRight = monitorWidthDip - kTrayRightMarginDip;
-    const float groupWidth = TrayWidthDip(count) - kTrayRightMarginDip;
-    const float left = groupRight - groupWidth + static_cast<float>(index) * (kTrayIconDip + kTrayGapDip);
-
+inline RectF TrayButtonFor(const RoundedBox& island, float monitorWidthDip) {
     RectF box;
-    box.left = left;
-    box.right = left + kTrayIconDip;
+    box.right = TrayButtonRightDip(monitorWidthDip);
+    box.left = box.right - kTrayIconDip;
     // On the island's own line, like the deck buttons and the application icons: one row, one centre.
     const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
     box.top = centreY - kTrayIconDip * 0.5f;
@@ -724,15 +729,12 @@ inline RectF TrayIconBoxFor(const RoundedBox& island, float monitorWidthDip, int
     return box;
 }
 
-// Which tray icon a window-local DIP point is on, or -1.
-inline int TrayIconUnderPointer(const RoundedBox& island, float monitorWidthDip, int count, float x,
-                                float y) {
-    for (int i = 0; i < count; ++i) {
-        const RectF box = TrayIconBoxFor(island, monitorWidthDip, i, count);
-        if (box.right <= box.left) continue;
-        if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return i;
-    }
-    return -1;
+inline bool TrayButtonHit(const RoundedBox& island, float monitorWidthDip, float x, float y) {
+    const RectF box = TrayButtonFor(island, monitorWidthDip);
+    return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
 }
+
+// The room the button takes on the right, for the row's own sizing: the button plus its margin.
+inline float TrayButtonReservedDip() { return kTrayIconDip + kTrayRightMarginDip; }
 
 } // namespace island

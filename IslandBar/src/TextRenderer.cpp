@@ -606,92 +606,166 @@ float TextRenderer::MeasureStatusLine(const wchar_t* weekday, const wchar_t* day
     return StatusRunWidth(pieces, count);
 }
 
-void TextRenderer::DrawTrayIcons(ID2D1DeviceContext2* context, const RoundedBox& island,
-                                 float monitorWidthDip, const TrayIcon* icons, int count,
-                                 unsigned long long revision, float opacity, int hoveredIndex) {
-    if (!context || !icons || count <= 0 || opacity <= 0.01f) return;
-    if (count > kMaxTrayIcons) count = kMaxTrayIcons;
+// The decoded bitmap for one tray icon, cached until the list's revision changes.
+//
+// One helper for the button's card and the old inline row alike: the decode is the expensive part (a PNG
+// per icon), and there is exactly one place that knows how to do it.
+ID2D1Bitmap1* TextRenderer::TrayIconBitmap(ID2D1DeviceContext2* context, int index, const TrayIcon& icon,
+                                           unsigned long long revision) {
+    if (!context || index < 0 || index >= kMaxTrayIcons) return nullptr;
+    if (!icon.png || icon.pngSize == 0) return nullptr;
 
-    // Reported on change, because "the tray is not drawn" has three causes a screenshot cannot separate:
-    // the draw was called with nothing, the pictures did not decode, or they were drawn somewhere the
-    // window's region clips. This says which.
-    {
-        static int reportedCount = -1;
-        static int reportedFirstWidth = -1;
-        if (count != reportedCount || icons[0].pngSize != static_cast<size_t>(reportedFirstWidth)) {
-            reportedCount = count;
-            reportedFirstWidth = static_cast<int>(icons[0].pngSize);
-            const RectF box = TrayIconBoxFor(island, monitorWidthDip, 0, count);
-            LogLine(L"  draw tray: count=%d, monitor %.0f DIP, first icon x [%.0f, %.0f] y [%.0f, %.0f], "
-                    L"%zu byte PNG, opacity %.2f",
-                    count, monitorWidthDip, box.left, box.right, box.top, box.bottom,
-                    icons[0].pngSize, opacity);
+    TrayIconSlot& slot = trayIconSlots_[index];
+    if (slot.bitmap && slot.revision == revision && slot.index == index) return slot.bitmap;
+
+    ID2D1Bitmap1* bitmap = nullptr;
+    DecodedImage decoded;
+    if (DecodeImage(icon.png, icon.pngSize, &decoded) && decoded.pixels) {
+        const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f,
+            96.0f);
+        const UINT32 stride = static_cast<UINT32>(decoded.width) * 4;
+        context->CreateBitmap(
+            D2D1::SizeU(static_cast<UINT32>(decoded.width), static_cast<UINT32>(decoded.height)),
+            decoded.pixels, stride, &properties, &bitmap);
+    }
+    SafeRelease(&slot.bitmap);
+    slot.bitmap = bitmap;
+    slot.revision = revision;
+    slot.index = index;
+
+    if (!bitmap) {
+        // Reported once: a picture that will not decode and a picture drawn where the region clips it look
+        // identical on screen, and only one of them is this branch.
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            LogLine(L"  tray: icon %d has a %zu byte PNG that produced no bitmap", index,
+                    icon.pngSize);
+        }
+    }
+    return bitmap;
+}
+
+void TextRenderer::DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box, bool hovered,
+                                  bool open, const D2D1_COLOR_F& fill, float opacity) {
+    if (!context || box.right <= box.left || opacity <= 0.01f) return;
+
+    // The same background the deck's buttons carry, in the island's own colour, so the bar's two ends read
+    // as one object -- and the same wash on hover, so "under the pointer" looks the same everywhere.
+    const float radius = (box.bottom - box.top) * 0.5f;
+    const D2D1_ROUNDED_RECT rounded = {
+        D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
+    if (fill.a > 0.001f) {
+        ID2D1SolidColorBrush* background = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(fill, &background)) && background) {
+            context->FillRoundedRectangle(&rounded, background);
+            context->DrawRoundedRectangle(&rounded, background, 1.0f);
+            background->Release();
+        }
+    }
+    if ((hovered || open) && opacity > 0.01f) {
+        ID2D1SolidColorBrush* wash = nullptr;
+        const float amount = open ? 0.22f : 0.16f;
+        if (SUCCEEDED(context->CreateSolidColorBrush(
+                D2D1::ColorF(1.0f, 1.0f, 1.0f, amount * opacity), &wash)) &&
+            wash) {
+            context->FillRoundedRectangle(&rounded, wash);
+            wash->Release();
         }
     }
 
-    ID2D1SolidColorBrush* wash = nullptr;
-    context->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity), &wash);
+    // THREE DOTS, not the chevron the system button carries. Two identical marks at the two ends of one bar
+    // would read as the same control, and this one means "there is more than fits", which is what the dots
+    // say. Drawn as geometry, for the reason the Start button's mark is: no glyph to get wrong and nothing
+    // to fail to load.
+    ID2D1SolidColorBrush* ink = nullptr;
+    const float brightness = open ? 1.0f : 0.90f;
+    if (FAILED(context->CreateSolidColorBrush(
+            D2D1::ColorF(brightness, brightness, brightness, 0.94f * opacity), &ink)) ||
+        !ink) {
+        return;
+    }
+    const float cx = (box.left + box.right) * 0.5f;
+    const float cy = (box.top + box.bottom) * 0.5f;
+    for (int i = -1; i <= 1; ++i) {
+        const float x = cx + static_cast<float>(i) * 6.0f;
+        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), 2.2f, 2.2f), ink);
+    }
+    ink->Release();
+}
 
-    for (int i = 0; i < count; ++i) {
-        const RectF box = TrayIconBoxFor(island, monitorWidthDip, i, count);
-        if (box.right <= box.left) continue;
+void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& card,
+                                const wchar_t* title, const TrayIcon* icons, int count,
+                                unsigned long long revision, float opacity, int hoveredIndex) {
+    if (!context || opacity <= 0.01f) return;
 
-        // The same wash the application buttons carry, so "under the pointer" looks the same here.
-        if (wash && i == hoveredIndex) {
-            const float radius = (box.bottom - box.top) * 0.5f;
-            const D2D1_ROUNDED_RECT rounded = {
-                D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
-            context->FillRoundedRectangle(&rounded, wash);
+    // The card's own surface: the same one the panel and the music card are drawn on, so the page cannot
+    // come out looking like a different kind of object.
+    const D2D1_COLOR_F surface = D2D1::ColorF(0.05f, 0.05f, 0.07f, 0.97f * opacity);
+    D2D1_ROUNDED_RECT rounded = {};
+    rounded.rect = D2D1::RectF(card.rect.left, card.rect.top, card.rect.right, card.rect.bottom);
+    rounded.radiusX = card.radiusX;
+    rounded.radiusY = card.radiusY;
+    ID2D1SolidColorBrush* background = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(surface, &background)) && background) {
+        context->FillRoundedRectangle(&rounded, background);
+        context->DrawRoundedRectangle(&rounded, background, 1.0f);
+        background->Release();
+    }
+
+    const TrayPageLayout layout = TrayPageFor(card, count);
+
+    if (title && title[0] != L'\0' && appRowFormat_) {
+        ID2D1SolidColorBrush* ink = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(
+                D2D1::ColorF(0.86f, 0.88f, 0.92f, 0.86f * opacity), &ink)) &&
+            ink) {
+            context->DrawTextW(title, static_cast<UINT32>(std::wcslen(title)), appRowFormat_,
+                               D2D1::RectF(layout.title.left, layout.title.top, layout.title.right,
+                                           layout.title.bottom),
+                               ink);
+            ink->Release();
         }
+    }
 
-        // The picture: decoded once per icon per revision. A PNG decode per frame per icon would be the
-        // most expensive thing on this bar, and the bar draws at the compositor's rate.
-        ID2D1Bitmap1* bitmap = nullptr;
-        if (icons[i].png && icons[i].pngSize > 0) {
-            TrayIconSlot& slot = trayIconSlots_[i];
-            if (slot.bitmap && slot.revision == revision && slot.index == i) {
-                bitmap = slot.bitmap;
-            } else {
-                DecodedImage decoded;
-                if (DecodeImage(icons[i].png, icons[i].pngSize, &decoded) && decoded.pixels) {
-                    const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
-                        D2D1_BITMAP_OPTIONS_NONE,
-                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                                          D2D1_ALPHA_MODE_PREMULTIPLIED),
-                        96.0f, 96.0f);
-                    const UINT32 stride = static_cast<UINT32>(decoded.width) * 4;
-                    context->CreateBitmap(
-                        D2D1::SizeU(static_cast<UINT32>(decoded.width),
-                                    static_cast<UINT32>(decoded.height)),
-                        decoded.pixels, stride, &properties, &bitmap);
-                }
-                SafeRelease(&slot.bitmap);
-                slot.bitmap = bitmap;
-                slot.revision = revision;
-                slot.index = i;
+    if (count == 0) return;   // the heading alone, over an empty page
+
+    for (int i = 0; i < layout.count; ++i) {
+        const RectF& cell = layout.cells[i];
+
+        // The cell's own square, in the island's colour: the icons belong to the bar, not to the wallpaper
+        // behind the card.
+        const float radius = 10.0f;
+        const D2D1_ROUNDED_RECT tile = {
+            D2D1::RectF(cell.left, cell.top, cell.right, cell.bottom), radius, radius};
+        ID2D1SolidColorBrush* tileFill = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(
+                D2D1::ColorF(0.11f, 0.11f, 0.14f, 0.95f * opacity), &tileFill)) &&
+            tileFill) {
+            context->FillRoundedRectangle(&tile, tileFill);
+            tileFill->Release();
+        }
+        if (i == hoveredIndex) {
+            ID2D1SolidColorBrush* wash = nullptr;
+            if (SUCCEEDED(context->CreateSolidColorBrush(
+                    D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity), &wash)) &&
+                wash) {
+                context->FillRoundedRectangle(&tile, wash);
+                wash->Release();
             }
         }
 
-        if (!bitmap) {
-            // Reported once: a picture that will not decode and a picture that is drawn somewhere the
-            // region clips look identical, and only one of them is this branch.
-            static bool reportedNoBitmap = false;
-            if (!reportedNoBitmap) {
-                reportedNoBitmap = true;
-                LogLine(L"  draw tray: icon %d has a %zu byte PNG that produced no bitmap",
-                        i, icons[i].pngSize);
-            }
-            continue;
-        }
-        const float side = kTrayPictureDip;
-        const float centreX = (box.left + box.right) * 0.5f;
-        const float centreY = (box.top + box.bottom) * 0.5f;
+        ID2D1Bitmap1* bitmap = TrayIconBitmap(context, i, icons[i], revision);
+        if (!bitmap) continue;
+        const float side = 24.0f;
+        const float centreX = (cell.left + cell.right) * 0.5f;
+        const float centreY = (cell.top + cell.bottom) * 0.5f;
         const D2D1_RECT_F target = D2D1::RectF(centreX - side * 0.5f, centreY - side * 0.5f,
                                                centreX + side * 0.5f, centreY + side * 0.5f);
         context->DrawBitmap(bitmap, &target, opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
     }
-
-    if (wash) wash->Release();
 }
 
 void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box,
