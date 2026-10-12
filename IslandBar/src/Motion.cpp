@@ -137,7 +137,8 @@ float (*CurveFor(IslandState from, IslandState to))(float) {
     return &EaseOutCubic;
 }
 
-IslandAnchor AnchorForWindow(float originX, float originY, float monitorWidthDip) {
+IslandAnchor AnchorForWindow(float originX, float originY, float monitorWidthDip,
+                             float bandHeightDip) {
     (void)originY;   // the vertical anchor is intentionally independent of it
 
     IslandAnchor anchor;
@@ -154,11 +155,26 @@ IslandAnchor AnchorForWindow(float originX, float originY, float monitorWidthDip
     // the top of its own window -- invisible on screen, and caught only because
     // the self-test asserts the pill lies inside the window it was laid out for.
     anchor.topY = kPillTopMarginDip;
+
+    // The band the shell's taskbar claims, when the caller measured one. Clamped rather than trusted:
+    // a work area that says the band is nothing (which happens on a machine whose taskbar is on
+    // another edge) would make the full bar invisible, and the state exists to cover that band.
+    anchor.bandHeightDip = (bandHeightDip >= kMinBandHeightDip &&
+                            bandHeightDip <= kMaxBandHeightDip)
+                               ? bandHeightDip
+                               : kFullBarHeightDip;
     return anchor;
 }
 
 RoundedBox BoxForState(IslandState state, const IslandAnchor& anchor) {
     SizeF size = StateSize(state);
+
+    // The full bar is exactly as tall as the band it exists to fill -- see IslandAnchor::bandHeightDip.
+    // Taken here rather than in StateSize because StateSize has no anchor, and the anchor is where the
+    // measurement lives.
+    if (state == IslandState::FullBar) {
+        size.height = anchor.bandHeightDip;
+    }
 
     // A width of zero means "the whole monitor", which only this function can resolve: it is the one
     // place holding the anchor, and the anchor carries the monitor's centre.

@@ -287,6 +287,17 @@ AppBarResult AppBar::Claim(HWND hwnd, DockEdge edge, LONG thicknessPx) {
     reserved_ = set.rc;
     registration_ = set;
 
+    // WHAT THE SHELL ANSWERED, logged before anything judges it.
+    //
+    // The shell is allowed to rewrite `set.rc` in place to what it actually granted, and it does:
+    // measured on this machine, a request for 42 px came back with a 10 px rectangle in `set.rc`
+    // while the work area really did move by 42. A caller that re-derives its own thickness from
+    // `registration_.rc` therefore re-claims a different strip -- which is exactly what happened
+    // (HANDOFF 8.50: the re-claim asked for 10 px, the landing check refused it, and the bar gave up
+    // the space it had just been granted). The requested thickness is remembered below instead.
+    LogLine(L"  appbar: ABM_SETPOS returned rc %ld,%ld %ldx%ld", set.rc.left, set.rc.top,
+            set.rc.right - set.rc.left, set.rc.bottom - set.rc.top);
+
     // Judge success by the DESKTOP, not by the return values.
     //
     // Every call in this sequence can report success while the work area stays
@@ -379,6 +390,11 @@ AppBarResult AppBar::Claim(HWND hwnd, DockEdge edge, LONG thicknessPx) {
         // shell's own bar is hidden, and Release still has to undo ABM_NEW.
         return AppBarResult::SpaceNotGranted;
     }
+
+    // Remembered for the re-claim: the thickness the bar ASKED for and had granted, not the rectangle
+    // the shell wrote back. See the log line above.
+    claimedThicknessPx_ = thicknessPx;
+    claimedEdge_ = edge;
     return AppBarResult::Registered;
 }
 
@@ -396,6 +412,9 @@ void AppBar::Release() {
     registered_ = false;
     reserved_ = {};
     fullscreenApp_ = false;
+    // Cleared with the rest: a released bar has no strip, and a later ABN_POSCHANGED must not use the
+    // thickness of one that no longer exists. See claimedThicknessPx_.
+    claimedThicknessPx_ = 0;
     LogLine(L"  appbar: released (work area restored)");
 }
 
@@ -411,14 +430,27 @@ bool AppBar::HandleCallback(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             // this drifts out of sync with the space it claims.
             LogLine(L"  appbar: ABN_POSCHANGED -- re-claiming the space");
             if (registered_) {
-                const DockEdge edge = registration_.uEdge == ABE_BOTTOM ? DockEdge::Bottom
-                                      : registration_.uEdge == ABE_LEFT ? DockEdge::Left
-                                      : registration_.uEdge == ABE_RIGHT ? DockEdge::Right
-                                                                 : DockEdge::Top;
-                const LONG thickness = registration_.rc.bottom - registration_.rc.top;
-                if (thickness > 0) {
-                    Claim(hwnd, edge, thickness);
-                }
+                // THE THICKNESS THIS BAR ASKED FOR, and not `registration_.rc`'s height.
+                //
+                // The shell rewrites the rectangle it is handed, so that height is not the strip that
+                // was granted: measured here, a granted 42 px came back as a 10 px rect, and the
+                // re-claim asked for 10 -- which the landing check correctly refused, after which the
+                // bar gave up the space it had. `claimedThicknessPx_` is what was asked for and
+                // verified, so re-claiming it is the same request again.
+                //
+                // The edge is remembered with it. The fallback is for a callback that arrives before
+                // any claim has been verified (which cannot happen in practice, but leaves this
+                // function total rather than reading a member nothing has written).
+                const bool haveClaim = claimedThicknessPx_ > 0;
+                const DockEdge edge =
+                    haveClaim ? claimedEdge_
+                              : (registration_.uEdge == ABE_BOTTOM ? DockEdge::Bottom
+                                 : registration_.uEdge == ABE_LEFT ? DockEdge::Left
+                                 : registration_.uEdge == ABE_RIGHT ? DockEdge::Right
+                                                                    : DockEdge::Top);
+                const LONG thickness = haveClaim ? claimedThicknessPx_
+                                                 : registration_.rc.bottom - registration_.rc.top;
+                if (thickness > 0) Claim(hwnd, edge, thickness);
             }
             return true;
 

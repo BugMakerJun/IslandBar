@@ -39,6 +39,7 @@
 #include "ToastStore.h"
 #include "WeChatWatch.h"
 #include "Weather.h"
+#include "ThumbnailPreview.h"
 #include "IslandWindow.h"
 #include "Monitor.h"
 #include "Motion.h"
@@ -5032,7 +5033,11 @@ void TestMusicCardLayout() {
             mon.dpi = 96;
             mon.dpiY = 96;
 
-            const IslandAnchor fullAnchor = AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f);
+            // WITH the band, the way the window builds its own anchor: the height of this state is the
+            // measurement, not a constant (see the assertions below).
+            const float bandDip = PixelsToDip(mon.work.top - mon.screen.top, mon.dpi);
+            const IslandAnchor fullAnchor =
+                AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f, bandDip);
             const RoundedBox full = BoxForState(IslandState::FullBar, fullAnchor);
 
             wchar_t dt[224];
@@ -5043,12 +5048,40 @@ void TestMusicCardLayout() {
 
             // Its height has to cover the band the work area leaves. Too short and a strip of the band
             // shows above the application; too tall and it covers part of the application.
-            const float bandDip = PixelsToDip(mon.work.top - mon.screen.top, mon.dpi);
             std::swprintf(dt, 224,
                           L"the band is %.0f DIP, the full bar is %.0f DIP, work starts at %.0f DIP",
-                          bandDip, kFullBarHeightDip, PixelsToDip(mon.work.top, mon.dpi));
-            Check(kFullBarHeightDip >= bandDip,
+                          bandDip, full.rect.bottom - full.rect.top,
+                          PixelsToDip(mon.work.top, mon.dpi));
+            Check(full.rect.bottom - full.rect.top >= bandDip - 0.01f,
                   L"the full bar covers the band the work area leaves", dt);
+
+            // AND IT IS THE BAND'S HEIGHT, NOT A CONSTANT.
+            //
+            // The height used to be `kFullBarHeightDip` = 32, which is what THIS machine's taskbar
+            // happens to be -- and the number is the user's setting (Settings > Personalisation >
+            // Taskbar). Three bands are checked, none of them 32, so a return to the constant fails
+            // here rather than on a machine nobody is looking at.
+            for (float requested : {24.0f, 40.0f, 64.0f}) {
+                const IslandAnchor bandAnchor =
+                    AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f, requested);
+                const RoundedBox bar = BoxForState(IslandState::FullBar, bandAnchor);
+                const float height = bar.rect.bottom - bar.rect.top;
+                std::swprintf(dt, 224, L"a %.0f DIP band makes a %.0f DIP bar", requested, height);
+                Check(Nearly(height, requested, 0.01f),
+                      L"the full bar is as tall as the band the work area leaves", dt);
+            }
+
+            // A work area that reports no band at all (a taskbar on another edge) falls back to the
+            // constant rather than producing an invisible state.
+            {
+                const IslandAnchor noBand = AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f, 0.0f);
+                const RoundedBox bar = BoxForState(IslandState::FullBar, noBand);
+                const float height = bar.rect.bottom - bar.rect.top;
+                std::swprintf(dt, 224, L"a 0 DIP band makes a %.0f DIP bar of %.0f", height,
+                              kFullBarHeightDip);
+                Check(Nearly(height, kFullBarHeightDip, 0.01f),
+                      L"a machine that reports no band falls back to the constant", dt);
+            }
 
             // And it reaches the work area's top edge, so there is no gap between the two.
             Check(full.rect.bottom >= PixelsToDip(mon.work.top, mon.dpi) - 0.01f,
@@ -5593,6 +5626,96 @@ void TestMusicCardLayout() {
                 Check(std::strcmp(numbers, "39.9042%2C116.4074") == 0,
                       L"coordinates are escaped and their digits are not", numberDetail);
             }
+        }
+
+        // The hover preview: where the box goes, and whether the compositor will draw one.
+        //
+        // TWO QUESTIONS, and they fail for different reasons. The placement is pure arithmetic over three
+        // rectangles -- it has to keep the source's shape, sit centred under the icon, hang below it and
+        // never leave the monitor -- and the registration is a call to the compositor that can be refused
+        // with a specific HRESULT (a layered destination, an elevated source, composition off). Both are
+        // asked here, because "the preview never appeared" has no other witness.
+        {
+            const RECT monitor = {0, 0, 2560, 1440};
+            const RECT icon = {1200, 40, 1230, 70};
+
+            const ThumbnailPlacement wide = ThumbnailBoxFor(1920, 1080, icon, monitor, 1.0f);
+            const ThumbnailPlacement tall = ThumbnailBoxFor(600, 1200, icon, monitor, 1.0f);
+            const ThumbnailPlacement unknown = ThumbnailBoxFor(0, 0, icon, monitor, 1.0f);
+            const ThumbnailPlacement sliver = ThumbnailBoxFor(1, 9000, icon, monitor, 1.0f);
+
+            wchar_t previewDetail[256];
+            std::swprintf(previewDetail, 256,
+                          L"wide %ldx%ld, tall %ldx%ld, unknown %ldx%ld of %ldx%ld max",
+                          wide.box.right - wide.box.left, wide.box.bottom - wide.box.top,
+                          tall.box.right - tall.box.left, tall.box.bottom - tall.box.top,
+                          unknown.box.right - unknown.box.left, unknown.box.bottom - unknown.box.top,
+                          static_cast<long>(kThumbnailMaxWidthDip),
+                          static_cast<long>(kThumbnailMaxHeightDip));
+
+            const auto aspectOf = [](const RECT& box) {
+                const float w = static_cast<float>(box.right - box.left);
+                const float h = static_cast<float>(box.bottom - box.top);
+                return h > 0.0f ? w / h : 0.0f;
+            };
+            Check(wide.valid && tall.valid && unknown.valid && sliver.valid,
+                  L"every preview box is a real rectangle", previewDetail);
+            Check(Nearly(aspectOf(wide.box), 1920.0f / 1080.0f, 0.02f) &&
+                      Nearly(aspectOf(tall.box), 0.5f, 0.02f),
+                  L"a preview keeps the shape of the window it shows", previewDetail);
+            Check(wide.box.right - wide.box.left <= static_cast<LONG>(kThumbnailMaxWidthDip) &&
+                      tall.box.bottom - tall.box.top <= static_cast<LONG>(kThumbnailMaxHeightDip),
+                  L"a preview never exceeds its maximum box", previewDetail);
+            Check(sliver.box.right - sliver.box.left >= static_cast<LONG>(kMinThumbnailSideDip) &&
+                      sliver.box.bottom - sliver.box.top >= static_cast<LONG>(kMinThumbnailSideDip),
+                  L"a window with an absurd shape still gets a preview", previewDetail);
+
+            // Centred under the icon it belongs to, and hanging below it. Judged on the unclamped case
+            // only, because the clamp is allowed to move it -- that is what the next check is for.
+            const float iconCentre = (icon.left + icon.right) * 0.5f;
+            const float boxCentre = (wide.box.left + wide.box.right) * 0.5f;
+            std::swprintf(previewDetail, 256, L"icon centre %.0f, box centre %.0f, box top %ld",
+                          iconCentre, boxCentre, wide.box.top);
+            Check(Nearly(boxCentre, iconCentre, 1.0f) && wide.box.top >= icon.bottom,
+                  L"a preview is centred under its icon and hangs below it", previewDetail);
+
+            // An icon in the corner: the box is pushed back inside the monitor rather than hanging off it.
+            const RECT cornerIcon = {2540, 40, 2560, 70};
+            const ThumbnailPlacement corner = ThumbnailBoxFor(1920, 1080, cornerIcon, monitor, 1.0f);
+            std::swprintf(previewDetail, 256, L"corner icon -> box %ld..%ld (monitor 0..2560)",
+                          corner.box.left, corner.box.right);
+            Check(corner.box.left >= monitor.left && corner.box.right <= monitor.right &&
+                      corner.box.bottom <= monitor.bottom,
+                  L"a preview near the edge is kept on the monitor", previewDetail);
+
+            // AND THE COMPOSITOR ITSELF, on a real window: the one part of this that no amount of
+            // arithmetic can answer. The source is a plain STATIC window -- a real top-level window of
+            // this process -- because what is being asked is whether the registration is granted at all.
+            island::ThumbnailPreview preview;
+            // No owner here: the bar's own window is not in scope in this part of the self-test, and what
+            // this block is asking about is the registration, not the z-order (which is the owner's job).
+            const bool created = preview.Create(nullptr);
+            Check(created, L"the preview window is created");
+
+            HWND source = nullptr;
+            if (created) {
+                source = CreateWindowExW(0, L"STATIC", L"preview source", WS_OVERLAPPEDWINDOW, 0, 0,
+                                         640, 400, nullptr, nullptr, GetModuleHandleW(nullptr),
+                                         nullptr);
+                const bool shown =
+                    source != nullptr && preview.Show(source, wide.box) && preview.Visible();
+                std::swprintf(previewDetail, 256,
+                              L"source window %hs, DwmRegisterThumbnail returned 0x%08llX, shown=%d",
+                              source ? "created" : "NOT created", preview.LastResult(), shown ? 1 : 0);
+                Check(shown,
+                      L"the compositor draws a thumbnail of a real window into the preview",
+                      previewDetail);
+
+                preview.Hide();
+                Check(!preview.Visible(), L"the preview can be put away again");
+            }
+            preview.Destroy();
+            if (source) DestroyWindow(source);
         }
 
         // The input region must be as tall as the shape that is DRAWN, including the card.

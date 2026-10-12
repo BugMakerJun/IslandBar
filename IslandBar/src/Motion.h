@@ -56,8 +56,17 @@ enum class IslandState : int {
 // already reserved, which means it covers the unusable band rather than fighting for it -- the
 // application is still given a work area starting below it, and nothing on screen is wasted.
 inline constexpr float kFullBarWidthDip  = 0.0f;   // 0 means "the whole monitor width"
+// The FALLBACK height, used only by callers with no monitor to measure: the self-test's hand-built
+// anchors, and a window whose monitor query failed. The real height is the band the work area leaves,
+// measured per frame and carried on the anchor (see IslandAnchor::bandHeightDip).
 inline constexpr float kFullBarHeightDip = 32.0f;
 inline constexpr float kFullBarRadiusDip = 6.0f;
+
+// What counts as a measured band: below the minimum there is no band to fill (the work area starts at
+// the screen's top edge, which happens when the taskbar is on another edge, and a zero-height bar is
+// not a state -- it is an invisible one). Above the maximum nothing sensible is being reported.
+inline constexpr float kMinBandHeightDip = 8.0f;
+inline constexpr float kMaxBandHeightDip = 128.0f;
 
 // The gap between the bar's underside and the top of a card that hangs BELOW it.
 //
@@ -294,9 +303,24 @@ SizeF StateSize(IslandState state);
 struct IslandAnchor {
     float centerX = 0.0f;
     float topY    = 0.0f;
+
+    // The thickness of the band the SHELL's own taskbar claims at the top of the screen, in DIPs.
+    //
+    // It exists for one state: FullBar, the widened bar that fills the band while a full-screen
+    // application runs -- the band is space no application can use (the work area is inset by it) and
+    // filling it is the whole point of that state. The number is therefore not a constant of this
+    // program but a SETTING of the user's: Settings > Personalisation > Taskbar decides it, and 32 on
+    // this machine is a coincidence. It used to be hardcoded, which was measured as wrong the moment
+    // anyone could change the setting (HANDOFF section 9's open item, closed in 8.50).
+    //
+    // Carried on the anchor because the anchor is already where monitor-derived numbers live (its
+    // centre comes from the monitor's width), so no layout function needs a new parameter and the
+    // geometry stays a pure function of one struct.
+    float bandHeightDip = kFullBarHeightDip;
 };
 
-IslandAnchor AnchorForWindow(float originX, float originY, float monitorWidthDip);
+IslandAnchor AnchorForWindow(float originX, float originY, float monitorWidthDip,
+                             float bandHeightDip = kFullBarHeightDip);
 
 // The pill for a state, as window-local DIPs. The same function the renderer
 // draws and the hit test decides with, so the two can never disagree.

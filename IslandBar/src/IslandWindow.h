@@ -331,6 +331,11 @@ public:
     // The anchor the current box geometry is derived from.
     IslandAnchor CurrentAnchor() const;
 
+    // The thickness of the band the shell's own taskbar keeps at the top of the screen, in DIPs --
+    // the height of the full-screen state, and therefore of the region that has to cover it. Measured
+    // from this window's own monitor. See IslandAnchor::bandHeightDip.
+    float BandHeightDip() const;
+
     // Polls the pointer and updates the enter/leave decision.
     //
     // Public because the frame loop calls it: relying only on the window timer turned out to be

@@ -85,5 +85,13 @@ if(ISLANDBAR_BUILD_GEOPROBE)
     add_subdirectory(tools/geoprobe)
 endif()
 
+# Two windows of one ordinary program, and a DWM thumbnail between them. The bar's own preview said
+# "registered, visible, right place, nothing drawn", and separating the recipe from the machine needed a
+# program that does nothing else. See tools/thumbprobe.
+option(ISLANDBAR_BUILD_THUMBPROBE "Build the DWM thumbnail probe" ON)
+if(ISLANDBAR_BUILD_THUMBPROBE)
+    add_subdirectory(tools/thumbprobe)
+endif()
+
 # The real bar: the DComp/D2D window foundation plus the phase 0-d self-test.
 add_subdirectory(src)

@@ -47,6 +47,7 @@
 #include "SystemStatus.h"
 #include "WicImage.h"
 #include "Weather.h"
+#include "ThumbnailPreview.h"
 #include "Renderer.h"
 
 #pragma comment(lib, "user32.lib")
@@ -618,6 +619,13 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     constexpr unsigned long long kStatusSampleMs = 2000;
     unsigned long long lastStatusSampleMs = 0;
 
+    // How long the pointer must REST on an icon before its live thumbnail appears.
+    //
+    // Short enough that the preview is there by the time the user has decided to look at it, and long
+    // enough that crossing the row on the way to another icon does not flash one up for every icon
+    // passed. The shell's own taskbar uses about this figure.
+    constexpr unsigned long long kThumbnailDwellMs = 350;
+
     // Whether the system panel is open. It is a TOGGLE, like the shell flyout it mirrors.
     bool systemPanelOpen = forcedSystemPanel;
     // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
@@ -943,6 +951,19 @@ unsigned long long lastMusicMeterMs = 0;
                             : "  weather: DISABLED (the worker could not start)");
     std::fflush(stdout);
 
+    // --- the hover preview ---------------------------------------------------
+    //
+    // A live thumbnail of the window under the pointer, hanging below the bar. A window of its own,
+    // because a DWM thumbnail is drawn by the compositor into an HWND rather than handed over as a
+    // bitmap -- see ThumbnailPreview.h.
+    island::ThumbnailPreview preview;
+    // Owned by the bar's window, so it can never be covered by it (see Create).
+    const bool previewReady = preview.Create(window.Handle());
+    island::LogAndPrint(previewReady
+                            ? "  preview: resting on a task icon shows a live thumbnail"
+                            : "  preview: DISABLED (the preview window could not be created)");
+    std::fflush(stdout);
+
     // --- the taskbar's window list ---
     //
     // Refreshed from the frame loop rather than polled here, because it is only needed while the
@@ -1003,6 +1024,17 @@ int rowSlotCount = 0;
     // re-enumerated every 500 ms and its order can differ from the one on screen, so
     // indexing into it at click time could activate a window the user did not point at.
     HWND taskHandles[island::kMaxTaskWindows] = {};
+    // --- the hover preview's own state ---------------------------------------
+    //
+    // Which window the preview is FOR, and when the pointer arrived on its icon. The delay is the
+    // whole reason this exists: the pointer crosses the row on its way somewhere, and a preview that
+    // appeared on the first frame would flash for every icon it passed.
+    HWND previewTarget = nullptr;
+    unsigned long long previewSinceMs = 0;
+    // Reported once each, because "the preview never appeared" and "the compositor refused this window"
+    // are different answers and only the log can tell them apart.
+    bool previewReported = false;
+    int  previewLastRefusals = 0;
     // What was last written to the trace, so it reports changes rather than every frame.
     int   lastReportedHoveredIcon = -2;
     float lastReportedHoverAmount = -1.0f;
@@ -3141,6 +3173,79 @@ float musicWavePhase = 0.0f;
                 // pointer's position using the geometry that is actually on screen.
                 frame.taskHoveredIndex = window.HoveredIcon();
                 frame.startHovered = window.StartHovered() || forcedStartHover;
+
+                // --- the hover preview: a live thumbnail under the icon the pointer rests on -------
+                //
+                // AFTER A DWELL, not on arrival (see previewTarget), and not while a card is up: the
+                // media card and the system panel hang BELOW the bar, which is exactly where a preview
+                // goes, so one would be drawn under the other.
+                //
+                // The box is computed by the pure ThumbnailBoxFor, from the SAME icon rectangle the row
+                // was laid out with -- so the preview cannot point at a different icon from the one
+                // that is open.
+                if (previewReady) {
+                    const unsigned long long previewNow = GetTickCount64();
+                    const int hoveredIcon = frame.taskHoveredIndex;
+                    const HWND wanted = (hoveredIcon >= 0 && hoveredIcon < drawn)
+                                            ? taskHandles[hoveredIcon]
+                                            : nullptr;
+                    if (wanted != previewTarget) {
+                        previewTarget = wanted;
+                        previewSinceMs = previewNow;
+                    }
+
+                    const bool rested = wanted && (previewNow - previewSinceMs) >= kThumbnailDwellMs;
+                    bool shown = false;
+                    if (rested && !frame.outerCardUp && IsWindow(wanted)) {
+                        const RECT monitorPx = window.Monitor().screen;
+                        const float scale = window.Scale();
+                        const island::RoundedBox islandBox = window.LayoutIslandFor();
+                        const island::RectF button = island::TaskIconButtonAtAmounts(
+                            islandBox, hoveredIcon, drawn, taskHoverAmount);
+                        RECT iconPx = {};
+                        iconPx.left = monitorPx.left +
+                                      static_cast<LONG>(std::lround(button.left * scale));
+                        iconPx.right = monitorPx.left +
+                                       static_cast<LONG>(std::lround(button.right * scale));
+                        iconPx.top = monitorPx.top + static_cast<LONG>(std::lround(button.top * scale));
+                        iconPx.bottom =
+                            monitorPx.top + static_cast<LONG>(std::lround(button.bottom * scale));
+
+                        RECT sourcePx = {};
+                        GetWindowRect(wanted, &sourcePx);
+                        const island::ThumbnailPlacement placement = island::ThumbnailBoxFor(
+                            sourcePx.right - sourcePx.left, sourcePx.bottom - sourcePx.top, iconPx,
+                            monitorPx, scale);
+                        shown = placement.valid && preview.Show(wanted, placement.box);
+
+                        if (!previewReported) {
+                            previewReported = true;
+                            island::LogAndPrint(
+                                "  preview: hwnd %p -> box %ld,%ld %ldx%ld (window %ldx%ld, "
+                                "compositor says %ldx%ld), shown=%d, hr=0x%08llX",
+                                reinterpret_cast<void*>(wanted), placement.box.left,
+                                placement.box.top, placement.box.right - placement.box.left,
+                                placement.box.bottom - placement.box.top,
+                                sourcePx.right - sourcePx.left, sourcePx.bottom - sourcePx.top,
+                                preview.SourceSize().cx, preview.SourceSize().cy, shown ? 1 : 0,
+                                preview.LastResult());
+                            std::fflush(stdout);
+                        }
+                    }
+
+                    if (!shown) preview.Hide();
+
+                    // A refusal is reported once per count rather than once per frame: a window the
+                    // compositor will not preview is a fact about that window, and repeating it 60 times
+                    // a second would drown the log.
+                    if (preview.Refusals() != previewLastRefusals) {
+                        previewLastRefusals = preview.Refusals();
+                        island::LogAndPrint("  preview: the compositor refused a thumbnail of hwnd %p "
+                                            "(0x%08llX)",
+                                            reinterpret_cast<void*>(wanted), preview.LastResult());
+                        std::fflush(stdout);
+                    }
+                }
 
                 // Each icon gets a background in the island's own colour, so the row reads as part
                 // of the island rather than as icons floating on the wallpaper -- a bright

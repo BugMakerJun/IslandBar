@@ -5264,6 +5264,97 @@ owner=2(Notification) h=211.6 → … → h=42.1   state 全程 = collapsed(目�
 | **"我按你这张卡画的"** | 三个读"卡片在哪"的地方各算各的：渲染器、面板瓦片、音乐控制键 | 一个几何量只能有一个实现；**发现第二份算式时，先把它替换掉再谈别的** |
 | **静态函数没被调用过** | `BoxHangingFrom` 保留了错误的那一维，且零调用者 | 死代码不只是占地方：它是**下一个复制错的模板**。删掉 |
 | **测试 frame 是一份契约** | 4 条断言红了，因为渲染器不再看 `state` | 渲染器改读哪个字段，测试 frame 就必须设哪个字段 —— 红了是它在提醒契约变了 |
+### 8.51 **图标悬停出实时预览（DWM 缩略图）—— 以及一个"全都成功但什么都不画"的坑** ✅
+
+用户点名要做（"1 2 3 都做了吧"里的第 2 项）：鼠标停在小图标上，下面弹出那个窗口的**实时画面**。
+
+#### 为什么是**另一个窗口**，不是画进自己的表面
+
+DWM 缩略图不是我们能取到的位图：**合成器把源窗口画进我们提供的一个 HWND**，节奏由它自己掌握。所以预览是独立窗口（新模块 `ThumbnailPreview`）：置顶、不抢焦点、点击穿透、挂在栏窗口**下面**（owned window）。
+
+`ThumbnailBoxFor()` 是纯函数（可断言）：保持源窗口宽高比、以图标为中心、吊在栏下方、不越出显示器、退化尺寸兜底（`kMinThumbnailSideDip`）。摆放之外的门控：**停 350 ms 才出现**（横移扫过一排图标不该每个都闪一下），卡片打开时不显示（卡片就挂在预览的位置）。
+
+#### 从"全都成功但什么都不画"到真相：**空 rcSource 在这里不等于"整个窗口"**
+
+第一版部署后：窗口在、位置对、`IsWindowVisible=true`、`DwmRegisterThumbnail` 返回 `S_OK`、`DwmUpdateThumbnailProperties` 返回 `S_OK` —— **像素一个都不变**。三次怀疑、三次被数据否掉：
+
+| 怀疑 | 怎么验的 | 结果 |
+|---|---|---|
+| 被栏自己的置顶窗口压住 | 给预览窗口涂纯色 → 采集像素 | **R255 G0 B0**，窗口**确实在合成**，不是层级问题 |
+| 注册时窗口还是 1×1 隐藏 | 先显示再注册 + 去掉 `WS_EX_TRANSPARENT` | 仍然 0 像素 |
+| 源窗口有问题（跨桌面/被遮挡/最小化） | 换 3 个图标，查 class/title/cloaked/iconic | 三个都是普通可见窗口，`cloaked=0` |
+
+于是按项目惯例写**独立探针** `tools/thumbprobe`（两个自己的窗口 + 一块可辨认的画面 + 打印所有 HRESULT），一次把配方和环境分开：
+
+```
+A 弹出窗口 rcSource={0,0,0,0}   DwmRegisterThumbnail 0x00000000  → 读到的还是桌面/壁纸（没画）
+C 弹出窗口 rcSource={0,0,626,473}                                 → R0 G160 B0 = 源窗口的绿色 ✓
+B 子窗口作 destination                                            → 0x80070057 (E_INVALIDARG)
+cloaked: source=0 destination=0     （不是被 cloaked）
+```
+
+**结论**：文档说空 `rcSource` = "整个源窗口"，在这台机器/这个 build 上**不成立** —— 等于"没有内容"，而且所有调用都报成功。把 `DwmQueryThumbnailSourceSize()` 报出来的矩形**显式**填回去就好了。改完的实测（同一区域 A/B 像素比对）：
+
+```
+icon 2 : changed=9622 of 16720, mean delta=165.67
+icon 0 : changed=8839 of 16720, mean delta=138.40
+```
+
+实拍 `captures/pv3-idx0.png`：悬停的 ChatGPT 图标下方就是那个窗口的实时画面（含它自己的内容），左侧状态行与图标行照常。**教训**：`S_OK` 只说明"调用被接受"；当有一整套 API 都说成功而屏幕是空的时，**最小可复现的独立探针比在自己程序里猜快一个数量级** —— 这次它一次就给出了两种配方的对照。
+
+#### 子窗口那条也是真结论
+
+`DwmRegisterThumbnail` 的 destination **必须是顶层窗口**：子窗口直接 `E_INVALIDARG`。探针里留着这一条，省得下次再试。
+
+自检 **790 → 800** 项：预览盒的 6 条性质 + "窗口建得起来" + "**合成器真的把缩略图画进我们的窗口**"（真窗口、真注册，读数 `DwmRegisterThumbnail returned 0x00000000, shown=1`）+ "能收回去"。
+
+### 8.50 **三件收尾：系统通知通道端到端、FullBar 高度从工作区读、AppBar 真机验证** ✅
+
+#### 一、`ToastStore` 早就接上了 —— 我上一轮的报告是**搜错了名字**
+
+上一轮我说"`ToastStore` 是死代码，没接上"。**错了**：`.cpp` 文件名是 `ToastStore.cpp`，但类名是 **`ToastReader`**，我按文件名搜，所以看着没人用。实际上 main.cpp 里早就建了它、每 2 秒轮询、还有 `--toast-dump`。
+
+真正该做的是**端到端验证**，于是：
+
+```
+toasts: reading '...\wpndatabase.db'
+toasts: starting after id 158
+18:08:43  toasts: 1 new system toast(s), 1 taken in total
+--toast-dump → #158 [Codex]
+```
+
+再跑一次**真实 toast**（`scripts\toast-test.ps1`，走 Windows 通知平台，不是栏自己的管道）：截图 `captures/toast-on-island.png` —— 岛变宽显示 `ToastTest · IslandBar toast test`，左侧状态行照常 ✓。**所以"任何应用弹的 Windows 通知"这条通道是通的**（微信那种不接通知平台的除外，那靠窗口监视，见 8.06）。
+
+#### 二、FullBar 高度不再写死 32
+
+`kFullBarHeightDip = 32` 是"这台机器恰好 32"的巧合（日志里 `taskbar inset 32 px`），而它是**用户的设置**（设置 → 个性化 → 任务栏）。改成从工作区量：`IslandAnchor::bandHeightDip`（锚点本来就在放显示器相关的数），`IslandWindow::BandHeightDip()` 一处算出，**四个地方共用**（布局、输入区域、帧循环读的锚点、命中测试）—— 区域和绘制必须同高，否则就是剪切。
+
+断言（三个都不是 32 的带宽 + 0 兜底）：`a 24 DIP band makes a 24 DIP bar`、`40 → 40`、`64 → 64`、`a 0 DIP band makes a 32 DIP bar of 32`。
+
+#### 三、AppBar 真机验证 —— 顺带修掉一个"自己放弃已到手空间"的 bug
+
+第一次带 `--appbar` 跑：
+
+```
+appbar: ABM_SETPOS asking for 0,0 2560x42
+appbar: registered -- work area was 0,32 2560x1408, now 0,42 2560x1398; asked for 42 px
+appbar: ABN_POSCHANGED -- re-claiming the space
+appbar: ABM_SETPOS asking for 0,0 2560x10        ← 重报时高度算错了
+appbar: the work area did NOT land as asked ...; releasing   ← 落点校验兜住，空间被退掉
+```
+
+**根因**：`registration_.rc` 在 `ABM_SETPOS` 之后被 shell 改写（补了一行日志当场看见：`ABM_SETPOS returned rc 0,32 2560x10` —— 我们请求 42，它回 10，而工作区确实按 42 变了），而重报恰好拿它当厚度。修法：成功后**记住我们请求过的厚度和边**（`claimedThicknessPx_` / `claimedEdge_`），重报用它；`Release` 时清零。
+
+修后同一测试：
+
+```
+ABM_SETPOS asking for 0,0 2560x42  →  returned rc 0,32 2560x10
+ABN_POSCHANGED → re-claim asking for 0,0 2560x42  →  already reserved (42 px off the top); nothing to re-claim
+工作区 BEFORE 0,32 / DURING 0,42 / AFTER 0,32    ← 退出后确实还原
+```
+
+→ **注册可用、重报正确、退出还原**，三项都在真机上量过。（`--appbar` 仍默认关闭：现在靠"隐藏原生任务栏 + 全屏时 FullBar 填满条带"。要开就是一行开关的事。）
+
 ### 8.49 **去掉日历图标，两个家共用同一条** ✅
 
 用户看完 8.48 的实拍后给两条：「**1.去掉前面的日历图标。2.胶囊里也带图标**」。

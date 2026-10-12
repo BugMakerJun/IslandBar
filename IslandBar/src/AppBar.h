@@ -141,6 +141,15 @@ private:
     // with, rather than reconstructing it.
     APPBARDATA registration_ = {};
     RECT    reserved_ = {};
+
+    // The strip this bar ASKED FOR and had granted: the thickness, and the edge it was granted on.
+    //
+    // NOT derivable from `registration_.rc`: the shell rewrites the rectangle it is handed during
+    // ABM_SETPOS, so after a granted 42 px request that rect measured 10 px tall -- and a re-claim that
+    // read its thickness from there asked for a 10 px strip, failed the landing check and released the
+    // space the bar had just been given (HANDOFF 8.50). Recorded on success and cleared on release.
+    LONG     claimedThicknessPx_ = 0;
+    DockEdge claimedEdge_ = DockEdge::Top;
     wchar_t detail_[256] = {};
 };
 

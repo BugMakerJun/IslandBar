@@ -226,6 +226,16 @@ void IslandWindow::Destroy() {
     destroyed_ = true;
 }
 
+// The band the shell's own taskbar keeps at the top of the screen, in DIPs.
+//
+// ONE function for it, because four places need the same number and they have to agree: the layout
+// (which sizes the full-screen bar), the input region (a region shorter than the drawing CLIPS it),
+// the anchor the frame loop reads, and the hit test. Measured from the work area rather than assumed,
+// because the number is the user's setting (Settings > Personalisation > Taskbar).
+float IslandWindow::BandHeightDip() const {
+    return PixelsToDip(monitor_.work.top - monitor_.screen.top, monitor_.dpi);
+}
+
 void IslandWindow::Layout() {
     if (!hwnd_ && rect_.right == 0) return;
 
@@ -233,7 +243,8 @@ void IslandWindow::Layout() {
     const float originY    = PixelsToDip(rect_.top, monitor_.dpi);
     const float widthDip   = PixelsToDip(rect_.right - rect_.left, monitor_.dpi);
 
-    anchor_ = AnchorForWindow(originX, originY, widthDip);
+    // The full-screen state is exactly as tall as the band; see IslandAnchor::bandHeightDip.
+    anchor_ = AnchorForWindow(originX, originY, widthDip, BandHeightDip());
     motion_.SetAnchor(anchor_);
 }
 
@@ -457,7 +468,9 @@ void IslandWindow::ApplyInputRegion() {
     const float originX = PixelsToDip(rect_.left, monitor_.dpi);
     const float originY = PixelsToDip(rect_.top, monitor_.dpi);
     const float widthDip = PixelsToDip(rect_.right - rect_.left, monitor_.dpi);
-    const IslandAnchor anchor = AnchorForWindow(originX, originY, widthDip);
+    // With the band, so that the region and the full-screen bar it must cover are the same height --
+    // the only state whose height comes from the monitor rather than from a constant.
+    const IslandAnchor anchor = AnchorForWindow(originX, originY, widthDip, BandHeightDip());
 
     // The card's left edge is passed so the region can follow the icon row past it. It is the value the
     // renderer was given, held on the window for exactly this reason: a plan for where the card goes that
@@ -768,7 +781,10 @@ IslandAnchor IslandWindow::CurrentAnchor() const {
     const float originX = PixelsToDip(rect_.left, monitor_.dpi);
     const float originY = PixelsToDip(rect_.top, monitor_.dpi);
     const float widthDip = PixelsToDip(rect_.right - rect_.left, monitor_.dpi);
-    return AnchorForWindow(originX, originY, widthDip);
+    // The band goes with it: the frame loop reads this anchor to lay the bar out, and an anchor that
+    // disagreed with the window's own would put the full-screen bar at a different height from the
+    // region that has to cover it.
+    return AnchorForWindow(originX, originY, widthDip, BandHeightDip());
 }
 
 bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
@@ -778,7 +794,12 @@ bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const REC
     const float originY    = PixelsToDip(windowRect.top, monitor.dpi);
     const float widthDip   = PixelsToDip(windowRect.right - windowRect.left, monitor.dpi);
 
-    const IslandAnchor anchor = AnchorForWindow(originX, originY, widthDip);
+    // With the band, like the layout and the region: in the full-screen state the box the pointer has
+    // to be tested against is the band's height, and a hit test that assumed the fallback constant
+    // would answer for a bar that is not the one on screen.
+    const IslandAnchor anchor = AnchorForWindow(
+        originX, originY, widthDip,
+        PixelsToDip(monitor.work.top - monitor.screen.top, monitor.dpi));
 
     const float localX = PixelsToDip(screenPoint.x - windowRect.left, monitor.dpi);
     const float localY = PixelsToDip(screenPoint.y - windowRect.top, monitor.dpi);

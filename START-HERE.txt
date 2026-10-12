@@ -110,6 +110,17 @@ C:\PROJECT\Taskbar starts at LOW integrity here), and expect a one-time Windows
 consent prompt. The line to read is `position source`: WiFi or Satellite means the
 machine worked it out itself, IPAddress means it asked a service across the network.
 
+AND THE SAME FOR THE HOVER PREVIEW (2026-10-12, HANDOFF 8.51):
+
+    build\Debug\tools\thumbprobe\Debug\thumb_probe.exe
+
+Two windows of its own, a DWM live thumbnail between them, every HRESULT
+printed -- because the bar's own preview reported S_OK from every call and drew
+NOTHING, twice over. GREEN inside the destination window means the machine draws
+thumbnails; the source rectangle must be stated explicitly (an empty rcSource,
+which the documentation calls "the whole window", is "no content" here), and the
+destination must be a TOP-LEVEL window (a child is refused with E_INVALIDARG).
+
 READ THE LOG, NOT THE CONSOLE:
 
     %TEMP%\island_bar.log      timestamped, written every run, flushed per line
