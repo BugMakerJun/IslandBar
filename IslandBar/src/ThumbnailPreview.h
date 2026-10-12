@@ -32,14 +32,13 @@ namespace island {
 //
 // A preview says WHICH window this is; it is not a second desktop. Past this size it covers the
 // application the user is working in, which is the opposite of the point.
+//
+// THE CARD IS THIS SIZE FOR EVERY WINDOW, and the picture is fitted inside it. A card that took its
+// shape from the window made every preview a different size, which is what "现在预览框 大小也不一样"
+// reported: a row of previews should be one shape, the way the shell's own are, and the window's
+// proportions belong inside the picture rather than in the frame around it.
 inline constexpr float kThumbnailMaxWidthDip  = 260.0f;
 inline constexpr float kThumbnailMaxHeightDip = 160.0f;
-
-// The smallest side a preview may have, in DIPs.
-//
-// A source window with an absurd shape (a 1 x 9000 strip, a 3000 x 40 toolbar) would otherwise produce
-// a box that is a line: technically the right aspect ratio, and useless as a picture of anything.
-inline constexpr float kMinThumbnailSideDip = 40.0f;
 
 // How far below the bar's own underside the preview hangs.
 inline constexpr float kThumbnailGapDip = 10.0f;
@@ -69,6 +68,10 @@ inline constexpr float kThumbnailRadiusDip = 12.0f;
 // thumbnail differed came out SQUASHED into a strip (a 1226x701 window drawn into a 260x44 box,
 // reported from the user's own screen). The compositor's own answer cannot disagree with the
 // compositor's own drawing.
+//
+// The card is ONE SIZE whatever those numbers are; only the PICTURE inside it takes their shape, and
+// the space left over is card (a letterbox). That is the difference between "the previews are all the
+// same object with different contents" and "the previews are all different objects".
 struct ThumbnailPlacement {
     RECT card = {};      // the rounded card: what this window is
     RECT picture = {};   // the thumbnail's destination, inside the card

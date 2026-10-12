@@ -5669,26 +5669,68 @@ void TestMusicCardLayout() {
                       tall.picture.bottom - tall.picture.top <=
                           static_cast<LONG>(kThumbnailMaxHeightDip),
                   L"a picture never exceeds its maximum box", previewDetail);
-            Check(sliver.picture.right - sliver.picture.left >=
-                          static_cast<LONG>(kMinThumbnailSideDip) &&
-                      sliver.picture.bottom - sliver.picture.top >=
-                          static_cast<LONG>(kMinThumbnailSideDip),
-                  L"a window with an absurd shape still gets a preview", previewDetail);
+            // THE SHAPE IS KEPT EVEN WHEN IT IS ABSURD: a 1 x 9000 window is a sliver, and the picture is
+            // a sliver inside an ordinary card rather than a stretched lie. (The card is one size, so a
+            // degenerate source can no longer make the CARD degenerate -- which is what the old minimum
+            // side was for.)
+            std::swprintf(previewDetail, 256, L"a 1x9000 source gives a %ldx%ld picture in a %ldx%ld card",
+                          sliver.picture.right - sliver.picture.left,
+                          sliver.picture.bottom - sliver.picture.top,
+                          sliver.card.right - sliver.card.left, sliver.card.bottom - sliver.card.top);
+            Check(aspectOf(sliver.picture) > 0.0f && aspectOf(sliver.picture) < 0.01f &&
+                      sliver.picture.right <= sliver.card.right - 8 &&
+                      sliver.picture.bottom <= sliver.card.bottom - 8,
+                  L"even an absurd window keeps its shape inside an ordinary card", previewDetail);
 
-            // The CARD WRAPS the picture: a title row above it and a margin on every side. That is what
-            // makes the preview read as a card rather than as a raw rectangle of someone else's window.
+            // ONE SIZE FOR EVERY WINDOW. This is the property the user asked for after seeing a row of
+            // previews of different sizes -- and it is the reason the card no longer takes its shape from
+            // the source: a wide window, a tall one and an unknown one must all give the same card.
+            std::swprintf(previewDetail, 256,
+                          L"wide %ldx%ld, tall %ldx%ld, unknown %ldx%ld",
+                          wide.card.right - wide.card.left, wide.card.bottom - wide.card.top,
+                          tall.card.right - tall.card.left, tall.card.bottom - tall.card.top,
+                          unknown.card.right - unknown.card.left,
+                          unknown.card.bottom - unknown.card.top);
+            Check((wide.card.right - wide.card.left) == (tall.card.right - tall.card.left) &&
+                      (wide.card.bottom - wide.card.top) == (tall.card.bottom - tall.card.top) &&
+                      (wide.card.right - wide.card.left) == (unknown.card.right - unknown.card.left) &&
+                      (wide.card.bottom - wide.card.top) == (unknown.card.bottom - unknown.card.top),
+                  L"every window gets a card of the same size", previewDetail);
+
+            // THE CARD IS A MARGIN AND A TITLE ROW AROUND A FIXED SLOT, and the picture is centred inside
+            // that slot. Measured against the SLOT rather than against the picture, because the picture's
+            // own margins include whatever the letterbox leaves.
+            const LONG pad = static_cast<LONG>(kThumbnailPadDip);
+            const LONG titleDip = static_cast<LONG>(kThumbnailTitleDip);
+            const LONG leftGap = wide.picture.left - wide.card.left;
+            const LONG rightGap = wide.card.right - wide.picture.right;
+            // The letterbox on each side of the slot: zero when the picture fills the slot one way, and
+            // LARGER than the margin when it does not -- which is why these are measured against the slot
+            // rather than against the picture.
+            const LONG topLetterbox = wide.picture.top - (wide.card.top + pad + titleDip);
+            const LONG bottomLetterbox = (wide.card.bottom - pad) - wide.picture.bottom;
+            const LONG cardWidth = wide.card.right - wide.card.left;
+            const LONG cardHeight = wide.card.bottom - wide.card.top;
+            const LONG expectedWidth =
+                static_cast<LONG>(kThumbnailMaxWidthDip + kThumbnailPadDip * 2.0f);
+            const LONG expectedHeight = static_cast<LONG>(
+                kThumbnailMaxHeightDip + kThumbnailPadDip * 2.0f + kThumbnailTitleDip);
+            std::swprintf(previewDetail, 256,
+                          L"card %ldx%ld (want %ldx%ld), gaps l%ld r%ld, letterbox t%ld b%ld, margin %.0f",
+                          cardWidth, cardHeight, expectedWidth, expectedHeight, leftGap, rightGap,
+                          topLetterbox, bottomLetterbox, kThumbnailPadDip);
+            Check(cardWidth == expectedWidth && cardHeight == expectedHeight &&
+                      leftGap >= pad && rightGap >= pad && topLetterbox >= 0 && bottomLetterbox >= 0,
+                  L"the card is a margin and a title row around a fixed slot", previewDetail);
+            Check(std::abs(leftGap - rightGap) <= 1,
+                  L"the picture is centred in its slot, so its letterbox is even", previewDetail);
+            Check(std::abs(topLetterbox - bottomLetterbox) <= 1,
+                  L"and even top to bottom", previewDetail);
+
             const float iconCentre = (icon.left + icon.right) * 0.5f;
             const float cardCentre = (wide.card.left + wide.card.right) * 0.5f;
-            const float padAndTitle = static_cast<float>(wide.picture.top - wide.card.top);
-            const float sidePad = static_cast<float>(wide.picture.left - wide.card.left);
-            std::swprintf(previewDetail, 256,
-                          L"icon centre %.0f, card centre %.0f, header %.0f, side margin %.0f DIP",
-                          iconCentre, cardCentre, padAndTitle, sidePad);
-            Check(Nearly(padAndTitle, kThumbnailPadDip + kThumbnailTitleDip, 0.01f) &&
-                      Nearly(sidePad, kThumbnailPadDip, 0.01f) &&
-                      Nearly(static_cast<float>(wide.card.bottom - wide.picture.bottom),
-                             kThumbnailPadDip, 0.01f),
-                  L"the card wraps the picture in a header and a margin", previewDetail);
+            std::swprintf(previewDetail, 256, L"icon centre %.0f, card centre %.0f, card top %ld",
+                          iconCentre, cardCentre, wide.card.top);
             Check(Nearly(cardCentre, iconCentre, 1.0f) && wide.card.top >= icon.bottom,
                   L"a preview is centred under its icon and hangs below it", previewDetail);
 

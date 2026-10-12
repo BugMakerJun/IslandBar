@@ -9,6 +9,7 @@
 #include <dwmapi.h>
 
 #include <algorithm>
+#include <cmath>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -24,32 +25,42 @@ ThumbnailPlacement ThumbnailBoxFor(int sourceWidthPx, int sourceHeightPx, const 
     ThumbnailPlacement placement;
     if (scale <= 0.0f) scale = 1.0f;
 
-    const float maxWidth = kThumbnailMaxWidthDip * scale;
-    const float maxHeight = kThumbnailMaxHeightDip * scale;
-    const float minSide = kMinThumbnailSideDip * scale;
-
-    // THE PICTURE: the source's own shape, fitted inside the maximum box. This is the rectangle the
-    // compositor is handed, and it is why the shape has to come from the compositor: it stretches what it
-    // draws to fill this rectangle, so any disagreement between the two is a squashed picture.
-    float width = maxWidth;
-    float height = maxHeight;
-    if (sourceWidthPx > 0 && sourceHeightPx > 0) {
-        const float aspect = static_cast<float>(sourceWidthPx) / static_cast<float>(sourceHeightPx);
-        width = maxWidth;
-        height = width / aspect;
-        if (height > maxHeight) {
-            height = maxHeight;
-            width = height * aspect;
-        }
-        if (width < minSide) width = minSide;
-        if (height < minSide) height = minSide;
-    }
-
-    // THE CARD: the picture, a margin on every side, and a title row above it.
+    const float slotWidth = kThumbnailMaxWidthDip * scale;
+    const float slotHeight = kThumbnailMaxHeightDip * scale;
     const float pad = kThumbnailPadDip * scale;
     const float title = kThumbnailTitleDip * scale;
-    const float cardWidth = width + pad * 2.0f;
-    const float cardHeight = height + pad * 2.0f + title;
+
+    // THE CARD IS ONE SIZE, whatever window it is showing: one margin, one title row, one slot for the
+    // picture. Every preview in a row is then the same object, which is what the shell's own previews are
+    // and what "现在预览框 大小也不一样" asked for.
+    const float cardWidth = slotWidth + pad * 2.0f;
+    const float cardHeight = slotHeight + pad * 2.0f + title;
+
+    // THE PICTURE takes the source's shape INSIDE that slot, and the leftover space becomes card: a
+    // letterbox. The shape has to come from the compositor because it stretches what it draws to fill the
+    // rectangle it is given, so any disagreement between the two is a squashed picture.
+    //
+    // No minimum side any more: it existed to stop an absurdly shaped source (a 1 x 9000 strip) from
+    // giving a card that was itself a line, and the fixed slot removes that problem -- the card stays 276
+    // DIP wide and the picture is a sliver in the middle of it, which is honest about a window that IS a
+    // sliver. Clamping the side instead would stretch that sliver back into a lie.
+    float width = slotWidth;
+    float height = slotHeight;
+    if (sourceWidthPx > 0 && sourceHeightPx > 0) {
+        const float aspect = static_cast<float>(sourceWidthPx) / static_cast<float>(sourceHeightPx);
+        width = slotWidth;
+        height = width / aspect;
+        if (height > slotHeight) {
+            height = slotHeight;
+            width = height * aspect;
+        }
+        // A floor of one pixel rather than a minimum SIDE: a source whose shape is absurd collapses to
+        // nothing at all otherwise (a 1 x 9000 window comes out under a tenth of a pixel wide), and a
+        // picture that is one pixel wide is still a picture of something, where an empty rectangle is a
+        // card with an inexplicable hole in it.
+        if (width < 1.0f) width = 1.0f;
+        if (height < 1.0f) height = 1.0f;
+    }
 
     // Centred under the icon, and hanging below it by the gap -- from the icon's BOTTOM edge, because
     // that is the edge the pointer came in over.
@@ -75,10 +86,15 @@ ThumbnailPlacement ThumbnailBoxFor(int sourceWidthPx, int sourceHeightPx, const 
     placement.card.right = static_cast<LONG>(left + cardWidth);
     placement.card.bottom = static_cast<LONG>(top + cardHeight);
 
-    placement.picture.left = placement.card.left + static_cast<LONG>(pad);
-    placement.picture.top = placement.card.top + static_cast<LONG>(pad + title);
-    placement.picture.right = placement.picture.left + static_cast<LONG>(width);
-    placement.picture.bottom = placement.picture.top + static_cast<LONG>(height);
+    // The picture is CENTRED in the slot, so the letterbox is even on both sides -- and ROUNDED rather
+    // than truncated, because truncating a half-pixel moved the letterbox a pixel to one side and the
+    // self-test's own "even top to bottom" caught it (6 above against 8 below).
+    const float slotLeft = static_cast<float>(placement.card.left) + pad;
+    const float slotTop = static_cast<float>(placement.card.top) + pad + title;
+    placement.picture.left = std::lround(slotLeft + (slotWidth - width) * 0.5f);
+    placement.picture.top = std::lround(slotTop + (slotHeight - height) * 0.5f);
+    placement.picture.right = placement.picture.left + std::lround(width);
+    placement.picture.bottom = placement.picture.top + std::lround(height);
 
     placement.valid = (placement.card.right > placement.card.left) &&
                       (placement.card.bottom > placement.card.top) &&
