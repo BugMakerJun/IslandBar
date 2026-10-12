@@ -112,7 +112,9 @@ public:
     // The button is deliberately NOT a chevron: the deck's own system button already carries one, and two
     // identical marks at the two ends of the bar would read as the same control. Three dots say "there is
     // more than fits", which is what this is.
-    void DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box, bool hovered, bool open,
+    // `wash` as for the Start button; `open` still forces a full one, because the card being open is a
+    // state rather than something the pointer is doing.
+    void DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box, float wash, bool open,
                         const D2D1_COLOR_F& fill, float opacity);
 
     // The card's tray page: the icons in a wrapping grid, each with the wash the other buttons get.
@@ -320,7 +322,9 @@ public:
     // disagree about where the middle is. `hovered` is whether the pointer is on it, and `fill` is the
     // island's own colour, for the reason the icon buttons take it: a button that chose its own shade
     // would drift away from the island the first time either changed.
-    void DrawStartButton(ID2D1DeviceContext2* context, const RoundedBox& island, bool hovered,
+    // `wash` is how far the pointer's wash has come up, 0 to 1, spring-animated by the frame loop -- a
+    // wash that switches on in one frame reads as hard rather than as responsive. See FrameState::startWash.
+    void DrawStartButton(ID2D1DeviceContext2* context, const RoundedBox& island, float wash,
                          const D2D1_COLOR_F& fill, float opacity);
 
     // Which system indicator a row slot — or a panel tile — holds.
@@ -378,7 +382,7 @@ public:
     //
     // `open` points it up when the panel is showing, which is the one piece of state the button has to
     // communicate by itself: whether pressing it again will put away what is already there.
-    void DrawSystemButton(ID2D1DeviceContext2* context, const RectF& box, bool hovered, bool open,
+    void DrawSystemButton(ID2D1DeviceContext2* context, const RectF& box, float wash, bool open,
                           const D2D1_COLOR_F& fill, float opacity);
 
     // What pressing a panel tile does.

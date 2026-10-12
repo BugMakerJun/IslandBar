@@ -4504,6 +4504,59 @@ void TestMusicCardLayout() {
             Check(monotonic, L"the title box only ever grows while the button opens", detail);
         }
 
+        // THE SPRING THE BUTTON OPENS ON, which replaced a linear ramp.
+        //
+        // The ramp (1/0.16 of the way per second, clamped at the ends) is smooth and it settles nowhere:
+        // it stops dead. The spring's whole point is the tail, and the whole risk is that a spring
+        // integrated with the frame's own dt can ring forever or diverge -- this machine's frame times have
+        // been measured as high as 139 ms. So what is asserted is the shape a spring has to have, and the
+        // stability that sub-stepping buys.
+        {
+            wchar_t springDetail[192];
+            float value = 0.0f;
+            float velocity = 0.0f;
+            float worst = 0.0f;
+            int frames = 0;
+            while (RowOpenStep(&value, &velocity, 1.0f, 1.0f / 60.0f) && frames < 600) {
+                ++frames;
+                if (value > worst) worst = value;
+            }
+            std::swprintf(springDetail, 192, L"settled at %.4f (after %d frames), peak %.4f", value,
+                          frames, worst);
+            Check(std::fabs(value - 1.0f) < 0.001f && frames < 45,
+                  L"the row's opening reaches the button's full width and settles inside 0.75 s",
+                  springDetail);
+            Check(worst > 1.0f && worst < 1.06f,
+                  L"... and overshoots by less than a twentieth: a settle, not a bounce", springDetail);
+
+            // The same, driven with the worst frame time this machine has produced.
+            float coarse = 0.0f;
+            float coarseVelocity = 0.0f;
+            float coarseWorst = 0.0f;
+            for (int i = 0; i < 20; ++i) {
+                RowOpenStep(&coarse, &coarseVelocity, 1.0f, 0.139f);
+                if (coarse > coarseWorst) coarseWorst = coarse;
+            }
+            std::swprintf(springDetail, 192, L"after 20 frames of 139 ms: %.4f, peak %.4f", coarse,
+                          coarseWorst);
+            Check(std::fabs(coarse - 1.0f) < 0.01f && coarseWorst < 1.1f,
+                  L"and it is stable at a 139 ms frame, which is what the sub-stepping is for",
+                  springDetail);
+
+            // A wash is a REACTION -- the pointer caused it -- and it has to be over sooner than the
+            // row's own opening, or the button feels like it is lagging behind the hand.
+            float wash = 0.0f;
+            float washVelocity = 0.0f;
+            int washFrames = 0;
+            while (ControlWashStep(&wash, &washVelocity, 1.0f, 1.0f / 60.0f) && washFrames < 600) {
+                ++washFrames;
+            }
+            std::swprintf(springDetail, 192, L"wash %d frames, row %d frames (60 Hz)", washFrames,
+                          frames);
+            Check(std::fabs(wash - 1.0f) < 0.001f && washFrames < frames,
+                  L"a hover wash settles sooner than the row's opening", springDetail);
+        }
+
         // A row where MANY buttons are mid-transition at once, which is the live case.
         //
         // Attempting to reproduce the failure with two non-zero amounts did not work: the old code

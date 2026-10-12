@@ -301,7 +301,7 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     if (frame.trayIconCount > 0) {
         // No fill either, for the reason the deck's buttons have none: it stands on the same surface (see
         // BarClusterFor). Its own hover wash and the three dots are what is drawn.
-        text_->DrawTrayButton(d2dContext_, TrayButtonFor(island), frame.trayButtonHovered,
+        text_->DrawTrayButton(d2dContext_, TrayButtonFor(island), frame.trayButtonWash,
                               frame.trayPageOpen,
                               D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), frame.contentOpacity);
     }
@@ -368,11 +368,11 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     // (BarClusterFor), and a button that painted its own rounded rectangle inside it would put the beads
     // straight back. What is left is the mark itself and the hover wash, which is what a control should be.
     const D2D1_COLOR_F onTheCluster = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f);
-    text_->DrawStartButton(d2dContext_, island, frame.startHovered, onTheCluster, frame.contentOpacity);
+    text_->DrawStartButton(d2dContext_, island, frame.startWash, onTheCluster, frame.contentOpacity);
 
     // `open` points the chevron up, which is the one thing the control has to say by itself: whether
     // pressing it again will put away what is already there.
-    text_->DrawSystemButton(d2dContext_, SystemButtonFor(island), frame.systemButtonHovered,
+    text_->DrawSystemButton(d2dContext_, SystemButtonFor(island), frame.systemButtonWash,
                             frame.systemPanelOpen, onTheCluster, frame.contentOpacity);
 }
 
@@ -668,7 +668,18 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 // Multiplied by the BAR's own strength, so a card opening beneath the strip cannot dim
                 // it -- the same rule the deck is drawn under -- and on the island's own colour, so the
                 // words stand on the bar rather than on the wallpaper.
-                text_->DrawStatusLine(d2dContext_, island::StatusStripFor(barIsland),
+                //
+                // ... AND IT SLIDES OUT OF THE ISLAND AS IT FADES IN, rather than appearing in place:
+                // the strip exists because the island's own line was taken, so it belongs to the island
+                // and should come FROM it. The offset is derived from the fade -- no second animation and
+                // no second piece of state -- and it is 6 DIP, which is small enough to read as motion
+                // rather than as a thing that moved. Nothing hit-tests the strip, so a drawn position that
+                // differs from its final one cannot disagree with a click.
+                RoundedBox strip = island::StatusStripFor(barIsland);
+                const float slide = (1.0f - frame.statusStripOpacity) * 6.0f;
+                strip.rect.left += slide;
+                strip.rect.right += slide;
+                text_->DrawStatusLine(d2dContext_, strip,
                                       frame.statusStripOpacity * frame.contentOpacity,
                                       frame.statusSky, frame.statusTemperature, frame.pill.fill);
             }

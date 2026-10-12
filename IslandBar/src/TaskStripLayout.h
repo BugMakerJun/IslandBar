@@ -683,6 +683,60 @@ inline float StatusStripFadeStep(float amount, bool wanted, float dtSeconds) {
     return amount;
 }
 
+// --- a spring, for the row's own opening --------------------------------------------------------
+//
+// The pointed-at button's opening used to be a LINEAR ramp: 1/0.16 of the way per second, clamped at the
+// ends. It is smooth and it is what "160 ms to open" sounds like, and it is also the single most
+// mechanical-looking movement on the bar -- measured against the reference, where nothing arrives at a
+// constant speed and stops dead. A spring does the one thing a ramp cannot: it settles, with a little
+// residual motion, which is what the eye reads as weight.
+//
+// Critically-damped-ish on purpose: zeta 0.8 gives about 1.5% of overshoot -- 1.5 DIP on a button that
+// opens by 102, which is visible as a settle and not as a bounce. The hit tests share this value (they
+// always have: one amount drives the width and the push-along), so an overshoot of a pixel and a half is
+// also the largest disagreement between what is drawn and what is clicked, for one frame.
+//
+// Integrated in fixed sub-steps rather than with the frame's own dt: at 20 ms a frame the explicit
+// integration of a 26 rad/s spring overshoots the overshoot and rings forever, and the frame time on this
+// machine has been measured as high as 139 ms. A 1/240 s sub-step is 40 multiplications per button per
+// frame in the worst case, and it cannot go unstable.
+inline constexpr float kRowSpringOmega = 32.0f;      // rad/s: about 0.19 s to the eye's arrival and 0.3 s
+                                                     // to the last pixel -- the button's opening, which is
+                                                     // a movement rather than a reaction
+inline constexpr float kControlSpringOmega = 48.0f;  // rad/s: about 0.13 s -- a REACTION, and the rule of
+                                                     // thumb is that anything the pointer causes should be
+                                                     // over inside 180 ms or it feels laggy
+inline constexpr float kSpringZeta = 0.8f;
+
+// One step. Returns true while it is still moving, which is the caller's "keep drawing" flag.
+inline bool SpringStep(float* value, float* velocity, float target, float dtSeconds, float omega) {
+    const float damping = 2.0f * kSpringZeta * omega;
+    const float substep = 1.0f / 240.0f;
+    float remaining = dtSeconds > 0.1f ? 0.1f : (dtSeconds < 0.0f ? 0.0f : dtSeconds);
+    while (remaining > 0.0f) {
+        const float h = remaining > substep ? substep : remaining;
+        const float error = *value - target;
+        const float accel = -omega * omega * error - damping * (*velocity);
+        *velocity += accel * h;
+        *value += *velocity * h;
+        remaining -= h;
+    }
+    const bool moving = std::fabs(*value - target) > 0.001f || std::fabs(*velocity) > 0.002f;
+    if (!moving) {
+        *value = target;
+        *velocity = 0.0f;
+    }
+    return moving;
+}
+
+inline bool RowOpenStep(float* value, float* velocity, float target, float dtSeconds) {
+    return SpringStep(value, velocity, target, dtSeconds, kRowSpringOmega);
+}
+
+inline bool ControlWashStep(float* value, float* velocity, float target, float dtSeconds) {
+    return SpringStep(value, velocity, target, dtSeconds, kControlSpringOmega);
+}
+
 // --- the system tray: the applications' own tray icons, at the right-hand END of the bar -------
 //
 // WHERE IT GOES, and why it is anchored to the MONITOR rather than to the row beside it. The

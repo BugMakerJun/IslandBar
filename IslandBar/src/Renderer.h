@@ -312,6 +312,11 @@ static constexpr int kMaxTaskButtons = 32;
     // under it. Both are the window's answers, taken from the geometry in TrayPageFor/TrayButtonFor.
     int             trayHoveredIndex = -1;
     bool            trayButtonHovered = false;
+    // How far the wash under it has come up, 0 to 1. The BOOL above says whether the pointer is there;
+    // this is the same answer with a spring on it, because a 16% white wash that appears in one frame is
+    // the one thing on the bar that reacts instantly -- and "reacts instantly" reads as "hard", not as
+    // "responsive". Same arrangement for the Start button and the system panel's toggle below.
+    float           trayButtonWash = 0.0f;
     // Whether the card is showing the tray page rather than the panel's tiles. The same card, the same
     // place, the same animation -- only the contents change (see TrayPageFor).
     bool            trayPageOpen = false;
@@ -322,6 +327,7 @@ static constexpr int kMaxTaskButtons = 32;
     // Whether the pointer is on the Start button, which lives on the other side of the
     // island from the application icons.
     bool startHovered = false;
+    float startWash = 0.0f;
 
     // The system panel: whether its toggle is hovered, whether the panel is open, and what it says.
     //
@@ -329,6 +335,7 @@ static constexpr int kMaxTaskButtons = 32;
     // the card is showing. A separate IslandState would have meant a second card geometry, a second set
     // of policy rules and a second transition, all for a shape that is already drawn.
     bool systemButtonHovered = false;
+    float systemButtonWash = 0.0f;
     bool systemPanelOpen = false;
     TextRenderer::SystemPanelText systemPanel = {};
 

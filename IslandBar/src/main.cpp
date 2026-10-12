@@ -1046,6 +1046,15 @@ unsigned long long lastMusicMeterMs = 0;
     // survived two rounds of diagnosis. Both the width and the push now come from this value, so
     // they cannot disagree.
     float taskHoverAmount[island::kMaxTaskWindows] = {};
+    // ... and how fast each of them is moving, which is what makes it a spring rather than a ramp: the
+    // value alone cannot settle (see RowOpenStep).
+    float taskHoverVelocity[island::kMaxTaskWindows] = {};
+    // ... and the same for the three washes on the bar's own buttons (Start, the system panel's toggle,
+    // the tray). They used to switch on in a single frame -- see FrameState::startWash.
+    float controlWash[3] = {};        // 0 = Start, 1 = system toggle, 2 = tray
+    float controlWashVelocity[3] = {};
+    // Set while any of those three is still moving, so the loop keeps drawing until they settle.
+    bool controlWashAnimating = false;
     // True while any button is mid-transition, so the loop keeps drawing until it settles.
     bool iconAnimating = false;
 // Whether any icon in the row is still arriving or leaving. Set inside the draw (where the row is
@@ -2732,34 +2741,20 @@ float musicWavePhase = 0.0f;
             // makes the row open as ONE movement: growing in place leaves no room for the title and
             // is drawn over the neighbours, while shifting in a single frame shuffles the row.
             {
-                // ~160 ms to open: fast enough not to feel sluggish, slow enough to read as movement.
-                const float speed = 1.0f / 0.16f;
-                const float step = speed * (dt > 0.05f ? 0.05f : dt);
-
                 // The island's own expansion already opens the whole row, so the pointed-at button is
                 // left alone in that state: growing it on top would be two animations where one is
                 // wanted.
                 const bool islandOpen = (window.State() == island::IslandState::Hover);
                 const int pointed = islandOpen ? -1 : window.HoveredIcon();
 
-                const auto approach = [step](float& value, float target) {
-                    if (value < target) {
-                        value += step;
-                        if (value > target) value = target;
-                        return true;
-                    }
-                    if (value > target) {
-                        value -= step;
-                        if (value < target) value = target;
-                        return true;
-                    }
-                    return false;
-                };
-
                 iconAnimating = false;
                 for (int i = 0; i < island::kMaxTaskWindows; ++i) {
                     const float target = (i == pointed) ? 1.0f : 0.0f;
-                    if (approach(taskHoverAmount[i], target)) iconAnimating = true;
+                    // A spring per button, not a linear ramp: see RowOpenStep for why, and for the
+                    // sub-stepping that keeps it stable at this machine's worst frame times.
+                    if (island::RowOpenStep(&taskHoverAmount[i], &taskHoverVelocity[i], target, dt)) {
+                        iconAnimating = true;
+                    }
                 }
 
                 // Reported whenever the pointer's icon changes, and once when the animation starts or
@@ -2772,8 +2767,11 @@ float musicWavePhase = 0.0f;
                 if (pointed != lastReportedPointed || iconAnimating != lastReportedAnimating) {
                     lastReportedPointed = pointed;
                     lastReportedAnimating = iconAnimating;
-                    island::LogAndPrint("  anim: pointed=%d animating=%d step=%.4f hover0=%.2f",
-                                        pointed, iconAnimating ? 1 : 0, step,
+                    // The step is gone (the row opens on a spring now, which has a velocity rather than a
+                    // rate), so the trace reports the velocity of the first button instead -- the number
+                    // that says whether the movement is settling or still swinging.
+                    island::LogAndPrint("  anim: pointed=%d animating=%d velocity=%.3f hover0=%.2f",
+                                        pointed, iconAnimating ? 1 : 0, taskHoverVelocity[0],
                                         taskHoverAmount[0]);
                     std::fflush(stdout);
                 }
@@ -2987,6 +2985,7 @@ float musicWavePhase = 0.0f;
                                   lyricLineAnimating || progressChanged || musicMeterDue ||
                                   iconAnimating || rowAppearAnimating || soundPageChanged ||
                                   callMeterDue || statusStripAnimating || weatherChanged ||
+                                  controlWashAnimating ||
                                   !haveDrawn;
             if (needDraw) {
                 // Which condition forced this redraw, counted per report interval.
@@ -3066,6 +3065,24 @@ float musicWavePhase = 0.0f;
                 frame.trayRevision = trayIcons.Revision();
                 frame.trayHoveredIndex = window.TrayCellHovered();
                 frame.trayButtonHovered = window.TrayButtonHovered();
+                // ... and the three washes, each a spring toward "the pointer is on it" (see
+                // FrameState::startWash for why a wash cannot be a switch). Stepped here, before the
+                // frame is drawn, and reported in the frame as AMOUNTS rather than as the booleans.
+                {
+                    const bool want[3] = {window.StartHovered() || forcedStartHover,
+                                          window.SystemButtonHovered(),
+                                          window.TrayButtonHovered()};
+                    controlWashAnimating = false;
+                    for (int i = 0; i < 3; ++i) {
+                        if (island::ControlWashStep(&controlWash[i], &controlWashVelocity[i],
+                                                    want[i] ? 1.0f : 0.0f, dt)) {
+                            controlWashAnimating = true;
+                        }
+                    }
+                    frame.startWash = controlWash[0];
+                    frame.systemButtonWash = controlWash[1];
+                    frame.trayButtonWash = controlWash[2];
+                }
                 // The level the card is SHOWING, not the page that was asked for: the two differ for the
                 // whole of the exit, and drawing the request is what put the tiles under a shrinking tray
                 // page. See NextPanelLevel.
