@@ -74,4 +74,11 @@ StartMenuResult ToggleStartMenu();
 // caveat as the Start button -- synthetic input is dropped by UIPI when this process sits below the shell.
 bool SendWindowsKeyChord(wchar_t letter);
 
+// Sends Win+Ctrl+<letter>, for the one shell shortcut that carries a third key: Win+Ctrl+L, which is the
+// only interface live captions has -- it has no API and its settings page does not switch it.
+//
+// Same construction and the same caveat as SendWindowsKeyChord above; the third key is pressed before
+// the chord key and released after it, so the shell sees one chord rather than two shortcuts.
+bool SendWindowsCtrlKeyChord(wchar_t letter);
+
 } // namespace island

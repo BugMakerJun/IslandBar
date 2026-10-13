@@ -4,6 +4,7 @@
 #include "SystemStatus.h"
 
 #include "Log.h"
+#include "SystemToggles.h"   // NightLightOn / LiveCaptionsRunning: the two switches that are not radios
 
 #include <wlanapi.h>
 #include <bluetoothapis.h>
@@ -346,6 +347,19 @@ void SystemStatusReader::Sample(SystemStatus* out) {
             out->volumePercent = percent;
         }
     }
+
+    // --- the two switches that are not radios ---
+    //
+    // Night light: the OS's own registry value, which is what the Settings page shows (there is no API,
+    // and measured: writing the value does not switch the feature -- see SystemToggles). Live captions:
+    // whether its process is running, which is the only state it has.
+    //
+    // Sampled here rather than asked for at the moment of the draw, because the panel is rebuilt every
+    // frame and a Toolhelp snapshot per frame is not.
+    // ForDisplay, not NightLightOn: once this session has pressed the page's switch, the page's own answer
+    // is the one the tile must show -- see NightLightOnForDisplay.
+    out->nightLightOn = NightLightOnForDisplay();
+    out->liveCaptionsOn = LiveCaptionsRunning();
 
     // --- power ---
     {

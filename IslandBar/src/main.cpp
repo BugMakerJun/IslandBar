@@ -54,6 +54,8 @@
 #include "ToastStore.h"
 #include "TrayIcons.h"
 #include "TrayPress.h"
+#include "DisplayBrightness.h"   // the brightness row: DDC/CI, the only interface this machine has
+#include "SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
 #include "WeChatWatch.h"
 #include "StatePolicy.h"
 #include "SoundOutput.h"
@@ -464,11 +466,15 @@ int BuildSystemPanel(const island::SystemStatus& status, int installedLayoutCoun
     // flyout prints (its Bluetooth tile reads 未连接 with the radio on and nothing paired). Whether a device
     // is actually attached is not readable from here -- the audio endpoint would answer for headphones only
     // -- so the honest pair is 关 when the radio is off and 未连接 when it is on.
+    //
+    // IT IS A TOGGLE NOW. The note that used to be here said Bluetooth had "no documented interface a
+    // desktop process can use", and that was wrong: Windows.Devices.Radios answers Allowed for this
+    // process and the radio went On -> Off -> On (measured, scripts/probe-radios.ps1). Pressing the tile
+    // switches the radio; the arrow is kept because the tile still says WHAT is connected.
     addTile(L"Bluetooth", status.bluetoothOn ? L"\u672A\u8FDE\u63A5" : L"\u5173",   // 未连接 / 关
             island::TextRenderer::IndicatorIcon::Bluetooth, status.bluetoothOn ? 1 : 0,
             status.bluetoothOn, true,
-            island::TextRenderer::PanelAction::OpenSettings,
-            L"ms-settings:bluetooth");
+            island::TextRenderer::PanelAction::ToggleBluetooth, nullptr);
 
     // 飞行模式 -- the panel's ONE real toggle, and a state that is read back rather than remembered.
     //
@@ -508,12 +514,12 @@ int BuildSystemPanel(const island::SystemStatus& status, int installedLayoutCoun
             island::TextRenderer::IndicatorIcon::BatterySaver, 0, status.batterySaverOn, false,
             island::TextRenderer::PanelAction::OpenSettings, L"ms-settings:batterysaver");
 
-    // Live captions: Windows 11 22H2 and later. Always shown, because whether captions are RUNNING is
-    // not something this process can see, and a tile that disappeared on older builds would be a gap in
-    // the grid rather than a missing feature.
-    addTile(L"\u5B9E\u65F6\u5B57\u5E55", nullptr,   // 实时字幕
-            island::TextRenderer::IndicatorIcon::Captions, 0, false, false,
-            island::TextRenderer::PanelAction::OpenSettings, L"ms-settings:easeofaccess-hearing");
+    // Live captions. A TOGGLE now, driven by the shortcut the feature itself is switched by: measured,
+    // Win+Ctrl+L starts LiveCaptions.exe and the same chord stops it again. The tile lights up while the
+    // process is running, which is the only state the feature has.
+    addTile(L"\u5B9E\u65F6\u5B57\u5E55", status.liveCaptionsOn ? L"\u5F00" : L"\u5173",   // 实时字幕
+            island::TextRenderer::IndicatorIcon::Captions, 0, status.liveCaptionsOn, false,
+            island::TextRenderer::PanelAction::ToggleLiveCaptions, nullptr);
 
     // --- the second page -------------------------------------------------------------
     //
@@ -521,9 +527,15 @@ int BuildSystemPanel(const island::SystemStatus& status, int installedLayoutCoun
     // each is an honest "take me where this lives" tile rather than a toggle this process cannot perform. No
     // state on any of them, because none of these settings can be READ from here -- a tile that guessed would
     // be worse than one that simply opens the page.
-    addTile(L"\u591C\u95F4\u6A21\u5F0F", nullptr,             // 夜间模式
-            island::TextRenderer::IndicatorIcon::Moon, 0, false, false,
-            island::TextRenderer::PanelAction::OpenSettings, L"ms-settings:nightlight");
+    // 夜间模式 -- a TOGGLE, and the most expensive one on the panel: Windows has no API for it, and writing
+    // the state it keeps in its own registry blob does NOT switch it (measured: the Settings page still
+    // offered "turn it on now" with the on-value written, after reopening the page). What does switch it is
+    // the Settings page's own switch, which this presses through UI Automation -- so the cost is a Settings
+    // window on screen for a couple of seconds, and the bar says so in the log rather than pretending
+    // otherwise. The state is read from that registry blob, which is what the page itself shows.
+    addTile(L"\u591C\u95F4\u6A21\u5F0F", status.nightLightOn ? L"\u5F00" : L"\u5173",   // 夜间模式
+            island::TextRenderer::IndicatorIcon::Moon, 0, status.nightLightOn, false,
+            island::TextRenderer::PanelAction::ToggleNightLight, nullptr);
     addTile(L"\u79FB\u52A8\u70ED\u70B9", nullptr,             // 移动热点
             island::TextRenderer::IndicatorIcon::Hotspot, 0, false, false,
             island::TextRenderer::PanelAction::OpenSettings, L"ms-settings:network-mobilehotspot");
@@ -729,6 +741,23 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     float lastAppliedVolumeFraction = -1.0f;
     float lastAppliedMixerFraction = -1.0f;
     float lastLoggedVolumeFraction = -1.0f;
+    // --- the brightness row (DDC/CI) ---
+    //
+    // `brightnessAvailable` is only ever made true by a successful read, the same rule as the Bluetooth
+    // probe: a monitor that does not answer must not leave a row on the panel claiming a level. It is
+    // re-checked whenever the bar moves to another display, because a laptop panel answers and the monitor
+    // beside it may not.
+    bool brightnessAvailable = false;
+    int brightnessPercent = 0;
+    // Which slider a drag belongs to: 0 the volume, 1 the brightness (the same numbering as
+    // SystemPanelHit::index, which is where a drag starts).
+    int panelSliderDragRow = 0;
+    // The same two clocks the volume keeps, for the same reasons: DDC/CI writes are not free (they go over
+    // the video cable to the monitor), so they are pushed on a step and never more often than this.
+    int lastAppliedBrightnessPercent = -1;
+    int lastLoggedBrightnessPercent = -1;
+    unsigned long long brightnessWriteNotBefore = 0;
+    unsigned long long panelBrightnessEchoUntil = 0;
     // Set by a press that started a slider drag, taken by the release that ends it: see the Slider branch.
     bool sliderPressHandled = false;
     // The volume the sliders are DRAWN at: the live reading, chased over a tenth of a second.
@@ -2229,8 +2258,34 @@ float musicWavePhase = 0.0f;
                 GetCursorPos(&dragPoint);
                 // From the pointer's x alone, not from the hit test: see PanelSliderFractionForDrag.
                 float fraction = 0.0f;
-                if (volumeAvailable &&
-                    window.PanelSliderFractionForDrag(dragPoint, &fraction)) {
+                if (panelSliderDragRow == 1) {
+                    // The brightness row. DDC/CI writes go over the video cable, so they are pushed on a
+                    // coarser step than the volume's 0.4% and never more often than the echo deadline
+                    // allows: a write per frame would queue up in the monitor and arrive behind the
+                    // handle. The value shown follows the pointer either way (see the frame fill).
+                    if (brightnessAvailable &&
+                        window.PanelSliderFractionForDrag(1, dragPoint, &fraction)) {
+                        const int wanted = static_cast<int>(fraction * 100.0f + 0.5f);
+                        if (wanted != lastAppliedBrightnessPercent &&
+                            (GetTickCount64() >= brightnessWriteNotBefore ||
+                             std::abs(wanted - lastAppliedBrightnessPercent) >= 5)) {
+                            int landed = wanted;
+                            const bool ok = island::SetBrightnessPercent(monitor.monitor, wanted,
+                                                                        &landed);
+                            lastAppliedBrightnessPercent = landed;
+                            brightnessWriteNotBefore = GetTickCount64() + 60;
+                            if (std::abs(landed - lastLoggedBrightnessPercent) >= 5 || !ok) {
+                                lastLoggedBrightnessPercent = landed;
+                                island::LogAndPrint(
+                                    "  brightness: dragging -> %d%% (asked %d, %ls)\n", landed,
+                                    wanted, ok ? "landed" : "the monitor did not take it");
+                                std::fflush(stdout);
+                            }
+                        }
+                        panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                    }
+                } else if (volumeAvailable &&
+                           window.PanelSliderFractionForDrag(0, dragPoint, &fraction)) {
                     if (std::fabs(fraction - lastAppliedVolumeFraction) > 0.004f) {
                         lastAppliedVolumeFraction = fraction;
                         volume.SetLevel(fraction);
@@ -2247,13 +2302,23 @@ float musicWavePhase = 0.0f;
                 }
                 if (!window.LeftButtonDown()) {
                     panelSliderDrag = false;
-                    float finalLevel = 0.0f;
-                    if (volume.Get(&finalLevel)) {
-                        island::LogAndPrint("  volume: drag ended at %.0f%%\n",
-                                            finalLevel * 100.0f);
+                    if (panelSliderDragRow == 1) {
+                        int finalLevel = 0;
+                        if (island::ReadBrightnessPercent(monitor.monitor, &finalLevel)) {
+                            island::LogAndPrint("  brightness: drag ended at %d%%\n", finalLevel);
+                        } else {
+                            island::LogAndPrint("  brightness: drag ended (the monitor did not answer)\n");
+                        }
                     } else {
-                        island::LogAndPrint("  volume: drag ended\n");
+                        float finalLevel = 0.0f;
+                        if (volume.Get(&finalLevel)) {
+                            island::LogAndPrint("  volume: drag ended at %.0f%%\n",
+                                                finalLevel * 100.0f);
+                        } else {
+                            island::LogAndPrint("  volume: drag ended\n");
+                        }
                     }
+                    panelSliderDragRow = 0;
                     std::fflush(stdout);
                 }
             }
@@ -2339,15 +2404,37 @@ float musicWavePhase = 0.0f;
                         }
                     } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Tiles)) {
                         const island::SystemPanelHit hit = window.SystemPanelHitAtScreen(pressed);
-                        if (hit.target == island::SystemPanelTarget::Slider && volumeAvailable) {
-                            sliderPressHandled = true;
-                            panelSliderDrag = true;
-                            lastAppliedVolumeFraction = hit.fraction;
-                            volume.SetLevel(hit.fraction);
-                            panelVolumeEchoUntil = GetTickCount64() + 1200;
-                            island::LogAndPrint("  volume: press on the slider -> %.0f%%\n",
-                                                hit.fraction * 100.0f);
-                            std::fflush(stdout);
+                        if (hit.target == island::SystemPanelTarget::Slider) {
+                            // WHICH slider, from the hit's own index: 0 is the volume row and 1 the
+                            // brightness row, and the drag that this press begins has to follow the row it
+                            // started on rather than whichever one is looked for first.
+                            if (hit.index == 1 && brightnessAvailable) {
+                                sliderPressHandled = true;
+                                panelSliderDrag = true;
+                                panelSliderDragRow = 1;
+                                int landed = 0;
+                                const int wanted = static_cast<int>(hit.fraction * 100.0f + 0.5f);
+                                const bool ok =
+                                    island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
+                                lastAppliedBrightnessPercent = landed;
+                                lastLoggedBrightnessPercent = landed;
+                                brightnessWriteNotBefore = GetTickCount64() + 60;
+                                panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                                island::LogAndPrint(
+                                    "  brightness: press on the slider -> %d%% (asked %d, %ls)\n",
+                                    landed, wanted, ok ? "landed" : "the monitor did not take it");
+                                std::fflush(stdout);
+                            } else if (volumeAvailable) {
+                                sliderPressHandled = true;
+                                panelSliderDrag = true;
+                                panelSliderDragRow = 0;
+                                lastAppliedVolumeFraction = hit.fraction;
+                                volume.SetLevel(hit.fraction);
+                                panelVolumeEchoUntil = GetTickCount64() + 1200;
+                                island::LogAndPrint("  volume: press on the slider -> %.0f%%\n",
+                                                    hit.fraction * 100.0f);
+                                std::fflush(stdout);
+                            }
                         }
                     }
                 }
@@ -2748,6 +2835,22 @@ float musicWavePhase = 0.0f;
                     // and the log would show a second "drag begins" for a drag that had just finished.
                     if (sliderPressHandled) {
                         sliderPressHandled = false;
+                    } else if (panelHit.index == 1 && brightnessAvailable) {
+                        // Pressed without a press event having been seen -- a click that arrived on its
+                        // own. The fraction comes from the same layout the bar was drawn from, so the
+                        // handle goes exactly where the click was.
+                        int landed = 0;
+                        const int wanted = static_cast<int>(panelHit.fraction * 100.0f + 0.5f);
+                        const bool ok =
+                            island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
+                        lastAppliedBrightnessPercent = landed;
+                        panelSliderDrag = true;
+                        panelSliderDragRow = 1;
+                        panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                        island::LogAndPrint(
+                            "  brightness: set to %d%% (drag begins; asked %d, %ls)\n", landed,
+                            wanted, ok ? "landed" : "the monitor did not take it");
+                        std::fflush(stdout);
                     } else if (volumeAvailable) {
                         // Pressed without a press event having been seen -- a click that arrived on its own,
                         // which happens when the panel opened between the two. The fraction comes from the
@@ -2879,6 +2982,51 @@ float musicWavePhase = 0.0f;
                                 // The projection list is the shell's own flyout and appears over this one:
                                 // staying open would put two flyouts on top of each other.
                                 dismissPanel();
+                                break;
+                            }
+
+                            case island::TextRenderer::PanelAction::ToggleBluetooth: {
+                                // The radio, switched on a WORKER: the WinRT call blocks for a few hundred
+                                // milliseconds and the frame loop must not wait for it. The outcome is
+                                // collected in the loop below and logged there, and the caption is read back
+                                // from the machine on the next status sample rather than flipped here.
+                                const bool wanted = !systemStatus.bluetoothOn;
+                                const bool started = island::RequestBluetoothRadio(wanted);
+                                island::LogAndPrint(
+                                    L"  tile %d '%ls' -> Bluetooth %ls (%ls)\n", tileIndex,
+                                    tile.label ? tile.label : L"?", wanted ? L"on" : L"off",
+                                    started ? L"asked, the answer follows in the log"
+                                            : L"a switch is already running");
+                                // Like the Wi-Fi tile: a toggle applies its change here, so the new state is
+                                // the thing to look at.
+                                break;
+                            }
+
+                            case island::TextRenderer::PanelAction::ToggleNightLight: {
+                                // Pressed on the Settings page's own switch, on a worker, because that page
+                                // takes seconds to load. The cost is stated in the log line: a Settings window
+                                // appears for the length of the operation.
+                                const bool wanted = !systemStatus.nightLightOn;
+                                const bool started = island::RequestNightLight(wanted);
+                                island::LogAndPrint(
+                                    L"  tile %d '%ls' -> night light %ls (%ls; this opens the Settings page"
+                                    L" for a moment -- it has no API)\n",
+                                    tileIndex, tile.label ? tile.label : L"?",
+                                    wanted ? L"on" : L"off",
+                                    started ? L"asked, the answer follows in the log"
+                                            : L"a switch is already running");
+                                break;
+                            }
+
+                            case island::TextRenderer::PanelAction::ToggleLiveCaptions: {
+                                // Win+Ctrl+L, the shortcut the feature is switched by. Sent here rather than on
+                                // a worker: the chord itself is a few milliseconds, and the state is read back
+                                // from the process list on the next status sample.
+                                const bool sent = island::ToggleLiveCaptions();
+                                island::LogAndPrint(
+                                    L"  tile %d '%ls' -> Win+Ctrl+L (result %d; the tile's caption comes"
+                                    L" from whether LiveCaptions.exe is running)\n",
+                                    tileIndex, tile.label ? tile.label : L"?", sent ? 1 : 0);
                                 break;
                             }
                         }
@@ -4041,6 +4189,37 @@ float musicWavePhase = 0.0f;
                                     ? (liveKnown ? liveLevel : frame.systemPanel.volume)
                                     : (shownVolume >= 0.0f ? shownVolume : frame.systemPanel.volume);
                         }
+
+                        // The brightness row, and its own percentage on the same terms.
+                        //
+                        // WHILE IT IS BEING DRAGGED the handle is drawn at the POINTER's position, not at the
+                        // last value the monitor confirmed: a DDC/CI write is a round trip over the video
+                        // cable, and drawing the confirmed value would make the handle lag behind the pointer
+                        // by a visible fraction of a second -- the complaint "不顺滑" that the volume row
+                        // already answered the same way.
+                        frame.systemPanel.hasBrightness = brightnessAvailable;
+                        if (brightnessAvailable) {
+                            float dragged = 0.0f;
+                            POINT echoPoint = {};
+                            GetCursorPos(&echoPoint);
+                            const island::SystemPanelHit echoHit =
+                                window.SystemPanelHitAtScreen(echoPoint);
+                            const bool onBrightnessRow =
+                                echoHit.target == island::SystemPanelTarget::Slider &&
+                                echoHit.index == 1;
+                            const bool draggingBrightness =
+                                panelSliderDrag && panelSliderDragRow == 1;
+
+                            if (draggingBrightness || onBrightnessRow) {
+                                dragged = echoHit.fraction;
+                            }
+                            frame.systemPanel.brightness =
+                                draggingBrightness ? dragged
+                                                   : static_cast<float>(brightnessPercent) / 100.0f;
+                            frame.systemPanel.showBrightnessPercent =
+                                draggingBrightness || onBrightnessRow ||
+                                GetTickCount64() < panelBrightnessEchoUntil;
+                        }
                         // The page's hit test is closed the moment the page is not showing: leaving it open
                         // would let a click on the panel's tiles be read as a device row.
                         window.CloseSoundPage();
@@ -4283,6 +4462,62 @@ float musicWavePhase = 0.0f;
                     if (nowMs - lastStatusSampleMs >= kStatusSampleMs) {
                         lastStatusSampleMs = nowMs;
                         statusReader.Sample(&systemStatus);
+
+                        // The brightness, on the same clock. It is a DDC/CI read -- an I2C transaction over
+                        // the video cable -- which is why it is not read per frame, and why the panel's row is
+                        // only offered when the display actually answers: a monitor with DDC/CI switched off
+                        // reports nothing, and a row drawn at a made-up level would be a lie about the screen.
+                        {
+                            int percent = 0;
+                            const bool read = island::ReadBrightnessPercent(monitor.monitor, &percent);
+                            if (read) {
+                                brightnessPercent = percent;
+                                if (!brightnessAvailable) {
+                                    brightnessAvailable = true;
+                                    island::LogAndPrint(
+                                        "  brightness: the panel gets a brightness row (now %d%%)\n",
+                                        percent);
+                                }
+                                if (lastAppliedBrightnessPercent < 0) {
+                                    lastAppliedBrightnessPercent = percent;
+                                    lastLoggedBrightnessPercent = percent;
+                                }
+                            } else if (brightnessAvailable) {
+                                // It answered before and does not now: the monitor was switched off, moved to
+                                // another input, or DDC/CI was turned off in its menu. The row goes away
+                                // rather than staying at the last number it saw.
+                                brightnessAvailable = false;
+                                island::LogAndPrint(
+                                    "  brightness: the display stopped answering; the row is gone\n");
+                            }
+                        }
+                    }
+                }
+
+                // The two worker switches report here, once each: the work is done on a thread and this is
+                // the only place the answer surfaces. A finished Bluetooth switch also re-samples the status,
+                // because the tile's caption is the machine's reading and waiting two seconds for it would
+                // leave the tile showing the state the press just changed.
+                {
+                    bool on = false;
+                    bool succeeded = false;
+                    long hresult = 0;
+                    if (island::TakeBluetoothOutcome(&on, &succeeded, &hresult)) {
+                        island::LogAndPrint(
+                            "  bluetooth: asked for %s, %s%s\n", on ? "on" : "off",
+                            succeeded ? "done" : "NOT done",
+                            hresult ? " (the radio refused the call)" : "");
+                        statusReader.Sample(&systemStatus);
+                        lastStatusSampleMs = GetTickCount64();
+                        std::fflush(stdout);
+                    }
+                    bool stateAfter = false;
+                    if (island::TakeNightLightOutcome(&on, &stateAfter, &succeeded)) {
+                        island::LogAndPrint(
+                            "  night light: asked for %s; it is now %s (%s)\n",
+                            on ? "on" : "off", stateAfter ? "on" : "off",
+                            stateAfter == on ? "it took" : "IT DID NOT CHANGE");
+                        std::fflush(stdout);
                     }
                 }
 

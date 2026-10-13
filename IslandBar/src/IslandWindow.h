@@ -487,7 +487,9 @@ public:
     // wrong one for a drag: once the gesture has started the pointer leaves the row, the card and sometimes
     // the bar itself, and the value still has to follow it (clamped at the ends). Asking the hit test instead
     // is what made the handle freeze half-way through a drag.
-    bool PanelSliderFractionForDrag(POINT screenPoint, float* fraction) const;
+    // `row` is which slider: 0 the volume, 1 the brightness (SystemPanelHit::index carries the same
+    // numbering from the press that started the drag).
+    bool PanelSliderFractionForDrag(int row, POINT screenPoint, float* fraction) const;
     bool MixerSliderFractionForDrag(int row, POINT screenPoint, float* fraction) const;
 
     // Applies an already-made pass-through decision. Used by the self-test so the

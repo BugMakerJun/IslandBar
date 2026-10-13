@@ -266,6 +266,39 @@ Windows 把合成按键丢了；必须用那两个快捷方式启动，别从 ID
 
 ## 5b. 最大化窗口应该顶到屏幕顶端（2026-10-14 修的那条）
 
+## 5c. 系统面板：亮度条 + 三个开关（2026-10-14 加的那批）
+
+**做**：点栏上系统按钮打开面板。应该看到：
+
+1. **音量行下面多了一条"太阳 + 轨道"的亮度行** —— 拖它，屏幕亮度跟着动，拖动时轨道上方显示百分比。
+   日志里：
+   ```
+   brightness: press on the slider -> 62% (asked 62, landed)
+   brightness: dragging -> 55% (asked 55, landed)
+   brightness: drag ended at 55%
+   ```
+   如果启动日志里有 `the monitor did not answer its capabilities`，说明显示器菜单里 DDC/CI 被关了
+   （LG 默认开），面板上**不会**有这一行。
+
+2. **点蓝牙那一格**：无线电真的开关（格子亮/灭，下面写"未连接 / 关"）。日志：
+   ```
+   bluetooth: '蓝牙' -> asked off, answered 1, now off
+   bluetooth: asked for off, done
+   ```
+
+3. **翻到第二页**（面板右边的向下箭头），点**夜间模式**：会先弹一下"设置"窗口（Windows 没有别的接口），
+   约 2–3 秒后它自己关掉，格子变亮，屏幕变暖。日志：
+   ```
+   night light: pressed 'turn it on now' (the page said off)
+   night light: the page now says on -- the press took
+   ```
+
+4. **点实时字幕**：字幕条出现（第一次会弹它自己的同意框，那是 Windows 的行为）；再点一次关掉。
+   日志：`win+ctrl+L: chord sent (keybd_event)`。
+
+**留意一条**：夜间模式那格下面的"开/关"字，正常情况与系统一致；万一它与实际不符（我探针里手写过那个值，见过
+一次不一致），说一声 —— 面板里的开关本身仍然正确，它按设置页自己的状态走。
+
 **做**：把任意一个窗口最大化（双击标题栏，或 Win+↑）。
 
 **应该看到**：窗口内容从屏幕**最上面 y=0** 开始铺满整块屏幕，**岛浮在它上面**；岛的左右两侧

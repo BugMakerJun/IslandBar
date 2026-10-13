@@ -253,4 +253,31 @@ bool SendWindowsKeyChord(wchar_t letter) {
     return true;
 }
 
+bool SendWindowsCtrlKeyChord(wchar_t letter) {
+    if (letter == L'\0') return false;
+
+    // Whatever is held is released first, for the reason given above: a key that is already down turns
+    // the chord into a different shortcut, and a different shortcut is indistinguishable from no
+    // shortcut once it has been sent.
+    if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) SendKey(VK_SHIFT, true);
+    if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) SendKey(VK_MENU, true);
+    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) SendKey(VK_CONTROL, true);
+
+    const WORD key = static_cast<WORD>(VkKeyScanW(letter) & 0xFF);
+    if (key == 0 || key == 0xFF) return false;
+
+    // keybd_event with the keys held briefly, exactly as SendWindowsKeyChord does it and for the same
+    // measured reason (SendInput reported success and the shell ignored the chord).
+    SendKeyLegacy(VK_LWIN, false);
+    SendKeyLegacy(VK_CONTROL, false);
+    SendKeyLegacy(key, false);
+    Sleep(40);
+    SendKeyLegacy(key, true);
+    SendKeyLegacy(VK_CONTROL, true);
+    SendKeyLegacy(VK_LWIN, true);
+
+    LogLine(L"  win+ctrl+%c: chord sent (keybd_event)", letter);
+    return true;
+}
+
 } // namespace island

@@ -416,6 +416,9 @@ public:
         Projection = 15,
         Headphones = 16,
         DisplayAudio = 17,
+        // The brightness row's own glyph, at the left of the second slider -- the shell's quick-settings
+        // flyout puts a sun there. Verified by drawing it, like the rest of this table.
+        Brightness = 18,
     };
 
     using SystemPanelIcon = IndicatorIcon;
@@ -463,6 +466,14 @@ public:
         // exists is 飞行模式, which switches the Wi-Fi radio through the documented WLAN opcode -- see
         // island::SetWifiRadioOn for why it is that radio and not the whole radio set.
         ToggleRadio,
+        // Bluetooth, through Windows.Devices.Radios -- which, measured, allows an ordinary unpackaged
+        // process: see island::RequestBluetoothRadio. Runs on a worker, so the press returns at once.
+        ToggleBluetooth,
+        // 夜间模式, by pressing the Settings page's own switch (island::RequestNightLight): there is no API,
+        // and measured -- writing the state the OS keeps in the registry does not switch it.
+        ToggleNightLight,
+        // 实时字幕, through the shortcut the feature itself is driven by: Win+Ctrl+L (island::ToggleLiveCaptions).
+        ToggleLiveCaptions,
     };
 
     // One tile of the system panel, as the caller has decided it.
@@ -509,6 +520,16 @@ public:
         // the slider is being used and hides it again, and the number is the only exact reading on the
         // panel -- a handle at 40% of its travel says nothing about whether that is 40 or 45.
         bool showVolumePercent = false;
+
+        // The brightness row, under the volume row, and only when the display answers for it.
+        //
+        // DDC/CI is what makes it possible at all, and it is not universal: a monitor with DDC/CI switched
+        // off in its own menu, or one that does not support it, reports nothing -- and then this row is not
+        // drawn rather than drawn at a made-up level. `hasBrightness` is that answer, decided by the caller
+        // from an actual read (DisplayBrightness.h).
+        bool hasBrightness = false;
+        float brightness = 0.0f;        // 0..1, the same scale as the volume
+        bool showBrightnessPercent = false;
     };
 
     // The system panel, drawn into the card.

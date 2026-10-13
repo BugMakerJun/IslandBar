@@ -62,6 +62,17 @@ struct SystemStatus {
     bool bluetoothOn = false;
     wchar_t bluetoothName[248] = {};
 
+    // --- the two switches that are not radios ---
+    //
+    // Night light is read from the state the OS keeps for it (see island::NightLightOn): there is no API,
+    // and the registry value is what the Settings page itself shows. Live captions has no state either --
+    // what is readable is whether its process is running, which is what the tile reflects.
+    //
+    // Both are here rather than asked for at the moment of the draw because the panel is rebuilt every
+    // frame and a Toolhelp snapshot per frame is not.
+    bool nightLightOn = false;
+    bool liveCaptionsOn = false;
+
     // --- volume ---
     bool muted = false;
     int volumePercent = 0;

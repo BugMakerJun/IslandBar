@@ -15,8 +15,10 @@ add_executable(island_bar
     AppBar.cpp
     StartMenu.cpp
     SystemStatus.cpp
+    SystemToggles.cpp
     AudioVolume.cpp
     Diagnostics.cpp
+    DisplayBrightness.cpp
     IslandWindow.cpp
     Log.cpp
     Lyrics.cpp

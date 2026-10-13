@@ -43,6 +43,7 @@
 #include "ThumbnailPreview.h"
 #include "IslandWindow.h"
 #include "Monitor.h"
+#include "SystemToggles.h"
 #include "Motion.h"
 #include "Renderer.h"
 #include "TextRenderer.h"
@@ -7230,13 +7231,27 @@ void TestMusicCardLayout() {
             // left 56 DIP of nothing between the last row and the slider. Asserted as a property rather than
             // as a number, because the number follows from the card's own height.
             {
-                const float expectedBottom = six.sliders[0].top - 10.0f;
+                // WITH THE BRIGHTNESS ROW, which is the shape this panel is laid out for when the display
+                // answers (DDC/CI): two sliders under the grid, and the grid fills the space exactly.
+                const SystemPanelLayout sixTwo = SystemPanelFor(gridCard, 6, 2);
+                const float expectedBottom = sixTwo.sliders[0].top - 10.0f;
                 std::swprintf(dt6, 256,
                               L"last slot ends at %.1f, slider starts at %.1f, the band between is %.1f DIP",
-                              six.tileLabels[5].bottom, six.sliders[0].top,
-                              six.sliders[0].top - six.tileLabels[5].bottom);
-                Check(Nearly(six.tileLabels[5].bottom, expectedBottom, 0.75f),
+                              sixTwo.tileLabels[5].bottom, sixTwo.sliders[0].top,
+                              sixTwo.sliders[0].top - sixTwo.tileLabels[5].bottom);
+                Check(Nearly(sixTwo.tileLabels[5].bottom, expectedBottom, 0.75f),
                       L"the tile grid fills the space down to the slider", dt6);
+
+                // WITH ONE SLIDER there is a band, and it is BOUNDED rather than unbounded: the tiles are
+                // capped at kSystemTileMaxHeightDip so a tall card cannot turn them into slabs, and the 280 DIP
+                // card exists for the two-row panel. A display that does not answer for its brightness
+                // therefore gets a slightly airier grid -- the tiles stay inside the card and clear of the
+                // slider (asserted above for every tile count), and this is the ceiling on the gap.
+                const float oneSliderBand = six.sliders[0].top - six.tileLabels[5].bottom;
+                std::swprintf(dt6, 256, L"one slider: the band under the grid is %.1f DIP (ceiling 45)",
+                              oneSliderBand);
+                Check(oneSliderBand <= 45.0f,
+                      L"without a brightness row the grid's gap is bounded, not a hole", dt6);
                 // And the CAPTION stands under the box rather than inside it, as the shell's own flyout has it:
                 // the box carries the glyph (and a chevron), the caption under it the state or the name.
                 Check(six.tileLabels[0].top >= six.tiles[0].bottom - 0.25f &&
@@ -7325,6 +7340,81 @@ void TestMusicCardLayout() {
                                         centreY)
                           .target == SystemPanelTarget::VolumeDevice,
                       L"the output-device button hits as the way to the sound page", dt6);
+            }
+
+            // THE SECOND SLIDER, the brightness row, and the three things about it that only exist because
+            // there are two: its own glyph, its own hit index, and a track that uses the width the volume row
+            // cannot (the output-device button owns that row's right end).
+            {
+                const SystemPanelLayout two = SystemPanelFor(gridCard, 6, 2);
+                const float brightnessCentreY = (two.sliders[1].top + two.sliders[1].bottom) * 0.5f;
+                std::swprintf(dt6, 256,
+                              L"rows: volume y [%.0f..%.0f], brightness y [%.0f..%.0f]; tracks "
+                              L"[%.0f..%.0f] and [%.0f..%.0f]",
+                              two.sliders[0].top, two.sliders[0].bottom, two.sliders[1].top,
+                              two.sliders[1].bottom, two.sliders[0].left, two.sliders[0].right,
+                              two.sliders[1].left, two.sliders[1].right);
+
+                Check(two.sliderCount == 2 && two.brightnessIcon.right > two.brightnessIcon.left,
+                      L"the brightness row has its own glyph", dt6);
+                Check(two.sliders[1].top > two.sliders[0].bottom - 0.01f,
+                      L"the brightness row sits under the volume row, never on it", dt6);
+                Check(two.sliders[1].right > two.sliders[0].right + 10.0f,
+                      L"the brightness track uses the width the device button takes from the volume row",
+                      dt6);
+                Check(two.sliders[1].right <= gridCard.rect.right - 6.0f,
+                      L"and it still stops inside the card", dt6);
+
+                // The hit test has to say WHICH row, or a press on one of them would move the other: the
+                // index is what the drag follows for the rest of the gesture.
+                const SystemPanelHit onBrightness = SystemPanelHitFor(
+                    gridCard, 6, 2, 0, 1, two.sliders[1].left + 1.0f, brightnessCentreY);
+                const SystemPanelHit onVolume = SystemPanelHitFor(
+                    gridCard, 6, 2, 0, 1, two.sliders[0].left + 1.0f,
+                    (two.sliders[0].top + two.sliders[0].bottom) * 0.5f);
+                std::swprintf(dt6, 256, L"brightness row -> target %d index %d; volume row -> target %d index %d",
+                              static_cast<int>(onBrightness.target), onBrightness.index,
+                              static_cast<int>(onVolume.target), onVolume.index);
+                Check(onBrightness.target == SystemPanelTarget::Slider && onBrightness.index == 1 &&
+                          onVolume.target == SystemPanelTarget::Slider && onVolume.index == 0,
+                      L"each row reports itself, not the other", dt6);
+
+                // The row's own reading, at the two ends: full and empty.
+                Check(Nearly(SystemPanelHitFor(gridCard, 6, 2, 0, 1, two.sliders[1].left,
+                                               brightnessCentreY).fraction, 0.0f, 0.02f) &&
+                          Nearly(SystemPanelHitFor(gridCard, 6, 2, 0, 1, two.sliders[1].right,
+                                                   brightnessCentreY).fraction, 1.0f, 0.02f),
+                      L"the brightness track reads left to right like the volume one", dt6);
+            }
+
+            // The night light state, on the three blobs that were captured on this machine rather than on a
+            // shape written from memory: the 13-byte off, the 41-byte off-with-history, and the 43-byte on.
+            //
+            // LENGTH IS THE TRAP HERE, which is why all three are here: a parse that went by length would
+            // read the 43-byte "was switched off" blob as ON and the first one as OFF by luck.
+            {
+                const unsigned char offFresh[] = {0x43, 0x42, 0x01, 0x00, 0x0A, 0x02, 0x01, 0x00,
+                                                  0x2A, 0x2A, 0x00, 0x00, 0x00};
+                const unsigned char offAgain[] = {
+                    0x43, 0x42, 0x01, 0x00, 0x0A, 0x02, 0x01, 0x00, 0x2A, 0x06, 0xBD, 0xE3,
+                    0xB9, 0xD6, 0x06, 0x2A, 0x2B, 0x0E, 0x13, 0x43, 0x42, 0x01, 0x00, 0xD0,
+                    0x0A, 0x02, 0xC6, 0x14, 0xBA, 0xBB, 0xFC, 0xDC, 0xCB, 0xE7, 0xD6, 0xEE,
+                    0x01, 0x00, 0x00, 0x00, 0x00};
+                const unsigned char on[] = {
+                    0x43, 0x42, 0x01, 0x00, 0x0A, 0x02, 0x01, 0x00, 0x2A, 0x06, 0xBA, 0xE3,
+                    0xB9, 0xD6, 0x06, 0x2A, 0x2B, 0x0E, 0x15, 0x43, 0x42, 0x01, 0x00, 0x10,
+                    0x00, 0xD0, 0x0A, 0x02, 0xC6, 0x14, 0xB3, 0xD4, 0xFA, 0xCD, 0xCB, 0xE7,
+                    0xD6, 0xEE, 0x01, 0x00, 0x00, 0x00, 0x00};
+
+                std::swprintf(dt6, 256, L"blobs: %zu, %zu and %zu bytes", sizeof(offFresh),
+                              sizeof(offAgain), sizeof(on));
+                Check(NightLightStateFromBlob(offFresh, sizeof(offFresh)) == NightLightState::Off &&
+                          NightLightStateFromBlob(offAgain, sizeof(offAgain)) == NightLightState::Off &&
+                          NightLightStateFromBlob(on, sizeof(on)) == NightLightState::On,
+                      L"the three measured blobs read off, off and on", dt6);
+                Check(NightLightStateFromBlob(nullptr, 0) == NightLightState::Unknown &&
+                          NightLightStateFromBlob(offFresh, 4) == NightLightState::Unknown,
+                      L"a missing or truncated blob is Unknown, not a guess", dt6);
             }
         }
 

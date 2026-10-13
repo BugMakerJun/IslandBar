@@ -45,11 +45,16 @@ inline constexpr float kDipPerInch = 96.0f;
 // 320, not 260.
 //
 // The outer cards -- the system panel and the notification -- now hang BELOW the bar instead of
-// growing out of it, so they start at the pill's bottom (42) plus the gap (8) and are 250 tall: the
-// card reaches y=300. At 260 the bottom 40 DIP of the panel were outside the window and could not be
+// growing out of it, so they start at the pill's bottom (42) plus the gap (8) and are 280 tall: the
+// card reaches y=330. At 260 the bottom 40 DIP of the panel were outside the window and could not be
 // painted or clicked at all, which is the same clip as the one that made 260 necessary in the first
 // place -- the arithmetic moved, so the constant has to move with it.
-inline constexpr float kWindowHeightDip = 320.0f;
+//
+// 360, and the arithmetic that moved this time is one row: the card grew by 30 DIP for the brightness
+// slider (Motion.h: kExpandedHeightDip 250 -> 280), so it ends at 330 and the window keeps the same
+// 30 DIP of slack it had at 320. Growing the window is free -- nothing is drawn below the card, and
+// the window is a transparent strip over the desktop whose input region is narrowed to what is drawn.
+inline constexpr float kWindowHeightDip = 360.0f;
 
 // The resting pill.
 inline constexpr float kPillWidthDip    = 220.0f;

@@ -2402,6 +2402,9 @@ wchar_t TextRenderer::IndicatorGlyph(IndicatorIcon icon, int value) {
             return 0xE702;
         case IndicatorIcon::Volume:
             return value == 0 ? 0xE74F : 0xE767;   // muted, or with sound
+        case IndicatorIcon::Brightness:
+            // The sun, which is the mark the shell's own brightness row carries.
+            return 0xE706;
         case IndicatorIcon::Battery:
             if (value <= 10) return 0xE850;
             if (value <= 30) return 0xE851;
@@ -2750,7 +2753,9 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
                                    const SystemPanelText& text, float opacity) {
     if (!context || !titleFormat_ || !bodyFormat_) return;
 
-    const SystemPanelLayout layout = SystemPanelFor(box, text.tileCount, 1 /* the volume slider */,
+    // One slider, or two when the display answers for its brightness (see SystemPanelText::hasBrightness).
+    const SystemPanelLayout layout = SystemPanelFor(box, text.tileCount,
+                                                    text.hasBrightness ? 2 : 1,
                                                     text.pageCount > 1, text.pageIndex,
                                                     text.pageCount);
 
@@ -2854,17 +2859,33 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         }
     }
 
-    // The volume slider: the speaker at the left, then a track with the filled part and a handle.
+    // The sliders: a glyph at the left, then a track with the filled part and a handle.
+    //
+    // Each row carries its OWN mark and its OWN reading -- the speaker with the volume, the sun with the
+    // brightness -- and the first version of this drew the speaker on both rows, because the loop was
+    // written when there was only ever one row.
     for (int i = 0; i < layout.sliderCount; ++i) {
         const RectF& track = layout.sliders[i];
         const float centreY = (track.top + track.bottom) * 0.5f;
         const float barHeight = 4.0f;
         const float radius = barHeight * 0.5f;
 
-        // The speaker, which is also the mute state: the panel must show what the volume says.
-        DrawIndicatorGlyph(context, IndicatorIcon::Volume, layout.speakerIcon,
-                           text.muted ? 0 : static_cast<int>(text.volume * 100.0f + 0.5f), nullptr,
-                           opacity, gearGlyphFormat_, bodyFormat_);
+        // Row 0 is the volume, row 1 the brightness (see SystemPanelFor: the rows stack upward from the
+        // gear, so index 0 -- the one the device button belongs to -- is the one above).
+        const bool brightnessRow = i == 1;
+        const float value = brightnessRow ? text.brightness : text.volume;
+        const bool mutedRow = !brightnessRow && text.muted;
+
+        if (brightnessRow) {
+            DrawIndicatorGlyph(context, IndicatorIcon::Brightness, layout.brightnessIcon,
+                               static_cast<int>(value * 100.0f + 0.5f), nullptr, opacity,
+                               gearGlyphFormat_, bodyFormat_);
+        } else {
+            // The speaker, which is also the mute state: the panel must show what the volume says.
+            DrawIndicatorGlyph(context, IndicatorIcon::Volume, layout.speakerIcon,
+                               text.muted ? 0 : static_cast<int>(text.volume * 100.0f + 0.5f),
+                               nullptr, opacity, gearGlyphFormat_, bodyFormat_);
+        }
 
         // The track, then the filled portion, then the handle. Drawn in that order so the fill covers
         // the track and the handle covers the fill.
@@ -2879,17 +2900,17 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
             trackBrush->Release();
         }
 
-        float fraction = text.volume;
+        float fraction = value;
         if (fraction < 0.0f) fraction = 0.0f;
         if (fraction > 1.0f) fraction = 1.0f;
-        if (text.muted) fraction = 0.0f;
+        if (mutedRow) fraction = 0.0f;
 
         const float handleX = track.left + (track.right - track.left) * fraction;
 
         ID2D1SolidColorBrush* fillBrush = nullptr;
         // Muted draws NO fill even at a non-zero level, so the state is visible in the bar itself and
         // not only in the glyph.
-        if (!text.muted && handleX > track.left + 0.5f) {
+        if (!mutedRow && handleX > track.left + 0.5f) {
             const D2D1_COLOR_F accent = D2D1::ColorF(0.0f, 0.47f, 0.83f, 0.95f * opacity);
             if (SUCCEEDED(context->CreateSolidColorBrush(accent, &fillBrush)) && fillBrush) {
                 const D2D1_ROUNDED_RECT rounded = {
@@ -2936,20 +2957,27 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         }
     }
 
-    // The volume as a percentage, while the slider is the thing in hand.
+    // The reading as a percentage, while that slider is the thing in hand.
     //
     // The handle's position is the only reading the slider itself carries, and "a bit over a third of the
     // way along" is not an answer to "how loud is it". The shell prints the number while the control is
-    // being used and takes it away again afterwards, which is what `showVolumePercent` mirrors.
-    if (text.showVolumePercent && layout.sliderCount > 0 && volumeFormat_) {
-        const RectF& track = layout.sliders[0];
-        float fraction = text.muted ? 0.0f : text.volume;
+    // being used and takes it away again afterwards, which is what the two `show*Percent` flags mirror.
+    for (int i = 0; i < layout.sliderCount; ++i) {
+        const bool brightnessRow = i == 1;
+        if (!(brightnessRow ? text.showBrightnessPercent : text.showVolumePercent) ||
+            !volumeFormat_) {
+            continue;
+        }
+
+        const RectF& track = layout.sliders[i];
+        float fraction = brightnessRow ? text.brightness : text.volume;
         if (fraction < 0.0f) fraction = 0.0f;
         if (fraction > 1.0f) fraction = 1.0f;
+        if (!brightnessRow && text.muted) fraction = 0.0f;
         const float handleX = track.left + (track.right - track.left) * fraction;
 
         wchar_t reading[16] = {};
-        std::swprintf(reading, 16, L"%d%%", static_cast<int>(text.volume * 100.0f + 0.5f));
+        std::swprintf(reading, 16, L"%d%%", static_cast<int>(fraction * 100.0f + 0.5f));
 
         ID2D1SolidColorBrush* numberBrush = nullptr;
         const D2D1_COLOR_F ink = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.94f * opacity);

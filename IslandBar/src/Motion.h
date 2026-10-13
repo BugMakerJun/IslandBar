@@ -163,7 +163,15 @@ inline constexpr float kExpandedWidthDip   = 520.0f;
 // The ceiling is the window: the card starts at the pill's margin of 6, so 250 ends at 256 inside a
 // never-resized 240 DIP window. THE WINDOW THEREFORE GROWS TO 260, which is the one number here that
 // is free -- nothing is drawn below the card, and the window is a transparent strip over the desktop.
-inline constexpr float kExpandedHeightDip  = 250.0f;
+//
+// 280, not 250: THE BRIGHTNESS ROW.
+//
+// The system panel gained a brightness slider under the volume row (22 DIP of track plus the 8 DIP gap),
+// and the tile grid above it takes the space that is left -- so at 250 the six tiles lost 30 DIP between
+// them and their glyph boxes were squeezed to about 8 DIP: measured arithmetic, not a guess, since the
+// caption and its gap are 23 of every tile's height. Growing the card by exactly the row's height keeps
+// the tiles the size they were designed at, and the window grows with it (Geometry.h: 320 -> 360).
+inline constexpr float kExpandedHeightDip  = 280.0f;
 
 // How much of an outer card (the system panel, a notification) is uncovered, given the height of the
 // animated box it is being drawn in.

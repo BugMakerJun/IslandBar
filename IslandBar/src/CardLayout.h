@@ -817,6 +817,7 @@ inline int StartPowerRowAt(const RoundedBox& card, float x, float y) {
 //     [ tile ] [ tile ] [ tile ]     2 rows of 3
 //     [ tile ] [ tile ] [ tile ]
 //     [ speaker  -----------o----- ]  the volume slider
+//     [ sun      ---------o------- ]  the brightness slider, when the display answers
 //     [                        (gear) ] the settings button
 //
 // The tiles have an ON and an OFF appearance rather than being a list of readings. A row that says
@@ -868,6 +869,10 @@ struct SystemPanelLayout {
     RectF tileLabels[kMaxSystemTiles];   // the CAPTION box, under the tile
     RectF sliders[2];         // the volume slider, and the brightness slider if there is one
     RectF speakerIcon;        // at the left of the first slider
+    // At the left of the second slider. Its own rectangle rather than a shared one, because the two rows
+    // carry different marks -- a speaker and a sun -- and one rectangle for both drew the speaker glyph
+    // twice, which is how the first attempt at this looked.
+    RectF brightnessIcon;
     // The output-device button at the RIGHT of the volume slider: the device glyph and the chevron
     // that opens the "声音输出" page, which is what the shell's own flyout puts there.
     RectF volumeButton;
@@ -932,8 +937,10 @@ inline SystemPanelLayout SystemPanelFor(const RoundedBox& box, int tileCount, in
         const float bottom = layout.gearButton.top - sliderGap -
                              static_cast<float>(sliderCount - 1 - i) * (sliderHeight + sliderGap);
         layout.sliders[i].left = left + 26.0f;   // clear of the speaker glyph
-        // Stops short of the output-device button, which owns the right end of this row.
-        layout.sliders[i].right = right - deviceButtonWidth - 6.0f;
+        // The VOLUME row stops short of the output-device button, which owns its right end. The brightness
+        // row has no such button, so its track uses the whole width -- and it is the row that is drawn
+        // second, which is why the two cannot share one right edge.
+        layout.sliders[i].right = i == 0 ? right - deviceButtonWidth - 6.0f : right;
         layout.sliders[i].bottom = bottom;
         layout.sliders[i].top = bottom - sliderHeight;
     }
@@ -950,6 +957,15 @@ inline SystemPanelLayout SystemPanelFor(const RoundedBox& box, int tileCount, in
         layout.volumeButton.left = right - deviceButtonWidth;
         layout.volumeButton.top = centreY - 12.0f;
         layout.volumeButton.bottom = centreY + 12.0f;
+    }
+
+    // The sun, at the left of the brightness row.
+    if (sliderCount > 1) {
+        const float centreY = (layout.sliders[1].top + layout.sliders[1].bottom) * 0.5f;
+        layout.brightnessIcon.left = left;
+        layout.brightnessIcon.right = left + 20.0f;
+        layout.brightnessIcon.top = centreY - 10.0f;
+        layout.brightnessIcon.bottom = centreY + 10.0f;
     }
 
     // The tile grid, filling the space that is left above the controls.

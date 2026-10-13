@@ -837,8 +837,11 @@ SystemPanelHit IslandWindow::SystemPanelHitAtScreen(POINT screenPoint) const {
     // fault in both axes (HANDOFF 7.86) and a second copy would have been a second chance to differ.
     const RoundedBox card =
         PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
-    return SystemPanelHitFor(card, systemPanel_.tileCount, 1, systemPanel_.pageIndex,
-                             systemPanel_.pageCount, localX, localY);
+    // The slider count comes from the panel that was last BUILT, not from a constant: the brightness row
+    // exists only when the display answered for it, and a hit test that assumed two rows would put a press
+    // between the sliders on the brightness track of a card that has none.
+    return SystemPanelHitFor(card, systemPanel_.tileCount, systemPanel_.hasBrightness ? 2 : 1,
+                             systemPanel_.pageIndex, systemPanel_.pageCount, localX, localY);
 }
 
 void IslandWindow::SetSoundPage(const TextRenderer::SoundPageText& page, float scroll) {
@@ -912,7 +915,7 @@ int IslandWindow::SoundScrollJumpFor(POINT screenPoint) const {
     return 0;   // on the thumb: a drag, which this does not do
 }
 
-bool IslandWindow::PanelSliderFractionForDrag(POINT screenPoint, float* fraction) const {
+bool IslandWindow::PanelSliderFractionForDrag(int row, POINT screenPoint, float* fraction) const {
     if (!fraction || systemPanel_.tileCount <= 0) return false;
     float localX = 0.0f;
     float localY = 0.0f;
@@ -920,14 +923,17 @@ bool IslandWindow::PanelSliderFractionForDrag(POINT screenPoint, float* fraction
 
     const RoundedBox card =
         PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
-    const SystemPanelLayout layout = SystemPanelFor(card, systemPanel_.tileCount, 1,
+    // WHICH row, because there are two now: 0 is the volume and 1 the brightness, the same numbering the
+    // hit test uses, and the row's own track is what the pointer is followed along.
+    const SystemPanelLayout layout =
+        SystemPanelFor(card, systemPanel_.tileCount, systemPanel_.hasBrightness ? 2 : 1,
                                                     systemPanel_.pageCount > 1,
                                                     systemPanel_.pageIndex, systemPanel_.pageCount);
-    if (layout.sliderCount <= 0) return false;
+    if (row < 0 || row >= layout.sliderCount) return false;
 
-    const float width = layout.sliders[0].right - layout.sliders[0].left;
+    const float width = layout.sliders[row].right - layout.sliders[row].left;
     if (width <= 1.0f) return false;
-    float value = (localX - layout.sliders[0].left) / width;
+    float value = (localX - layout.sliders[row].left) / width;
     if (value < 0.0f) value = 0.0f;
     if (value > 1.0f) value = 1.0f;
     *fraction = value;

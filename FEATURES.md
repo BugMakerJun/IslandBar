@@ -656,4 +656,28 @@ NextCardOwner **保持**原归属，面板被完整画着收回。**六处**关�
 
 * 画不出边框的最大化窗口（无 `WS_THICKFRAME`）矩形与全屏应用完全一致 → 会被当成全屏应用，栏退场（只剩岛）。
   取舍方向明确：宁可漏判成"全屏"（少画一点），也不要在游戏上压一整天。
+
+---
+
+## 二十七、系统面板：亮度条 + 三个"开关本身"（2026-10-14，HANDOFF 8.87）
+
+用户：「**做1和2把**」—— 面板缺的亮度滑条，以及 Wi-Fi / 蓝牙 / 夜间模式 / 实时字幕**真的能开关**。
+Wi-Fi 早就是真开关（WLAN 的 radio-state opcode）；这一轮把另外三条补上，并把"没有接口"那几句**逐条实测**过。
+
+| # | 行为 | 默认 | 证据等级 | 证据 |
+|---|---|---|---|---|
+| 1 | **亮度滑条**（音量行下面一条，自己的太阳图标、自己的百分比、可点可拖） | 屏幕能答就有 | **A** | 实测 DDC/CI：范围 0..100、当前 77 → 写 60 → 读回 60 → 复原 77（`scripts/probe-brightness.ps1`）；日志 `brightness: DDC/CI on 'Generic PnP Monitor', range 0..100`；截图 `captures/panel-brightness.png`；自检 5 条新断言（两条滑条各自的图标/边界/命中/两端读数） |
+| 2 | **蓝牙开关**：点它真的开关无线电（不再是打开设置页） | 开 | **A** | `Radio.RequestAccessAsync` = Allowed；实测 On→Off→On；面板上点两次：`bluetooth: '蓝牙' -> asked off, answered 1, now off` / `asked on, now on`；状态是**读回来**的（`ProbeBluetooth`） |
+| 3 | **夜间模式开关**：点它 → 开设置页 → 按页面自己的开关 → 关掉页面（约 2–3 秒，日志写明） | 开 | **A（有代价）** | 日志 `night light: pressed 'turn it on now' (the page said off)` → `the page now says on -- the press took`。**没有 API**；实测"直接写它的状态值"**不生效**（设置页仍显示"立即启用"）。核对用**页面自己的标签**，因为注册表那个值会与页面不一致（我自己手写探针造成过一次，记录在 8.87） |
+| 4 | **实时字幕开关**：点它发 Win+Ctrl+L（开/关同一键） | 开 | **A** | 实测两个方向（进程出现/消失）；日志 `win+ctrl+L: chord sent` + tile 说明；tile 的文字来自 `LiveCaptions.exe` 是否在跑 |
+| 5 | 亮度写不进去时：**整行不画**（不是画一条假的），日志写清原因 | —— | **A** | `the monitor did not answer its capabilities (DDC/CI off in its menu?)`；`SetBrightnessPercent` 写完**读回**比对，不一致就报 false |
+
+**这一轮推翻的三句话（原话都在文档里）**：
+
+* "蓝牙没有文档化接口，桌面进程用不了" → **错**，`Windows.Devices.Radios` 对普通 exe 返回 Allowed。
+* "实时字幕看不了状态、只能打开设置页" → 状态可读（进程），开关可用（Win+Ctrl+L）。
+* "亮度 WMI，本环境无法验证" → 这台机器上 **WMI 是空的**（外接显示器），能用的是 **DDC/CI**。
+
+**边界**：DDC/CI 需要显示器自己开着它（关了就整行不画）；夜间模式每次要点开一次设置页；亮度只作用于栏所在的
+那块显示器（多显示器未验证）；蓝牙/字幕的状态在 2 秒采样内反映。
 * 贴边（Win+←）与桌面图标的可用区域也一起变到屏幕顶端 —— 与"最大化顶满"是同一件事。
