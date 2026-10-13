@@ -37,6 +37,27 @@ const Theme kThemes[] = {
     // 石墨
     {L"\u77F3\u58A8", {0.13f, 0.13f, 0.14f, 0.94f}, {0.08f, 0.08f, 0.09f, 0.98f}, 0.05f,
      {0.11f, 0.11f, 0.12f, 0.97f}, 0.18f, {0.24f, 0.56f, 0.90f, 0.95f}, {0.99f, 0.99f, 0.99f, 1.0f}},
+    // 玻璃 -- asked for in these words: "加一个玻璃效果的".
+    //
+    // IT IS PAINTED GLASS, and the difference from real glass is measured rather than assumed. Three
+    // APIs were tried on this window (scripts/probe-glass-blur.ps1, probe-glass-region.ps1):
+    //
+    //   * ACCENT_ENABLE_ACRYLICBLURBEHIND does blur what is behind the window -- edge energy of a strip
+    //     behind it fell 16.0 -> 3.4 -- but across the WHOLE window rectangle, and a window region does
+    //     NOT clip it (outside the region: 7.8 -> 3.4 with acrylic on). The window is a 360 DIP strip, so
+    //     that would paint a blurred band across the top of the screen.
+    //   * DWMWA_SYSTEMBACKDROP_TYPE = acrylic: accepted the call, changed nothing visible.
+    //   * DwmEnableBlurBehindWindow WITH a region -- the one API documented to honour one -- returns
+    //     S_OK and does nothing on Windows 11: the classic Aero glass it drove was removed.
+    //
+    // The only route left is making the WINDOW itself exactly what is drawn (it is created once and
+    // never resized today, deliberately: resizing a DirectComposition swap-chain window flickers, and
+    // the cards would have to grow it too). So this theme does what a surface can do: much more
+    // transparent, cooler, the strongest top gloss of the four, a bright hairline along the edge -- the
+    // things that read as glass -- and its ink is kept bright enough that the contrast floor still
+    // passes. What you see behind the bar is the desktop itself, unblurred.
+    {L"\u73BB\u7483", {0.20f, 0.24f, 0.32f, 0.66f}, {0.06f, 0.08f, 0.14f, 0.82f}, 0.16f,
+     {0.12f, 0.14f, 0.20f, 0.78f}, 0.34f, {0.42f, 0.78f, 1.00f, 0.95f}, {0.98f, 0.99f, 1.00f, 1.0f}},
 };
 constexpr int kThemeCount = static_cast<int>(sizeof(kThemes) / sizeof(kThemes[0]));
 
