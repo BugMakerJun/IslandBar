@@ -3360,27 +3360,36 @@ float musicWavePhase = 0.0f;
                             lyricsScrollDip = 0.0f;   // a new line starts at its beginning
                             lyricLineAge = 0.0f;      // ... and fades in rather than appearing
                             lyricLineChanged = true;
+                            // The WORDS are on the line too, not just the index: "which line is it" cannot
+                            // be checked from a number, and the whole point of this record is that the pill
+                            // and the log can be compared. Measured need: an empty LRC line used to blank
+                            // the pill and it showed the song title instead ("如果一句唱的慢的话 会显示歌
+                            // 曲名") -- with the text in the log that is visible in one grep.
+                            wchar_t wideLine[island::kLyricLineCapacity] = {};
+                            MultiByteToWideChar(CP_UTF8, 0, nextText, -1, wideLine,
+                                                static_cast<int>(island::kLyricLineCapacity));
                             if (track.fromSession) {
                                 island::LogAndPrint(
-                                    "  lyrics: line %d at %lld ms (the session last reported %lld ms)\n",
-                                    index, sungMs, nowPlaying.positionMs);
+                                    L"  lyrics: line %d at %lld ms (the session last reported %lld ms): "
+                                    L"%ls\n",
+                                    index, sungMs, nowPlaying.positionMs, wideLine);
                             } else if (activeFromSession) {
                                 // A session that sends no timeline: the number is the bar's own stopwatch,
                                 // which is exactly what has to be checked when the words look out of step
                                 // with the singing. Measured on NetEase Cloud Music, which reports
                                 // `Position 00:00` for the whole song.
                                 island::LogAndPrint(
-                                    "  lyrics: line %d at %lld ms (counted by the bar -- this session"
-                                    " reports no position)\n",
-                                    index, sungMs);
+                                    L"  lyrics: line %d at %lld ms (counted by the bar -- this session"
+                                    L" reports no position): %ls\n",
+                                    index, sungMs, wideLine);
                             } else {
                                 // No session, so no reading to compare against: the number is this
                                 // source's own count from the moment the window title appeared, which is
                                 // exactly what has to be checked when the words look out of step.
                                 island::LogAndPrint(
-                                    "  lyrics: line %d at %lld ms (counted from the player's window"
-                                    " title -- there is no session)\n",
-                                    index, sungMs);
+                                    L"  lyrics: line %d at %lld ms (counted from the player's window"
+                                    L" title -- there is no session): %ls\n",
+                                    index, sungMs, wideLine);
                             }
                         }
                     }

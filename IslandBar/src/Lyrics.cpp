@@ -555,15 +555,27 @@ int Lyrics::LineAt(long long positionMs) const {
     // otherwise display the first lyric for its whole duration.
     if (positionMs < lines[0].timeMs) return -1;
 
-    // Linear scan from the end. A song has at most a few hundred lines and the
-    // position moves forward, so this is cheaper than a binary search in practice
-    // and has no branch-heavy setup.
+    // THE LAST LINE WITH WORDS, and an empty line is SKIPPED rather than shown.
+    //
+    // NetEase's LRCs mark the end of a phrase with a time tag and no text, and they are everywhere:
+    // measured on 满江《归来》, 37 of its 88 lines are such markers, one of them 1.4 s after "我的心"
+    // began. Returning the marker made the current line EMPTY, and the frame loop reads an empty line as
+    // "no lyric" and falls back to the SONG TITLE -- reported as "如果一句唱的慢的话 会显示歌曲名 然后唱
+    // 下一句的时候 歌词才能对上". Skipping them keeps the words that were just sung on the pill until
+    // the next ones arrive, which is what every player does and what the pill is for.
+    //
+    // The line is still KEPT in the array (its emptiness is the marker's whole meaning, and the parser's
+    // test says so); it is only never the answer to "what is being sung now".
+    //
+    // Linear scan from the end. A song has at most a few hundred lines and the position moves forward, so
+    // this is cheaper than a binary search in practice and has no branch-heavy setup.
     int best = -1;
     for (int i = 0; i < count; ++i) {
-        if (lines[i].timeMs <= positionMs) {
-            best = i;
-        } else {
+        if (lines[i].timeMs > positionMs) {
             break;
+        }
+        if (lines[i].text[0] != '\0') {
+            best = i;
         }
     }
     return best;

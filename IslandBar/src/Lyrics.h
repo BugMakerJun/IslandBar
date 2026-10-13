@@ -54,11 +54,16 @@ struct Lyrics {
     long long trackDurationMs = 0;
 
     // Index of the line that should be shown at `positionMs`, or -1 when the
-    // position is before the first line (an intro) or there are no lines.
+    // position is before the first line WITH WORDS (an intro) or there are no lines.
     //
     // Before the first line the answer is -1 rather than 0 on purpose: showing the
     // first line during an instrumental intro reads as being out of sync, while
     // showing nothing reads as "not started yet".
+    //
+    // An EMPTY line (a time tag with no text, which is how these files mark the end of a phrase) is
+    // never the answer: the last line WITH WORDS stays on screen until the next one arrives. Returning
+    // the marker made the current line empty, the pill fell back to the song title, and a slow phrase
+    // read as "the lyrics stopped" -- "如果一句唱的慢的话 会显示歌曲名".
     int LineAt(long long positionMs) const;
 
     // The line at `index`, or nullptr when out of range.

@@ -159,6 +159,7 @@ start button: island x [1170, 1390] -> ... opacity 1.00
 | 做什么 | 应该看到 | 日志里 |
 |---|---|---|
 | **播放器"不开口"的时候**（它的系统媒体控制开关没开；或先用 `ISLANDBAR_NO_SESSION=1` 启动栏）（2026-10-13 HANDOFF 8.73 起） | 胶囊里**照样有歌词** —— 栏改读它的**窗口标题**（`歌名 - 歌手`）。可**没有封面**，岛也**打不开音乐卡片**（卡片用的是会话里的封面/进度/三个控制键，标题里没有） | `music: [cloudmusic.exe] 歌手 - 歌名 (from its window title -- this player publishes no session)`；歌词那几行尾上是 `(counted from the player's window title -- there is no session)` |
+| **盯着岛上看一句"唱得慢"的词**（2026-10-13 HANDOFF 8.76 起） | 这一句的**词一直停在胶囊里**，直到下一句唱出来才换 —— **中间不该闪出歌名**。（很多 LRC 用"只有时间、没有词"的空行标记句尾；以前那种空行会把词顶掉、露出歌名） | `lyrics: line N …: 那句词` —— 每行都该**带词**；行号会**跳着走**（如 0,1,2,4,6,8…），被跳过的奇数就是那些空标记 |
 | **放网易云的歌**（它不报时间轴）（2026-10-13 HANDOFF 8.74 + 8.75 起） | 胶囊里的歌词**一行行往上走**；卡片左边"已播"在走、右边是**目录里的真实总长**（如 `03:16`）、进度条**按总长填**。**栏是在歌的中段启动的**话，秒表从 0 开始 → 歌词与"已播"会一直差着那一段（不会自己收敛）：**按一下 ⏭/⏮ 或让栏从开歌就在跑**就重新对齐 | `lyrics: loaded (55 lines, the catalogue says 196426 ms)` —— 后面那个数是接口给的；`lyrics: line N at X ms (counted by the bar -- this session reports no position)` 里行号与毫秒都该往前走；`gsmtc_probe.exe` 对同一首歌看到的是 `Position 00:00 / EndTime 00:00` |
 | 点 播放/暂停、上一首、下一首 | 歌真的跟着变 | `music: play/pause requested` |
 | 看卡片右上角（2026-10-12 HANDOFF 8.29 起） | **没有喇叭、没有百分比、没有滑条** —— 整组控件按用户要求删掉了；名字那条来源行现在通到卡片右边距 | 日志里**不该再出现** `volume: press on the card's bar` / `volume: control opened` / `dragging the card's bar`；出现即回退。设备音量仍看第 2 节的面板滑条，单个应用的音量走子页「音量合成器」 |

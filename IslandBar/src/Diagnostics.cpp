@@ -3496,6 +3496,36 @@ void TestLyrics() {
                   L"the looked-up line is the right one");
         }
 
+        // --- AN EMPTY LINE IS NOT AN ANSWER (2026-10-13, HANDOFF 8.76) ---------------------
+        //
+        // Reported: "如果一句唱的慢的话 会显示歌曲名 然后唱下一句的时候 歌词才能对上". NetEase's LRCs mark
+        // the end of a phrase with a time tag and no text, and they are everywhere -- measured on 满江
+        // 《归来》: 37 of its 88 lines, one of them 1.4 s after "我的心" began. Taking the marker as the
+        // current line made that line EMPTY, and an empty line is what the frame loop reads as "no lyric"
+        // and answers with the SONG TITLE. The words that were just sung stay instead.
+        {
+            ParseLrc("[00:20.94]我的心\n[00:22.33]\n[00:26.81]\n[00:30.00]下一句\n", &lyrics);
+            wchar_t markerDetail[192];
+            std::swprintf(markerDetail, 192,
+                          L"lines=%d, at 25 s -> %d, at 30 s -> %d, before the words -> %d",
+                          lyrics.count, lyrics.LineAt(25000), lyrics.LineAt(30000),
+                          lyrics.LineAt(20000));
+            Check(lyrics.count == 4 && lyrics.LineAt(25000) == 0 && lyrics.LineAt(30000) == 3 &&
+                      lyrics.LineAt(20000) == -1,
+                  L"an empty LRC line does not blank the pill: the words stay until the next ones",
+                  markerDetail);
+
+            // A marker BEFORE any words is the intro: the title is the honest thing to show.
+            ParseLrc("[00:01.00]\n[00:05.00]words\n", &lyrics);
+            Check(lyrics.LineAt(2000) == -1 && lyrics.LineAt(6000) == 1,
+                  L"a marker before the first words leaves nothing to show, as the intro does");
+
+            // Nothing but markers: still nothing to show, however far in.
+            ParseLrc("[00:01.00]\n[00:05.00]\n", &lyrics);
+            Check(lyrics.LineAt(9000) == -1,
+                  L"a document of nothing but markers shows nothing at all");
+        }
+
         Lyrics& empty = emptyLyrics;
         Check(empty.LineAt(0) == -1 && empty.Empty(), L"an empty document shows nothing");
     }
