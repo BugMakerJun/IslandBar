@@ -4525,8 +4525,11 @@ float musicWavePhase = 0.0f;
                     if (nowPlaying.artworkRevision != lastDecodedArtworkRevision) {
                         lastDecodedArtworkRevision = nowPlaying.artworkRevision;
                         island::DecodedImage decoded;
-                        if (island::DecodeImage(nowPlaying.artwork, nowPlaying.artworkSize,
-                                                &decoded)) {
+                        // Its own slot: the blurred background below is decoded in the same frame, and
+                        // sharing one buffer is what drew the cover out of the blur's bytes (see
+                        // DecodeSlot).
+                        if (island::DecodeImage(nowPlaying.artwork, nowPlaying.artworkSize, &decoded,
+                                                island::DecodeSlot::Artwork)) {
                             artworkPixels = decoded.pixels;
                             artworkWidth = decoded.width;
                             artworkHeight = decoded.height;
@@ -4557,7 +4560,8 @@ float musicWavePhase = 0.0f;
                             backgroundPng, sizeof(backgroundPng));
                         if (backgroundSize > 0) {
                             island::DecodedImage blurred;
-                            if (island::DecodeImage(backgroundPng, backgroundSize, &blurred)) {
+                            if (island::DecodeImage(backgroundPng, backgroundSize, &blurred,
+                                                    island::DecodeSlot::Background)) {
                                 backgroundPixels = blurred.pixels;
                                 backgroundWidth = blurred.width;
                                 backgroundHeight = blurred.height;
@@ -4623,8 +4627,8 @@ float musicWavePhase = 0.0f;
                     nowPlaying.iconRevision != lastDecodedIconRevision) {
                     lastDecodedIconRevision = nowPlaying.iconRevision;
                     island::DecodedImage decodedIcon;
-                    if (island::DecodeImage(nowPlaying.icon, nowPlaying.iconSize,
-                                            &decodedIcon)) {
+                    if (island::DecodeImage(nowPlaying.icon, nowPlaying.iconSize, &decodedIcon,
+                                            island::DecodeSlot::Icon)) {
                         iconPixels = decodedIcon.pixels;
                         iconWidth = decodedIcon.width;
                         iconHeight = decodedIcon.height;
@@ -5553,7 +5557,8 @@ int RunMusicPreview() {
     island::DecodedImage artwork;
     const bool haveArtwork =
         sample.artworkSize > 0 &&
-        island::DecodeImage(sample.artwork, sample.artworkSize, &artwork);
+        island::DecodeImage(sample.artwork, sample.artworkSize, &artwork,
+                            island::DecodeSlot::Artwork);
 
     // The source application's icon, loaded through the SAME function the live path uses.
     //
@@ -5591,11 +5596,12 @@ int RunMusicPreview() {
     island::DecodedImage iconImage;
     const bool haveIcon =
         sample.iconSize > 0 &&
-        island::DecodeImage(sample.icon, sample.iconSize, &iconImage);
+        island::DecodeImage(sample.icon, sample.iconSize, &iconImage, island::DecodeSlot::Icon);
 
     island::DecodedImage background;
     const bool haveBackground =
-        backgroundSize > 0 && island::DecodeImage(backgroundPng, backgroundSize, &background);
+        backgroundSize > 0 && island::DecodeImage(backgroundPng, backgroundSize, &background,
+                                                  island::DecodeSlot::Background);
 
     island::LogAndPrint("music preview: five shapes, 4 seconds each "
                         "(pill, strip+lyric, strip+title, hover, card; decoded %s, wash %s)",

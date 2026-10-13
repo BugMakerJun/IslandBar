@@ -3177,6 +3177,63 @@ void TestImageCodec() {
               L"channels and orientation survive the round trip", detail);
     }
 
+    // --- TWO DECODED IMAGES ALIVE AT ONCE (2026-10-13, HANDOFF 8.77) --------------------
+    //
+    // The decoder keeps one buffer PER SLOT, and this is the reason: the music path has three images alive
+    // in the same frame -- the cover, the blurred background built from it, and the source app's icon --
+    // and while they shared one buffer the LAST decode overwrote the first. The card then drew its cover
+    // out of the blurred background's bytes; the blur is smaller than the cover, so only the cover's first
+    // rows were overwritten and the top half came out smeared over artwork that still looked right.
+    // Reported in those words: "歌曲封面这个上半部分会涂抹".
+    //
+    // The second decode here is deliberately SMALLER, and the sample is taken at the start of the first
+    // image's buffer -- the bytes a shared buffer would have overwritten. A test that sampled the middle
+    // would pass with the bug still in place.
+    {
+        constexpr int kBig = 8;
+        static uint8_t big[kBig * kBig * 4] = {};
+        for (size_t i = 0; i < sizeof(big); i += 4) {
+            big[i + 0] = 20;    // B
+            big[i + 1] = 20;    // G
+            big[i + 2] = 240;   // R
+            big[i + 3] = 255;
+        }
+        static uint8_t bigPng[kMusicArtworkCapacity] = {};
+        const size_t bigSize = EncodeBgraToPng(big, kBig, kBig, bigPng, sizeof(bigPng));
+
+        constexpr int kSmall = 6;
+        static uint8_t smallArt[kSmall * kSmall * 4] = {};
+        for (size_t i = 0; i < sizeof(smallArt); i += 4) {
+            smallArt[i + 0] = 240;   // B
+            smallArt[i + 1] = 20;
+            smallArt[i + 2] = 20;    // R
+            smallArt[i + 3] = 255;
+        }
+        static uint8_t smallArtPng[kMusicArtworkCapacity] = {};
+        const size_t smallArtSize = EncodeBgraToPng(smallArt, kSmall, kSmall, smallArtPng, sizeof(smallArtPng));
+
+        DecodedImage bigDecoded;
+        DecodedImage smallArtDecoded;
+        const bool bigOk =
+            bigSize > 0 && DecodeImage(bigPng, bigSize, &bigDecoded, DecodeSlot::Artwork);
+        const bool smallOk =
+            smallArtSize > 0 && DecodeImage(smallArtPng, smallArtSize, &smallArtDecoded, DecodeSlot::Other);
+        const size_t mid = (static_cast<size_t>(kBig / 2) * kBig + kBig / 2) * 4;
+        wchar_t twoDetail[176];
+        std::swprintf(twoDetail, 176, L"big B=%u R=%u (also mid B=%u R=%u), small B=%u R=%u",
+                      bigDecoded.pixels ? bigDecoded.pixels[0] : 0,
+                      bigDecoded.pixels ? bigDecoded.pixels[2] : 0,
+                      bigDecoded.pixels ? bigDecoded.pixels[mid + 0] : 0,
+                      bigDecoded.pixels ? bigDecoded.pixels[mid + 2] : 0,
+                      smallArtDecoded.pixels ? smallArtDecoded.pixels[0] : 0,
+                      smallArtDecoded.pixels ? smallArtDecoded.pixels[2] : 0);
+        Check(bigOk && smallOk && bigDecoded.pixels && smallArtDecoded.pixels &&
+                  bigDecoded.pixels[2] > bigDecoded.pixels[0] &&
+                  bigDecoded.pixels[mid + 2] > bigDecoded.pixels[mid + 0] &&
+                  smallArtDecoded.pixels[0] > smallArtDecoded.pixels[2],
+              L"a decode in one slot leaves a decode in another alone", twoDetail);
+    }
+
     // Downscaling must preserve the aspect ratio, or a non-square cover would be
     // squashed on the card.
     {

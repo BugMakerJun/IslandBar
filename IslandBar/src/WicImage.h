@@ -51,13 +51,33 @@ struct AccentColour {
 // A cover with nothing saturated in it keeps the default.
 AccentColour AccentColourFromArtwork(const uint8_t* bgra, int width, int height);
 
+// Which of the decoder's buffers to use.
+//
+// A decoded image's pixels stay valid until the next decode INTO THE SAME BUFFER, and the music path has
+// three of them alive at the same moment: the cover, the blurred background built from it, and the source
+// application's icon. They used to share ONE buffer, so the last decode silently overwrote the first --
+// and the card drew its cover out of the blurred background's bytes. The blur is smaller than the cover,
+// so only the cover's first half was overwritten: the top came out smeared and the bottom still looked
+// like album art. Reported in exactly those words: "歌曲封面这个上半部分会涂抹".
+//
+// So the buffer is chosen by PURPOSE. Callers that hold more than one decoded image at a time must give
+// each its own slot; a caller with a single image (a probe, the self-test) takes the default.
+enum class DecodeSlot : int {
+    Artwork = 0,
+    Background = 1,
+    Icon = 2,
+    Other = 3,
+};
+inline constexpr int kDecodeSlotCount = 4;
+
 // Decodes an encoded image (PNG, JPEG, ...) into BGRA premultiplied pixels.
 //
 // `out` receives the pixel pointer, which is owned by the decoder's own buffer
-// and stays valid until the next call. Returns false for anything the decoder
+// and stays valid until the next decode into the same slot. Returns false for anything the decoder
 // cannot read, including truncated and non-image data -- a hostile or broken
 // payload must not crash the bar.
-bool DecodeImage(const uint8_t* bytes, size_t size, DecodedImage* out);
+bool DecodeImage(const uint8_t* bytes, size_t size, DecodedImage* out,
+                 DecodeSlot slot = DecodeSlot::Other);
 
 // Re-encodes an encoded image to a PNG no larger than `maxDimension` on its long
 // side, writing the bytes to `out`.

@@ -123,11 +123,14 @@ IWICBitmapFrameDecode* DecodeFrame(const uint8_t* bytes, size_t size, UINT* widt
 
 } // namespace
 
-bool DecodeImage(const uint8_t* bytes, size_t size, DecodedImage* out) {
+bool DecodeImage(const uint8_t* bytes, size_t size, DecodedImage* out, DecodeSlot slot) {
     if (!out || !bytes || size == 0) return false;
     out->width = 0;
     out->height = 0;
     out->pixels = nullptr;
+
+    const int slotIndex = static_cast<int>(slot);
+    if (slotIndex < 0 || slotIndex >= kDecodeSlotCount) return false;
 
     IWICImagingFactory* factory = Factory();
     if (!factory) return false;
@@ -163,11 +166,14 @@ bool DecodeImage(const uint8_t* bytes, size_t size, DecodedImage* out) {
     const UINT stride = width * 4;
     const UINT bytesNeeded = stride * height;
 
-    // A static buffer, sized on first use. Album art is small and the card draws
-    // one image, so a single buffer is enough -- and it means the caller never has
-    // to free anything.
-    static uint8_t* buffer = nullptr;
-    static size_t bufferSize = 0;
+    // One buffer PER SLOT, sized on first use. Album art is small, the card draws a few of these at
+    // once, and none of them needs freeing -- but "one buffer is enough" was wrong, and the way it was
+    // wrong is worth keeping here: three images are alive together (cover, blurred background, icon),
+    // the last decode won, and the cover was drawn from the blurred background's bytes. See DecodeSlot.
+    static uint8_t* buffers[kDecodeSlotCount] = {};
+    static size_t bufferSizes[kDecodeSlotCount] = {};
+    uint8_t*& buffer = buffers[slotIndex];
+    size_t& bufferSize = bufferSizes[slotIndex];
     if (bytesNeeded > bufferSize) {
         delete[] buffer;
         buffer = new (std::nothrow) uint8_t[bytesNeeded];
