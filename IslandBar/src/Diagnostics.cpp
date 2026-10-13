@@ -33,6 +33,7 @@
 #include "TaskStripLayout.h"
 #include "WindowList.h"
 #include "MusicSession.h"
+#include "PlayerWindow.h"
 #include "WicImage.h"
 #include "Notification.h"
 #include "NotificationIcon.h"
@@ -3927,6 +3928,91 @@ void TestMusicCardLayout() {
                   SessionScoreForTest(L"qqmusic.exe", true),
               L"the app name comparison ignores case");
 
+        // --- the player that never publishes a session (2026-10-13, HANDOFF 8.73) -----------------
+        //
+        // Such a player's own window title is the only thing it says out loud, so the title has to be
+        // read conservatively: the pill would otherwise announce a page name as a song, and the lyric
+        // lookup would come back empty while the island claimed something was playing.
+        {
+            wchar_t detail[224];
+            const wchar_t* const playerNames[] = {
+                L"cloudmusic.exe", L"CloudMusic.exe", L"QQMusic.exe",
+                L"C:\\SOFTWARE\\CloudMusic\\CloudMusic\\cloudmusic.exe"};
+            int accepted = 0;
+            for (const wchar_t* name : playerNames) {
+                if (IsKnownPlayerExecutable(name)) ++accepted;
+            }
+            std::swprintf(detail, 224, L"%d of 4 accepted", accepted);
+            Check(accepted == 4, L"a known player is recognised by bare name, by case and by full path",
+                  detail);
+
+            const wchar_t* const notPlayerNames[] = {L"chrome.exe", L"msedge.exe", L"explorer.exe",
+                                                     L"island_bar.exe", L""};
+            int refused = 0;
+            for (const wchar_t* name : notPlayerNames) {
+                if (!IsKnownPlayerExecutable(name)) ++refused;
+            }
+            std::swprintf(detail, 224, L"%d of 5 refused", refused);
+            Check(refused == 5,
+                  L"a browser, the shell, the bar itself and an empty name are not players", detail);
+        }
+
+        {
+            wchar_t detail[224];
+            // Each case carries the reason it is the way it is, because the refused ones are the cases
+            // that would put "网易云音乐" on the pill as if it were a song.
+            struct TitleCase {
+                const wchar_t* window;
+                const wchar_t* title;   // nullptr = refused
+                const wchar_t* artist;
+            };
+            const TitleCase titleCases[] = {
+                // The measured one: what NetEase's window says while a track is up.
+                {L"长大以后你是否无忧 - 宋扬/不劉", L"长大以后你是否无忧", L"宋扬/不劉"},
+                {L"如愿 - 葱香科学家（王悠然）", L"如愿", L"葱香科学家（王悠然）"},
+                {L"I Am You - Kim Taylor", L"I Am You", L"Kim Taylor"},
+                {L"  Song  -  Artist  ", L"Song", L"Artist"},
+                // From the RIGHT: a song's own title may contain a dash, the artist part does not.
+                {L"A - B - C", L"A - B", L"C"},
+                // No track up: the window is titled with the application's own name.
+                {L"网易云音乐", nullptr, nullptr},
+                {L"QQ音乐", nullptr, nullptr},
+                {L"网易云音乐 - 每日推荐", nullptr, nullptr},
+                {L"Spotify Free", nullptr, nullptr},
+                // Half a title is not a title.
+                {L"Song - ", nullptr, nullptr},
+                {L" - Artist", nullptr, nullptr},
+                {L"", nullptr, nullptr},
+            };
+            int wrong = 0;
+            const wchar_t* firstWrong = L"";
+            for (const TitleCase& c : titleCases) {
+                char title[kPlayerWindowTitleCapacity] = {};
+                char artist[kPlayerWindowArtistCapacity] = {};
+                const bool parsed = ParsePlayerWindowTitle(c.window, title, sizeof(title), artist,
+                                                           sizeof(artist));
+                bool ok = false;
+                if (c.title == nullptr) {
+                    ok = !parsed;
+                } else {
+                    wchar_t wideTitle[kPlayerWindowTitleCapacity] = {};
+                    wchar_t wideArtist[kPlayerWindowArtistCapacity] = {};
+                    MultiByteToWideChar(CP_UTF8, 0, title, -1, wideTitle, kPlayerWindowTitleCapacity);
+                    MultiByteToWideChar(CP_UTF8, 0, artist, -1, wideArtist,
+                                        kPlayerWindowArtistCapacity);
+                    ok = parsed && std::wcscmp(wideTitle, c.title) == 0 &&
+                         std::wcscmp(wideArtist, c.artist) == 0;
+                }
+                if (!ok) {
+                    if (wrong == 0) firstWrong = c.window;
+                    ++wrong;
+                }
+            }
+            std::swprintf(detail, 224, L"%d of %d wrong, first: '%ls'", wrong,
+                          static_cast<int>(sizeof(titleCases) / sizeof(titleCases[0])), firstWrong);
+            Check(wrong == 0, L"a player window title is read as (song, artist), or refused", detail);
+        }
+
         // --- how long the worker waits, and the SHORT wait after a skip (2026-10-12, HANDOFF 8.38) ---
         //
         // Reported as "切歌的时候点击完 需要等个2-3秒才能切", and the log says where the two and a half seconds
@@ -7330,6 +7416,11 @@ void TestPointerStateCycle() {
             PointerContext icon;
             icon.shape = IslandState::MusicStrip;
             icon.resting = IslandState::MusicStrip;      // a playing session rests as the strip
+            // ... and a playing session is a SESSION. The card asks for that, not for the strip: the
+            // strip is also what a player read from its own window title rests as, and that source has
+            // nothing to put on a card (see PlayerWindow.h). This frame is the session case, so it says
+            // so -- the contract changed with the rule, and the test frame has to change with it.
+            icon.musicPresent = true;
             icon.pointerInside = true;
             icon.pointerOnIsland = false;                // an icon is on the bar, not on the island
             icon.iconCount = 8;
@@ -7352,6 +7443,8 @@ void TestPointerStateCycle() {
                 PointerContext up;
                 up.shape = IslandState::Expanded;
                 up.resting = IslandState::MusicStrip;
+                // A session, for the same reason as the frame above.
+                up.musicPresent = true;
                 up.pointerInside = true;
                 up.pointerOnIsland = false;          // the pointer has left the pill
                 up.iconCount = 8;
@@ -7380,6 +7473,28 @@ void TestPointerStateCycle() {
                 Check(NextShape(up) == IslandState::Expanded,
                       L"the card keeps itself while the pointer is on the card");
                 up.pointerInCardColumn = false;
+                // AND A TRACK THAT CAME FROM A WINDOW TITLE IS NOT A CARD, one field different from the
+                // frame above: the line is up (`resting` is the strip) but there is no session, and
+                // every field the card is made of -- cover, position, three transport keys -- belongs to
+                // the session. Asked in these terms so that the two sources cannot be confused again.
+                {
+                    wchar_t detail[224];
+                    PointerContext lyricOnly;
+                    lyricOnly.shape = IslandState::MusicStrip;
+                    lyricOnly.resting = IslandState::MusicStrip;
+                    lyricOnly.pointerInside = true;
+                    lyricOnly.pointerOnIsland = true;
+                    lyricOnly.musicPresent = false;
+                    std::swprintf(detail, 224,
+                                  L"a track from a window title, pointer on the pill -> %ls",
+                                  StateName(NextShape(lyricOnly)));
+                    Check(NextShape(lyricOnly) != IslandState::Expanded,
+                          L"a track read from a player's window title does not offer the media card",
+                          detail);
+                    lyricOnly.musicPresent = true;
+                    Check(NextShape(lyricOnly) == IslandState::Expanded,
+                          L"... while the same track WITH a session still does", detail);
+                }
                 // The two explicit requests keep it: a message must not be hidden by the pointer, and the
                 // panel was opened deliberately.
                 up.pointerOnIsland = false;

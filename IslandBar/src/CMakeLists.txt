@@ -28,6 +28,7 @@ add_executable(island_bar
     Notification.cpp
     NotificationIcon.cpp
     NotificationPipe.cpp
+    PlayerWindow.cpp
     Renderer.cpp
     SoundOutput.cpp
     TextRenderer.cpp

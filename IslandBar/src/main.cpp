@@ -48,6 +48,7 @@
 #include "Notification.h"
 #include "NotificationIcon.h"
 #include "NotificationPipe.h"
+#include "PlayerWindow.h"
 #include "ToastStore.h"
 #include "TrayIcons.h"
 #include "TrayPress.h"
@@ -960,12 +961,40 @@ unsigned long long lastMusicMeterMs = 0;
     wchar_t noMediaSetting[8] = {};
     const bool noMedia = GetEnvironmentVariableW(L"ISLANDBAR_NO_MEDIA", noMediaSetting, 8) > 0 &&
                          noMediaSetting[0] == L'1';
-    const bool musicAvailable = !noMedia && music.Start();
+    // ISLANDBAR_NO_SESSION=1 leaves the SESSION reader unstarted while the window-title source below
+    // stays on. That is the switch for exercising the fallback on a machine whose player does publish
+    // a session -- this one, since NetEase's own switch was turned on (HANDOFF 8.72) -- because the
+    // fallback only reads while there is no session at all.
+    wchar_t noSessionSetting[8] = {};
+    const bool noSession = GetEnvironmentVariableW(L"ISLANDBAR_NO_SESSION", noSessionSetting, 8) > 0 &&
+                           noSessionSetting[0] == L'1';
+    const bool musicAvailable = !noMedia && !noSession && music.Start();
     island::LogAndPrint(musicAvailable
                             ? "  music: reading the system media session"
                             : (noMedia ? "  music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were"
                                          " playing)"
-                                       : "  music: DISABLED (the media API is unavailable)"));
+                                       : (noSession ? "  music: the session reader is DISABLED BY"
+                                                      " ISLANDBAR_NO_SESSION (the window-title source"
+                                                      " below is what is left)"
+                                                    : "  music: DISABLED (the media API is"
+                                                      " unavailable)")));
+    std::fflush(stdout);
+
+    // --- the player that never publishes a session ------------------------------
+    //
+    // Its own window title is then the only thing it says out loud, and that is enough for the words
+    // (the lyrics come from the online lyric APIs by title and artist). Read ONLY while there is no
+    // session: a session carries the cover, the position and the transport keys as well, and it wins
+    // every time. See PlayerWindow.h for what this source cannot do.
+    //
+    // Off under ISLANDBAR_NO_MEDIA, which means "as if nothing were playing" -- the idle island's own
+    // screenshot depends on that meaning exactly what it says.
+    island::PlayerWindowWatch playerWindow;
+    const bool playerWindowAvailable = !noMedia && playerWindow.Start();
+    island::LogAndPrint(playerWindowAvailable
+                            ? "  music: player window titles are watched too (used only while no"
+                              " session exists)"
+                            : "  music: player window titles DISABLED");
     std::fflush(stdout);
 
     // --- lyrics ---
@@ -1360,6 +1389,9 @@ float musicWavePhase = 0.0f;
         liveStats.Start();
         unsigned long long lastMusicRevision = music.Revision();
         unsigned long long lastDrawnMusicRevision = music.Revision();
+        // Whether a reading has ever been taken from the session worker, so the FIRST one is taken
+        // whatever the revision says. See the music block for why that is not the same question.
+        bool haveMusicReading = false;
 
         // --- diagnostic hooks, all off unless the environment asks for them ---
         //
@@ -1600,6 +1632,23 @@ float musicWavePhase = 0.0f;
     // moves for a position update as well -- so the track is compared by name (see the music block).
     char  drawnTrackTitle[island::kMusicTitleCapacity] = {};
     char  drawnTrackArtist[island::kMusicArtistCapacity] = {};
+
+    // --- the window-title source, and which of the two the pill is showing ---------
+    //
+    // ONE source at a time: the media session if there is one, otherwise the player's own window title
+    // (see PlayerWindow.h). `active*` is that decision, taken once per frame in the music block below
+    // and read by everything downstream -- the lyric line, the marquee, the level meter's frames and
+    // the pill's fallback line -- so no two of them can disagree about which track is up.
+    island::PlayerWindowInfo playerWindowNow;
+    unsigned long long lastPlayerWindowRevision = 0;
+    // When the track on the pill appeared. This is the POSITION for the window-title source: a window
+    // title carries no playhead (see PlayerWindow.h), so its line is counted from here.
+    unsigned long long trackStartedAt = GetTickCount64();
+    bool activePresent = false;
+    bool activeFromSession = false;
+    bool activePlaying = false;
+    const char* activeTitle = "";
+    const char* activeArtist = "";
         // Marquee speed. Slow enough to read a Chinese lyric line.
         constexpr float kLyricScrollDipPerSec = 26.0f;
 
@@ -1748,7 +1797,19 @@ float musicWavePhase = 0.0f;
 
             // --- what is playing ---
             if (musicAvailable) {
-                if (music.Revision() != lastMusicRevision) {
+                // ... AND ONCE AT STARTUP, whatever the revision says.
+                //
+                // The worker publishes only CHANGES, and MusicSession::Start() waits for its first poll
+                // before returning -- so a session that is already up and STEADY when the bar starts is
+                // published exactly once, BEFORE this loop first reads the revision, and never published
+                // again (nothing about it changes). A paused player is exactly that case: same title,
+                // position 0, no state change. Measured live: NetEase paused while the bar started, and
+                // for the whole run there was no `music:` line at all while gsmtc_probe saw the session --
+                // the bar believed nothing was playing, so its card could not be opened and its own track
+                // was invisible.
+                const bool firstMusicReading = !haveMusicReading;
+                if (firstMusicReading || music.Revision() != lastMusicRevision) {
+                    haveMusicReading = true;
                     lastMusicRevision = music.Revision();
                     island::MusicInfo latest;
                     music.Snapshot(&latest);
@@ -1756,61 +1817,168 @@ float musicWavePhase = 0.0f;
                     // The moment this position was read, so it can be projected forward.
                     musicPositionAt = GetTickCount64();
 
-                    // A track change invalidates the lyrics and their scroll position.
-                    //
-                    // AND ONLY A TRACK CHANGE. This block runs whenever the session's revision moves,
-                    // which a position update does too (once every second or two) -- so resetting here
-                    // re-announced the same line as if it had changed, restarted a long line's marquee
-                    // and replayed the roll with the same words on both sides: "歌词每1、2秒就会上下出现
-                    // 一模一样的歌词然后和在一起似的". The comparison is on the track, not on the
-                    // revision.
-                    const bool newTrack =
+                    // Whether this reading is a DIFFERENT TRACK than the one the pill is showing -- which
+                    // is the question the cover line below asks. The lyric fetch and the roll reset are
+                    // NOT done here: which SOURCE the track came from is decided once, further down, by
+                    // the block that also knows about the window-title source (see PlayerWindow.h).
+                    const bool sessionTrackChanged =
                         std::strcmp(drawnTrackTitle, nowPlaying.title) != 0 ||
                         std::strcmp(drawnTrackArtist, nowPlaying.artist) != 0;
-                    strncpy_s(drawnTrackTitle, sizeof(drawnTrackTitle), nowPlaying.title, _TRUNCATE);
-                    strncpy_s(drawnTrackArtist, sizeof(drawnTrackArtist), nowPlaying.artist, _TRUNCATE);
-                    if (newTrack) {
-                        lyricsScrollDip = 0.0f;
-                        lastLyricIndex = -2;
-                    }
-                    if (nowPlaying.present && nowPlaying.title[0] != '\0') {
-                        lyrics.Request(nowPlaying.title, nowPlaying.artist);
-                    }
 
-                    island::LogAndPrint("  music: [%s] %s - %s (%s)",
-                                        nowPlaying.app[0] ? nowPlaying.app : "?",
-                                        nowPlaying.artist[0] ? nowPlaying.artist : "?",
-                                        nowPlaying.title[0] ? nowPlaying.title : "?",
-                                        island::PlaybackStateName(nowPlaying.state));
-                    std::fflush(stdout);
-
-                    // ... AND WHETHER THERE IS A COVER, once per track.
-                    //
-                    // Asked in as many words -- "现在音乐获取 封面 能获取到不" -- and there was no line anywhere
-                    // that answered it: the card either had a cover or it did not, and the only way to tell was
-                    // to photograph it. The bytes below are what the MEDIA SESSION published, so this one line
-                    // separates the three cases that all look alike on screen: the player published nothing
-                    // (`gsmtc_probe` says `Thumbnail: none`), it published something this bar could not decode,
-                    // and it published a cover that is on the card right now.
-                    if (newTrack) {
-                        island::LogAndPrint("  music: cover %s (%zu bytes, revision %llu)\n",
-                                            nowPlaying.artworkSize > 0 ? "present" : "NONE",
-                                            nowPlaying.artworkSize, nowPlaying.artworkRevision);
+                    // Nothing to announce when the reading has no session at all: the FIRST reading is
+                    // taken unconditionally (see above), so without this guard a machine with nothing
+                    // playing would get a line of question marks at every startup. The other half of the
+                    // story -- "the music stopped" -- is logged where the source is decided, below.
+                    if (nowPlaying.present) {
+                        // WIDE, with the arguments converted first. This line used to go through the NARROW
+                        // LogAndPrint overload, which widens its arguments a byte at a time -- so a UTF-8
+                        // artist name came out as `è±é¦ç§å¦å®¶ï¼çæ ï¼` in the log while every other line
+                        // around it read correctly. Found by reading the log of a NetEase track (HANDOFF
+                        // 8.72). The project's own note on that overload warned about exactly this.
+                        {
+                            wchar_t wideApp[island::kMusicAppCapacity] = {};
+                            wchar_t wideArtist[island::kMusicArtistCapacity] = {};
+                            wchar_t wideTitle[island::kMusicTitleCapacity] = {};
+                            wchar_t wideState[64] = {};
+                            MultiByteToWideChar(CP_UTF8, 0, nowPlaying.app, -1, wideApp,
+                                                static_cast<int>(island::kMusicAppCapacity));
+                            MultiByteToWideChar(CP_UTF8, 0, nowPlaying.artist, -1, wideArtist,
+                                                static_cast<int>(island::kMusicArtistCapacity));
+                            MultiByteToWideChar(CP_UTF8, 0, nowPlaying.title, -1, wideTitle,
+                                                static_cast<int>(island::kMusicTitleCapacity));
+                            MultiByteToWideChar(CP_UTF8, 0,
+                                                island::PlaybackStateName(nowPlaying.state), -1,
+                                                wideState, 64);
+                            island::LogAndPrint(L"  music: [%ls] %ls - %ls (%ls)",
+                                                wideApp[0] ? wideApp : L"?",
+                                                wideArtist[0] ? wideArtist : L"?",
+                                                wideTitle[0] ? wideTitle : L"?", wideState);
+                        }
                         std::fflush(stdout);
+
+                        // ... AND WHETHER THERE IS A COVER, once per track.
+                        //
+                        // Asked in as many words -- "现在音乐获取 封面 能获取到不" -- and there was no line
+                        // anywhere that answered it: the card either had a cover or it did not, and the
+                        // only way to tell was to photograph it. The bytes below are what the MEDIA SESSION
+                        // published, so this one line separates the three cases that all look alike on
+                        // screen: the player published nothing (`gsmtc_probe` says `Thumbnail: none`), it
+                        // published something this bar could not decode, and it published a cover that is
+                        // on the card right now.
+                        if (sessionTrackChanged) {
+                            island::LogAndPrint("  music: cover %s (%zu bytes, revision %llu)\n",
+                                                nowPlaying.artworkSize > 0 ? "present" : "NONE",
+                                                nowPlaying.artworkSize, nowPlaying.artworkRevision);
+                            std::fflush(stdout);
+                        }
                     }
                 }
 
-                // Lyrics arrive later than the track does, so a fetch completing is
-                // its own reason to redraw.
-                if (lyrics.Revision() != lastLyricsRevision) {
-                    lastLyricsRevision = lyrics.Revision();
-                    currentLyrics = lyrics.Current();
-                    lastLyricIndex = -2;
+            }
+
+            // Lyrics arrive later than the track does, so a fetch completing is its own reason to
+            // redraw -- and it is read OUT HERE, not inside the session branch above.
+            //
+            // It was inside that branch, and the live run caught it: with the session reader off
+            // (ISLANDBAR_NO_SESSION=1, the switch for exercising the window-title source) the fetch
+            // completed and NOTHING READ IT -- the log showed the track arriving from the window title
+            // and then no `lyrics:` line at all, while the words were sitting in the provider. The
+            // provider is the same one for both sources, so this belongs to neither of them.
+            if (lyrics.Revision() != lastLyricsRevision) {
+                lastLyricsRevision = lyrics.Revision();
+                currentLyrics = lyrics.Current();
+                lastLyricIndex = -2;
+                lyricsScrollDip = 0.0f;
+                island::LogAndPrint("  lyrics: %s (%d lines)",
+                                    currentLyrics ? "loaded" : "none",
+                                    currentLyrics ? currentLyrics->count : 0);
+                std::fflush(stdout);
+            }
+
+            // --- the player that never publishes a session (see PlayerWindow.h) ---------
+            //
+            // Read from its own window title, and ONLY while there is no session: the session carries
+            // the cover, the position and the transport keys as well, and it wins whenever it exists.
+            // Measured need: NetEase Cloud Music 3.1.40 plays with the system's session list empty
+            // until its own switch is turned on (HANDOFF 8.72), and until then the island had nothing
+            // at all to show for the music.
+            if (playerWindowAvailable && playerWindow.Revision() != lastPlayerWindowRevision) {
+                lastPlayerWindowRevision = playerWindow.Revision();
+                // ONLY the reading. It is NOT announced here, because "this player publishes no session"
+                // is a statement about which source is IN USE, and that is decided in the block below --
+                // the live run produced the opposite: the window arrived a few hundred milliseconds before
+                // the session did (the reader's first poll), so the log announced the fallback while a
+                // session was about to be published, and the track it named was the same one.
+                playerWindow.Snapshot(&playerWindowNow);
+            }
+
+            // --- ONE track change, whichever source it came from -------------------------
+            //
+            // The track the PILL is showing, and the one decision that follows from it. There is
+            // exactly one such track: the session's while a session exists, otherwise the player's own
+            // window title. Everything that keys on "a different song is up" reads this -- so the two
+            // sources cannot each believe they own the transition, which is what a reset and a fetch
+            // inside each source's own block would amount to.
+            {
+                const bool sessionUp = nowPlaying.present && nowPlaying.title[0] != '\0';
+                const bool windowUp =
+                    !sessionUp && playerWindowNow.present && playerWindowNow.title[0] != '\0';
+                activePresent = sessionUp || windowUp;
+                activeFromSession = sessionUp;
+                // Whether the line may creep: a paused session stands still (its playhead is not
+                // moving), while a window title only exists while the player is playing something.
+                activePlaying =
+                    sessionUp ? nowPlaying.state == island::PlaybackState::Playing : windowUp;
+                activeTitle = sessionUp ? nowPlaying.title : (windowUp ? playerWindowNow.title : "");
+                activeArtist = sessionUp ? nowPlaying.artist : (windowUp ? playerWindowNow.artist : "");
+
+                const bool trackChanged = std::strcmp(drawnTrackTitle, activeTitle) != 0 ||
+                                          std::strcmp(drawnTrackArtist, activeArtist) != 0;
+                if (trackChanged) {
+                    strncpy_s(drawnTrackTitle, sizeof(drawnTrackTitle), activeTitle, _TRUNCATE);
+                    strncpy_s(drawnTrackArtist, sizeof(drawnTrackArtist), activeArtist, _TRUNCATE);
+                    // A track change invalidates the lyrics and their scroll position.
+                    //
+                    // AND ONLY A TRACK CHANGE. The session bumps its revision for a POSITION update too
+                    // (once every second or two), so keying this on the revision re-announced the same
+                    // line as if it had changed, restarted a long line's marquee and replayed the roll
+                    // with the same words on both sides: "歌词每1、2秒就会上下出现一模一样的歌词然后和
+                    // 在一起似的". The comparison is on the track, not on the revision.
                     lyricsScrollDip = 0.0f;
-                    island::LogAndPrint("  lyrics: %s (%d lines)",
-                                        currentLyrics ? "loaded" : "none",
-                                        currentLyrics ? currentLyrics->count : 0);
-                    std::fflush(stdout);
+                    lastLyricIndex = -2;
+                    // The playhead for the window-title source: it has none of its own, so the words are
+                    // counted from the moment the title appeared (see PlayerWindow.h -- the line is
+                    // aligned when the bar catches the song as it starts, and drifts when it does not).
+                    trackStartedAt = GetTickCount64();
+                    if (activePresent) {
+                        lyrics.Request(activeTitle, activeArtist);
+                        if (!activeFromSession) {
+                            // WHICH SOURCE, said out loud. Without this line a log cannot tell that the
+                            // words on the pill came from a window title instead of a session -- and the
+                            // difference matters the moment someone compares it with `gsmtc_probe`.
+                            wchar_t wideApp[island::kPlayerWindowAppCapacity] = {};
+                            wchar_t wideArtist[island::kPlayerWindowArtistCapacity] = {};
+                            wchar_t wideTitle[island::kPlayerWindowTitleCapacity] = {};
+                            MultiByteToWideChar(CP_UTF8, 0, playerWindowNow.app, -1, wideApp,
+                                                static_cast<int>(island::kPlayerWindowAppCapacity));
+                            MultiByteToWideChar(CP_UTF8, 0, playerWindowNow.artist, -1, wideArtist,
+                                                static_cast<int>(island::kPlayerWindowArtistCapacity));
+                            MultiByteToWideChar(CP_UTF8, 0, playerWindowNow.title, -1, wideTitle,
+                                                static_cast<int>(island::kPlayerWindowTitleCapacity));
+                            island::LogAndPrint(
+                                L"  music: [%ls] %ls - %ls (from its window title -- this player"
+                                L" publishes no session)\n",
+                                wideApp, wideArtist, wideTitle);
+                            std::fflush(stdout);
+                        }
+                    } else {
+                        // Nothing to put on the pill any more: no session AND no player window. Logged
+                        // because the pill is about to go back to its clock and, with both sources silent,
+                        // the log is the only witness that it was not a mistake.
+                        island::LogAndPrint(L"  music: nothing is playing (no session and no player window"
+                                            L" title) -- the pill goes back to its clock\n");
+                        std::fflush(stdout);
+                    }
                 }
             }
 
@@ -1893,8 +2061,12 @@ float musicWavePhase = 0.0f;
             // It used to require PLAYING, so pausing swapped the lyric for the clock. Asked for in these
             // words: "暂停音乐后灵动岛不显示歌词了 应该显示" -- the words are what the strip is for, and a
             // paused player still has them.
-            const bool musicResting =
-                nowPlaying.present && nowPlaying.title[0] != '\0';
+            //
+            // EITHER source counts as something to say, because the question is what the PILL is for, not
+            // where the words came from: the session's track, or the player's own window title while it
+            // publishes no session (see PlayerWindow.h). The CARD is a different question and stays with
+            // the session -- see ShouldPromoteToCard.
+            const bool musicResting = activePresent;
             const island::IslandState resting =
                 musicResting ? island::IslandState::MusicStrip : island::IslandState::Collapsed;
 
@@ -2955,6 +3127,10 @@ float musicWavePhase = 0.0f;
                 context.notificationActive = active != nullptr;
                 // ... and whether there is a player at all: a PAUSED session still opens the card, which
                 // is how the play button is reached after a pause (see ShouldPromoteToCard).
+                //
+                // This is the SESSION, not "the pill has a lyric": a player read from its own window
+                // title (see PlayerWindow.h) fills the pill's line but has no cover, no position and no
+                // transport keys to put on a card, and the card is exactly those three things.
                 context.musicPresent = nowPlaying.present;
                 context.fullscreenApp = fullscreenAppInFront;
                 // The panel is a request for the CARD, so the policy has to know about it -- otherwise
@@ -3126,10 +3302,16 @@ float musicWavePhase = 0.0f;
                     // couple of seconds after the words were sung. Reported as "现在歌词和唱的有点
                     // 对应不上". The same correction the card's progress bar uses (see
                     // ProjectedPositionMs).
-                    const long long sungMs = island::ProjectedPositionMs(
-                        nowPlaying.positionMs, nowPlaying.durationMs,
-                        static_cast<long long>(GetTickCount64() - musicPositionAt),
-                        nowPlaying.state == island::PlaybackState::Playing);
+                    // WHERE the song is. The session reports a position (and only once every second or
+                    // two, so it is projected forward); the window-title source has no position at all
+                    // and is counted from the moment its track appeared (see PlayerWindow.h).
+                    const long long sungMs =
+                        activeFromSession
+                            ? island::ProjectedPositionMs(
+                                  nowPlaying.positionMs, nowPlaying.durationMs,
+                                  static_cast<long long>(GetTickCount64() - musicPositionAt),
+                                  nowPlaying.state == island::PlaybackState::Playing)
+                            : static_cast<long long>(GetTickCount64() - trackStartedAt);
                     const int index = currentLyrics->LineAt(sungMs);
                     const island::LyricLine* line = currentLyrics->At(index);
                     const char* nextText = (line && line->text[0] != '\0') ? line->text : "";
@@ -3151,8 +3333,19 @@ float musicWavePhase = 0.0f;
                             lyricsScrollDip = 0.0f;   // a new line starts at its beginning
                             lyricLineAge = 0.0f;      // ... and fades in rather than appearing
                             lyricLineChanged = true;
-                            island::LogAndPrint("  lyrics: line %d at %lld ms (the session last reported %lld ms)\n",
-                                                index, sungMs, nowPlaying.positionMs);
+                            if (activeFromSession) {
+                                island::LogAndPrint(
+                                    "  lyrics: line %d at %lld ms (the session last reported %lld ms)\n",
+                                    index, sungMs, nowPlaying.positionMs);
+                            } else {
+                                // No session, so no reading to compare against: the number is this
+                                // source's own count from the moment the window title appeared, which is
+                                // exactly what has to be checked when the words look out of step.
+                                island::LogAndPrint(
+                                    "  lyrics: line %d at %lld ms (counted from the player's window"
+                                    " title -- there is no session)\n",
+                                    index, sungMs);
+                            }
                         }
                     }
                     lyricLineAnimating = lyricLineAge < island::kLyricLineEnterSeconds;
@@ -3187,7 +3380,7 @@ float musicWavePhase = 0.0f;
                                 // are what it is for -- but a line that kept creeping across a paused player
                                 // would be reading a playhead that is not moving, and asking for frames
                                 // forever to do it.
-                                if (nowPlaying.state == island::PlaybackState::Playing) {
+                                if (activePlaying) {
                                     lyricsScrolling = true;
                                     lyricsScrollDip +=
                                         static_cast<float>(dt) * kLyricScrollDipPerSec;
@@ -3198,7 +3391,7 @@ float musicWavePhase = 0.0f;
                 }
                 // No lyrics for this track: the title is the honest fallback. The
                 // clock is only shown when there is no music at all.
-                if (!lyricLine) fallbackLine = nowPlaying.title;
+                if (!lyricLine) fallbackLine = activeTitle;
             }
 
             // Does the card's printed position need to change?
@@ -3256,7 +3449,7 @@ float musicWavePhase = 0.0f;
             // Only while music is what the bar is showing: a wave nobody can see is a redraw nobody
             // asked for.
             const bool musicMeterDue =
-                musicResting && nowPlaying.state == island::PlaybackState::Playing &&
+                musicResting && activePlaying &&
                 volumeAvailable && (GetTickCount64() - lastMusicMeterMs >= 33);
             if (musicMeterDue) lastMusicMeterMs = GetTickCount64();
 
@@ -4500,6 +4693,7 @@ float musicWavePhase = 0.0f;
     lyrics.Stop();
     weather.Stop();
     volume.Stop();
+    playerWindow.Stop();
     music.Stop();
 
     // Give the reserved strip back while the window still exists.

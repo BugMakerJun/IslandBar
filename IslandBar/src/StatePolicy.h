@@ -36,7 +36,13 @@ struct PointerContext {
     bool pointerInside = false;
     bool notificationActive = false;
     // A media session exists -- PLAYING OR PAUSED. The two questions are different: `resting == MusicStrip`
-    // means "something is playing right now", while this means "there is a player to talk to".
+    // means "the pill has something to say right now", while this means "there is a player to TALK TO".
+    //
+    // That second question is what a card needs: its cover, its progress bar and its three transport keys
+    // all come from the session. The pill's own line can also be filled by a player that publishes no
+    // session at all -- read from its window title instead (see PlayerWindow.h) -- and that source has
+    // words and nothing else, so a card built on it would be a rectangle of empty rows with three dead
+    // buttons. Hence the card asks THIS, not `resting`.
     bool musicPresent = false;
 
     // The row of application icons beside the island.
@@ -148,7 +154,11 @@ inline bool ShouldPromoteToCard(const PointerContext& c) {
     // used to need `resting == MusicStrip`, which is true only WHILE PLAYING, so pressing pause retracted
     // the card in the same breath -- the button vanished and the next press, the one that would resume,
     // could never be made. Reported as "暂停按钮点击没有变化".
-    return c.resting == IslandState::MusicStrip || c.musicPresent;
+    //
+    // A SESSION, not merely a line on the pill: `resting == MusicStrip` is also true for a player read
+    // from its window title (see PlayerWindow.h), and that source has no cover, no position and no
+    // transport keys -- every field this card is made of. So the card asks for the session itself.
+    return c.musicPresent;
 }
 
 // True when the pointer should make the island show its row of application icons widened.
@@ -171,8 +181,10 @@ inline bool ShouldPromoteToTaskbar(const PointerContext& c) {
     // session: with only the first test, hovering a paused player opened the card and this rule closed it
     // again on the following frame -- measured in the log as `state: expanded` and `state: hover` swapping
     // every frame, and reported as "音乐卡片会出现消失的来回".
-    if (c.shape == IslandState::Expanded && (c.resting == IslandState::MusicStrip ||
-                                            c.musicPresent)) {
+    //
+    // The question is the SAME one the card itself asks (a session to control), so the two cannot
+    // disagree about whether a card is up over a player.
+    if (c.shape == IslandState::Expanded && c.musicPresent) {
         return false;
     }
     // `Expanded` is included for the case where the card has LOST THE REASON IT WAS OPENED while the
@@ -293,6 +305,11 @@ inline IslandState NextShape(IslandState shape, IslandState resting, bool pointe
     c.resting = resting;
     c.pointerInside = pointerInside;
     c.notificationActive = notificationActive;
+    // A strip at rest in this older form means "a session is up" -- the window-title source (see
+    // PlayerWindow.h) is the only other way to fill the pill's line, and it is newer than this
+    // signature, which has no room to say "line, but no card". Callers that need that distinction
+    // describe the pointer fully, and the distinction has its own case in the policy test.
+    c.musicPresent = resting == IslandState::MusicStrip;
     // With no icon row and no deck described, "the pointer is inside the bar" can only mean "on the island"
     // -- there is nothing else on this bar for it to be on. The distinction is exercised by the callers that
     // DO describe the row, which is where it matters.
