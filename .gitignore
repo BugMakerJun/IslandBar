@@ -27,6 +27,9 @@
 build/
 out/
 [Oo]ut/
+# The release package (scripts\package-release.ps1). It is a build product: *.exe below
+# already keeps it out of the repository, and this names the folder so the intent is readable.
+dist/
 *.obj
 *.o
 *.exe

@@ -76,7 +76,12 @@ constexpr wchar_t kMenuShortcut[] = L"IslandBar.lnk";
 // unfamiliar machine needs a way to run it that leaves the shell alone -- without knowing that
 // `--keep-taskbar` is a thing. Named in ASCII so it cannot be mangled by a shell code page.
 constexpr wchar_t kSafeModeShortcut[] = L"IslandBar (safe mode).lnk";
-constexpr wchar_t kVersion[] = L"1.2";
+// Kept in step with payload.rc.in and src/island_bar.rc: this string is what Settings > Apps
+// shows for the installed product, and the other two are what the executables answer in their
+// Properties dialog. The three said 1.2 during the first packaging round (HANDOFF 8.69, built
+// from a Debug tree); 1.3 is the first Release package, which is why the number moves rather
+// than the package being replaced by a file with the same version in it.
+constexpr wchar_t kVersion[] = L"1.3";
 constexpr wchar_t kUninstallKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\IslandBar";
 constexpr wchar_t kSettingsKey[] = L"Software\\IslandBar";
