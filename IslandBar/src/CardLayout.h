@@ -493,6 +493,18 @@ inline PanelLevel NextPanelLevel(PanelLevel held, bool cardUp, bool panelWanted,
     return PanelLevel::Tiles;
 }
 
+// WHETHER A CONTROL MAY ANSWER THE POINTER.
+//
+// All four levels are one card in one rectangle, so each of them has controls where another has EMPTY
+// SPACE -- and empty space that answers is how dragging across the tray page's lower band moved the
+// volume, because the panel's slider lies exactly there. Only the level that is SHOWING may answer, for
+// every kind of control: the tiles and their slider, the 声音输出 rows, the tray page's cells, the Start
+// card's tiles.
+//
+// A function rather than a comparison at each site, because the four questions are asked in five places
+// (the press, the click chain, the right click, the wheel) and the fifth one is exactly what gets missed.
+inline bool LevelAnswersInput(PanelLevel showing, PanelLevel controls) { return showing == controls; }
+
 // WHICH CONTROL SHOWS THAT IT IS OPEN.
 //
 // One card, four levels, and three controls that can open one of them -- so "which button looks pressed"

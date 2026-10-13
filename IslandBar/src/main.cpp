@@ -2238,7 +2238,10 @@ float musicWavePhase = 0.0f;
                 POINT pressed = {};
                 while (window.TakePress(&pressed)) {
                     if (!systemPanelOpen) continue;
-                    if (soundPageOpen) {
+                    // The level that is SHOWING decides which control the press lands on, exactly as the click
+                    // chain below does -- see the note at `panelHit`. Without it the mixer's rows answered
+                    // while the tray page was up, because the two share the card.
+                    if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Sound)) {
                         const island::SoundPageHit hit = window.SoundPageHitAtScreen(pressed);
                         if (hit.target == island::SoundPageTarget::MixerSlider) {
                             mixerSliderDragRow = hit.index;
@@ -2254,7 +2257,7 @@ float musicWavePhase = 0.0f;
                                                 hit.fraction * 100.0f);
                             std::fflush(stdout);
                         }
-                    } else {
+                    } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Tiles)) {
                         const island::SystemPanelHit hit = window.SystemPanelHitAtScreen(pressed);
                         if (hit.target == island::SystemPanelTarget::Slider && volumeAvailable) {
                             sliderPressHandled = true;
@@ -2321,7 +2324,16 @@ float musicWavePhase = 0.0f;
                 // those calls re-lays the panel out to answer it. One value, read once, so the answers cannot
                 // disagree with each other within a single click either.
                 const island::SystemPanelHit panelHit =
-                    systemPanelOpen ? window.SystemPanelHitAtScreen(cursor) : island::SystemPanelHit{};
+                    (systemPanelOpen && island::LevelAnswersInput(panelLevel, island::PanelLevel::Tiles))
+                        ? window.SystemPanelHitAtScreen(cursor)
+                        : island::SystemPanelHit{};
+
+                // ... AND ONLY WHILE THE TILES ARE THE LEVEL THAT IS SHOWING. All four levels share one card
+                // and one rectangle, so each of them has controls where another has empty space: the panel's
+                // volume slider lies exactly across the tray page's lower band, and dragging there moved the
+                // volume -- reported with a photograph of that band ("在托盘卡片红框的地方拖动 声音也会跟着
+                // 变"). Gating the question here gates every branch below that asks `panelHit`, which is why
+                // the answer is computed once, at the top, rather than re-asked per branch.
 
                 // What the click was shown to mean, before anything acts on it: which level is up, what the
                 // panel's own hit test answered, and what shape the window is in. Without this, "the tile did
@@ -2386,7 +2398,7 @@ float musicWavePhase = 0.0f;
                     mixerSliderDragPid = 0;
                     island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
                     std::fflush(stdout);
-                } else if (startPageOpen && systemPanelOpen &&
+                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Start) &&
                            window.StartHitHovered().target !=
                                island::IslandWindow::StartHitTarget::None) {
                     // --- A PRESS ON THE START CARD -----------------------------------------------------
@@ -2465,7 +2477,8 @@ float musicWavePhase = 0.0f;
                             break;
                     }
                     std::fflush(stdout);
-                } else if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0) {
+                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Tray) &&
+                           window.TrayCellHovered() >= 0) {
                     // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
                     // thing about the tray this bar cannot do itself -- the menu or the window that
                     // follows belongs to the application, and the shell is the one that knows how to ask
@@ -2499,7 +2512,7 @@ float musicWavePhase = 0.0f;
                     island::LogAndPrint("  system panel: %ls\n",
                                         systemPanelOpen ? L"open" : L"closed");
                     std::fflush(stdout);
-                } else if (systemPanelOpen && soundPageOpen) {
+                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Sound)) {
                     // --- the 声音输出 page's own controls ---
                     //
                     // Reached BEFORE the panel's, because the two are laid out over the same card: while this
@@ -2913,8 +2926,9 @@ float musicWavePhase = 0.0f;
                         startApps.Unpin(startHit.index);
                         startPowerConfirm = -1;
                     }
-                } else if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0 &&
-                    window.TrayCellHovered() < trayIcons.Count()) {
+                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Tray) &&
+                           window.TrayCellHovered() >= 0 &&
+                           window.TrayCellHovered() < trayIcons.Count()) {
                     // THE BAR'S OWN MENU, not the shell's (HANDOFF 8.80).
                     //
                     // Right-clicking a cell used to ask the shell for the application's menu: show the

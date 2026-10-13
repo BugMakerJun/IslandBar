@@ -6501,6 +6501,33 @@ void TestMusicCardLayout() {
                       L"and that card is still on the screen", trayDetail);
             }
 
+            // ONLY THE LEVEL THAT IS SHOWING MAY ANSWER THE POINTER (2026-10-14, HANDOFF 8.81) -------
+            //
+            // Reported with a photograph of the tray page's lower band: "在托盘卡片红框的地方拖动 声音也会跟着
+            // 变". All four levels are ONE card in one rectangle, so each of them has controls where another
+            // has empty space -- the panel's volume slider lies exactly across that band -- and the hit test
+            // was asking "is the panel open", which is true for every level of it.
+            {
+                const PanelLevel levels[4] = {PanelLevel::Tiles, PanelLevel::Sound, PanelLevel::Tray,
+                                              PanelLevel::Start};
+                int answering = 0;
+                int crossing = 0;
+                for (const PanelLevel showing : levels) {
+                    for (const PanelLevel controls : levels) {
+                        if (LevelAnswersInput(showing, controls)) {
+                            ++answering;
+                            if (showing != controls) ++crossing;
+                        }
+                    }
+                }
+                wchar_t levelInputDetail[192];
+                std::swprintf(levelInputDetail, 192,
+                              L"%d of 16 pairs answer, %d of them from another level", answering,
+                              crossing);
+                Check(answering == 4 && crossing == 0,
+                      L"exactly one level answers a point: the one that is showing", levelInputDetail);
+            }
+
             // WHICH LEVEL THE CARD SHOWS, INCLUDING WHILE IT IS PUT AWAY -- the half that is easy to lose.
             //
             // Every row of NextPanelLevel's table, because the two "put away" rows are what a later change
