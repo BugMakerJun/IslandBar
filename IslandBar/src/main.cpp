@@ -20,6 +20,7 @@
 #include <cmath>        // fabs: comparing the last pushed slider fraction
 #include <cstring>
 #include <cwchar>       // wcstoul / wcstol / wcstof: the diagnostic environment settings
+#include <cwctype>      // towlower: comparing an executable's name with a window's process image
 #include <memory>       // make_unique: the sound page's worker object
 #include <vector>
 
@@ -77,6 +78,13 @@ namespace {
 // Defined further down with the other tray commands, where the reason for the copy is written out.
 island::TrayPressRequest MakeTrayPressRequest(const island::TrayIcon& icon, const wchar_t* exePath);
 void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick);
+// Runs one entry of the bar's OWN tray menu (see CardLayout.h), defined with the tray commands below.
+void RunTrayMenuAction(const island::TrayIcons& icons, island::WindowList& windows, int cell,
+                       island::TrayMenuAction action);
+// What the menu for one icon may offer: whether its application has a window to bring forward, and whether
+// the record knows where its executable is. See TrayMenuEntriesFor for the rule.
+void TrayMenuFactsFor(const island::TrayIcons& icons, island::WindowList& windows, int cell,
+                      island::TrayMenuFacts* out);
 
 // --- the Start card's power list -------------------------------------------------------------------
 //
@@ -689,6 +697,12 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     // The TRAY's own level of the same card: the icons behind the button at the right-hand end of the bar.
     // Kept beside the panel's flag because the two are two levels of one card (see the click handler).
     bool trayPageOpen = false;
+    // THE TRAY'S OWN MENU (2026-10-14, HANDOFF 8.80): which cell it belongs to and what its rows say. The
+    // geometry lives in the window -- it owns the card and answers the hover test -- and this is the
+    // meaning: the same split as every other control on this bar.
+    int trayMenuCell = -1;
+    island::TrayMenuAction trayMenuActions[island::kMaxTrayMenuEntries] = {};
+    int trayMenuActionCount = 0;
     // Which level of the panel's card is showing -- the tiles, the 声音输出 page, or the tray page. Held
     // for the card's whole life, like the owner: the card is on screen for the length of its own exit, so
     // the level it was opened with is also what it leaves with (see NextPanelLevel, and the three places
@@ -2108,6 +2122,9 @@ float musicWavePhase = 0.0f;
                 // put away by a click outside must take every level with it, exactly as a click on the
                 // system button does (see the click handler).
                 trayPageOpen = false;
+                // ... and the tray's own menu, which is a thing in front of that page rather than a level
+                // of it, so it cannot outlive the card it was opened over.
+                window.CloseTrayMenu();
                 panelSliderDrag = false;
                 mixerSliderDragRow = -1;
                 mixerSliderDragPid = 0;
@@ -2269,6 +2286,32 @@ float musicWavePhase = 0.0f;
                     island::LogAndPrint("  %ls: drag ended by the release\n",
                                         wasMixer ? L"mixer" : L"volume");
                     std::fflush(stdout);
+                    continue;
+                }
+
+                // THE TRAY'S OWN MENU, while it is up: a click on one of its rows runs that row, and a
+                // click anywhere else puts the menu away and does nothing else. The click that dismisses a
+                // menu is CONSUMED -- that is what every context menu does, and the alternative (dismiss and
+                // then act on whatever was underneath) presses a tray icon the user was only trying to get
+                // out from under the menu.
+                if (window.TrayMenuIsOpen()) {
+                    const int row = window.TrayMenuRowHovered();
+                    window.CloseTrayMenu();
+                    if (row >= 0 && row < trayMenuActionCount) {
+                        const island::TrayMenuAction action = trayMenuActions[row];
+                        island::LogAndPrint(L"  tray menu: %ls\n", island::TrayMenuLabel(action));
+                        std::fflush(stdout);
+                        RunTrayMenuAction(trayIcons, taskWindows, trayMenuCell, action);
+                        if (action == island::TrayMenuAction::Open ||
+                            action == island::TrayMenuAction::ApplicationMenu) {
+                            // The card goes with the press, which is what the shell does with its own
+                            // flyout: the application's window or menu is what the user is waiting for.
+                            dismissPanel();
+                        }
+                    } else {
+                        island::LogAndPrint("  tray menu: closed (the click was not on a row)\n");
+                        std::fflush(stdout);
+                    }
                     continue;
                 }
 
@@ -2872,8 +2915,27 @@ float musicWavePhase = 0.0f;
                     }
                 } else if (systemPanelOpen && trayPageOpen && window.TrayCellHovered() >= 0 &&
                     window.TrayCellHovered() < trayIcons.Count()) {
-                    StartTrayPress(trayIcons, window.TrayCellHovered(), true);
-                    dismissPanel();
+                    // THE BAR'S OWN MENU, not the shell's (HANDOFF 8.80).
+                    //
+                    // Right-clicking a cell used to ask the shell for the application's menu: show the
+                    // taskbar invisibly, open the overflow panel, move the pointer onto the icon, click, put
+                    // the pointer back -- three to six hundred milliseconds, the shell's panel briefly on
+                    // screen (until 8.79), and the menu at the far corner of the screen rather than under
+                    // the pointer that asked for it. This menu is instant, lands where the pointer is, and
+                    // is drawn in the card the user is already looking at; the application's own menu is the
+                    // LAST entry of it, for the things only the application knows ("退出微信").
+                    trayMenuCell = window.TrayCellHovered();
+                    island::TrayMenuFacts facts;
+                    TrayMenuFactsFor(trayIcons, taskWindows, trayMenuCell, &facts);
+                    trayMenuActionCount = island::TrayMenuEntriesFor(facts, trayMenuActions,
+                                                                     island::kMaxTrayMenuEntries);
+                    window.OpenTrayMenu(trayMenuCell, trayMenuActionCount);
+                    wchar_t flatMenuName[128] = {};
+                    island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d)\n",
+                                        FlatName(trayIcons.At(trayMenuCell).name, flatMenuName, 128),
+                                        trayMenuActionCount, facts.hasWindow ? 1 : 0,
+                                        facts.hasExePath ? 1 : 0);
+                    std::fflush(stdout);
                 } else {
                     island::LogAndPrint("  right click: no tray cell under the pointer (%d,%d)\n",
                                         rightCursor.x, rightCursor.y);
@@ -3611,6 +3673,20 @@ float musicWavePhase = 0.0f;
                 frame.trayRevision = trayIcons.Revision();
                 frame.trayHoveredIndex = window.TrayCellHovered();
                 frame.trayButtonHovered = window.TrayButtonHovered();
+                // ... and the tray's own menu, when one is up: its rows come from the window (it owns the
+                // card and answers the hover test), its labels from here (user-facing text is not the
+                // renderer's to invent -- the same split as the page's title above).
+                frame.trayMenuOpen = window.TrayMenuIsOpen();
+                frame.trayMenuHovered = window.TrayMenuRowHovered();
+                if (frame.trayMenuOpen) {
+                    const island::TrayMenuLayout& menu = window.TrayMenu();
+                    const int rows = menu.count < trayMenuActionCount ? menu.count : trayMenuActionCount;
+                    frame.trayMenuRowCount = rows;
+                    for (int i = 0; i < rows; ++i) {
+                        frame.trayMenuRows[i] = menu.rows[i];
+                        frame.trayMenuLabels[i] = island::TrayMenuLabel(trayMenuActions[i]);
+                    }
+                }
                 // ... and the three washes, each a spring toward "the pointer is on it" (see
                 // FrameState::startWash for why a wash cannot be a switch). Stepped here, before the
                 // frame is drawn, and reported in the frame as AMOUNTS rather than as the booleans.
@@ -5045,6 +5121,91 @@ const wchar_t* FlatName(const wchar_t* name, wchar_t* buffer, size_t capacity) {
 // Hands one icon to a worker thread: the press shows the shell's tray for about a fifth of a second and
 // walks its overflow, which is not something the bar's own frame loop can spend time on. The request is a
 // copy, because the list refreshes under it.
+// The bare executable name out of a path ("Weixin.exe" from a full path), for comparing what the registry
+// recorded with the process behind a window.
+const wchar_t* BaseNameOf(const wchar_t* path) {
+    if (!path) return L"";
+    const wchar_t* base = std::wcsrchr(path, L'\\');
+    return base ? base + 1 : path;
+}
+
+// Whether two bare names are the same image. Case-insensitive: the registry records what the application
+// wrote, and Windows does not care about the case of an executable's name.
+bool SameImage(const wchar_t* a, const wchar_t* b) {
+    if (!a || !b || a[0] == L'\0' || b[0] == L'\0') return false;
+    while (*a && *b) {
+        if (std::towlower(*a) != std::towlower(*b)) return false;
+        ++a;
+        ++b;
+    }
+    return *a == L'\0' && *b == L'\0';
+}
+
+// The first window of that image in the bar's OWN task list -- the same list the icon row draws, so "show
+// the window" acts on the window whose icon the user would have clicked.
+HWND WindowOfImageInList(island::WindowList& windows, const wchar_t* image) {
+    if (!image || image[0] == L'\0') return nullptr;
+    for (int i = 0; i < windows.Count(); ++i) {
+        const island::TaskEntry& entry = windows.At(i);
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.processId);
+        if (!process) continue;
+        wchar_t path[MAX_PATH] = {};
+        DWORD length = MAX_PATH;
+        const bool havePath = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+        CloseHandle(process);
+        if (havePath && SameImage(BaseNameOf(path), image)) return entry.handle;
+    }
+    return nullptr;
+}
+
+void TrayMenuFactsFor(const island::TrayIcons& icons, island::WindowList& windows, int cell,
+                      island::TrayMenuFacts* out) {
+    if (!out) return;
+    *out = island::TrayMenuFacts{};
+    if (cell < 0 || cell >= icons.Count()) return;
+    const wchar_t* path = icons.ExePathAt(cell);
+    out->hasExePath = path && path[0] != L'\0';
+    if (!out->hasExePath) return;
+    out->hasWindow = WindowOfImageInList(windows, BaseNameOf(path)) != nullptr;
+}
+
+void RunTrayMenuAction(const island::TrayIcons& icons, island::WindowList& windows, int cell,
+                       island::TrayMenuAction action) {
+    if (cell < 0 || cell >= icons.Count()) return;
+    const wchar_t* path = icons.ExePathAt(cell);
+    switch (action) {
+        case island::TrayMenuAction::Open:
+            // Exactly what a left click on the cell does: the icon's own default action.
+            StartTrayPress(icons, cell, false);
+            break;
+        case island::TrayMenuAction::ApplicationMenu:
+            // ... and exactly what a right click used to do, for the items only the application knows.
+            StartTrayPress(icons, cell, true);
+            break;
+        case island::TrayMenuAction::ActivateWindow: {
+            HWND window = WindowOfImageInList(windows, BaseNameOf(path));
+            const bool raised = window != nullptr && windows.Activate(window);
+            island::LogAndPrint(L"  tray menu: '%ls' -> %ls\n", BaseNameOf(path),
+                                raised ? L"brought forward" : L"nothing to bring forward");
+            std::fflush(stdout);
+            break;
+        }
+        case island::TrayMenuAction::OpenLocation: {
+            if (!path || path[0] == L'\0') break;
+            // Through Explorer's own "open file location", which is the same gesture the shell's menus
+            // offer. Quoted, because a path with spaces in it is the normal case.
+            wchar_t argument[512] = {};
+            std::swprintf(argument, 512, L"/select,\"%ls\"", path);
+            const HINSTANCE result = ShellExecuteW(nullptr, L"open", L"explorer.exe", argument, nullptr,
+                                                   SW_SHOWNORMAL);
+            island::LogAndPrint(L"  tray menu: opened the folder of '%ls' (result %lld)\n", path,
+                                static_cast<long long>(reinterpret_cast<INT_PTR>(result)));
+            std::fflush(stdout);
+            break;
+        }
+    }
+}
+
 void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
     if (cell < 0 || cell >= icons.Count()) return;
     const island::TrayPressRequest request =

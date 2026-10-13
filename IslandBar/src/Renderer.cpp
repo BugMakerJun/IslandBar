@@ -861,6 +861,15 @@ void Renderer::RenderFrame(const FrameState& frame) {
                         text_->DrawSystemPanel(d2dContext_, panelCard, frame.systemPanel,
                                                frame.cardOpacity);
                     }
+
+                    // ... and the tray's own context menu OVER whatever level is showing: it is opened by a
+                    // right click on a cell, and the page underneath it stays exactly where it was -- the
+                    // menu is a thing in front, not a level of its own (see TrayMenuFor).
+                    if (frame.trayMenuOpen) {
+                        text_->DrawTrayMenu(d2dContext_, frame.trayMenuRows, frame.trayMenuRowCount,
+                                            frame.trayMenuLabels, frame.trayMenuHovered,
+                                            frame.cardOpacity);
+                    }
                 } else if (frame.cardOwner == CardOwner::Notification && frame.notification) {
                     text_->DrawNotification(d2dContext_, panelCard,
                                             frame.notification->app,

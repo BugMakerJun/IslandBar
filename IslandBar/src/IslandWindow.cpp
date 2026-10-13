@@ -765,6 +765,26 @@ void IslandWindow::SetTrayIconCount(int count) {
     trayIconCount_ = count < 0 ? 0 : count;
 }
 
+void IslandWindow::OpenTrayMenu(int cell, int entryCount) {
+    if (cell < 0 || trayIconCount_ <= 0 || cardLeftDip_ <= 0.0f) {
+        CloseTrayMenu();
+        return;
+    }
+    const RoundedBox card =
+        PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
+    const island::TrayPageLayout page = TrayPageFor(card, trayIconCount_);
+    if (cell >= page.count) {
+        CloseTrayMenu();
+        return;
+    }
+    // From the bottom-right corner of the cell: the menu hangs off the icon that was right clicked, the way
+    // a context menu hangs off its object, and TrayMenuFor keeps it inside the card from there.
+    const island::RectF& icon = page.cells[cell];
+    trayMenuLayout_ = island::TrayMenuFor(card, icon.right, icon.bottom, entryCount);
+    trayMenuOpen_ = trayMenuLayout_.count > 0;
+    trayMenuRowHovered_ = -1;
+}
+
 void IslandWindow::SetSystemPanel(const TextRenderer::SystemPanelText& panel, float cardLeftDip) {
     systemPanel_ = panel;
     cardLeftDip_ = cardLeftDip;
@@ -1234,6 +1254,14 @@ void IslandWindow::UpdatePointerState() {
             const RoundedBox card =
                 PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
             trayCellHovered_ = TrayPageCellAt(card, trayIconCount_, localX, localY);
+        }
+
+        // ... and the tray's own menu, when one is up: the rows it was OPENED with, not a fresh layout from
+        // the pointer -- a menu whose box is recomputed from the pointer every frame walks away from the
+        // pointer that is on it, and then the row under the pointer changes as it moves.
+        trayMenuRowHovered_ = -1;
+        if (trayMenuOpen_) {
+            trayMenuRowHovered_ = TrayMenuRowAt(trayMenuLayout_, localX, localY);
         }
 
         // ... and the same question for the Start card, which is laid out by the same rule.

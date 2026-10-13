@@ -6765,6 +6765,86 @@ void TestMusicCardLayout() {
                       L"a point on a tray cell is that icon and the margin beside it is not",
                       trayDetail);
 
+                // --- the tray's OWN menu (2026-10-14, HANDOFF 8.80) -------------------------------
+                //
+                // A right click on a cell used to ask the shell for the application's menu: 300-600 ms,
+                // the shell's panel on screen (until 8.79), and the menu at the corner of the screen
+                // instead of under the pointer. This menu is the bar's own, and these are the two rules it
+                // runs on: WHICH rows it offers, and WHERE they land.
+                {
+                    // Which rows: an entry that would do nothing is not offered, and the application's own
+                    // menu -- the slow one, the one that leaves the bar -- is always last.
+                    TrayMenuAction all[kMaxTrayMenuEntries] = {};
+                    const int withEverything = TrayMenuEntriesFor(TrayMenuFacts{true, true}, all,
+                                                                  kMaxTrayMenuEntries);
+                    TrayMenuAction bare[kMaxTrayMenuEntries] = {};
+                    const int withNothing = TrayMenuEntriesFor(TrayMenuFacts{false, false}, bare,
+                                                               kMaxTrayMenuEntries);
+                    TrayMenuAction onlyPath[kMaxTrayMenuEntries] = {};
+                    const int withPath = TrayMenuEntriesFor(TrayMenuFacts{false, true}, onlyPath,
+                                                            kMaxTrayMenuEntries);
+                    std::swprintf(trayDetail, 256,
+                                  L"everything=%d (last=%d), nothing=%d, path only=%d",
+                                  withEverything,
+                                  withEverything > 0
+                                      ? static_cast<int>(all[withEverything - 1])
+                                      : -1,
+                                  withNothing, withPath);
+                    Check(withEverything == 4 && all[0] == TrayMenuAction::Open &&
+                              all[1] == TrayMenuAction::ActivateWindow &&
+                              all[2] == TrayMenuAction::OpenLocation &&
+                              all[3] == TrayMenuAction::ApplicationMenu &&
+                              withNothing == 2 && bare[0] == TrayMenuAction::Open &&
+                              bare[1] == TrayMenuAction::ApplicationMenu && withPath == 3,
+                          L"the menu offers only what can be done, and the application's own menu last",
+                          trayDetail);
+                }
+                {
+                    // Where: the box hangs off the point it was opened for, and stays inside the card --
+                    // the card is what the window's input region covers, so a menu outside it would be
+                    // drawn where clicks cannot reach.
+                    const RoundedBox menuCard =
+                        BoxForState(IslandState::Expanded,
+                                    AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
+                    const float midX = (menuCard.rect.left + menuCard.rect.right) * 0.5f;
+                    const float midY = (menuCard.rect.top + menuCard.rect.bottom) * 0.5f;
+                    const TrayMenuLayout middle = TrayMenuFor(menuCard, midX, midY, 4);
+                    // A pointer in the card's bottom-right corner: the menu has to flip, not overflow.
+                    const TrayMenuLayout corner =
+                        TrayMenuFor(menuCard, menuCard.rect.right - 2.0f, menuCard.rect.bottom - 2.0f, 4);
+                    // ... and one at the top-left, where there is no room below or to the right either.
+                    const TrayMenuLayout topLeft = TrayMenuFor(menuCard, menuCard.rect.left + 2.0f,
+                                                              menuCard.rect.top + 2.0f, 4);
+                    const bool rowsInside =
+                        middle.rows[3].bottom <= middle.box.bottom + 0.01f &&
+                        middle.box.left >= menuCard.rect.left && middle.box.right <= menuCard.rect.right;
+                    const bool cornerInside = corner.box.left >= menuCard.rect.left &&
+                                              corner.box.right <= menuCard.rect.right &&
+                                              corner.box.top >= menuCard.rect.top &&
+                                              corner.box.bottom <= menuCard.rect.bottom;
+                    const bool topLeftInside = topLeft.box.left >= menuCard.rect.left &&
+                                               topLeft.box.right <= menuCard.rect.right &&
+                                               topLeft.box.top >= menuCard.rect.top &&
+                                               topLeft.box.bottom <= menuCard.rect.bottom;
+                    const int rowHit = TrayMenuRowAt(middle, (middle.rows[1].left + middle.rows[1].right) *
+                                                                  0.5f,
+                                                     (middle.rows[1].top + middle.rows[1].bottom) * 0.5f);
+                    const int rowMiss =
+                        TrayMenuRowAt(middle, middle.box.left - 30.0f, middle.box.top - 30.0f);
+                    const bool rowsOrdered = middle.rows[0].bottom <= middle.rows[1].top + 0.01f &&
+                                             middle.rows[1].bottom <= middle.rows[2].top + 0.01f;
+                    std::swprintf(trayDetail, 256,
+                                  L"middle %ld..%ld x %ld..%ld, corner %ld..%ld, row hit %d miss %d",
+                                  static_cast<LONG>(middle.box.left), static_cast<LONG>(middle.box.right),
+                                  static_cast<LONG>(middle.box.top), static_cast<LONG>(middle.box.bottom),
+                                  static_cast<LONG>(corner.box.left),
+                                  static_cast<LONG>(corner.box.right), rowHit, rowMiss);
+                    Check(middle.count == 4 && rowsInside && cornerInside && topLeftInside &&
+                              rowsOrdered && rowHit == 1 && rowMiss < 0,
+                          L"the menu hangs off its point, stays in the card, and its rows are hit-tested",
+                          trayDetail);
+                }
+
                 MonitorGeometry trayMon;
                 trayMon.screen = {0, 0, 2560, 1440};
                 trayMon.work = {0, 32, 2560, 1408};

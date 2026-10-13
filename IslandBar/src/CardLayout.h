@@ -143,6 +143,116 @@ inline int TrayPageCellAt(const RoundedBox& card, int iconCount, float x, float 
     return -1;
 }
 
+// --- the tray's own context menu (2026-10-14, HANDOFF 8.80) ---------------------------
+//
+// WHY THIS EXISTS. A right click on a tray cell used to ask the SHELL for the application's menu: show the
+// taskbar invisibly, open the overflow panel, move the pointer onto the icon, click, put the pointer back.
+// That works (and is the only way to the items only the application knows -- "退出微信"), but it costs
+// three to six hundred milliseconds and the menu appears at the icon's own screen position, which is the
+// top-right corner rather than under the pointer. This menu is the bar's own: instant, under the pointer,
+// drawn in the surface the bar already owns. The application's menu is still reachable, from the last
+// entry, which is what turns the two into one usable thing instead of two half-answers.
+inline constexpr float kTrayMenuWidthDip   = 176.0f;
+inline constexpr float kTrayMenuRowDip     = 30.0f;
+inline constexpr float kTrayMenuPadDip     = 6.0f;
+inline constexpr int   kMaxTrayMenuEntries = 6;
+
+enum class TrayMenuAction : int {
+    Open,             // the icon's own default action -- exactly what a left click on it does
+    ActivateWindow,   // bring a window of that application to the front
+    OpenLocation,     // the folder the executable lives in, with the file selected
+    ApplicationMenu,  // the application's own menu, through the shell (slow, and at the icon's corner)
+};
+
+// The label a user reads. Wide, because two of the four are Chinese and the renderer wants wide strings.
+inline const wchar_t* TrayMenuLabel(TrayMenuAction action) {
+    switch (action) {
+        case TrayMenuAction::Open:            return L"打开";
+        case TrayMenuAction::ActivateWindow:  return L"显示窗口";
+        case TrayMenuAction::OpenLocation:    return L"打开文件位置";
+        case TrayMenuAction::ApplicationMenu: return L"应用自己的菜单…";
+    }
+    return L"";
+}
+
+// What the icon can actually do, so that the menu never offers a row that does nothing.
+struct TrayMenuFacts {
+    bool hasWindow = false;    // the application has a window to bring forward
+    bool hasExePath = false;   // the registry recorded where its executable lives
+};
+
+// Which entries the menu shows, in order, for one icon -- PURE, so the rule is pinned by the self-test
+// rather than by looking at the screen. The application's menu is always last: it is the slow one, and it
+// is the one that leaves the bar.
+inline int TrayMenuEntriesFor(const TrayMenuFacts& facts, TrayMenuAction* out, int capacity) {
+    if (!out || capacity <= 0) return 0;
+    int count = 0;
+    const auto add = [&](TrayMenuAction action) {
+        if (count < capacity) out[count++] = action;
+    };
+    add(TrayMenuAction::Open);
+    if (facts.hasWindow) add(TrayMenuAction::ActivateWindow);
+    if (facts.hasExePath) add(TrayMenuAction::OpenLocation);
+    add(TrayMenuAction::ApplicationMenu);
+    return count;
+}
+
+struct TrayMenuLayout {
+    RectF box;
+    RectF rows[kMaxTrayMenuEntries];
+    int   count = 0;
+};
+
+// Where the menu goes for a pointer at a card-local DIP point: just below and to the right of it, flipped
+// up or to the left when that would leave the card, and never outside the card at all -- the card is what
+// the window's input region covers, so a menu beyond it would be drawn where clicks cannot land.
+//
+// Called ONCE, when the menu opens, and the box is kept: a menu whose position is recomputed from the
+// pointer every frame walks away from the pointer that is on it.
+inline TrayMenuLayout TrayMenuFor(const RoundedBox& card, float x, float y, int entryCount) {
+    TrayMenuLayout layout;
+    if (entryCount < 0) entryCount = 0;
+    if (entryCount > kMaxTrayMenuEntries) entryCount = kMaxTrayMenuEntries;
+    layout.count = entryCount;
+    if (entryCount == 0) return layout;
+
+    const float height = entryCount * kTrayMenuRowDip + kTrayMenuPadDip * 2.0f;
+    const float cardWidth = card.rect.right - card.rect.left;
+    float left = x + 6.0f;
+    float top = y + 6.0f;
+    if (left + kTrayMenuWidthDip > card.rect.right - 4.0f) left = x - 6.0f - kTrayMenuWidthDip;
+    if (top + height > card.rect.bottom - 4.0f) top = y - 6.0f - height;
+    // The last word: inside the card, whatever the flips decided.
+    if (left < card.rect.left + 4.0f) left = card.rect.left + 4.0f;
+    if (left + kTrayMenuWidthDip > card.rect.right - 4.0f) {
+        left = card.rect.right - 4.0f - kTrayMenuWidthDip;
+    }
+    if (top < card.rect.top + 4.0f) top = card.rect.top + 4.0f;
+    if (top + height > card.rect.bottom - 4.0f) top = card.rect.bottom - 4.0f - height;
+
+    layout.box.left = left;
+    layout.box.right = left + kTrayMenuWidthDip;
+    layout.box.top = top;
+    layout.box.bottom = top + height;
+    for (int i = 0; i < entryCount; ++i) {
+        layout.rows[i].left = layout.box.left + kTrayMenuPadDip;
+        layout.rows[i].right = layout.box.right - kTrayMenuPadDip;
+        layout.rows[i].top = layout.box.top + kTrayMenuPadDip + i * kTrayMenuRowDip;
+        layout.rows[i].bottom = layout.rows[i].top + kTrayMenuRowDip;
+    }
+    return layout;
+}
+
+// Which row a card-local DIP point is on, or -1. Against the box the menu was OPENED with, not a fresh
+// one: see TrayMenuFor.
+inline int TrayMenuRowAt(const TrayMenuLayout& layout, float x, float y) {
+    for (int i = 0; i < layout.count; ++i) {
+        const RectF& row = layout.rows[i];
+        if (x >= row.left && x <= row.right && y >= row.top && y <= row.bottom) return i;
+    }
+    return -1;
+}
+
 inline CardContentLayout CardContentFor(const RoundedBox& cardBox) {
     const float height = cardBox.rect.bottom - cardBox.rect.top;
     const float top = cardBox.rect.top + height * kCardContentTopFraction;

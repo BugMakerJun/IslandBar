@@ -803,6 +803,63 @@ void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& 
     }
 }
 
+void TextRenderer::DrawTrayMenu(ID2D1DeviceContext2* context, const island::RectF* rows, int count,
+                                const wchar_t* const* labels, int hoveredRow, float opacity) {
+    if (!context || !rows || !labels || count <= 0 || opacity <= 0.01f) return;
+    Refresh();
+
+    // The surface: a raised rectangle that sits ON the card, so it reads as something in front rather than
+    // as a hole in it. The card's own surface is 0.05/0.05/0.07; this is lighter and outlined.
+    const float pad = kTrayMenuPadDip;
+    const D2D1_ROUNDED_RECT box = {
+        D2D1::RectF(rows[0].left - pad, rows[0].top - pad, rows[0].right + pad,
+                    rows[count - 1].bottom + pad),
+        10.0f, 10.0f};
+    ID2D1SolidColorBrush* fill = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(
+            D2D1::ColorF(0.13f, 0.13f, 0.16f, 0.99f * opacity), &fill)) &&
+        fill) {
+        context->FillRoundedRectangle(&box, fill);
+        fill->Release();
+    }
+    ID2D1SolidColorBrush* edge = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(
+            D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f * opacity), &edge)) &&
+        edge) {
+        context->DrawRoundedRectangle(&box, edge, 1.0f);
+        edge->Release();
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const RectF& row = rows[i];
+        const D2D1_ROUNDED_RECT rowBox = {
+            D2D1::RectF(row.left, row.top, row.right, row.bottom), 6.0f, 6.0f};
+        if (i == hoveredRow) {
+            ID2D1SolidColorBrush* wash = nullptr;
+            if (SUCCEEDED(context->CreateSolidColorBrush(
+                    D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity), &wash)) &&
+                wash) {
+                context->FillRoundedRectangle(&rowBox, wash);
+                wash->Release();
+            }
+        }
+        const wchar_t* label = labels[i] ? labels[i] : L"";
+        if (label[0] == L'\0') continue;
+        ID2D1SolidColorBrush* ink = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(
+                D2D1::ColorF(0.90f, 0.91f, 0.95f, 0.94f * opacity), &ink)) &&
+            ink) {
+            if (appRowFormat_) {
+                // Left-aligned inside the row, vertically centred by the format's own paragraph alignment.
+                context->DrawTextW(label, static_cast<UINT32>(std::wcslen(label)), appRowFormat_,
+                                   D2D1::RectF(row.left + 8.0f, row.top, row.right - 8.0f, row.bottom),
+                                   ink);
+            }
+            ink->Release();
+        }
+    }
+}
+
 void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box,
                                   float opacity, const wchar_t* sky, const wchar_t* temperature,
                                   const D2D1_COLOR_F& fill) {

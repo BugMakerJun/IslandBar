@@ -174,6 +174,12 @@ public:
                       const TrayIcon* icons, int count, unsigned long long revision, float opacity,
                       int hoveredIndex);
 
+    // The tray's own context menu: a small raised surface with one row per entry, the row under the
+    // pointer washed white. Geometry comes from `TrayMenuFor` (CardLayout.h) -- the box and the rows are
+    // handed in, so the drawing and the hit test cannot disagree about which row a point is on.
+    void DrawTrayMenu(ID2D1DeviceContext2* context, const island::RectF* rows, int count,
+                      const wchar_t* const* labels, int hoveredRow, float opacity);
+
     // --- the date, the weekday, the time and the weather: one line, two homes ----
     //
     // Inside the pill while the island is idle, and in the band left of the deck while the pill's

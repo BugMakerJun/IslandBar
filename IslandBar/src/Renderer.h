@@ -332,6 +332,15 @@ static constexpr int kMaxTaskButtons = 32;
     // own (see SoundPageText, which is here for the same reason). Empty means no heading.
     const wchar_t*  trayPageTitle = nullptr;
 
+    // THE TRAY'S OWN CONTEXT MENU (CardLayout.h): the bar's answer to a right click on a cell, instead of
+    // the shell's panel and the application's menu at the far corner. Opened data, like everything else
+    // here -- where its rows are, which one is under the pointer, and what each one says.
+    bool            trayMenuOpen = false;
+    RectF           trayMenuRows[kMaxTrayMenuEntries] = {};
+    int             trayMenuRowCount = 0;
+    int             trayMenuHovered = -1;
+    const wchar_t*  trayMenuLabels[kMaxTrayMenuEntries] = {};
+
     // --- the Start card -------------------------------------------------------------------------------
     //
     // The same card, one level further: the user's own pins, the shell's full list behind the picker, and
