@@ -79,10 +79,12 @@ struct SystemStatus {
 
     // --- the wireless radio ---
     //
-    // False once the Wi-Fi radio has been switched off, which is the one radio a desktop process can
-    // actually switch: `WlanSetInterface` with `wlan_intf_opcode_radio_state` is documented and needs no
-    // elevation. Bluetooth has no equivalent -- see SetWifiRadioOn -- so the 飞行模式 tile toggles this and
-    // says so in the log rather than pretending the whole radio set went quiet.
+    // False once the Wi-Fi radio has been switched off. Read from the WLAN radio-state QUERY (which works
+    // here), while the WRITE goes through `Windows.Devices.Radios` -- see SystemToggles.h: the WLAN write
+    // that used to serve this reported success and changed nothing on this machine, twice in one session,
+    // and the tile is only honest if what it shows is a reading.
+    //
+    // Both radios are switchable now, so the 飞行模式 tile switches both (Bluetooth has `bluetoothOn` below).
     //
     // True is the default because a reading that never happened must not report a radio the user turned off:
     // the Wi-Fi tile would then say 已关闭 on a machine whose radio is on.

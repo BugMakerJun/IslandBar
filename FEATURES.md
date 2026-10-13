@@ -667,7 +667,9 @@ Wi-Fi 早就是真开关（WLAN 的 radio-state opcode）；这一轮把另外�
 | # | 行为 | 默认 | 证据等级 | 证据 |
 |---|---|---|---|---|
 | 1 | **亮度滑条**（音量行下面一条，自己的太阳图标、自己的百分比、可点可拖） | 屏幕能答就有 | **A** | 实测 DDC/CI：范围 0..100、当前 77 → 写 60 → 读回 60 → 复原 77（`scripts/probe-brightness.ps1`）；日志 `brightness: DDC/CI on 'Generic PnP Monitor', range 0..100`；截图 `captures/panel-brightness.png`；自检 5 条新断言（两条滑条各自的图标/边界/命中/两端读数） |
-| 2 | **蓝牙开关**：点它真的开关无线电（不再是打开设置页） | 开 | **A** | `Radio.RequestAccessAsync` = Allowed；实测 On→Off→On；面板上点两次：`bluetooth: '蓝牙' -> asked off, answered 1, now off` / `asked on, now on`；状态是**读回来**的（`ProbeBluetooth`） |
+| 2 | **蓝牙开关**：点它真的开关无线电（不再是打开设置页），**无箭头**（原地开关，不展开列表） | 开 | **A** | `Radio.RequestAccessAsync` = Allowed；实测 On→Off→On；面板上点两次：`radios: '蓝牙' (bluetooth) -> asked off, answered 1, now off` / `asked on, now on`；状态是**读回来**的（`ProbeBluetooth`） |
+| 2b | **Wi-Fi 开关**：点它开关 Wi-Fi 无线电，**高亮表示"无线电开着"**，文字表示连接状态（可用 / 未连接 / 已关闭） | 开 | **A** | 实测（2026-10-14，8.88）：`radios: 'WLAN' (wifi) -> asked off, answered 1, now off`，同时 `netsh wlan show interfaces` 显示 `Software Off`；再点一次回 `on`。**旧写法（WLAN opcode）在这台机器上静默失败**：`single=0 full=0 counted=0` 却什么都没发生 |
+| 2c | **飞行模式**：**两个无线电一起**开关（以前只切 Wi-Fi，并在日志里声明"蓝牙没切"） | 开 | **A** | 与 Wi-Fi/蓝牙走同一个作业（`RequestRadios(true,true,on)`）；高亮 = 两个都关 |
 | 3 | **夜间模式开关**：点它 → 开设置页 → 按页面自己的开关 → 关掉页面（约 2–3 秒，日志写明） | 开 | **A（有代价）** | 日志 `night light: pressed 'turn it on now' (the page said off)` → `the page now says on -- the press took`。**没有 API**；实测"直接写它的状态值"**不生效**（设置页仍显示"立即启用"）。核对用**页面自己的标签**，因为注册表那个值会与页面不一致（我自己手写探针造成过一次，记录在 8.87） |
 | 4 | **实时字幕开关**：点它发 Win+Ctrl+L（开/关同一键） | 开 | **A** | 实测两个方向（进程出现/消失）；日志 `win+ctrl+L: chord sent` + tile 说明；tile 的文字来自 `LiveCaptions.exe` 是否在跑 |
 | 5 | 亮度写不进去时：**整行不画**（不是画一条假的），日志写清原因 | —— | **A** | `the monitor did not answer its capabilities (DDC/CI off in its menu?)`；`SetBrightnessPercent` 写完**读回**比对，不一致就报 false |

@@ -462,13 +462,17 @@ public:
         // 投影: the shell's own tile sends Win+P, which is what brings up the projection-mode list. The
         // page it opens is the shell's, not a settings URI, so it cannot be expressed as OpenSettings.
         ProjectionModes,
-        // A tile that switches something here and now, rather than taking the user to a page. The one that
-        // exists is 飞行模式, which switches the Wi-Fi radio through the documented WLAN opcode -- see
-        // island::SetWifiRadioOn for why it is that radio and not the whole radio set.
+        // A tile that switches something here and now, rather than taking the user to a page. 飞行模式 is
+        // the one that switches BOTH radios, through island::RequestRadios -- the documented WLAN write that
+        // used to serve it reported success and changed nothing on this machine (see SetWifiRadioOn).
         ToggleRadio,
         // Bluetooth, through Windows.Devices.Radios -- which, measured, allows an ordinary unpackaged
-        // process: see island::RequestBluetoothRadio. Runs on a worker, so the press returns at once.
+        // process: see island::RequestRadios. Runs on a worker, so the press returns at once.
         ToggleBluetooth,
+        // Wi-Fi, through the same API and the same worker. It used to open a settings page, which is what
+        // the tile had the arrow for; a radio switch is what every tile beside it does now, and the shell's
+        // own tile switches in place as well.
+        ToggleWifi,
         // 夜间模式, by pressing the Settings page's own switch (island::RequestNightLight): there is no API,
         // and measured -- writing the state the OS keeps in the registry does not switch it.
         ToggleNightLight,

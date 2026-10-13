@@ -40,7 +40,7 @@ namespace {
 // The two blocking jobs share one worker slot on purpose: they are both "press a switch the machine
 // owns", the user cannot meaningfully start the second while the first is in flight, and one flag is
 // easier to keep honest than two.
-enum class JobKind { None, Bluetooth, NightLight };
+enum class JobKind { None, Radios, NightLight };
 
 std::atomic<bool> g_busy{false};
 std::mutex g_resultMutex;
@@ -48,10 +48,14 @@ std::mutex g_resultMutex;
 struct JobResult {
     bool finished = false;
     JobKind kind = JobKind::None;
-    bool wanted = false;
+    bool wanted = false;        // radios: what was asked for (both radios get the same answer)
+    bool wifiRequested = false;
+    bool bluetoothRequested = false;
     bool succeeded = false;
-    long hresult = 0;      // Bluetooth only: the WinRT failure code
-    bool stateAfter = false;   // Night light only: the registry, read back
+    long hresult = 0;           // radios: the WinRT failure code, when a call was refused
+    bool wifiNow = false;       // radios: the state read back afterwards
+    bool bluetoothNow = false;
+    bool stateAfter = false;    // night light: the page's answer, or the registry, read back
 };
 JobResult g_result;
 
@@ -80,15 +84,17 @@ void Publish(const JobResult& result) {
 }
 
 // ---------------------------------------------------------------------------------------------
-//  Bluetooth -- Windows.Devices.Radios
+//  The radios -- Windows.Devices.Radios, one job for either or both
 // ---------------------------------------------------------------------------------------------
 //
 // A worker thread with its own apartment (MTA: nothing here needs a message loop), because the WinRT
-// call is synchronous from this side.
-void RunBluetoothJob(bool on) {
+// calls are synchronous from this side.
+void RunRadioJob(bool wifi, bool bluetooth, bool on) {
     JobResult result;
-    result.kind = JobKind::Bluetooth;
+    result.kind = JobKind::Radios;
     result.wanted = on;
+    result.wifiRequested = wifi;
+    result.bluetoothRequested = bluetooth;
 
     bool comUp = false;
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -100,32 +106,52 @@ void RunBluetoothJob(bool on) {
         const RadioAccessStatus access = Radio::RequestAccessAsync().get();
         if (access != RadioAccessStatus::Allowed) {
             result.hresult = static_cast<long>(access);
-            LogLine(L"  bluetooth: radio access is NOT allowed (status %d); nothing was switched",
+            LogLine(L"  radios: access is NOT allowed (status %d); nothing was switched",
                     static_cast<int>(access));
         } else {
             const auto radios = Radio::GetRadiosAsync().get();
-            bool any = false;
+            bool requested = false;
             for (const Radio& radio : radios) {
-                if (radio.Kind() != RadioKind::Bluetooth) continue;
-                any = true;
+                const RadioKind kind = radio.Kind();
+                const bool wanted = (kind == RadioKind::WiFi && wifi) ||
+                                    (kind == RadioKind::Bluetooth && bluetooth);
+                if (!wanted) continue;
+                requested = true;
+
                 const RadioAccessStatus wrote =
                     radio.SetStateAsync(on ? RadioState::On : RadioState::Off).get();
                 const bool now = radio.State() == RadioState::On;
-                LogLine(L"  bluetooth: '%ls' -> asked %ls, answered %d, now %ls",
-                        radio.Name().c_str(), on ? L"on" : L"off", static_cast<int>(wrote),
-                        now ? L"on" : L"off");
-                result.succeeded = (wrote == RadioAccessStatus::Allowed) && (now == on);
+                if (kind == RadioKind::WiFi) {
+                    result.wifiNow = now;
+                } else {
+                    result.bluetoothNow = now;
+                }
+                LogLine(L"  radios: '%ls' (%ls) -> asked %ls, answered %d, now %ls",
+                        radio.Name().c_str(), kind == RadioKind::WiFi ? L"wifi" : L"bluetooth",
+                        on ? L"on" : L"off", static_cast<int>(wrote), now ? L"on" : L"off");
+
+                // A radio that answered Allowed but did not move counts as a failure: the panel's whole
+                // point is that its caption is a reading, and a press that changed nothing must not be
+                // reported as one that did.
+                if (wrote != RadioAccessStatus::Allowed || now != on) result.succeeded = false;
             }
-            if (!any) {
-                LogLine(L"  bluetooth: no Bluetooth radio on this machine");
+            if (!requested) {
+                LogLine(L"  radios: this machine has no %ls radio",
+                        wifi && bluetooth ? L"Wi-Fi or Bluetooth"
+                                          : (wifi ? L"Wi-Fi" : L"Bluetooth"));
+            } else {
+                // Both were asked for: success means every one of them moved.
+                result.succeeded = true;
+                if (wifi && result.wifiNow != on) result.succeeded = false;
+                if (bluetooth && result.bluetoothNow != on) result.succeeded = false;
             }
         }
     } catch (const winrt::hresult_error& error) {
         result.hresult = static_cast<long>(error.code().value);
-        LogLine(L"  bluetooth: the radio call threw (hr 0x%08lX); nothing switched",
+        LogLine(L"  radios: the call threw (hr 0x%08lX); nothing switched",
                 static_cast<unsigned long>(result.hresult));
     } catch (...) {
-        LogLine(L"  bluetooth: the radio call failed with an unknown error");
+        LogLine(L"  radios: the call failed with an unknown error");
     }
 
     if (comUp) CoUninitialize();
@@ -357,21 +383,26 @@ void RunNightLightJob(bool on) {
 
 // ---------------------------------------------------------------------------------------------
 
-bool RequestBluetoothRadio(bool on) {
-    if (!ClaimJob(JobKind::Bluetooth)) return false;
-    std::thread(RunBluetoothJob, on).detach();
+bool RequestRadios(bool wifi, bool bluetooth, bool on) {
+    if (!wifi && !bluetooth) return false;
+    if (!ClaimJob(JobKind::Radios)) return false;
+    std::thread(RunRadioJob, wifi, bluetooth, on).detach();
     return true;
 }
 
-bool BluetoothRequestInFlight() {
+bool RadioRequestInFlight() {
     std::lock_guard<std::mutex> lock(g_resultMutex);
-    return g_busy.load() && g_result.kind == JobKind::Bluetooth;
+    return g_busy.load() && g_result.kind == JobKind::Radios;
 }
 
-bool TakeBluetoothOutcome(bool* on, bool* succeeded, long* hresult) {
+bool TakeRadioOutcome(bool* wifiNow, bool* bluetoothNow, bool* wifiAsked, bool* bluetoothAsked,
+                      bool* succeeded, long* hresult) {
     std::lock_guard<std::mutex> lock(g_resultMutex);
-    if (!g_result.finished || g_result.kind != JobKind::Bluetooth) return false;
-    if (on) *on = g_result.wanted;
+    if (!g_result.finished || g_result.kind != JobKind::Radios) return false;
+    if (wifiNow) *wifiNow = g_result.wifiNow;
+    if (bluetoothNow) *bluetoothNow = g_result.bluetoothNow;
+    if (wifiAsked) *wifiAsked = g_result.wifiRequested;
+    if (bluetoothAsked) *bluetoothAsked = g_result.bluetoothRequested;
     if (succeeded) *succeeded = g_result.succeeded;
     if (hresult) *hresult = g_result.hresult;
     g_result = JobResult{};

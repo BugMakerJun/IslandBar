@@ -439,27 +439,31 @@ int BuildSystemPanel(const island::SystemStatus& status, int installedLayoutCoun
         tile.uri = uri;
     };
 
-    // Wi-Fi. The label says WHICH state rather than only on/off, because "Wi-Fi" alone would leave the
-    // user guessing what pressing it does -- and on this machine there is no API to switch the radio, so
-    // the tile's honest job is to say what the network is doing, and pressing it opens the page where it
-    // CAN be changed.
+    // Wi-Fi. A TOGGLE, like its neighbours and like the shell's own tile, and the caption says what the
+    // RADIO is doing rather than what the connection is doing:
+    //
+    //     已关闭   the radio is off -- pressing the tile turns Wi-Fi back on
+    //     可用     on and associated
+    //     未连接   on but not associated (this machine, which reaches the network over Ethernet)
+    //
+    // The tile lights up when the RADIO is on, which is the state the press changes; it used to light only
+    // when ASSOCIATED, so on a machine wired to Ethernet the Wi-Fi tile sat dark next to a lit Bluetooth
+    // tile with the same caption under both. Reported as "wifi的显示有问题".
     {
         const bool connected = status.network == island::NetworkKind::Connected;
         const wchar_t* label = status.network == island::NetworkKind::None
                                    ? L"No Wi-Fi"
                                    : (connected ? L"Wi-Fi" : L"Wi-Fi");
-        // 可用 when there is a network, which is what the shell's own flyout prints under this tile -- its
-        // Wi-Fi tile names the STATE, not the radio, because the glyph already says which control it is.
         const wchar_t* state = status.network == island::NetworkKind::None
                                    ? L"\u65E0 Wi-Fi"          // 无 Wi-Fi
                                    : (connected ? L"\u53EF\u7528"          // 可用
                                                 : L"\u672A\u8FDE\u63A5"); // 未连接
         // A radio that has been switched off is not "not connected": it is off, and saying 未连接 for it
-        // leaves the user looking for a network problem that is a switch.
+        // would leave the user looking for a network problem that is a switch.
         if (!status.wifiRadioOn) state = L"\u5DF2\u5173\u95ED";   // 已关闭
         addTile(label, state, island::TextRenderer::IndicatorIcon::Network,
-                static_cast<int>(status.signal), connected && status.wifiRadioOn, true,
-                island::TextRenderer::PanelAction::OpenSettings, L"ms-settings:network-wifi");
+                static_cast<int>(status.signal), status.wifiRadioOn, false,
+                island::TextRenderer::PanelAction::ToggleWifi, nullptr);
     }
 
     // Bluetooth. Captioned with the CONNECTION state rather than the radio's, which is what the shell's own
@@ -470,24 +474,27 @@ int BuildSystemPanel(const island::SystemStatus& status, int installedLayoutCoun
     // IT IS A TOGGLE NOW. The note that used to be here said Bluetooth had "no documented interface a
     // desktop process can use", and that was wrong: Windows.Devices.Radios answers Allowed for this
     // process and the radio went On -> Off -> On (measured, scripts/probe-radios.ps1). Pressing the tile
-    // switches the radio; the arrow is kept because the tile still says WHAT is connected.
+    // switches the radio, and the ARROW IS GONE with the page it used to open: the arrow means "this opens
+    // a LIST" (see SystemPanelTile::chevron), and a tile that switches in place must not promise one. It
+    // was kept one round longer than the behaviour it described, which is exactly the drift the note above
+    // about arrows was written to prevent.
     addTile(L"Bluetooth", status.bluetoothOn ? L"\u672A\u8FDE\u63A5" : L"\u5173",   // 未连接 / 关
             island::TextRenderer::IndicatorIcon::Bluetooth, status.bluetoothOn ? 1 : 0,
-            status.bluetoothOn, true,
+            status.bluetoothOn, false,
             island::TextRenderer::PanelAction::ToggleBluetooth, nullptr);
 
-    // 飞行模式 -- the panel's ONE real toggle, and a state that is read back rather than remembered.
+    // 飞行模式 -- BOTH radios now, which is what airplane mode means in the shell's own flyout.
     //
-    // What it switches is the Wi-Fi radio (island::SetWifiRadioOn). Airplane mode in the shell's own flyout
-    // means every radio, and Bluetooth has no documented interface a desktop process can use; switching
-    // Wi-Fi and calling it "airplane mode" would be exactly the kind of half-truth this panel has been
-    // careful about elsewhere, so the log line names what actually changed. The tile itself lights up when
-    // the radio is off, which is the state the user sees reflected in the Wi-Fi tile beside it (已关闭).
+    // It used to switch Wi-Fi alone, and the log said so, because Bluetooth had "no documented interface".
+    // That is no longer true (Windows.Devices.Radios, measured), so switching one radio and calling it
+    // airplane mode would be the half-truth this panel was avoiding. The tile lights up when BOTH radios
+    // are off, which is the same reading the Wi-Fi and Bluetooth tiles beside it show.
     //
     // Captioned with its NAME and not with 开/关, which is how the shell has this tile: the state is the
     // tile's own highlight.
     addTile(L"\u98DE\u884C\u6A21\u5F0F", nullptr,   // 飞行模式
-            island::TextRenderer::IndicatorIcon::Airplane, 0, !status.wifiRadioOn, false,
+            island::TextRenderer::IndicatorIcon::Airplane, 0,
+            !status.wifiRadioOn && !status.bluetoothOn, false,
             island::TextRenderer::PanelAction::ToggleRadio, nullptr);
 
     // --- the second row ---------------------------------------------------------------
@@ -2950,25 +2957,35 @@ float musicWavePhase = 0.0f;
                                 break;
 
                             case island::TextRenderer::PanelAction::ToggleRadio: {
-                                // The Wi-Fi radio, switched here and now. The state is READ BACK from the
-                                // WLAN API on the next sample rather than flipped locally, so a switch the
-                                // machine refuses (a hardware switch, a managed adapter) shows as what it
-                                // really is instead of as what was asked for.
-                                unsigned long radioError = 0;
-                                const bool wanted = !systemStatus.wifiRadioOn;
-                                const bool switched = island::SetWifiRadioOn(wanted, &radioError);
+                                // BOTH radios, which is what this tile has always claimed to be. The state is
+                                // read back on the next sample rather than flipped locally, so a switch the
+                                // machine refuses shows as what it really is.
+                                //
+                                // Off when anything is still on, on otherwise -- the same rule the shell's own
+                                // airplane mode follows, and the one a user expects from a toggle that is dark
+                                // while a radio beside it is lit.
+                                const bool wanted = systemStatus.wifiRadioOn || systemStatus.bluetoothOn;
+                                const bool started = island::RequestRadios(true, true, wanted);
                                 island::LogAndPrint(
-                                    L"  tile %d '%ls' -> Wi-Fi radio %ls (result %d, error %lu;"
-                                    L" Bluetooth is NOT switched -- no documented interface)\n",
+                                    L"  tile %d '%ls' -> Wi-Fi and Bluetooth %ls (result %d)\n",
                                     tileIndex, tile.label ? tile.label : L"?",
-                                    wanted ? L"on" : L"off", switched ? 1 : 0, radioError);
-                                // The reading behind the tiles is a two-second sample, and waiting for it
-                                // would leave the tile showing the old state right after the press that
-                                // changed it.
-                                statusReader.Sample(&systemStatus);
-                                lastStatusSampleMs = GetTickCount64();
+                                    wanted ? L"off (airplane mode)" : L"on", started ? 1 : 0);
                                 // Deliberately NOT closed: a toggle applies its change here, and its new
                                 // state is the thing to look at. Several can be flipped in a row.
+                                break;
+                            }
+
+                            case island::TextRenderer::PanelAction::ToggleWifi: {
+                                // The Wi-Fi radio on its own, from the Wi-Fi tile. Its own switch and the
+                                // 飞行模式 tile's are the same mechanism at different scopes, which is why
+                                // they are one call with different arguments rather than two code paths.
+                                const bool wanted = !systemStatus.wifiRadioOn;
+                                const bool started = island::RequestRadios(true, false, wanted);
+                                island::LogAndPrint(
+                                    L"  tile %d '%ls' -> Wi-Fi radio %ls (%ls)\n", tileIndex,
+                                    tile.label ? tile.label : L"?", wanted ? L"on" : L"off",
+                                    started ? L"asked, the answer follows in the log"
+                                            : L"a switch is already running");
                                 break;
                             }
 
@@ -2991,7 +3008,7 @@ float musicWavePhase = 0.0f;
                                 // collected in the loop below and logged there, and the caption is read back
                                 // from the machine on the next status sample rather than flipped here.
                                 const bool wanted = !systemStatus.bluetoothOn;
-                                const bool started = island::RequestBluetoothRadio(wanted);
+                                const bool started = island::RequestRadios(false, true, wanted);
                                 island::LogAndPrint(
                                     L"  tile %d '%ls' -> Bluetooth %ls (%ls)\n", tileIndex,
                                     tile.label ? tile.label : L"?", wanted ? L"on" : L"off",
@@ -4499,18 +4516,34 @@ float musicWavePhase = 0.0f;
                 // because the tile's caption is the machine's reading and waiting two seconds for it would
                 // leave the tile showing the state the press just changed.
                 {
-                    bool on = false;
+                    bool wifiNow = false;
+                    bool bluetoothNow = false;
+                    bool wifiAsked = false;
+                    bool bluetoothAsked = false;
                     bool succeeded = false;
                     long hresult = 0;
-                    if (island::TakeBluetoothOutcome(&on, &succeeded, &hresult)) {
-                        island::LogAndPrint(
-                            "  bluetooth: asked for %s, %s%s\n", on ? "on" : "off",
-                            succeeded ? "done" : "NOT done",
-                            hresult ? " (the radio refused the call)" : "");
+                    if (island::TakeRadioOutcome(&wifiNow, &bluetoothNow, &wifiAsked, &bluetoothAsked,
+                                                 &succeeded, &hresult)) {
+                        // Only the radios the request NAMED are reported: a Wi-Fi-only press that printed
+                        // Bluetooth's state as well read as if the job had touched it.
+                        const char* verdict = succeeded ? "as asked" : "NOT as asked";
+                        const char* refused = hresult ? " (the radio refused the call)" : "";
+                        if (wifiAsked && bluetoothAsked) {
+                            island::LogAndPrint("  radios: Wi-Fi %s, Bluetooth %s -- %s%s\n",
+                                                wifiNow ? "on" : "off", bluetoothNow ? "on" : "off",
+                                                verdict, refused);
+                        } else if (wifiAsked) {
+                            island::LogAndPrint("  radios: Wi-Fi %s -- %s%s\n", wifiNow ? "on" : "off",
+                                                verdict, refused);
+                        } else {
+                            island::LogAndPrint("  radios: Bluetooth %s -- %s%s\n",
+                                                bluetoothNow ? "on" : "off", verdict, refused);
+                        }
                         statusReader.Sample(&systemStatus);
                         lastStatusSampleMs = GetTickCount64();
                         std::fflush(stdout);
                     }
+                    bool on = false;
                     bool stateAfter = false;
                     if (island::TakeNightLightOutcome(&on, &stateAfter, &succeeded)) {
                         island::LogAndPrint(

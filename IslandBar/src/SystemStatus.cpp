@@ -404,6 +404,19 @@ void SystemStatusReader::Sample(SystemStatus* out) {
     out->ageMs = 0;
 }
 
+// NOT USED BY THE BAR ANY MORE, and the measurement that retired it is the reason it stays in writing.
+//
+// The tiles switch the radios through `Windows.Devices.Radios` (SystemToggles.h), which is what the shell
+// itself uses and which works here for BOTH radios. This WLAN write was tried first, and on this machine it
+// FAILS SILENTLY: all three shapes below report ERROR_SUCCESS and the radio does not move -- the user's own
+// log carries two of them, from two presses of the 飞行模式 tile:
+//
+//     wifi radio: WlanSetInterface single=0 full=0 counted=0
+//
+// A write that says success and changes nothing is the one failure mode this project keeps re-learning, and
+// it is precisely why the tile's caption is a READING rather than a memory. Kept rather than deleted because
+// the documented WLAN route is the fallback if a machine ever turns up where the Radios API is refused --
+// and it is labelled here so that nobody reaches for it without knowing what it did on this one.
 bool SetWifiRadioOn(bool on, unsigned long* error) {
     if (error) *error = 0;
 

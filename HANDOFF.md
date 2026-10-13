@@ -5355,6 +5355,55 @@ GSMTC sessions: 1
 | **二进制里有那个 API 的字符串** | 只说明"它能做"，不说明"它在做" | 能力的证据是**运行时测量**（会话列表），不是 `strings` |
 | **沙箱里的答案可能只是"看不见"** | 本沙箱 `Get-Process` 的 `MainWindowHandle` 全 0、EnumWindows 一个都不返回，而沙箱外同一个工具能看到 325 个窗口 | "系统里有什么"这类结论，**沙箱内外各测一次**，两次一致才敢下结论 |
 
+### 8.88 **Wi-Fi 那一格：它一直是"点开设置页"，而且飞行模式那条写在**成功**里却不生效** ✅
+
+用户 2026-10-14 凌晨：「**wifi的显示有问题**」。翻他那一段会话的日志（他按过的每一格都记着）：
+
+```
+[02:28:33]   tile 0 'Wi-Fi' -> ms-settings:network-wifi (result 42)
+[02:28:37]   wifi radio: WlanSetInterface single=0 full=0 counted=0      <- 飞行模式
+[02:28:38]   wifi radio: WlanSetInterface single=0 full=0 counted=0      <- 再按一次
+[02:29:09]   tile 1 '移动热点' -> ms-settings:network-mobilehotspot (result 42)
+[02:29:19]   tile 0 'Wi-Fi' -> ms-settings:network-wifi (result 42)
+```
+
+#### 两个真问题（都在这一格里）
+
+1. **Wi-Fi 那格不开关，只开网页。** 同一行里蓝牙已经是真开关、飞行模式也写着"真开关"，而 Wi-Fi 是
+   `OpenSettings` —— 用户按它期待的是开关，得到的是一个设置窗口。
+2. **飞行模式那两次，写在"成功"里，什么也没发生。** `WlanSetInterface`（`wlan_intf_opcode_radio_state`）
+   三种形状都返回 `ERROR_SUCCESS`（这就是 `single=0 full=0 counted=0` 的意思），而无线电没动 ——
+   本项目已经反复踩过的那个坑：**成功 ≠ 生效**。
+
+#### 修法：两个无线电都走 Radios API（就是 shell 自己用的那套）
+
+接手前先量，实测（`scripts/probe-radios.ps1 -Toggle WiFi`）：`RequestAccessAsync` = **Allowed**，
+Wi-Fi 无线电 `On → Off → On`，每次 `SetStateAsync` 都回 Allowed。所以：
+
+| 位置 | 改动 |
+|---|---|
+| `SystemToggles.*` | 一个作业同时管两种无线电：`RequestRadios(wifi, bluetooth, on)` / `TakeRadioOutcome`；读完**回读**每个无线电自己的状态，回读不对就算失败 |
+| Wi-Fi 那一格 | `OpenSettings` → **`ToggleWifi`**：点它开关无线电；**状态文字现在是"无线电"的**：可 用（已连）/ 未连接（开着没连，本机就是这种，它走网线）/ 已关闭；**高亮 = 无线电开着**（以前是"已连接"才亮，于是这一格是暗的、旁边蓝牙却是亮的，两行字都写"未连接" —— 用户看到的"显示有问题"多半就是这个） |
+| 蓝牙那一格 | 走同一个作业；**箭头去掉了**：箭头的意思是"会展开一个列表"，而它现在是原地开关 |
+| 飞行模式那一格 | 现在**两个无线电一起**（这才是飞行模式的意思；以前只切 Wi-Fi，还得在日志里声明"蓝牙没切"）；高亮 = 两个都关 |
+| `SystemStatus` | `SetWifiRadioOn`（那条静默失败的 WLAN 写法）**保留但标注为不再使用**，函数上方写着它在这台机器上的实测结论与出处——将来若遇到 Radios 被拒的机器，它是备选 |
+
+#### 证据
+
+* 用户机器上实测（网线在线，所以无线电可以安全地来回切）：点 Wi-Fi 格 → `radios: 'WLAN' (wifi) -> asked off,
+  answered 1, now off`，`netsh wlan show interfaces` 同时显示 **`Software Off`**；再点一次 → `now on` ✓
+* 自检 **938 项 0 失败**（几何部分未改）。
+* 截图 `captures/wifi-toggle.png`：Wi-Fi 与蓝牙两格都**亮着**、都没有箭头、两行字都是"未连接"（无线电开着、
+  都没连上），飞行模式是暗的 —— 三者彼此一致。
+
+#### 教训
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **同一行里的格子可以有三种语义，而用户只看画面** | 蓝牙那格的高亮是"无线电开着"，Wi-Fi 那格的高亮却是"已连接" —— 两格都写"未连接"，一个亮一个暗 | 一排控件里的**同一个视觉状态必须表示同一件事**；语义不同就得让画面看得出来 |
+| **返回成功、什么都没发生（第五次）** | `WlanSetInterface` 三种形状全回 `ERROR_SUCCESS`，无线电纹丝不动 | 写全局状态的调用，**一律回读**；回读不出来就别声称成功——这条已经写进 `SetWifiRadioOn` 上方，供以后的人看 |
+| **"文档里的做法"和"这台机器上的做法"是两件事** | WLAN opcode 是文档写法，在这台 MediaTek 上静默失败；Radios API 是 shell 自己用的，实测两种无线电都行 | 有更权威的同类接口时（shell 用的那套），**先量它**再决定要不要保留旧路 |
+
 ### 8.87 **亮度条 + 三个"开关本身"（蓝牙 / 夜间模式 / 实时字幕）：三条路是量出来的，其中两条把老结论推翻了** ✅
 
 用户 2026-10-14 凌晨看完没做的清单后说：「**做1和2把**」——即 ①面板缺的亮度滑条，②

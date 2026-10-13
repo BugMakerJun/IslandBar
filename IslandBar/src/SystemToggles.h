@@ -26,21 +26,40 @@
 
 namespace island {
 
-// --- Bluetooth ------------------------------------------------------------------------------------
-
-// Asks for the Bluetooth radio to be switched. False if a request is already running.
+// --- the radios: Wi-Fi and Bluetooth ---------------------------------------------------------------
 //
-// The state is NOT remembered here: the tile's caption comes from SystemStatus, which reads the radio
-// through bluetoothapis on its own cadence, so what the panel shows after this is what the machine
-// says, not what was asked for.
-bool RequestBluetoothRadio(bool on);
+// ONE mechanism for both, and it is the one the shell itself uses: `Windows.Devices.Radios`. Measured on
+// this machine, both directions, for both radios: `RequestAccessAsync` answers Allowed for this ordinary
+// unpackaged process, and `SetStateAsync` switches the radio and reports Allowed.
+//
+// WHAT THIS REPLACED, and why it had to. The Wi-Fi radio used to be switched through the WLAN API's
+// documented `wlan_intf_opcode_radio_state`, and on this machine that write FAILS: the user's own log
+// carries two of them, from two presses of the 飞行模式 tile,
+//
+//     wifi radio: WlanSetInterface single=0 full=0 counted=0
+//
+// i.e. no phy accepted the state, nothing changed, and the tile had nothing to show for the press. The
+// same two presses go through the Radios API here and both radios switch.
+//
+// The state is NOT remembered: the tiles' captions come from SystemStatus, which reads the radios on its
+// own cadence, so what the panel shows after a press is what the machine says rather than what was asked.
+//
+// The job runs on a worker thread -- the WinRT calls block for a few hundred milliseconds and the frame
+// loop must not wait for them.
 
-bool BluetoothRequestInFlight();
+// Asks for the named radios to be switched. False when a request is already running.
+bool RequestRadios(bool wifi, bool bluetooth, bool on);
+
+bool RadioRequestInFlight();
 
 // Collects a finished request. False when none has finished since the last call.
-// `hresult` is the WinRT failure code when the call was refused, which is the only part of a WinRT
-// error that can go into an ASCII log line.
-bool TakeBluetoothOutcome(bool* on, bool* succeeded, long* hresult);
+//
+// `wifiNow`/`bluetoothNow` are what the radios reported AFTER the call, `wifiAsked`/`bluetoothAsked` what
+// the request named -- both, because a caller that asked for one radio must not report the other's state as
+// if it had been part of the job -- and `hresult` is the WinRT failure code when a call was refused (the
+// only part of a WinRT error an ASCII log line can carry).
+bool TakeRadioOutcome(bool* wifiNow, bool* bluetoothNow, bool* wifiAsked, bool* bluetoothAsked,
+                      bool* succeeded, long* hresult);
 
 // --- night light ----------------------------------------------------------------------------------
 

@@ -280,20 +280,25 @@ Windows 把合成按键丢了；必须用那两个快捷方式启动，别从 ID
    如果启动日志里有 `the monitor did not answer its capabilities`，说明显示器菜单里 DDC/CI 被关了
    （LG 默认开），面板上**不会**有这一行。
 
-2. **点蓝牙那一格**：无线电真的开关（格子亮/灭，下面写"未连接 / 关"）。日志：
+2. **点蓝牙那一格**（以及旁边**第一格 Wi-Fi**）：无线电真的开关（格子亮/灭）。日志：
    ```
-   bluetooth: '蓝牙' -> asked off, answered 1, now off
-   bluetooth: asked for off, done
+   radios: '蓝牙' (bluetooth) -> asked off, answered 1, now off
+   radios: Bluetooth off -- as asked
    ```
+   Wi-Fi 那一格现在**也是开关**（以前是打开设置页）：亮 = 无线电开着；下面写 未连接（开着但没连上，
+   这台机器走网线，所以一直是这个）/ 可用（连上了）/ 已关闭（无线电关了）。两格都没有箭头了，因为
+   它们是原地开关、不展开列表（辅助功能那些还有箭头）。
 
-3. **翻到第二页**（面板右边的向下箭头），点**夜间模式**：会先弹一下"设置"窗口（Windows 没有别的接口），
+3. **点飞行模式那一格**：Wi-Fi 和蓝牙**两个一起**关/开（以前只关 Wi-Fi）。
+
+4. **翻到第二页**（面板右边的向下箭头），点**夜间模式**：会先弹一下"设置"窗口（Windows 没有别的接口），
    约 2–3 秒后它自己关掉，格子变亮，屏幕变暖。日志：
    ```
    night light: pressed 'turn it on now' (the page said off)
    night light: the page now says on -- the press took
    ```
 
-4. **点实时字幕**：字幕条出现（第一次会弹它自己的同意框，那是 Windows 的行为）；再点一次关掉。
+5. **点实时字幕**：字幕条出现（第一次会弹它自己的同意框，那是 Windows 的行为）；再点一次关掉。
    日志：`win+ctrl+L: chord sent (keybd_event)`。
 
 **留意一条**：夜间模式那格下面的"开/关"字，正常情况与系统一致；万一它与实际不符（我探针里手写过那个值，见过
