@@ -235,6 +235,7 @@ Flags:
 | Flag | Meaning |
 |---|---|
 | `--keep-taskbar` | do not hide the shell taskbar |
+| `--keep-strip` | do not release the strip of work area the shell taskbar reserves (a maximized window then keeps a band at the top of the screen) |
 | `--self-test` | run the runtime assertions; exit code = failures |
 | `--probe-taskbar` | may this process hide the shell taskbar? exit 0 = yes, 1 = blocked (UIPI), 2 = taskbar failed to restore |
 | `--demo` | cycle collapsed/hover/expanded with no input needed |

@@ -5702,6 +5702,63 @@ void TestMusicCardLayout() {
                 Check(!WindowCoversMonitor(tallWindow, monitor),
                       L"a window that is merely tall does not", dt);
             }
+
+            // The strip released: the same question, one state later.
+            //
+            // Once the bar gives the work area back (NativeTaskbar::ReleaseWorkArea) a maximized window
+            // covers the monitor as well, so "does it cover the monitor" stops being the test -- and the
+            // obvious replacement, "is it zoomed", is wrong. Both of those are measured on this desktop
+            // at 100%, and the numbers below are the measurements:
+            //
+            //     work area with the strip   0,32-2560,1440    a maximized window is  -8,24-2568,1448
+            //     work area released           0,0-2560,1440   a maximized window is  -8,-8-2568,1448
+            //     a maximized window made borderless over the screen:  0,0-2560,1440, and STILL zoomed
+            //
+            // The last line is what makes the rectangle the test rather than IsZoomed: the geometry of a
+            // window that went full-screen from a maximized state is EXACTLY that of a game.
+            {
+                const RECT monitor = {0, 0, 2560, 1440};
+                const RECT workWithStrip = {0, 32, 2560, 1440};
+                const RECT workReleased = {0, 0, 2560, 1440};
+                const RECT maximizedBehindStrip = {-8, 24, 2568, 1448};
+                const RECT maximizedAfterRelease = {-8, -8, 2568, 1448};
+                const RECT borderlessFullScreen = {0, 0, 2560, 1440};
+
+                // `rdt`, not `dt`: the block above already has a `dt` in scope, and a shadowed one is a
+                // warning this project does not carry (the compiler saw the first attempt).
+                wchar_t rdt[224];
+                const BorderInflation border = MaximizedBorderPx(96);
+                std::swprintf(rdt, 224, L"border %ld x %ld px at 96 dpi", border.x, border.y);
+                Check(border.x == 8 && border.y == 8,
+                      L"the invisible resize border is 8 px at 100%, which the rest of this rests on",
+                      rdt);
+
+                std::swprintf(rdt, 224,
+                              L"work %ld,%ld-%ld,%ld -> maximized %ld,%ld-%ld,%ld",
+                              workWithStrip.left, workWithStrip.top, workWithStrip.right,
+                              workWithStrip.bottom, maximizedBehindStrip.left, maximizedBehindStrip.top,
+                              maximizedBehindStrip.right, maximizedBehindStrip.bottom);
+                Check(LooksLikeWindowsMaximizedRect(maximizedBehindStrip, workWithStrip, 96),
+                      L"a maximized window is the work area inflated by the resize border", rdt);
+
+                Check(LooksLikeWindowsMaximizedRect(maximizedAfterRelease, workReleased, 96),
+                      L"... and the same holds after the strip is released",
+                      L"released work 0,0-2560,1440, maximized -8,-8-2568,1448");
+
+                Check(!LooksLikeWindowsMaximizedRect(borderlessFullScreen, workReleased, 96),
+                      L"a window that covers the monitor exactly is NOT a maximized one",
+                      L"it is what a game, or a player that dropped its frame, reports");
+
+                // The two questions must disagree on the released state, or the bar would stand down --
+                // island only, no deck, no tray -- on every ordinary maximized window, which is the
+                // state the user is in whenever a browser is maximized.
+                Check(WindowCoversMonitor(maximizedAfterRelease, monitor) &&
+                      WindowCoversMonitor(borderlessFullScreen, monitor) &&
+                      LooksLikeWindowsMaximizedRect(maximizedAfterRelease, workReleased, 96) &&
+                      !LooksLikeWindowsMaximizedRect(borderlessFullScreen, workReleased, 96),
+                      L"covering the monitor and being a maximized window are two different questions",
+                      L"both cover it; only one is a maximized window");
+            }
         }
 
         // The Start button mirrors the icon row, and is inside the input region.
@@ -7960,6 +8017,20 @@ int RunSelfTest() {
     Check(monitor.work.right <= monitor.screen.right &&
           monitor.work.bottom <= monitor.screen.bottom,
           L"work area lies inside the screen");
+
+    // The band the bar draws in, read from the shell taskbar's own window. It is the number the work
+    // area stops carrying once the strip is released, so it is reported next to it: on a desktop where
+    // the two disagree, one of them is being read wrong.
+    {
+        wchar_t band[192];
+        std::swprintf(band, 192,
+                      L"top band from the taskbar window: %ld px (work-area inset: %ld px)",
+                      ShellTopBandThicknessPx(monitor.monitor), TaskbarThickness(monitor));
+        Info(L"band", band);
+        Check(ShellTopBandThicknessPx(monitor.monitor) >= 0 &&
+              ShellTopBandThicknessPx(monitor.monitor) < 200,
+              L"the band read from the taskbar is plausible");
+    }
 
     // Layout numbers as the window constructor will see them.
     const float originX = PixelsToDip(monitor.screen.left, monitor.dpi);

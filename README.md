@@ -207,6 +207,7 @@ cmd /c "build\Debug\src\Debug\island_bar.exe" --self-test > selftest.txt 2>&1
 | 参数 | 含义 |
 |---|---|
 | `--keep-taskbar` | 不隐藏系统任务栏 |
+| `--keep-strip` | 不让出系统任务栏占着的那条工作区（最大化窗口会照旧在顶部留一条空白） |
 | `--self-test` | 运行运行时断言；退出码 = 失败数 |
 | `--probe-taskbar` | 本进程能否隐藏系统任务栏？退出 0 = 能，1 = 被 UIPI 挡住，2 = 任务栏恢复失败 |
 | `--demo` | 无需输入，循环 collapsed / hover / expanded |

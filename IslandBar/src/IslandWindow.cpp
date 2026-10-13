@@ -5,6 +5,7 @@
 #include "AppBar.h"
 #include "TaskStripLayout.h"
 #include "Log.h"
+#include "Monitor.h"   // ShellTopBandThicknessPx: the band, once the work area no longer carries it
 
 #include "CardLayout.h"   // HitsTransportButton, for click routing
 
@@ -247,7 +248,17 @@ void IslandWindow::Destroy() {
 // the anchor the frame loop reads, and the hit test. Measured from the work area rather than assumed,
 // because the number is the user's setting (Settings > Personalisation > Taskbar).
 float IslandWindow::BandHeightDip() const {
-    return PixelsToDip(monitor_.work.top - monitor_.screen.top, monitor_.dpi);
+    const LONG inset = monitor_.work.top - monitor_.screen.top;
+    if (inset > 0) return PixelsToDip(inset, monitor_.dpi);
+
+    // NO INSET, AND THAT IS THE ORDINARY STATE WHILE THE BAR RUNS. The strip is released so that a
+    // maximized window can reach the top of the screen (NativeTaskbar::ReleaseWorkArea), which puts the
+    // work area at the whole monitor -- and this function used to read its number from exactly there.
+    // The band itself has not changed: it is the strip the shell's taskbar occupies, and the taskbar
+    // window still reports it while it is hidden. Reading it from the taskbar instead is what keeps the
+    // four callers above agreeing with each other; a band of 0 would clamp to kMinBandHeightDip and the
+    // full-screen bar would be 8 DIP tall instead of the strip.
+    return PixelsToDip(island::ShellTopBandThicknessPx(monitor_.monitor), monitor_.dpi);
 }
 
 void IslandWindow::Layout() {

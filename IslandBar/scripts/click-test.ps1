@@ -127,9 +127,9 @@ try {
     $tile2X = $CardLeft + 14 + 2 * ($tileWidth + $tileGap) + [int]($tileWidth / 2)
 
     if ($Scenario -eq 'tile') {
-        # 飞行模式 is the third tile of the first row, and it is a TOGGLE: the press should switch the Wi-Fi
+        # The third tile of the first row (airplane mode) is a TOGGLE: the press should switch the Wi-Fi
         # radio, and the panel should then put itself away.
-        Invoke-Click $tile2X $tileCentreY 'the third tile of the first row (飞行模式)'
+        Invoke-Click $tile2X $tileCentreY 'the third tile of the first row (airplane mode)'
         return
     }
 

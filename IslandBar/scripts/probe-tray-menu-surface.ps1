@@ -8,7 +8,7 @@
 #  The press opens the shell's overflow panel and then either invokes the button (a left click, semantic)
 #  or synthesises a REAL right click at the icon (there is no right-click pattern in UI Automation). The
 #  panel is now made invisible -- layered alpha 0, applied while it slides and again once it has settled --
-#  and with that in place a LEFT press still works ("-> pressed (shell calls it ' 微信')") while a RIGHT
+#  and with that in place a LEFT press still works ("-> pressed (shell calls it ' Weixin')") while a RIGHT
 #  press produces NO menu at all: a poll for `#32768` (the class of a Win32 popup menu) over the whole
 #  press found nothing.
 #

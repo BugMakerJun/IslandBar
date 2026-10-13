@@ -3,6 +3,9 @@
 // =====================================================================
 #include "NativeTaskbar.h"
 
+#include "Log.h"
+#include "Monitor.h"
+
 namespace island {
 namespace {
 
@@ -12,6 +15,28 @@ namespace {
 constexpr const wchar_t* kTrayClass          = L"Shell_TrayWnd";
 constexpr const wchar_t* kSecondaryTrayClass = L"Shell_SecondaryTrayWnd";
 constexpr const wchar_t* kTrayNotifyClass    = L"TrayNotifyWnd";
+
+// The work area, read and written with SPI_GETWORKAREA / SPI_SETWORKAREA.
+//
+// NO SPIF_* FLAGS ON THE WRITE, and that is the whole finding. Measured on the real desktop:
+//
+//   SPI_SETWORKAREA, SPIF_UPDATEINIFILE|SPIF_SENDCHANGE -> returns TRUE, work area does NOT move
+//   SPI_SETWORKAREA, SPIF_SENDCHANGE only               -> returns TRUE, work area does NOT move
+//   SPI_SETWORKAREA, no flags                           -> work area moves, and is still moved 12 s
+//                                                          later (longer than the bar's 5 s cycle)
+//
+// The announcement is what undoes it: sending WM_SETTINGCHANGE(SPI_SETWORKAREA) to HWND_BROADCAST
+// afterwards put the 32 px strip straight back, because the shell re-derives the work area from its own
+// taskbar when it hears about a change. So the release is silent on purpose, and re-asserted on the
+// same slow cadence as the re-hide.
+bool ReadWorkArea(RECT* out) {
+    return SystemParametersInfoW(SPI_GETWORKAREA, 0, out, 0) != FALSE;
+}
+
+bool WriteWorkArea(const RECT& wanted) {
+    RECT value = wanted;
+    return SystemParametersInfoW(SPI_SETWORKAREA, 0, &value, 0) != FALSE;
+}
 
 } // namespace
 
@@ -75,6 +100,10 @@ bool NativeTaskbar::Hide() {
 }
 
 void NativeTaskbar::Restore() {
+    // The strip goes back FIRST, before the taskbar is shown: showing the taskbar makes the shell
+    // re-derive the work area from it, and this way the two answers are the same one.
+    RestoreWorkArea();
+
     // Only undo what we did. If the taskbar was already hidden when the bar
     // started -- auto-hide, or the user's own choice -- putting it back would be
     // overriding them.
@@ -149,6 +178,109 @@ bool NativeTaskbar::EnsureHidden() {
     }
 
     return false;
+}
+
+bool NativeTaskbar::TaskbarMonitorBounds(RECT* out) const {
+    const HWND reference = (trayWnd_ && IsWindow(trayWnd_)) ? trayWnd_ : GetDesktopWindow();
+    const HMONITOR monitor = MonitorFromWindow(reference, MONITOR_DEFAULTTONEAREST);
+
+    MONITORINFO info = {};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) return false;
+
+    *out = info.rcMonitor;
+    return true;
+}
+
+NativeTaskbar::WorkAreaRelease NativeTaskbar::ReleaseWorkArea() {
+    WorkAreaRelease result;
+
+    // Only while WE are the reason the taskbar is hidden. With the taskbar on screen its reservation is
+    // correct and taking it away would put maximized windows on top of a visible taskbar.
+    if (!weHidIt_) return result;
+
+    RECT screen = {};
+    if (!TaskbarMonitorBounds(&screen)) return result;
+
+    RECT before = {};
+    if (!ReadWorkArea(&before)) return result;
+
+    result.before = before;
+
+    if (!haveWorkBefore_) {
+        workBefore_ = before;
+        haveWorkBefore_ = true;
+    }
+
+    if (SameRect(before, screen)) {
+        // Nothing to give back: the work area is already the whole monitor (auto-hide, or an earlier
+        // release in this session).
+        releasedWorkArea_ = true;
+        result.released = true;
+        result.after = before;
+        return result;
+    }
+
+    if (!WriteWorkArea(screen)) return result;
+
+    // Verified rather than assumed, because the call above is the kind that reports success and does
+    // nothing: with SPIF_SENDCHANGE it returns TRUE and the work area does not move at all.
+    RECT after = {};
+    if (!ReadWorkArea(&after)) return result;
+
+    result.after = after;
+    releasedWorkArea_ = SameRect(after, screen);
+    result.released = releasedWorkArea_;
+    result.changed = !SameRect(before, after);
+    return result;
+}
+
+NativeTaskbar::WorkAreaRelease NativeTaskbar::EnsureWorkAreaReleased() {
+    WorkAreaRelease result;
+    if (!weHidIt_ || !releasedWorkArea_) return result;
+
+    RECT screen = {};
+    if (!TaskbarMonitorBounds(&screen)) return result;
+
+    RECT now = {};
+    if (!ReadWorkArea(&now)) return result;
+
+    result.before = now;
+    result.after = now;
+    if (SameRect(now, screen)) {
+        result.released = true;      // still ours: nothing to do, and nothing changed
+        return result;
+    }
+
+    if (!WriteWorkArea(screen)) return result;
+
+    RECT after = {};
+    if (!ReadWorkArea(&after)) return result;
+
+    result.after = after;
+    releasedWorkArea_ = SameRect(after, screen);
+    result.released = releasedWorkArea_;
+    result.changed = !SameRect(now, after);
+    return result;
+}
+
+void NativeTaskbar::RestoreWorkArea() {
+    if (!haveWorkBefore_) return;
+
+    // Put back what was FOUND, not what the shell would compute now. The shell re-derives the work area
+    // from the taskbar as soon as it is shown again, so this is not the last word in the ordinary case --
+    // it is the answer for the case where the shell does not, and it is the one that is always right.
+    const bool written = WriteWorkArea(workBefore_);
+    RECT after = {};
+    const bool read = ReadWorkArea(&after);
+
+    LogAndPrint("  work area: restored to %ld,%ld - %ld,%ld (%s)", workBefore_.left, workBefore_.top,
+                workBefore_.right, workBefore_.bottom,
+                written && read ? (SameRect(after, workBefore_) ? "confirmed" : "NOT CONFIRMED")
+                                : "the write or the read failed");
+
+    haveWorkBefore_ = false;
+    releasedWorkArea_ = false;
 }
 
 bool NativeTaskbar::IsVisible() const {

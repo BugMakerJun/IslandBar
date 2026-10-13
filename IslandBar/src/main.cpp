@@ -651,7 +651,7 @@ void BuildSoundPage(const island::SoundOutputSnapshot& snapshot, const island::S
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
-int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
+int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar_t* forcedState,
            bool forcedStartHover, bool forcedSystemPanel) {
     island::MonitorGeometry monitor = island::QueryMonitor(nullptr);
 
@@ -911,6 +911,52 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
         } else if (appBarResult == island::AppBarResult::SpaceNotGranted) {
             island::LogAndPrint("    Registered, but the desktop did not give up the strip yet.");
             island::LogAndPrint("    It is claimed again automatically on ABN_POSCHANGED.");
+        }
+        std::fflush(stdout);
+    }
+
+    // --- the strip the work area reserves: give it back ----------------------
+    //
+    // A hidden AppBar keeps its claim. Hiding the shell's taskbar left the desktop's WORK AREA inset by
+    // its thickness, so a maximized window stopped below a band that holds nothing but our island -- and
+    // the user photographed the empty space either side of it: "是我把应用放到最大的时候 直接就顶满屏幕
+    // 而不是现在这样 有空白的".
+    //
+    // The release is deliberately SILENT (no SPIF_SENDCHANGE): measured on this desktop, the announced
+    // form of this call reports success and changes nothing, and announcing it ourselves afterwards puts
+    // the strip straight back, because the shell re-derives the work area from its own taskbar when it
+    // hears about the change. It is re-asserted on the same slow cadence as the re-hide.
+    //
+    // Skipped when the AppBar above claims the strip: that claim is the same strip, reserved on purpose,
+    // and releasing it would put maximized windows on top of the space just asked for.
+    if (!hideNativeTaskbar) {
+        island::LogAndPrint("  work area: left alone (--keep-taskbar)");
+    } else if (keepStrip) {
+        island::LogAndPrint("  work area: the strip is NOT released (--keep-strip);");
+        island::LogAndPrint("    a maximized window will keep the band the shell's taskbar reserves");
+    } else if (appBarResult == island::AppBarResult::Registered) {
+        island::LogAndPrint("  work area: the strip stays reserved (the AppBar above claims it)");
+    } else {
+        const island::NativeTaskbar::WorkAreaRelease release = taskbar.ReleaseWorkArea();
+        if (release.changed) {
+            island::LogAndPrint("  work area: the strip is released -- %ld,%ld - %ld,%ld  ->  "
+                                "%ld,%ld - %ld,%ld",
+                                release.before.left, release.before.top, release.before.right,
+                                release.before.bottom, release.after.left, release.after.top,
+                                release.after.right, release.after.bottom);
+            // A window that was ALREADY maximized does not follow the work area -- measured, neither
+            // Windows nor the application re-lays it out -- so it keeps the very band this is about.
+            const int nudged =
+                island::NudgeStaleMaximizedWindows(monitor.screen, release.before, release.after);
+            if (nudged) {
+                island::LogAndPrint("  work area: %d already-maximized window(s) brought to the full "
+                                    "screen", nudged);
+            }
+        } else if (release.released) {
+            island::LogAndPrint("  work area: nothing to release (it is already the whole monitor)");
+        } else {
+            island::LogAndPrint("  work area: NOT released -- the shell's taskbar is not hidden by "
+                                "this process, so its strip is not ours to give back");
         }
         std::fflush(stdout);
     }
@@ -1707,6 +1753,30 @@ float musicWavePhase = 0.0f;
                 if (!island::TrayPressInFlight() && taskbar.EnsureHidden()) {
                     island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
+                }
+                // ... and the same question for the work area the hide used to reserve. The shell
+                // re-derives it from its own taskbar whenever the reservation is announced -- by any
+                // application, on a display change, or when it re-shows its taskbar -- and every one of
+                // those puts the strip back. Silent when nothing happened, which is the usual case.
+                if (!keepStrip) {
+                    const island::NativeTaskbar::WorkAreaRelease again =
+                        taskbar.EnsureWorkAreaReleased();
+                    if (again.changed) {
+                        island::LogAndPrint("  work area: strip released again (it was back) -- "
+                                            "%ld,%ld - %ld,%ld  ->  %ld,%ld - %ld,%ld\n",
+                                            again.before.left, again.before.top, again.before.right,
+                                            again.before.bottom, again.after.left, again.after.top,
+                                            again.after.right, again.after.bottom);
+                        // A window maximized while the strip was back is in the same state as the ones at
+                        // startup: it will not follow the work area by itself.
+                        const int nudged = island::NudgeStaleMaximizedWindows(monitor.screen,
+                                                                             again.before, again.after);
+                        if (nudged) {
+                            island::LogAndPrint("  work area: %d already-maximized window(s) brought to "
+                                                "the full screen\n", nudged);
+                        }
+                        std::fflush(stdout);
+                    }
                 }
             }
 
@@ -4890,6 +4960,9 @@ float musicWavePhase = 0.0f;
     if (hideNativeTaskbar) {
         taskbar.Restore();
         island::LogAndPrint("  native taskbar: restored\n");
+        // The work area went back with it, inside Restore() and BEFORE the taskbar was shown: showing
+        // the taskbar makes the shell re-derive the work area from it, so this order leaves one answer,
+        // not two. Its own line is written there.
         std::fflush(stdout);
     }
 
@@ -6232,6 +6305,7 @@ int main(int argc, char** argv) {
     bool demo = false;
     bool keepTaskbar = false;
     bool claimAppBar = false;
+    bool keepStrip = false;
     bool windowList = false;
     bool probe = false;
     bool noConsole = false;
@@ -6249,6 +6323,10 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--demo") == 0) demo = true;
         if (std::strcmp(argv[i], "--keep-taskbar") == 0) keepTaskbar = true;
         if (std::strcmp(argv[i], "--appbar") == 0) claimAppBar = true;
+        // Keeps the shell's strip reserved: a maximized window then stops below the band, exactly as it
+        // did before the work area was ever released. Here for the case where the release misbehaves on a
+        // machine, so the answer is a restart rather than a rebuild.
+        if (std::strcmp(argv[i], "--keep-strip") == 0) keepStrip = true;
         if (std::strcmp(argv[i], "--window-list") == 0) windowList = true;
         if (std::strcmp(argv[i], "--probe-taskbar") == 0) probe = true;
         if (std::strcmp(argv[i], "--notify") == 0) notify = true;
@@ -6421,6 +6499,8 @@ int main(int argc, char** argv) {
             island::LogAndPrint("usage: island_bar.exe [options]");
             island::LogAndPrint("  (no arguments)   show the bar and hide the native taskbar");
             island::LogAndPrint("  --keep-taskbar   leave the native taskbar visible");
+            island::LogAndPrint("  --keep-strip     do not release the strip the shell taskbar reserves");
+            island::LogAndPrint("                   (a maximized window then keeps a band at the top)");
             island::LogAndPrint("  --self-test      run the runtime assertions; exit code = failures");
             island::LogAndPrint("  --probe-taskbar  report whether this process may hide the shell taskbar");
             island::LogAndPrint("  --demo           cycle collapsed/hover/expanded with no input needed");
@@ -6502,7 +6582,7 @@ int main(int argc, char** argv) {
     // Hiding the native taskbar is the default: the whole point of the project is
     // to be the taskbar. --keep-taskbar exists for developing the bar alongside
     // the real one, and for comparing the two.
-    const int result = RunBar(/*hideNativeTaskbar=*/!keepTaskbar, claimAppBar, forcedState,
+    const int result = RunBar(/*hideNativeTaskbar=*/!keepTaskbar, claimAppBar, keepStrip, forcedState,
                            forcedStartHover, forcedSystemPanel);
     // The status reader is closed by RunBar, where it was opened.
     CoUninitialize();

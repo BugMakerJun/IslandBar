@@ -1,6 +1,6 @@
 # IslandBar 手工自测清单
 
-> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 751 项）覆盖几何、解析、像素，
+> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 929 项）覆盖几何、解析、像素，
 > 但"鼠标点下去到底发生什么"必须在真人手里过一遍。
 > **已脱敏**：命令里的 `$env:USERPROFILE` 就是你的用户目录（本文档按 PowerShell 写，所以用这个变量而不是 `%USERPROFILE%`）。
 >
@@ -262,11 +262,50 @@ Windows 把合成按键丢了；必须用那两个快捷方式启动，别从 ID
 
 ## 6. 出问题时
 
+---
+
+## 5b. 最大化窗口应该顶到屏幕顶端（2026-10-14 修的那条）
+
+**做**：把任意一个窗口最大化（双击标题栏，或 Win+↑）。
+
+**应该看到**：窗口内容从屏幕**最上面 y=0** 开始铺满整块屏幕，**岛浮在它上面**；岛的左右两侧
+**不再有空白条**（空白条 = 系统任务栏原本占的那一条）。
+
+**日志里**（启动时应该已经有这两行，这是"让出去"发生的证据）：
+
+```
+  work area: the strip is released -- 0,32 - 2560,1440  ->  0,0 - 2560,1440
+```
+
+**如果启动时最大化过的窗口还留着一条空白**：正常 —— 让出去之后**已经最大化**的窗口不会自己动，
+栏会把它搬一次，日志里会出现：
+
+```
+  work area: 1 already-maximized window(s) brought to the full screen
+```
+看到这行却还有空白，就手动还原再最大化一次（Win+↓ 再 Win+↑）。
+
+**如果某个窗口最大化后栏"退场"了**（只剩岛，图标行/托盘都不见）：那是把这条 32 px 宽的
+窗口当成了全屏应用。目前已知会这样的是**画不出边框**的那种窗口（见 FEATURES §二十六 的边界）。
+日志里对应 `fullscreen: an application has the screen` —— 把是哪个应用告诉我就行。
+
+**不想要这个行为**（想让最大化窗口照旧停在条下方）：用 `--keep-strip` 启动。
+
+**如果一切都乱了**（栏被任务管理器强杀之后，任务栏一直不回来）：
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\restore-desktop.ps1
+```
+
+它会把 shell 任务栏显示回来、把工作区按任务栏算回去；只有在两样都做不到时才重启 Explorer。
+
+---
+
 ```
 # 最近 20 行日志
 Get-Content $env:USERPROFILE\IslandBar\island_bar.log -Tail 20
 
-# 全部自检（751 项：几何 / 解析 / 像素）
+# 全部自检（929 项：几何 / 解析 / 像素）
 & "$env:USERPROFILE\IslandBar\island_bar.exe" --self-test
 
 # Windows 侧最新的真通知（这条通道的调试口）

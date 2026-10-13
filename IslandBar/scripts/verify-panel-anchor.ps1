@@ -96,7 +96,7 @@ if ($LyricsProbe) {
     $outFile = Join-Path $shots 'lyrics-probe.out.txt'
     $errFile = Join-Path $shots 'lyrics-probe.err.txt'
     # Every argument is QUOTED, because Start-Process joins the list with spaces and a title with a
-    # space in it arrives split in two -- which is how the first probe of "Maple Road（你的名字）"
+    # space in it arrives split in two -- which is how the first probe of "Maple Road (a name in Chinese)"
     # fetched the right song with the wrong artist.
     $probeArgs = @('--lyrics-test', ('"' + $Title + '"'), '--lyrics-verbose')
     if ($Artist -ne '') {

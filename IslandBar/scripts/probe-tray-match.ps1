@@ -8,8 +8,8 @@
 #
 #  Pressing an icon in the bar's card means pressing the same icon in the shell's tray, and the only
 #  handle on one is what the shell calls it: the overflow flyout publishes buttons named
-#  "QQ音乐 听我想听 ...", " 微信", "Clash Verge 2.5.8 ..." while the bar's own names come from the
-#  registry and are often just the executable ("Weixin.exe"). A name match therefore covers half of
+#  "QQ Yinyue <tagline> ..." (Chinese), " Weixin", "Clash Verge 2.5.8 ..." while the bar's own names come
+#  from the registry and are often just the executable ("Weixin.exe"). A name match therefore covers half of
 #  them and cannot ever cover WeChat.
 #
 #  Their PICTURES are the same picture, though: the registry holds the PNG the shell snapshots, and the

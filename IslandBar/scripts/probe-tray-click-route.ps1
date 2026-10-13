@@ -6,7 +6,7 @@
 #
 #  Pressing an icon in the bar's tray card needs the shell to do it, and the route through UI
 #  Automation has a hole in the middle: the shell's buttons are named after the APPLICATION
-#  (" 微信", "QQ音乐 听我想听 ...") while the bar's names come from the registry and are often just the
+#  (" Weixin", "QQ Yinyue <tagline> ...") while the bar's names come from the registry and are often just the
 #  executable ("Weixin.exe"). Matching the two by picture was tried and does not work either -- a screen
 #  grab of the overflow flyout comes back black, because that panel is drawn by the compositor (the
 #  taskbar itself photographs fine, which is what made the picture idea look plausible).

@@ -42,6 +42,38 @@ public:
     // Returns true if it had to act, so the caller can throttle the check.
     bool EnsureHidden();
 
+    // --- the strip the work area reserves ---------------------------------------------------
+    //
+    // A hidden AppBar keeps its claim: the shell's taskbar holds the desktop's WORK AREA inset by its
+    // thickness whether or not it is on screen, so a maximized window stops below a band that holds
+    // nothing but our island, and the user photographs the empty space either side of it. Released here
+    // so that a maximized window fills the screen, with the island floating over the application.
+    //
+    // All of it is a no-op unless this object is the reason the taskbar is gone.
+
+    // Gives the strip back, reporting what it found so the caller can write its own line and act on the
+    // one follow-up: an ALREADY maximized window does not follow the work area (measured), so it has to
+    // be brought forward by hand if the user is to see anything change.
+    struct WorkAreaRelease {
+        bool released = false;   // the work area has no strip in it after the call
+        bool changed = false;    // ... and this call is what removed it
+        RECT before = {};        // the work area as found
+        RECT after = {};         // what it is now
+    };
+    WorkAreaRelease ReleaseWorkArea();
+
+    // Puts the strip back out of the way if something re-took it (the shell re-derives the work area
+    // whenever the reservation is announced, and on a display change). `changed` is true when it had to
+    // act, and `before`/`after` then describe the pair the caller needs to bring forward any window that
+    // was maximized in the meantime.
+    WorkAreaRelease EnsureWorkAreaReleased();
+
+    // Puts the work area back exactly as it was found, and forgets it. Called on the way out.
+    void RestoreWorkArea();
+
+    // Whether the strip is released, as of the last call that could have changed it.
+    bool WorkAreaReleased() const { return releasedWorkArea_; }
+
     bool IsFound() const { return trayWnd_ != nullptr; }
 
     // Whether the taskbar is visible right now, as the OS reports it.
@@ -66,12 +98,20 @@ public:
 
 private:
     void HandleExplorerRestart();
+    // The screen bounds of the display the shell's taskbar is on: what the strip is released TO.
+    bool TaskbarMonitorBounds(RECT* out) const;
 
     HWND trayWnd_ = nullptr;        // Shell_TrayWnd: the primary taskbar
     HWND trayNotify_ = nullptr;     // TrayNotifyWnd: the clock/notification corner
     bool wasVisible_ = false;       // as found, before we touched anything
     bool weHidIt_ = false;
     bool located_ = false;
+
+    // The work area this process found, and whether it has been touched. Saved even when the values
+    // look familiar: the point is to put back what was there, not what the shell would compute.
+    RECT workBefore_ = {};
+    bool haveWorkBefore_ = false;
+    bool releasedWorkArea_ = false;
 };
 
 } // namespace island
