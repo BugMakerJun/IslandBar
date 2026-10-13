@@ -29,14 +29,18 @@ namespace {
 const Theme kThemes[] = {
     // name          pillTop                          pillBottom                       gloss
     //               cardFill                         edge   accent                            ink
+    //               shadow grain
     {L"\u9ED8\u8BA4",   {0.05f, 0.05f, 0.07f, 0.92f}, {0.04f, 0.05f, 0.08f, 0.98f}, 0.06f,
-     {0.05f, 0.05f, 0.07f, 0.97f}, 0.13f, {0.0f, 0.47f, 0.83f, 0.95f}, {0.93f, 0.93f, 0.93f, 1.0f}},
+     {0.05f, 0.05f, 0.07f, 0.97f}, 0.13f, {0.0f, 0.47f, 0.83f, 0.95f}, {0.93f, 0.93f, 0.93f, 1.0f},
+     0.0f, 0.0f},
     // 冰蓝
     {L"\u51B0\u84DD", {0.06f, 0.09f, 0.16f, 0.93f}, {0.02f, 0.03f, 0.07f, 0.97f}, 0.10f,
-     {0.04f, 0.06f, 0.12f, 0.97f}, 0.16f, {0.20f, 0.62f, 0.98f, 0.95f}, {0.90f, 0.94f, 1.00f, 1.0f}},
+     {0.04f, 0.06f, 0.12f, 0.97f}, 0.16f, {0.20f, 0.62f, 0.98f, 0.95f}, {0.90f, 0.94f, 1.00f, 1.0f},
+     0.05f, 0.02f},
     // 石墨
     {L"\u77F3\u58A8", {0.13f, 0.13f, 0.14f, 0.94f}, {0.08f, 0.08f, 0.09f, 0.98f}, 0.05f,
-     {0.11f, 0.11f, 0.12f, 0.97f}, 0.18f, {0.24f, 0.56f, 0.90f, 0.95f}, {0.99f, 0.99f, 0.99f, 1.0f}},
+     {0.11f, 0.11f, 0.12f, 0.97f}, 0.18f, {0.24f, 0.56f, 0.90f, 0.95f}, {0.99f, 0.99f, 0.99f, 1.0f},
+     0.05f, 0.0f},
     // 玻璃 -- asked for in these words: "加一个玻璃效果的".
     //
     // IT IS PAINTED GLASS, and the difference from real glass is measured rather than assumed. Three
@@ -57,7 +61,8 @@ const Theme kThemes[] = {
     // things that read as glass -- and its ink is kept bright enough that the contrast floor still
     // passes. What you see behind the bar is the desktop itself, unblurred.
     {L"\u73BB\u7483", {0.20f, 0.24f, 0.32f, 0.66f}, {0.06f, 0.08f, 0.14f, 0.82f}, 0.16f,
-     {0.12f, 0.14f, 0.20f, 0.78f}, 0.34f, {0.42f, 0.78f, 1.00f, 0.95f}, {0.98f, 0.99f, 1.00f, 1.0f}},
+     {0.12f, 0.14f, 0.20f, 0.78f}, 0.34f, {0.42f, 0.78f, 1.00f, 0.95f}, {0.98f, 0.99f, 1.00f, 1.0f},
+     0.20f, 0.05f},
 };
 constexpr int kThemeCount = static_cast<int>(sizeof(kThemes) / sizeof(kThemes[0]));
 
@@ -284,6 +289,10 @@ bool ThemeFromText(const char* utf8, Theme* out, std::string* why) {
             if (!colour(&theme.accent)) return false;
         } else if (key == "ink") {
             if (!colour(&theme.ink)) return false;
+        } else if (key == "shadow") {
+            if (!scalarf(&theme.shadow)) return false;
+        } else if (key == "grain") {
+            if (!scalarf(&theme.grain)) return false;
         } else {
             if (why) *why = "unknown key: " + key;
             return false;

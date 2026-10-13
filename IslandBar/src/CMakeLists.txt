@@ -19,6 +19,7 @@ add_executable(island_bar
     AudioVolume.cpp
     Diagnostics.cpp
     DisplayBrightness.cpp
+    GlassMaterial.cpp
     IslandWindow.cpp
     Log.cpp
     Lyrics.cpp

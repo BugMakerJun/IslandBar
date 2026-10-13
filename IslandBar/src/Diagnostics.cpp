@@ -45,6 +45,7 @@
 #include "Monitor.h"
 #include "SystemToggles.h"
 #include "Theme.h"
+#include "GlassMaterial.h"
 #include "Motion.h"
 #include "Renderer.h"
 #include "TextRenderer.h"
@@ -7489,6 +7490,41 @@ void TestMusicCardLayout() {
                     const float contrast = ThemeInkContrast(theme);
                     std::swprintf(dt6, 256, L"theme '%ls': ink contrast %.1f:1", theme.name, contrast);
                     Check(contrast >= 4.5f, L"every built-in theme keeps its text readable", dt6);
+                }
+
+                // The grain, on the two properties that make it a material rather than a random number:
+                // it is the SAME every run (a texture that changed between launches would be a different
+                // material each time) and it is a narrow band around the middle rather than full-range
+                // speckle, because it is drawn at 2-5%.
+                const unsigned char* noise = NoisePixels();
+                const int size = NoiseSize();
+                Check(noise != nullptr && size == 256,
+                      L"the grain is 256x256, as the material layer is specified", L"noise buffer");
+                if (noise) {
+                    unsigned long long sum = 0;
+                    int low = 255;
+                    int high = 0;
+                    // Four bytes per pixel: the grey is the blue channel (they are all the same value).
+                    for (int i = 0; i < size * size; ++i) {
+                        const unsigned char grey = noise[i * 4];
+                        sum += grey;
+                        if (grey < low) low = grey;
+                        if (grey > high) high = grey;
+                    }
+                    const int mean = static_cast<int>(sum / static_cast<unsigned long long>(size * size));
+                    std::swprintf(dt6, 256, L"grain: mean %d, range %d..%d", mean, low, high);
+                    // Centred near the middle and no wider than a few percent of the range: what the
+                    // assertion is about is "grain, not speckle", so the numbers describe a narrow band.
+                    Check(mean >= 120 && mean <= 135 && high - low <= 40,
+                          L"the grain is a narrow band around the middle, not speckle", dt6);
+                    // Determinism: the same buffer twice is the same bytes -- a cheap proxy for "the same
+                    // bytes next launch", which the fixed seed gives.
+                    bool stable = true;
+                    const unsigned char* again = NoisePixels();
+                    for (int i = 0; i < size * size && stable; i += 977) {
+                        if (again[i * 4] != noise[i * 4]) stable = false;
+                    }
+                    Check(stable, L"and it does not change under the caller's feet", dt6);
                 }
             }
         }

@@ -44,6 +44,11 @@ struct Theme {
     float cardEdge = 0.0f;          // 0..1: the hairline around a card, as an alpha of the ink
     D2D1_COLOR_F accent = {};       // "on" tiles, slider fills, the meters
     D2D1_COLOR_F ink = {};          // text and glyphs -- the colour everything is written in
+    // The two layers of the material that are neither colour nor edge (GlassMaterial.h): how far the soft
+    // shadow reaches under the shape, and how strong the grain over it is. Both are 0 in 默认, so the
+    // built-in that existed before themes keeps its exact pixels -- a theme opts into a material.
+    float shadow = 0.0f;            // 0..1: opacity of the shadow at its darkest
+    float grain = 0.0f;             // 0..1: the grain's own alpha
 };
 
 // The theme in force.

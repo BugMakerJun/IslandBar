@@ -3,6 +3,7 @@
 // =====================================================================
 #include "TextRenderer.h"
 #include "Theme.h"   // the material: the card's surface, the edge, the accent and the ink
+#include "GlassMaterial.h"   // the shadow under a card and the grain over it
 
 #include "WicImage.h"   // DecodeImage, for the mixer's application icons
 #include "TaskStripLayout.h"
@@ -2772,6 +2773,9 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
     // disagreeing. The edge is the theme's ink at the theme's own edge strength: a hairline that
     // catches the light rather than a second fill colour, which is the plan's "细微边缘反射".
     const island::Theme& theme = island::CurrentTheme();
+    // The shadow under the card, then the surface, then the grain over it -- the same three steps the pill
+    // is drawn in, from the same two functions, so a card and the bar cannot end up as different materials.
+    island::DrawSoftShadow(context, rounded, theme.shadow, 22.0f);
     const D2D1_COLOR_F fillColour = D2D1::ColorF(theme.cardFill.r, theme.cardFill.g, theme.cardFill.b,
                                                 theme.cardFill.a * opacity);
     const D2D1_COLOR_F edgeColour = island::ThemeInk(theme.cardEdge * opacity);
@@ -2788,6 +2792,7 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
         context->DrawRoundedRectangle(&rounded, edge, 1.0f);
         edge->Release();
     }
+    island::DrawGrain(context, rounded, theme.grain * opacity);
 }
 
 // One line of text, with the format's own alignment overridden for the call and put back afterwards.

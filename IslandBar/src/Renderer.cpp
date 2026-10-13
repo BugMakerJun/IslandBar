@@ -3,6 +3,7 @@
 // =====================================================================
 #include "Renderer.h"
 #include "Theme.h"   // the material: two stops, a highlight, a hairline, an accent and an ink
+#include "GlassMaterial.h"   // the shadow under the shape and the grain over it
 
 #include "Log.h"
 // Reused rather than reimplemented, so the music card's source icon and a taskbar button's icon
@@ -507,6 +508,11 @@ void Renderer::RenderFrame(const FrameState& frame) {
         // changes every frame of a transition, so a cache would build one entry per frame of every
         // animation and hold them all.
         const island::Theme& theme = island::CurrentTheme();
+        // The shadow FIRST, so the surface sits on it rather than the shadow on the surface. A theme with
+        // shadow 0 (默认) draws nothing here, which is why adding all of this cannot change that one's
+        // pixels. 18 DIP of reach is the brief's "blur 20px, opacity 20%", rounded to what the pill's own
+        // size can carry without the shadow reading as a second object.
+        island::DrawSoftShadow(d2dContext_, rounded, theme.shadow, 18.0f);
         ID2D1SolidColorBrush* edge = nullptr;
         if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(theme.pillTop, &edge)) && edge) {
             ID2D1GradientStopCollection* stops = nullptr;
@@ -567,6 +573,10 @@ void Renderer::RenderFrame(const FrameState& frame) {
             SafeRelease(&bright);
             SafeRelease(&faint);
         }
+
+        // ... and the grain over the whole surface, which is what keeps a flat translucent colour from
+        // reading as plastic. Same rule as the shadow: a theme that asks for none gets none.
+        island::DrawGrain(d2dContext_, rounded, theme.grain);
 
         // Content last, so it sits on top of the fill. It is drawn only when the
         // frame asks for it: at zero content opacity the text is skipped rather
