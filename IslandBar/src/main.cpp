@@ -56,6 +56,7 @@
 #include "TrayPress.h"
 #include "DisplayBrightness.h"   // the brightness row: DDC/CI, the only interface this machine has
 #include "SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
+#include "Theme.h"               // the material: colours and edges, switchable, plus themes\*.txt
 #include "WeChatWatch.h"
 #include "StatePolicy.h"
 #include "SoundOutput.h"
@@ -614,6 +615,13 @@ int BuildSystemPanel(const island::SystemStatus& status, int installedLayoutCoun
                 island::TextRenderer::PanelAction::OpenSettings, L"ms-settings:typing");
     }
 
+    // 外观 -- the material, as a list the user can walk (Theme.h). On the panel's second page with the
+    // other "how the bar looks" controls rather than among the system switches, and captioned with the
+    // theme that is IN FORCE, so the tile answers "which one am I on" without opening anything.
+    addTile(L"\u5916\u89C2", island::CurrentTheme().name,   // 外观
+            island::TextRenderer::IndicatorIcon::Settings, 0, false, false,
+            island::TextRenderer::PanelAction::CycleTheme, nullptr);
+
     if (island::ShouldDrawBattery(status)) {
         static wchar_t percent[8] = {};
         percent[0] = L'\0';
@@ -707,6 +715,13 @@ void BuildSoundPage(const island::SoundOutputSnapshot& snapshot, const island::S
 int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar_t* forcedState,
            bool forcedStartHover, bool forcedSystemPanel) {
     island::MonitorGeometry monitor = island::QueryMonitor(nullptr);
+
+    // --- the material ---------------------------------------------------------------------------
+    //
+    // Read before the first frame, because every surface, edge and word on the bar is drawn from it:
+    // the built-in themes, plus any `themes\*.txt` beside the program, with the choice remembered in
+    // `theme.txt` (see Theme.h). A missing file is the ordinary case.
+    island::ApplyRememberedTheme();
 
     // The machine's own state, sampled on a timer rather than per frame.
     island::SystemStatusReader statusReader;
@@ -3100,6 +3115,25 @@ float musicWavePhase = 0.0f;
                                     tileIndex, tile.label ? tile.label : L"?", sent ? 1 : 0);
                                 break;
                             }
+
+                            case island::TextRenderer::PanelAction::CycleTheme: {
+                                // The whole material at once, and it takes effect on the NEXT frame
+                                // because every drawing call reads CurrentTheme(). The brush cache is
+                                // cleared with it: the cached brushes are keyed by colour, so a theme
+                                // change would otherwise leave every old colour in memory for the rest
+                                // of the session.
+                                const island::Theme& chosen = island::CycleTheme();
+                                text.ClearBrushCache();
+                                island::LogAndPrint(
+                                    L"  tile %d '%ls' -> theme %ls (%d of %d)\n", tileIndex,
+                                    tile.label ? tile.label : L"?", chosen.name,
+                                    island::CurrentThemeIndex() + 1, island::ThemeCount());
+                                // The tile's own caption is the theme's name, and it is built from the
+                                // frame's panel text -- which was assembled earlier in this same pass.
+                                // Redrawing on the next pass is what updates it, and the theme change
+                                // already asks for one.
+                                break;
+                            }
                         }
                         std::fflush(stdout);
                     }
@@ -5117,7 +5151,7 @@ float musicWavePhase = 0.0f;
                         // would be hidden behind it -- and only the CARD's: with no card up this would change
                         // the island's own fill, which is the one thing the wash has nothing to do with.
                         if (frame.music) {
-                            frame.pill.fill = D2D1::ColorF(0.04f, 0.05f, 0.08f, 0.98f);
+                            frame.pill.fill = island::CurrentTheme().pillTop;
                         }
                     }
                 } else if (nowPlaying.artworkRevision == 0 && lastDecodedArtworkRevision != 0) {
@@ -6539,7 +6573,7 @@ int RunMusicPreview() {
                 // renderer's cache is invalidated once rather than every frame.
                 frame.backgroundRevision = 1;
                 // The translucent fill the wash needs behind it, as in the live path.
-                frame.pill.fill = D2D1::ColorF(0.04f, 0.05f, 0.08f, 0.98f);
+                frame.pill.fill = island::CurrentTheme().pillTop;
             }
             renderer.Render(frame);
             frameStats.Record(/*drew=*/true);

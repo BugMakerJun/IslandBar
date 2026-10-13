@@ -97,6 +97,10 @@ public:
 
     void Shutdown();
 
+    // Empties the brush cache. Called by Shutdown (the brushes belong to the device context) and by the
+    // theme switch, which changes every colour the cache is keyed by -- see the note on BrushFor.
+    void ClearBrushCache();
+
     bool IsReady() const { return factory_ != nullptr; }
 
     // Draws the current local time centred in `box`, using window-local DIPs.
@@ -479,6 +483,10 @@ public:
         ToggleNightLight,
         // 实时字幕, through the shortcut the feature itself is driven by: Win+Ctrl+L (island::ToggleLiveCaptions).
         ToggleLiveCaptions,
+        // 外观: walks the theme list (Theme.h) and re-colours the whole bar on the spot. A CYCLE rather
+        // than a list page, for the panel's own reason: every other tile applies its change here and
+        // says what it is now, and the caption under this one names the theme that is in force.
+        CycleTheme,
     };
 
     // One tile of the system panel, as the caller has decided it.
@@ -745,6 +753,10 @@ private:
 
     // A single-colour brush, borrowed from a cache rather than created.
     //
+    // PUBLIC because the theme switch has to empty it (see CycleTheme in main.cpp): the cache is keyed
+    // by the colour it was asked for, so a theme change would leave every colour of the old one in
+    // memory for the rest of the session. Nothing else outside this class has a reason to call it.
+    //
     // WHY THIS EXISTS. The draw path used to create a brush wherever it needed one -- ninety-odd places
     // in this file -- and a creation is a device call with an allocation behind it. Where the count is
     // constant (a title, a clock) that is a handful per frame and nobody notices; where it scales with
@@ -760,7 +772,6 @@ private:
     // what this returns: the cache owns it, and the brush is shared with every other caller that asked
     // for the same colour.
     ID2D1SolidColorBrush* BrushFor(ID2D1DeviceContext2* context, const D2D1_COLOR_F& colour);
-    void ClearBrushCache();
     std::unordered_map<unsigned, ID2D1SolidColorBrush*> brushCache_;
     StartBitmap startPinBitmaps_[24];   // as many as can be on screen at once, and then some
     StartBitmap startAvatarBitmap_;

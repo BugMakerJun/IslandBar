@@ -2,6 +2,7 @@
 //  Renderer.cpp
 // =====================================================================
 #include "Renderer.h"
+#include "Theme.h"   // the material: two stops, a highlight, a hairline, an accent and an ink
 
 #include "Log.h"
 // Reused rather than reimplemented, so the music card's source icon and a taskbar button's icon
@@ -495,18 +496,76 @@ void Renderer::RenderFrame(const FrameState& frame) {
         rounded.radiusX      = std::max(0.0f, shape.radiusX);
         rounded.radiusY      = std::max(0.0f, shape.radiusY);
 
-        // Rounded-rectangle fills and strokes take an ID2D1Brush, not a colour
-        // value. The brush is per-frame and cheap; it is deliberately not cached
-        // because the fill colour is animated in phase 1.
-        ID2D1SolidColorBrush* brush = nullptr;
-        if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(pill.fill, &brush)) && brush) {
-            // A hairline stroke in the fill colour covers the antialiased fringe
-            // a plain fill leaves along the curve, which otherwise shows as a
-            // pale seam against the desktop.
-            const float strokeWidth = 1.0f;
-            d2dContext_->FillRoundedRectangle(&rounded, brush);
-            d2dContext_->DrawRoundedRectangle(&rounded, brush, strokeWidth);
-            SafeRelease(&brush);
+        // THE GLASS: two stops and a highlight, all from the theme (Theme.h).
+        //
+        // It used to be one flat colour at 92% alpha, which is what a bar with no material looks like --
+        // a black rounded rectangle. The two stops are the plan's "reflected light": the surface is
+        // lighter where the light is, and the highlight along the top is a narrow gradient rather than a
+        // hard band, because a hard edge across the pill reads as a line drawn on it.
+        //
+        // The brushes are per-frame and NOT cached: the gradient's geometry is the animated box, which
+        // changes every frame of a transition, so a cache would build one entry per frame of every
+        // animation and hold them all.
+        const island::Theme& theme = island::CurrentTheme();
+        ID2D1SolidColorBrush* edge = nullptr;
+        if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(theme.pillTop, &edge)) && edge) {
+            ID2D1GradientStopCollection* stops = nullptr;
+            const D2D1_GRADIENT_STOP gradientStops[2] = {
+                {0.0f, theme.pillTop},
+                {1.0f, theme.pillBottom},
+            };
+            if (SUCCEEDED(d2dContext_->CreateGradientStopCollection(
+                    gradientStops, 2, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, &stops)) &&
+                stops) {
+                ID2D1LinearGradientBrush* fill = nullptr;
+                const D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES properties = {
+                    D2D1::Point2F(rounded.rect.left, rounded.rect.top),
+                    D2D1::Point2F(rounded.rect.left, rounded.rect.bottom)};
+                if (SUCCEEDED(d2dContext_->CreateLinearGradientBrush(properties, stops, &fill)) &&
+                    fill) {
+                    d2dContext_->FillRoundedRectangle(&rounded, fill);
+                    SafeRelease(&fill);
+                }
+                SafeRelease(&stops);
+            } else {
+                // A device that will not give a gradient still gets a surface rather than nothing.
+                d2dContext_->FillRoundedRectangle(&rounded, edge);
+            }
+
+            // A hairline stroke in the fill colour covers the antialiased fringe a plain fill leaves
+            // along the curve, which otherwise shows as a pale seam against the desktop.
+            d2dContext_->DrawRoundedRectangle(&rounded, edge, 1.0f);
+            SafeRelease(&edge);
+        }
+
+        // The highlight: the ink at the theme's gloss strength, over the top third of the pill and
+        // fading out in two steps. Drawn only when the theme asks for one, so a theme switches it off
+        // by saying 0.
+        //
+        // TWO FILLS rather than a gradient brush: at these alphas (0.05-0.10) an 8-bit banding step is
+        // invisible, and this way the highlight does not need its own brush created per frame.
+        if (theme.gloss > 0.001f && rounded.rect.bottom > rounded.rect.top + 2.0f) {
+            const float top = rounded.rect.top;
+            const float band = (rounded.rect.bottom - rounded.rect.top) * 0.34f;
+            const float half = band * 0.5f;
+            ID2D1SolidColorBrush* bright = nullptr;
+            ID2D1SolidColorBrush* faint = nullptr;
+            if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(island::ThemeInk(theme.gloss), &bright)) &&
+                bright &&
+                SUCCEEDED(d2dContext_->CreateSolidColorBrush(island::ThemeInk(theme.gloss * 0.45f),
+                                                             &faint)) &&
+                faint) {
+                const D2D1_ROUNDED_RECT upper = {
+                    D2D1::RectF(rounded.rect.left, top, rounded.rect.right, top + half),
+                    rounded.radiusX, rounded.radiusY};
+                const D2D1_ROUNDED_RECT lower = {
+                    D2D1::RectF(rounded.rect.left, top + half, rounded.rect.right, top + band),
+                    rounded.radiusX, rounded.radiusY};
+                d2dContext_->FillRoundedRectangle(&upper, bright);
+                d2dContext_->FillRoundedRectangle(&lower, faint);
+            }
+            SafeRelease(&bright);
+            SafeRelease(&faint);
         }
 
         // Content last, so it sits on top of the fill. It is drawn only when the

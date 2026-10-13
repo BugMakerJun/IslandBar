@@ -2,6 +2,7 @@
 //  TextRenderer.cpp
 // =====================================================================
 #include "TextRenderer.h"
+#include "Theme.h"   // the material: the card's surface, the edge, the accent and the ink
 
 #include "WicImage.h"   // DecodeImage, for the mixer's application icons
 #include "TaskStripLayout.h"
@@ -46,8 +47,11 @@ void SafeRelease(T** pp) {
 constexpr float kTextLuminance = 0.93f;
 
 D2D1_COLOR_F TextColour(float opacity) {
+    // The theme's ink rather than a fixed grey, which is what makes a theme change the WORDS as well as
+    // the surfaces. The luminance above is the built-in default's own value, so 默认 draws exactly what
+    // the bar drew before themes existed.
     const float a = (opacity < 0.0f) ? 0.0f : (opacity > 1.0f ? 1.0f : opacity);
-    return D2D1::ColorF(kTextLuminance, kTextLuminance, kTextLuminance, a);
+    return island::ThemeInk(a);
 }
 
 // Chinese weekday and month names for the card's date line.
@@ -777,7 +781,11 @@ void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& 
 
     // The card's own surface: the same one the panel and the music card are drawn on, so the page cannot
     // come out looking like a different kind of object.
-    const D2D1_COLOR_F surface = D2D1::ColorF(0.05f, 0.05f, 0.07f, 0.97f * opacity);
+    // ... and it is the THEME's surface, from the same struct FillCardSurface reads, so the tray page
+    // cannot drift from the panel beside it.
+    const island::Theme& trayTheme = island::CurrentTheme();
+    const D2D1_COLOR_F surface = D2D1::ColorF(trayTheme.cardFill.r, trayTheme.cardFill.g,
+                                             trayTheme.cardFill.b, trayTheme.cardFill.a * opacity);
     D2D1_ROUNDED_RECT rounded = {};
     rounded.rect = D2D1::RectF(card.rect.left, card.rect.top, card.rect.right, card.rect.bottom);
     rounded.radiusX = card.radiusX;
@@ -808,14 +816,22 @@ void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& 
     for (int i = 0; i < layout.count; ++i) {
         const RectF& cell = layout.cells[i];
 
-        // The cell's own square, in the island's colour: the icons belong to the bar, not to the wallpaper
-        // behind the card.
+        // The cell's own square, raised off the card by a wash of the theme's INK rather than by a second
+        // fixed colour: the cells belong to the card, and a hard-coded 0.11/0.11/0.14 grey read as a
+        // neutral tile inside a blue-black card as soon as there were themes to make that visible.
         const float radius = 10.0f;
         const D2D1_ROUNDED_RECT tile = {
             D2D1::RectF(cell.left, cell.top, cell.right, cell.bottom), radius, radius};
         ID2D1SolidColorBrush* tileFill = nullptr;
-        if ((tileFill = BrushFor(context, D2D1::ColorF(0.11f, 0.11f, 0.14f, 0.95f * opacity))) !=
-            nullptr) {
+        // The cell is the CARD's surface lifted a little toward the theme's ink, not a fixed colour: it has
+        // to read as raised in every theme, and a hard-coded 0.11/0.11/0.14 grey became a neutral tile
+        // inside a blue-black card the moment there were themes to make that visible.
+        const auto lift = [](float base, float ink) { return base + (ink - base) * 0.08f; };
+        const D2D1_COLOR_F cellColour =
+            D2D1::ColorF(lift(trayTheme.cardFill.r, trayTheme.ink.r),
+                         lift(trayTheme.cardFill.g, trayTheme.ink.g),
+                         lift(trayTheme.cardFill.b, trayTheme.ink.b), 0.95f * opacity);
+        if ((tileFill = BrushFor(context, cellColour)) != nullptr) {
             context->FillRoundedRectangle(&tile, tileFill);
         }
         if (i == hoveredIndex) {
@@ -2751,12 +2767,26 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
     const D2D1_ROUNDED_RECT rounded = {
         D2D1::RectF(box.rect.left, box.rect.top, box.rect.right, box.rect.bottom), radius,
         std::max(0.0f, box.radiusY)};
+    // ONE PLACE FOR EVERY CARD'S MATERIAL, which is why a theme re-colours the panel, the tray page,
+    // the 声音输出 page, the music card and a notification all at once and cannot leave two of them
+    // disagreeing. The edge is the theme's ink at the theme's own edge strength: a hairline that
+    // catches the light rather than a second fill colour, which is the plan's "细微边缘反射".
+    const island::Theme& theme = island::CurrentTheme();
+    const D2D1_COLOR_F fillColour = D2D1::ColorF(theme.cardFill.r, theme.cardFill.g, theme.cardFill.b,
+                                                theme.cardFill.a * opacity);
+    const D2D1_COLOR_F edgeColour = island::ThemeInk(theme.cardEdge * opacity);
+    // Created here rather than borrowed from the text renderer's brush cache: this function is free
+    // rather than a member (the music card and the notification call it before the class is in scope),
+    // and it runs once or twice a frame rather than once per icon or per tile.
     ID2D1SolidColorBrush* fill = nullptr;
-    const D2D1_COLOR_F colour = D2D1::ColorF(0.09f, 0.10f, 0.13f, 0.97f * opacity);
-    if (SUCCEEDED(context->CreateSolidColorBrush(colour, &fill)) && fill) {
+    if (SUCCEEDED(context->CreateSolidColorBrush(fillColour, &fill)) && fill) {
         context->FillRoundedRectangle(&rounded, fill);
-        context->DrawRoundedRectangle(&rounded, fill, 1.0f);
         fill->Release();
+    }
+    ID2D1SolidColorBrush* edge = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(edgeColour, &edge)) && edge) {
+        context->DrawRoundedRectangle(&rounded, edge, 1.0f);
+        edge->Release();
     }
 }
 
@@ -2822,17 +2852,22 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
             ID2D1SolidColorBrush* fillBrush = nullptr;
             if (tile.on) {
                 // The shell's own accent, at a strength that keeps white text readable on it.
-                const D2D1_COLOR_F accent = D2D1::ColorF(0.0f, 0.47f, 0.83f, 0.92f * opacity);
+                const D2D1_COLOR_F source = island::CurrentTheme().accent;
+                const D2D1_COLOR_F accent =
+                    D2D1::ColorF(source.r, source.g, source.b, source.a * 0.97f * opacity);
                 if ((fillBrush = BrushFor(context, accent)) != nullptr) {
                     context->FillRoundedRectangle(&rounded, fillBrush);
                 }
             } else {
-                const D2D1_COLOR_F surface = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.055f * opacity);
+                // The OFF tile: a wash of the theme's ink over the card, and a hairline of the same ink.
+                // Both were fixed white, which is the one colour a theme with a coloured ink would show up
+                // against as a grey patch.
+                const D2D1_COLOR_F surface = island::ThemeInk(0.055f * opacity);
                 if ((fillBrush = BrushFor(context, surface)) != nullptr) {
                     context->FillRoundedRectangle(&rounded, fillBrush);
                 }
                 ID2D1SolidColorBrush* edge = nullptr;
-                const D2D1_COLOR_F border = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.13f * opacity);
+                const D2D1_COLOR_F border = island::ThemeInk(0.13f * opacity);
                 if ((edge = BrushFor(context, border)) != nullptr) {
                     context->DrawRoundedRectangle(&rounded, edge, 1.0f);
                 }
@@ -2939,7 +2974,11 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         // Muted draws NO fill even at a non-zero level, so the state is visible in the bar itself and
         // not only in the glyph.
         if (!mutedRow && handleX > track.left + 0.5f) {
-            const D2D1_COLOR_F accent = D2D1::ColorF(0.0f, 0.47f, 0.83f, 0.95f * opacity);
+            // The slider's fill takes the theme's accent; the track and the handle stay neutral, so the
+            // part that shows the LEVEL is the part that carries the colour.
+            const D2D1_COLOR_F themeAccent = island::CurrentTheme().accent;
+            const D2D1_COLOR_F accent =
+                D2D1::ColorF(themeAccent.r, themeAccent.g, themeAccent.b, themeAccent.a * opacity);
             if ((fillBrush = BrushFor(context, accent)) != nullptr) {
                 const D2D1_ROUNDED_RECT rounded = {
                     D2D1::RectF(track.left, centreY - barHeight * 0.5f, handleX,

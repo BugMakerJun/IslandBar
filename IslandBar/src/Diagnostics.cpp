@@ -44,6 +44,7 @@
 #include "IslandWindow.h"
 #include "Monitor.h"
 #include "SystemToggles.h"
+#include "Theme.h"
 #include "Motion.h"
 #include "Renderer.h"
 #include "TextRenderer.h"
@@ -2324,19 +2325,29 @@ void TestRenderer(IslandWindow& window) {
 
         // The rounded ends must stay clear of text.
         //
-        // The threshold is the pill's own fill, not black: the corner is inside the
-        // pill, so it is painted with the fill colour, and an earlier version of this
-        // check demanded near-zero and failed at 11.44 against a fill of 12.46.
+        // TWO THINGS ABOUT THE REFERENCE, and both were learned the hard way.
+        //
+        // It is the pill's own surface rather than black -- the corner is inside the pill, so it is
+        // painted with the fill, and an earlier version demanded near-zero and failed at 11.44 against a
+        // fill of 12.46.
+        //
+        // And it is taken at the SAME HEIGHT as the corner, because the material now has a highlight
+        // along the top of the pill: the first version measured the corner against a glyph-free row
+        // near the BOTTOM, so a theme's gloss moved the corner to 23.4 against a fill of 12.3 and the
+        // check failed for a reason that has nothing to do with text. Comparing along one row keeps the
+        // tolerance tight -- a glyph in the corner still fails it -- while following the material.
         renderStrip(longLyric, 120.0f);
         float cornerLuma = -1.0f;
         float fillLuma = -1.0f;
         const bool measuredCorner = renderer.RegionLuminance(
             strip.rect.left + 2.0f, strip.rect.top + 2.0f, strip.rect.left + 8.0f,
             strip.rect.top + 8.0f, &cornerLuma);
-        // A glyph-free strip of the same height, for the fill's own reading.
+        // The same band, in the middle of the strip: above the line's own height, so it is as free of
+        // glyphs as the corner is.
         const bool measuredFill = renderer.RegionLuminance(
-            strip.rect.left + 2.0f, stripMidY + 12.0f, strip.rect.right - 2.0f,
-            stripMidY + 15.0f, &fillLuma);
+            strip.rect.left + (strip.rect.right - strip.rect.left) * 0.5f - 3.0f,
+            strip.rect.top + 2.0f, strip.rect.left + (strip.rect.right - strip.rect.left) * 0.5f + 3.0f,
+            strip.rect.top + 8.0f, &fillLuma);
         std::swprintf(stripDetail, 224, L"corner=%.2f, fill=%.2f", cornerLuma, fillLuma);
         Check(measuredCorner && measuredFill && Nearly(cornerLuma, fillLuma, 2.0f),
               L"the strip's rounded corner holds only the fill, not text", stripDetail);
@@ -7436,6 +7447,49 @@ void TestMusicCardLayout() {
                 Check(NightLightStateFromBlob(nullptr, 0) == NightLightState::Unknown &&
                           NightLightStateFromBlob(offFresh, 4) == NightLightState::Unknown,
                       L"a missing or truncated blob is Unknown, not a guess", dt6);
+            }
+
+            // THE THEMES, on the two things that decide whether switching one is a good idea: does a
+            // theme FILE parse (the format a user types), and is the text still readable in every
+            // theme that ships.
+            //
+            // The contrast floor is the plan's own requirement -- "do not over-transparent the
+            // background so the text becomes unclear" -- turned into a number, because a theme whose
+            // ink is a shade lighter than its surface looks fine in a file and unreadable on screen.
+            {
+                std::string why;
+                Theme parsed;
+                const char* good =
+                    "# a theme written the way a user would write one\n"
+                    "name=test\n"
+                    "pill-top=0.02,0.03,0.06,0.90\n"
+                    "pill-bottom=0.5\n"          // the one-component shorthand: a grey
+                    "gloss=0.12\n"
+                    "accent=0.2,0.6,1.0\n";
+                Check(ThemeFromText(good, &parsed, &why),
+                      L"a hand-written theme parses, and may state only what it changes",
+                      L"name + three colours and a scalar");
+                Check(parsed.gloss > 0.11f && parsed.gloss < 0.13f && parsed.pillBottom.r == 0.5f &&
+                          parsed.accent.b == 1.0f && parsed.cardFill.a > 0.9f,
+                      L"and the fields it did not mention keep the default's values",
+                      L"pill-bottom=0.5 is the grey shorthand; cardFill comes from 默认");
+
+                const char* noName = "accent=0.2,0.6,1.0\n";
+                Check(!ThemeFromText(noName, &parsed, &why),
+                      L"a theme with no name is refused (the name is what theme.txt stores)");
+                const char* badColour = "name=x\naccent=1.4,0.2,0.2\n";
+                Check(!ThemeFromText(badColour, &parsed, &why),
+                      L"a channel outside 0..1 is refused rather than clamped");
+                const char* badKey = "name=x\ncolour=0.2,0.2,0.2\n";
+                Check(!ThemeFromText(badKey, &parsed, &why),
+                      L"an unknown key is refused, so a typo cannot be silently ignored");
+
+                for (int i = 0; i < BuiltInThemeCount(); ++i) {
+                    const Theme& theme = BuiltInTheme(i);
+                    const float contrast = ThemeInkContrast(theme);
+                    std::swprintf(dt6, 256, L"theme '%ls': ink contrast %.1f:1", theme.name, contrast);
+                    Check(contrast >= 4.5f, L"every built-in theme keeps its text readable", dt6);
+                }
             }
         }
 

@@ -34,6 +34,7 @@ add_executable(island_bar
     Renderer.cpp
     SoundOutput.cpp
     TextRenderer.cpp
+    Theme.cpp
     ThumbnailPreview.cpp
     ToastStore.cpp
     TrayIcons.cpp
