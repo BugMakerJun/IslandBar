@@ -1733,7 +1733,13 @@ float musicWavePhase = 0.0f;
             // started", and a bar that starts at logon can easily start first -- see the note in
             // NativeTaskbar::EnsureHidden, which is where the second look happens.
             if (hideNativeTaskbar && --taskbarCheckCountdown <= 0) {
-                taskbarCheckCountdown = 50;   // roughly every 5 s at an 8 ms tick
+                // 50 FRAMES, and the frame is the units of this counter -- not seconds. Measured on this
+                // machine (the `interval [music-strip]` line in the log): ~15 ms per frame, so this is
+                // about every 0.8 s. The comment here used to claim "roughly every 5 s at an 8 ms tick",
+                // and both numbers were wrong: an 8 ms timer from an earlier design that no longer exists.
+                // It cost a measurement -- a probe that put the work area back by hand and waited 8 s for
+                // "the bar's cycle" was looking at two cycles that had already been and gone (HANDOFF 8.86).
+                taskbarCheckCountdown = 50;
                 // ... unless a tray press is showing it this instant: the press needs the shell's taskbar
                 // to exist for about a fifth of a second, and re-hiding it in the middle of that would
                 // make roughly one press in twenty-five do nothing at all. See TrayPressInFlight.
