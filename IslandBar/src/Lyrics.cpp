@@ -742,6 +742,7 @@ bool FetchFromNetEase(const char* title, const char* artist, int timeoutMs, Lyri
     }
 
     long long songId = 0;
+    long long songDurationMs = 0;
     {
         // The song's OWN id -- not the album's and not the artist's. See FlatFieldInArrayObject:
         // the previous reader took the first `id` after `songs`, which for `晴天` was an artist's
@@ -752,6 +753,17 @@ bool FetchFromNetEase(const char* title, const char* artist, int timeoutMs, Lyri
             // and "the id could not be read" and "there is no such song" need opposite fixes.
             explain("netease: TRANSIENT: the search response had no usable song id");
             return false;
+        }
+        // ... and how long the catalogue says that track is, out of the SAME response.
+        //
+        // This is the number the card prints and the bar fills against, and it exists only because the
+        // session does not always supply one: NetEase Cloud Music reports `EndTime 00:00` for the whole
+        // song (see TrackPositionFor), so the card had no total and its bar could not fill. Measured
+        // response for `偷心 糯米Nomi`: `"duration":243714` (4:03) right beside the `"id"` this already
+        // reads -- no extra request, and the track's real length rather than a guess from the LRC.
+        if (!FindFlatIntegerInArray(searchBody, kSongsPath, 1, "duration", &songDurationMs) ||
+            songDurationMs <= 0) {
+            songDurationMs = 0;   // it did not say; the card then prints `--:--` instead of a number
         }
     }
 
@@ -804,6 +816,7 @@ bool FetchFromNetEase(const char* title, const char* artist, int timeoutMs, Lyri
         return false;
     }
     explain("ok (netease)");
+    out->trackDurationMs = songDurationMs;
     return true;
 }
 
@@ -874,6 +887,7 @@ bool FetchFromQqMusic(const char* title, const char* artist, int timeoutMs, Lyri
     }
 
     char songMid[128] = {};
+    long long songDurationMs = 0;
     // `song.list` and not `list`: this response carries three `list` arrays and the first two are
     // EMPTY (the album's and the singer's), so "the first list" is the wrong array as well as the
     // wrong level. Measured: the old reader took a mid that the service then refused with
@@ -882,6 +896,15 @@ bool FetchFromQqMusic(const char* title, const char* artist, int timeoutMs, Lyri
     if (!FindFlatStringInArray(searchBody, kSongListPath, 2, "mid", songMid, sizeof(songMid))) {
         explain("qq: TRANSIENT: the search response had no usable song mid");
         return false;
+    }
+    // The track's length, from the SAME response, for the same reason NetEase's is read: the card needs
+    // a total to print and a bar to fill against, and a session that sends no timeline has none. QQ
+    // states it in SECONDS (`interval`), so it is converted here rather than at every reader.
+    {
+        long long seconds = 0;
+        if (FindFlatIntegerInArray(searchBody, kSongListPath, 2, "interval", &seconds) && seconds > 0) {
+            songDurationMs = seconds * 1000;
+        }
     }
 
     wchar_t wideMid[128] = {};
@@ -932,6 +955,7 @@ bool FetchFromQqMusic(const char* title, const char* artist, int timeoutMs, Lyri
         return false;
     }
     explain("ok (qq)");
+    out->trackDurationMs = songDurationMs;
     return true;
 }
 

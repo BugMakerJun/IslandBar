@@ -3721,6 +3721,45 @@ void TestLyrics() {
         Check(!FindFlatIntegerInArray(R"({"result":{"songs":[]}})", kSongsPath, 1, "id", &id),
               L"an empty result list has no id");
 
+        // ... and the track's LENGTH, read out of the same response (2026-10-13, HANDOFF 8.75).
+        //
+        // It is what the card prints and what its bar fills against when the session publishes no
+        // timeline -- NetEase Cloud Music's case, where `EndTime` stays 00:00 for the whole song. The
+        // document below is the real response for `偷心 糯米Nomi` (captured with curl), shortened to the
+        // fields this reader touches; `duration` sits beside the song's own `id`, after the album's and
+        // an artist's nested objects, which is why it is read by path and not by "the first one".
+        {
+            long long duration = 0;
+            wchar_t durationDetail[160];
+            // The delimiter is a word, not the default: the body itself contains `)"` inside a song
+            // title ("偷心 (女生版)") and a bare `R"(...)"` would have ended the literal in the middle
+            // of the JSON -- which it did, and the compiler's complaint was "newline in a constant".
+            const bool read = FindFlatIntegerInArray(
+                R"doc({"result":{"songs":[{"album":{"id":255723258},"artists":[{"id":0}],)doc"
+                R"doc("duration":243714,"id":2116892727,"name":"偷心 (女生版)"}]}})doc",
+                kSongsPath, 1, "duration", &duration);
+            std::swprintf(durationDetail, 160, L"found=%d duration=%lld", read ? 1 : 0, duration);
+            Check(read && duration == 243714,
+                  L"the track's length is read from the same search response as its id",
+                  durationDetail);
+
+            duration = 123;
+            Check(!FindFlatIntegerInArray(R"({"songs":[{"id":1}]})", kSongsPath, 1, "duration",
+                                          &duration) &&
+                      duration == 123,
+                  L"a response that does not state a length leaves the caller's value alone");
+
+            // QQ states it in SECONDS (`interval`), in the same object as the mid.
+            long long seconds = 0;
+            static const char* const kQqSongListPath[] = {"song", "list"};
+            Check(FindFlatIntegerInArray(
+                      R"doc({"req_0":{"data":{"body":{"song":{"list":[{"mid":"0039MnYb0qxYhV",)doc"
+                      R"doc("interval":243}]}}}}})doc",
+                      kQqSongListPath, 2, "interval", &seconds) &&
+                      seconds == 243,
+                  L"QQ's length is read, in seconds, from the same list as its mid");
+        }
+
         char mid[64] = {};
         static const char* const kSongListPath[] = {"song", "list"};
         Check(FindFlatStringInArray(

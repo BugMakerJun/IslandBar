@@ -252,6 +252,14 @@ struct FrameState {
     // the caller can project it forward between polls and keep the time and the bar in step.
     long long musicPositionMs = 0;
 
+    // The total length to print, in milliseconds, when the caller has one and the snapshot does not.
+    //
+    // A session is not obliged to publish a timeline and NetEase Cloud Music never does, so the card
+    // had no total (`00:00`) and its bar could not fill. The lyric provider reads the length from the
+    // catalogue it just searched (see Lyrics::trackDurationMs), and this is where it reaches the
+    // drawing code. Zero means "nobody knows", and the card prints `--:--`.
+    long long musicDurationMs = 0;
+
     // Decoded album art, BGRA premultiplied. Owned by the caller; null when there
     // is none. Passed as pixels rather than as a bitmap so the renderer does not
     // have to own a cache or a lifetime.

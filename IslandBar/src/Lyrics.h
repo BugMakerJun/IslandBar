@@ -43,6 +43,16 @@ struct Lyrics {
     char title[kLyricLineCapacity]  = {};
     char artist[kLyricLineCapacity] = {};
 
+    // How long the track is, from the CATALOGUE the lyrics came from (0 when it did not say).
+    //
+    // Worth carrying because a session is not obliged to publish a timeline and NetEase Cloud Music
+    // never does: measured while playing, `Position 00:00 / StartTime 00:00 / EndTime 00:00` for the
+    // whole song (see TrackPositionFor). The card had no total to print and its bar could not fill.
+    // The search that finds the track already carries the length (`duration`, in ms) -- the same
+    // request, no extra round trip -- so this is the track's real length, not a guess from the last
+    // lyric line. QQ Music's search carries `interval`, in seconds.
+    long long trackDurationMs = 0;
+
     // Index of the line that should be shown at `positionMs`, or -1 when the
     // position is before the first line (an intro) or there are no lines.
     //

@@ -1893,9 +1893,14 @@ float musicWavePhase = 0.0f;
                 currentLyrics = lyrics.Current();
                 lastLyricIndex = -2;
                 lyricsScrollDip = 0.0f;
-                island::LogAndPrint("  lyrics: %s (%d lines)",
+                // The catalogue's length is on this line because it is what the card prints and the bar
+                // fills against when the session publishes no timeline (see Lyrics::trackDurationMs), and
+                // a number that reaches the screen without ever reaching the log is a number nobody can
+                // check. Zero means the service did not say.
+                island::LogAndPrint("  lyrics: %s (%d lines, the catalogue says %lld ms)",
                                     currentLyrics ? "loaded" : "none",
-                                    currentLyrics ? currentLyrics->count : 0);
+                                    currentLyrics ? currentLyrics->count : 0,
+                                    currentLyrics ? currentLyrics->trackDurationMs : 0);
                 std::fflush(stdout);
             }
 
@@ -4449,10 +4454,19 @@ float musicWavePhase = 0.0f;
                 // The elapsed time still moves, because the bar is counting it -- before this, both ends
                 // showed `00:00` and nothing moved at all ("进度条也不动").
                 if (activePresent) {
+                    // The TOTAL: the session's, or -- when it publishes none, which is NetEase Cloud
+                    // Music's case -- the catalogue's, which the lyric provider fetched together with the
+                    // words (see Lyrics::trackDurationMs). Now the bar has a scale to fill against and the
+                    // card prints a real length instead of `--:--`.
+                    const long long totalMs =
+                        nowPlaying.durationMs > 0
+                            ? nowPlaying.durationMs
+                            : (currentLyrics ? currentLyrics->trackDurationMs : 0);
                     frame.musicPositionMs = track.ms;
-                    if (nowPlaying.durationMs > 0) {
+                    frame.musicDurationMs = totalMs;
+                    if (totalMs > 0) {
                         const double fraction = static_cast<double>(track.ms) /
-                                                static_cast<double>(nowPlaying.durationMs);
+                                                static_cast<double>(totalMs);
                         frame.progressFraction = static_cast<float>(fraction > 1.0 ? 1.0 : fraction);
                     }
                 }

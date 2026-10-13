@@ -893,7 +893,12 @@ void Renderer::RenderFrame(const FrameState& frame) {
                     // the printed time matches the bar.
                     text.positionMs = frame.musicPositionMs > 0 ? frame.musicPositionMs
                                                                 : frame.music->positionMs;
-                    text.durationMs = frame.music->durationMs;
+                    // The total comes from the CALLER when it has one: a session that publishes no
+                    // timeline has none, and the lyric provider read the track's real length out of the
+                    // catalogue it searched (see Lyrics::trackDurationMs). Zero means nobody knows, and
+                    // the card prints `--:--`.
+                    text.durationMs = frame.musicDurationMs > 0 ? frame.musicDurationMs
+                                                                : frame.music->durationMs;
                     text.progressFraction = frame.progressFraction;
 
                     text_->DrawMusicCard(d2dContext_, panelCard, text,
