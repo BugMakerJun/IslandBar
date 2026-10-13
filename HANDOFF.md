@@ -5,6 +5,18 @@
 > **注意**：本文档含中文，仅供人阅读；**所有 `.ps1` / `.bat` 脚本必须保持纯 ASCII**（原因见 6.1）。
 > **已脱敏**：文中路径里的 `%USERPROFILE%` 指你自己的用户目录（例如 `C:\Users\<你>`）；`<pid>` / `<window>` / `<mac>` / `<device-name>` 是占位符 —— 原来的进程号、窗口句柄、蓝牙 MAC 与设备名已移除。文中保留的曲名是定位问题时用到的实例，不含播放历史。
 > **协作约定（2026-10-12 与用户确认）**：**改完 ≠ 推上去。** 每次改动都是：编译 → 自检 → 部署到用户栏上 → **把要试什么、日志里看哪几行写清楚交给用户**；在他回"没问题"之前**只做本地提交**（保住工作 + `scripts\snapshot.ps1` 快照），**不 `git push`**。他说有问题就在本地继续迭代，未验证的东西不上 GitHub。远端 = `github.com/BugMakerJun/IslandBar-DynamicIsland`（public；2026-10-13 由 `IslandBar` 改名，旧地址仍重定向 —— **仓库名只能是 ASCII**，见 8.70）；`gh` 在 `C:\Users\<你>\gh-cli\bin\gh.exe`，已按 `BugMakerJun` 认证（scopes `gist/repo/workflow`）。
+>
+> **推代码这一条命令（2026-10-14 补，踩过两次）**：本 shell 的 `HTTP(S)_PROXY` 指向 `127.0.0.1:9`（黑洞），
+> 所以每次推送都要先清掉再指定 Clash 的混合端口；而 **schannel 后端在这个代理上会间歇性 TLS 握手失败**
+> （`fatal: ... schannel: failed to receive handshake`，此时用 `curl -x http://127.0.0.1:7897 https://github.com`
+> 明明回 200 —— 说明是 git 的 TLS 后端，不是网络）。可用的完整命令：
+>
+> ```powershell
+> Remove-Item Env:\HTTP_PROXY,Env:\HTTPS_PROXY,Env:\ALL_PROXY -ErrorAction SilentlyContinue
+> git -c http.proxy=http://127.0.0.1:7897 -c http.sslBackend=openssl push origin main
+> ```
+>
+> （直连必然 `Connection was reset`，那是预期；`127.0.0.1:7890` 上没有监听。）
 
 > **已推批次**：
 > * 2026-10-12 晚（第一批）8.45–8.49：状态条 → 一行两个家 → 系统定位 → 参考图重排 → 去掉日历图标。部署到用户栏上、他逐条试过后回「没问题了」→ 推送 `4ba7240` / `9e619c4` / `a746f9a` / `64744f1` / `e73e187`。
