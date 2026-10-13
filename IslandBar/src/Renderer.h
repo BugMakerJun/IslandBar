@@ -87,13 +87,39 @@ struct ContentStrengths {
     float card = 1.0f;
 };
 
-inline ContentStrengths ContentStrengthsFor(bool cardUp, float easedProgress) {
+// The card's strength, SEQUENCED against the shape rather than moving with it.
+//
+// The brief this answers, in its own words: "expanding: the pill opens smoothly and the content fades
+// in afterwards; collapsing: the content fades out first and the body then shrinks back". Following the
+// shape exactly -- which is what this did -- makes the two one object: the words slide out with the
+// edge, so on the way open they are already legible inside a card that has not finished making room for
+// them, and on the way closed they leave together with the border they were sitting in.
+//
+// `opening` is which of the two this transition is, and it CANNOT be derived from `easedProgress`: both
+// directions run their progress from 0 to 1 (the shape interpolates from `from_` to `to_`, and which of
+// those is the card is the caller's knowledge, not this function's).
+//
+// The lead is a third of the movement: on the way open the card's content stays at its floor while the
+// shape takes a third of the room it needs, then fades in over the rest; on the way closed it is gone
+// before the shape has finished a third of the way back. Both ends are exact -- 0.35 at the start of an
+// opening and 1.0 at its end, and the mirror of that for a closing -- so the settled values are what the
+// rest of the renderer has always assumed.
+inline constexpr float kCardContentLeadFraction = 0.35f;
+
+inline ContentStrengths ContentStrengthsFor(bool cardUp, float easedProgress, bool opening) {
     ContentStrengths out;
     if (!cardUp) return out;
+
     float t = easedProgress;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
-    out.card = 0.35f + 0.65f * t;
+
+    float sequenced = opening ? (t - kCardContentLeadFraction) / (1.0f - kCardContentLeadFraction)
+                              : 1.0f - t / kCardContentLeadFraction;
+    if (sequenced < 0.0f) sequenced = 0.0f;
+    if (sequenced > 1.0f) sequenced = 1.0f;
+
+    out.card = 0.35f + 0.65f * sequenced;
     return out;
 }
 

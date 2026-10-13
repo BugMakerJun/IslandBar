@@ -18,6 +18,7 @@
 #include <dwrite_3.h>
 
 #include <cstddef>
+#include <unordered_map>
 
 #include "Geometry.h"      // RoundedBox: the text is laid out inside the pill's box
 #include "MusicSession.h"  // the now-playing field capacities
@@ -741,6 +742,26 @@ private:
     };
     ID2D1Bitmap1* StartBitmapFor(ID2D1DeviceContext2* context, StartBitmap* slot, const uint8_t* png,
                                  size_t size);
+
+    // A single-colour brush, borrowed from a cache rather than created.
+    //
+    // WHY THIS EXISTS. The draw path used to create a brush wherever it needed one -- ninety-odd places
+    // in this file -- and a creation is a device call with an allocation behind it. Where the count is
+    // constant (a title, a clock) that is a handful per frame and nobody notices; where it scales with
+    // what is on screen it is a brush per tray icon, per window in the task row, per tile, per mixer row
+    // -- and the bar repaints for as long as it is on screen, which is all day.
+    //
+    // The cache follows the same rule as the bitmaps above it: keyed by something that identifies the
+    // resource (there, a revision; here, the colour), and cleared when the device context is replaced.
+    //
+    // THE COLOUR IS QUANTISED TO 8 BITS PER CHANNEL, which is what D2D stores anyway -- so the key can
+    // never be finer than the brush, and a colour that also depends on a fading `opacity` produces a
+    // small number of distinct brushes per animation instead of one per frame. Callers must NOT release
+    // what this returns: the cache owns it, and the brush is shared with every other caller that asked
+    // for the same colour.
+    ID2D1SolidColorBrush* BrushFor(ID2D1DeviceContext2* context, const D2D1_COLOR_F& colour);
+    void ClearBrushCache();
+    std::unordered_map<unsigned, ID2D1SolidColorBrush*> brushCache_;
     StartBitmap startPinBitmaps_[24];   // as many as can be on screen at once, and then some
     StartBitmap startAvatarBitmap_;
 

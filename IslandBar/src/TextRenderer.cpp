@@ -334,6 +334,9 @@ bool TextRenderer::Initialize() {
 }
 
 void TextRenderer::Shutdown() {
+    // The brush cache first: those brushes belong to this device context, and a cache that outlived its
+    // context would hand out dangling pointers on the next frame.
+    ClearBrushCache();
     // The mixer's icon bitmaps go with everything else: they are GPU resources created on this device
     // context's device, and leaving them behind would keep the device alive past Shutdown.
     for (SoundIconSlot& slot : soundIcons_) {
@@ -374,6 +377,42 @@ void TextRenderer::Shutdown() {
     timeText_[0] = L'\0';
     dateText_[0] = L'\0';
     dateKey_[0] = L'\0';
+}
+
+// See the declaration in the header for why this exists at all.
+ID2D1SolidColorBrush* TextRenderer::BrushFor(ID2D1DeviceContext2* context,
+                                            const D2D1_COLOR_F& colour) {
+    if (!context) return nullptr;
+
+    // 8 bits per channel, which is the precision D2D keeps anyway: a key finer than the brush would miss
+    // for changes nobody can see, and `opacity` is multiplied into most of these colours, so it would miss
+    // on every frame of every animation.
+    const auto quantise = [](float value) -> unsigned {
+        if (value <= 0.0f) return 0u;
+        if (value >= 1.0f) return 255u;
+        return static_cast<unsigned>(value * 255.0f + 0.5f);
+    };
+    const unsigned key = (quantise(colour.a) << 24) | (quantise(colour.r) << 16) |
+                         (quantise(colour.g) << 8) | quantise(colour.b);
+
+    const auto found = brushCache_.find(key);
+    if (found != brushCache_.end()) return found->second;
+
+    // Built from the QUANTISED value, so what is drawn is exactly what the key describes.
+    const D2D1_COLOR_F wanted =
+        D2D1::ColorF(static_cast<float>((key >> 16) & 0xFF) / 255.0f,
+                     static_cast<float>((key >> 8) & 0xFF) / 255.0f,
+                     static_cast<float>(key & 0xFF) / 255.0f,
+                     static_cast<float>((key >> 24) & 0xFF) / 255.0f);
+    ID2D1SolidColorBrush* brush = nullptr;
+    if (FAILED(context->CreateSolidColorBrush(wanted, &brush)) || !brush) return nullptr;
+    brushCache_.emplace(key, brush);
+    return brush;
+}
+
+void TextRenderer::ClearBrushCache() {
+    for (auto& entry : brushCache_) SafeRelease(&entry.second);
+    brushCache_.clear();
 }
 
 void TextRenderer::Refresh() {
@@ -744,10 +783,9 @@ void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& 
     rounded.radiusX = card.radiusX;
     rounded.radiusY = card.radiusY;
     ID2D1SolidColorBrush* background = nullptr;
-    if (SUCCEEDED(context->CreateSolidColorBrush(surface, &background)) && background) {
+    if ((background = BrushFor(context, surface)) != nullptr) {
         context->FillRoundedRectangle(&rounded, background);
         context->DrawRoundedRectangle(&rounded, background, 1.0f);
-        background->Release();
     }
 
     const TrayPageLayout layout = TrayPageFor(card, count);
@@ -776,19 +814,15 @@ void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& 
         const D2D1_ROUNDED_RECT tile = {
             D2D1::RectF(cell.left, cell.top, cell.right, cell.bottom), radius, radius};
         ID2D1SolidColorBrush* tileFill = nullptr;
-        if (SUCCEEDED(context->CreateSolidColorBrush(
-                D2D1::ColorF(0.11f, 0.11f, 0.14f, 0.95f * opacity), &tileFill)) &&
-            tileFill) {
+        if ((tileFill = BrushFor(context, D2D1::ColorF(0.11f, 0.11f, 0.14f, 0.95f * opacity))) !=
+            nullptr) {
             context->FillRoundedRectangle(&tile, tileFill);
-            tileFill->Release();
         }
         if (i == hoveredIndex) {
             ID2D1SolidColorBrush* wash = nullptr;
-            if (SUCCEEDED(context->CreateSolidColorBrush(
-                    D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity), &wash)) &&
-                wash) {
+            if ((wash = BrushFor(context, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity))) !=
+                nullptr) {
                 context->FillRoundedRectangle(&tile, wash);
-                wash->Release();
             }
         }
 
@@ -2789,21 +2823,18 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
             if (tile.on) {
                 // The shell's own accent, at a strength that keeps white text readable on it.
                 const D2D1_COLOR_F accent = D2D1::ColorF(0.0f, 0.47f, 0.83f, 0.92f * opacity);
-                if (SUCCEEDED(context->CreateSolidColorBrush(accent, &fillBrush)) && fillBrush) {
+                if ((fillBrush = BrushFor(context, accent)) != nullptr) {
                     context->FillRoundedRectangle(&rounded, fillBrush);
-                    fillBrush->Release();
                 }
             } else {
                 const D2D1_COLOR_F surface = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.055f * opacity);
-                if (SUCCEEDED(context->CreateSolidColorBrush(surface, &fillBrush)) && fillBrush) {
+                if ((fillBrush = BrushFor(context, surface)) != nullptr) {
                     context->FillRoundedRectangle(&rounded, fillBrush);
-                    fillBrush->Release();
                 }
                 ID2D1SolidColorBrush* edge = nullptr;
                 const D2D1_COLOR_F border = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.13f * opacity);
-                if (SUCCEEDED(context->CreateSolidColorBrush(border, &edge)) && edge) {
+                if ((edge = BrushFor(context, border)) != nullptr) {
                     context->DrawRoundedRectangle(&rounded, edge, 1.0f);
-                    edge->Release();
                 }
             }
         }
@@ -2820,7 +2851,7 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         if (tile.chevron && gearGlyphFormat_ && layout.tiles[i].right > layout.tiles[i].left) {
             ID2D1SolidColorBrush* chevronBrush = nullptr;
             const D2D1_COLOR_F ink = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.72f * opacity);
-            if (SUCCEEDED(context->CreateSolidColorBrush(ink, &chevronBrush)) && chevronBrush) {
+            if ((chevronBrush = BrushFor(context, ink)) != nullptr) {
                 const float side = 14.0f;
                 const float centreY = (layout.tiles[i].top + layout.tiles[i].bottom) * 0.5f;
                 const D2D1_RECT_F area = D2D1::RectF(
@@ -2829,7 +2860,6 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
                 const wchar_t chevron[] = {L'\uE76C', L'\0'};   // ChevronRight, Segoe MDL2 Assets
                 context->DrawTextW(chevron, 1, gearGlyphFormat_, area, chevronBrush,
                                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                chevronBrush->Release();
             }
         }
 
@@ -2841,7 +2871,7 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         if (caption && caption[0] != L'\0') {
             ID2D1SolidColorBrush* labelBrush = nullptr;
             const D2D1_COLOR_F ink = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.94f * opacity);
-            if (SUCCEEDED(context->CreateSolidColorBrush(ink, &labelBrush)) && labelBrush) {
+            if ((labelBrush = BrushFor(context, ink)) != nullptr) {
                 // Centred in both directions: the box IS the caption's line.
                 const DWRITE_PARAGRAPH_ALIGNMENT previous = bodyFormat_->GetParagraphAlignment();
                 const DWRITE_TEXT_ALIGNMENT previousText = bodyFormat_->GetTextAlignment();
@@ -2854,7 +2884,6 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
                                    bodyFormat_, area, labelBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 bodyFormat_->SetParagraphAlignment(previous);
                 bodyFormat_->SetTextAlignment(previousText);
-                labelBrush->Release();
             }
         }
     }
@@ -2891,13 +2920,12 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         // the track and the handle covers the fill.
         ID2D1SolidColorBrush* trackBrush = nullptr;
         const D2D1_COLOR_F trackColour = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.22f * opacity);
-        if (SUCCEEDED(context->CreateSolidColorBrush(trackColour, &trackBrush)) && trackBrush) {
+        if ((trackBrush = BrushFor(context, trackColour)) != nullptr) {
             const D2D1_ROUNDED_RECT rounded = {
                 D2D1::RectF(track.left, centreY - barHeight * 0.5f, track.right,
                             centreY + barHeight * 0.5f),
                 radius, radius};
             context->FillRoundedRectangle(&rounded, trackBrush);
-            trackBrush->Release();
         }
 
         float fraction = value;
@@ -2912,23 +2940,21 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         // not only in the glyph.
         if (!mutedRow && handleX > track.left + 0.5f) {
             const D2D1_COLOR_F accent = D2D1::ColorF(0.0f, 0.47f, 0.83f, 0.95f * opacity);
-            if (SUCCEEDED(context->CreateSolidColorBrush(accent, &fillBrush)) && fillBrush) {
+            if ((fillBrush = BrushFor(context, accent)) != nullptr) {
                 const D2D1_ROUNDED_RECT rounded = {
                     D2D1::RectF(track.left, centreY - barHeight * 0.5f, handleX,
                                 centreY + barHeight * 0.5f),
                     radius, radius};
                 context->FillRoundedRectangle(&rounded, fillBrush);
-                fillBrush->Release();
             }
         }
 
         ID2D1SolidColorBrush* handleBrush = nullptr;
         const D2D1_COLOR_F handleColour = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.96f * opacity);
-        if (SUCCEEDED(context->CreateSolidColorBrush(handleColour, &handleBrush)) && handleBrush) {
+        if ((handleBrush = BrushFor(context, handleColour)) != nullptr) {
             const D2D1_ELLIPSE handle =
                 D2D1::Ellipse(D2D1::Point2F(handleX, centreY), 6.5f, 6.5f);
             context->FillEllipse(&handle, handleBrush);
-            handleBrush->Release();
         }
     }
 

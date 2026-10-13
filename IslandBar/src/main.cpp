@@ -288,10 +288,28 @@ struct FrameStats {
     // Intervals above this are counted as hitches.
     static constexpr double kHitchMs = 50.0;
 
+    // ... and the ones that only deserve a line: there is no need to print a frame that ran at the
+    // compositor's own rate, and no point printing a hitch without saying what it was doing.
+    static constexpr double kSlowFrameMs = 40.0;
+
     long long count = 0;
     double totalMs = 0.0;
+    double totalDrawnMs = 0.0;
     double worstMs = 0.0;
     int hitches = 0;
+    // THE WAIT IS NOT A HITCH, and this is the measurement that showed it.
+    //
+    // When nothing is happening the loop BLOCKS on input, on purpose, with a 100 ms cap (see the pacing
+    // at the bottom of the loop) -- so two frames out of every second or so arrive ~80-100 ms apart, and
+    // every one of those used to be counted and reported as a hitch. The first version of this file's
+    // slow-frame line said what those frames were doing, and the answer was "nothing, and it did not even
+    // draw": the stalls being chased for three rounds were the idle wait.
+    //
+    // So the two are counted apart. `drew` is the caller telling this how the pass BEFORE the interval
+    // spent itself -- which is the pass the interval measures -- and only passes that drew are evidence
+    // about the loop's ability to keep up.
+    double idleWorstMs = 0.0;
+    long long idleCount = 0;
     // A coarse histogram, in milliseconds, for a rough percentile.
     int buckets[8] = {};   // <8, <16, <24, <33, <50, <100, <250, >=250
 
@@ -301,8 +319,10 @@ struct FrameStats {
         started = true;
     }
 
-    void Record() {
-        if (!started || frequency.QuadPart <= 0) return;
+    // Returns the interval it just recorded, so the caller can say something about the frame that took
+    // it -- which is the whole point of the line this feeds.
+    double Record(bool drew) {
+        if (!started || frequency.QuadPart <= 0) return 0.0;
         LARGE_INTEGER now = {};
         QueryPerformanceCounter(&now);
         const double ms = static_cast<double>(now.QuadPart - last.QuadPart) * 1000.0 /
@@ -311,36 +331,50 @@ struct FrameStats {
 
         ++count;
         totalMs += ms;
-        if (ms > worstMs) worstMs = ms;
-        if (ms > kHitchMs) ++hitches;
+        if (drew) {
+            totalDrawnMs += ms;
+            if (ms > worstMs) worstMs = ms;
+            if (ms > kHitchMs) ++hitches;
 
-        if (ms < 8.0)        ++buckets[0];
-        else if (ms < 16.0)  ++buckets[1];
-        else if (ms < 24.0)  ++buckets[2];
-        else if (ms < 33.0)  ++buckets[3];
-        else if (ms < 50.0)  ++buckets[4];
-        else if (ms < 100.0) ++buckets[5];
-        else if (ms < 250.0) ++buckets[6];
-        else                 ++buckets[7];
+            if (ms < 8.0)        ++buckets[0];
+            else if (ms < 16.0)  ++buckets[1];
+            else if (ms < 24.0)  ++buckets[2];
+            else if (ms < 33.0)  ++buckets[3];
+            else if (ms < 50.0)  ++buckets[4];
+            else if (ms < 100.0) ++buckets[5];
+            else if (ms < 250.0) ++buckets[6];
+            else                 ++buckets[7];
+        } else {
+            ++idleCount;
+            if (ms > idleWorstMs) idleWorstMs = ms;
+        }
+        return ms;
     }
 
     void Reset() {
         count = 0;
         totalMs = 0.0;
+        totalDrawnMs = 0.0;
         worstMs = 0.0;
         hitches = 0;
+        idleWorstMs = 0.0;
+        idleCount = 0;
         for (int& bucket : buckets) bucket = 0;
         Start();
     }
 
     void Describe(wchar_t* out, size_t capacity) const {
         if (!out || capacity == 0) return;
-        const double mean = count > 0 ? totalMs / static_cast<double>(count) : 0.0;
+        // Both numbers are of the frames that DREW: an idle wait in the average would flatter exactly the
+        // state where nobody is looking, and it would hide the frames that matter.
+        const long long drawn = count - idleCount;
+        const double mean = drawn > 0 ? totalDrawnMs / static_cast<double>(drawn) : 0.0;
         swprintf(out, capacity,
-                 L"avg %.1f ms, worst %.1f ms, hitches(>%.0f ms) %d | "
-                 L"<8:%d <16:%d <24:%d <33:%d <50:%d <100:%d <250:%d 250+:%d",
-                 mean, worstMs, kHitchMs, hitches, buckets[0], buckets[1], buckets[2],
-                 buckets[3], buckets[4], buckets[5], buckets[6], buckets[7]);
+                 L"drawn %lld: avg %.1f ms, worst %.1f ms, hitches(>%.0f ms) %d | "
+                 L"<8:%d <16:%d <24:%d <33:%d <50:%d <100:%d <250:%d 250+:%d | "
+                 L"idle %lld pass(es), worst wait %.1f ms",
+                 drawn, mean, worstMs, kHitchMs, hitches, buckets[0], buckets[1], buckets[2],
+                 buckets[3], buckets[4], buckets[5], buckets[6], buckets[7], idleCount, idleWorstMs);
     }
 };
 
@@ -1762,6 +1796,22 @@ float musicWavePhase = 0.0f;
         // and each check is a handful of window queries.
         int taskbarCheckCountdown = 0;
 
+        // WHICH PERIODIC TASK RAN IN A PASS, so a slow frame can name its own cause. Set by each block
+        // below, moved into `lastWork` and cleared at the bottom of the pass -- the interval being
+        // measured is the gap since the previous pass, so the flags that describe it are the previous
+        // pass's. The names travel in the log line rather than in a debugger, because the interesting
+        // hitches are one or two per twenty seconds and only happen on the machine being used.
+        constexpr unsigned long long kWorkStatusSample = 1ull << 0;
+        constexpr unsigned long long kWorkTrayRefresh = 1ull << 1;
+        constexpr unsigned long long kWorkToastPoll = 1ull << 2;
+        constexpr unsigned long long kWorkWeChatScan = 1ull << 3;
+        constexpr unsigned long long kWorkWeChatSound = 1ull << 4;
+        constexpr unsigned long long kWorkTaskbarCheck = 1ull << 5;
+        constexpr unsigned long long kWorkThumbnail = 1ull << 6;
+        constexpr unsigned long long kWorkDraw = 1ull << 7;
+        unsigned long long frameWork = 0;
+        unsigned long long lastWork = 0;
+
         while (true) {
             if (!window.PumpMessages()) break;
 
@@ -1776,6 +1826,7 @@ float musicWavePhase = 0.0f;
                 // It cost a measurement -- a probe that put the work area back by hand and waited 8 s for
                 // "the bar's cycle" was looking at two cycles that had already been and gone (HANDOFF 8.86).
                 taskbarCheckCountdown = 50;
+                frameWork |= kWorkTaskbarCheck;
                 // ... unless a tray press is showing it this instant: the press needs the shell's taskbar
                 // to exist for about a fifth of a second, and re-hiding it in the middle of that would
                 // make roughly one press in twenty-five do nothing at all. See TrayPressInFlight.
@@ -1865,6 +1916,7 @@ float musicWavePhase = 0.0f;
             // depends on the push channel and nothing in the push channel depends on this.
             if (toastsAvailable && GetTickCount64() - lastToastPoll >= 2000) {
                 lastToastPoll = GetTickCount64();
+                frameWork |= kWorkToastPoll;
                 const int arrived = toasts.Poll(&notifications);
                 if (arrived > 0) {
                     island::LogAndPrint("  toasts: %d new system toast(s), %d taken in total", arrived,
@@ -1879,6 +1931,7 @@ float musicWavePhase = 0.0f;
             // ... and WeChat, which has no channel of its own and is recognised by its popup appearing.
             if (GetTickCount64() - lastWeChatPoll >= 500) {
                 lastWeChatPoll = GetTickCount64();
+                frameWork |= kWorkWeChatScan;
                 if (wechat.Poll(&notifications, GetTickCount64()) > 0) {
                     island::LogAndPrint("  wechat: %d message announcement(s) so far", wechat.Announced());
                     std::fflush(stdout);
@@ -1893,6 +1946,7 @@ float musicWavePhase = 0.0f;
             // see the edge -- the sound would play with no announcement and no evidence anywhere.
             if (soundOutputStarted && soundOutput && GetTickCount64() - lastWeChatSoundPoll >= 200) {
                 lastWeChatSoundPoll = GetTickCount64();
+                frameWork |= kWorkWeChatSound;
                 soundOutput->Snapshot(soundSnapshot.get());
 
                 // Is WeChat running, and is one of its audio sessions making sound?
@@ -3936,6 +3990,7 @@ float musicWavePhase = 0.0f;
                 // row's sizing spent room on and the count the window hit-tests are all the same number.
                 if (GetTickCount64() - lastTrayRefresh >= kTrayRefreshMs) {
                     lastTrayRefresh = GetTickCount64();
+                    frameWork |= kWorkTrayRefresh;
                     const int trayNow = trayIcons.Refresh();
                     if (trayNow != lastTrayCount) {
                         lastTrayCount = trayNow;
@@ -4478,6 +4533,7 @@ float musicWavePhase = 0.0f;
                     const unsigned long long nowMs = GetTickCount64();
                     if (nowMs - lastStatusSampleMs >= kStatusSampleMs) {
                         lastStatusSampleMs = nowMs;
+                        frameWork |= kWorkStatusSample;
                         statusReader.Sample(&systemStatus);
 
                         // The brightness, on the same clock. It is a DDC/CI read -- an I2C transaction over
@@ -4589,6 +4645,9 @@ float musicWavePhase = 0.0f;
                     // the pointer leaves the row.
                     const bool follow = wanted != nullptr && preview.Visible();
                     bool shown = false;
+                    // The preview path registers a DWM thumbnail on the window and can redraw the live
+                    // content every frame, so it is one of the things a slow frame may turn out to be.
+                    frameWork |= kWorkThumbnail;
                     if ((rested || follow) && !frame.outerCardUp && IsWindow(wanted)) {
                         const RECT monitorPx = window.Monitor().screen;
                         const float scale = window.Scale();
@@ -4751,7 +4810,8 @@ float musicWavePhase = 0.0f;
                 // and never touches it. Reported as "点击系统按钮 或者 播放音乐的时候 鼠标移入灵动岛时候
                 // 图片中红框里的会闪一下". See ContentStrengthsFor.
                 const island::ContentStrengths strengths =
-                    island::ContentStrengthsFor(cardUp, window.EasedProgress());
+                    island::ContentStrengthsFor(cardUp, window.EasedProgress(),
+                                                window.State() == island::IslandState::Expanded);
                 frame.contentOpacity = strengths.bar;
                 frame.cardOpacity = strengths.card;
 
@@ -5121,6 +5181,7 @@ float musicWavePhase = 0.0f;
                 }
 
                 renderer.Render(frame);
+                frameWork |= kWorkDraw;
 
                 // What the page looked like, recorded AFTER the draw: these are the values the next
                 // iteration's redraw decision compares against, so recording them before the draw would
@@ -5151,7 +5212,33 @@ float musicWavePhase = 0.0f;
             // was 1.3 ms and the loop was not hitching at all -- measuring the wrong quantity
             // is how a fix gets reported that changes nothing. A stutter is a maximum, so the
             // worst value matters more than the average.
-            liveStats.Record();
+            // A SLOW FRAME SAYS WHAT IT WAS DOING, and that is the point of the bitfield.
+            //
+            // The interval this measures is the gap since the previous pass, so the work it describes is
+            // the work of the pass that just ENDED -- `frameWork` is copied into `lastWork` and cleared at
+            // the bottom of the loop for exactly that reason. Without the flags the line would only say
+            // "something took 90 ms", and the last three rounds of guessing which periodic task it was
+            // would have been three rounds of guessing.
+            // ... and whether that pass drew, which is what separates a slow frame from a sleeping loop.
+            const double intervalMs = liveStats.Record((lastWork & kWorkDraw) != 0);
+            if (intervalMs >= FrameStats::kSlowFrameMs) {
+                char work[192] = {};
+                auto add = [&work](const char* name) {
+                    if (work[0]) strcat_s(work, sizeof(work), " ");
+                    strcat_s(work, sizeof(work), name);
+                };
+                if (lastWork & kWorkStatusSample) add("status-sample");
+                if (lastWork & kWorkTrayRefresh) add("tray-refresh");
+                if (lastWork & kWorkToastPoll) add("toast-poll");
+                if (lastWork & kWorkWeChatScan) add("wechat-scan");
+                if (lastWork & kWorkWeChatSound) add("wechat-sound");
+                if (lastWork & kWorkTaskbarCheck) add("taskbar-check");
+                if (lastWork & kWorkThumbnail) add("thumbnail");
+                if (lastWork & kWorkDraw) add("draw");
+                island::LogAndPrint("  slow frame: %.1f ms -- work: %s%s\n", intervalMs,
+                                    work[0] ? work : "none logged",
+                                    (lastWork & kWorkDraw) ? "" : " (no draw: the loop was waiting)");
+            }
             if (GetTickCount64() - lastIntervalReport >= 4000) {
                 lastIntervalReport = GetTickCount64();
                 wchar_t intervalSummary[256] = {};
@@ -5198,6 +5285,11 @@ float musicWavePhase = 0.0f;
                 ::MsgWaitForMultipleObjectsEx(0, nullptr, 100, QS_ALLINPUT,
                                               MWMO_INPUTAVAILABLE);
             }
+
+            // What this pass did, for the slow-frame line above: the interval it will be measured against
+            // is the gap from the END of this pass to the next, so these flags describe it.
+            lastWork = frameWork;
+            frameWork = 0;
         }
     }
 
@@ -6450,7 +6542,7 @@ int RunMusicPreview() {
                 frame.pill.fill = D2D1::ColorF(0.04f, 0.05f, 0.08f, 0.98f);
             }
             renderer.Render(frame);
-            frameStats.Record();
+            frameStats.Record(/*drew=*/true);
 
             ::MsgWaitForMultipleObjectsEx(0, nullptr, 16, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }

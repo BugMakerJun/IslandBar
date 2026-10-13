@@ -1440,9 +1440,11 @@ void TestRenderer(IslandWindow& window) {
         // answer: dimming the CARD must measurably dim the card's pixels, and must leave the deck's and
         // the pill's exactly where they were.
         {
-            const ContentStrengths opening = ContentStrengthsFor(true, 0.0f);
-            const ContentStrengths settled = ContentStrengthsFor(true, 1.0f);
-            const ContentStrengths idle = ContentStrengthsFor(false, 0.25f);
+            const ContentStrengths opening = ContentStrengthsFor(true, 0.0f, /*opening=*/true);
+            const ContentStrengths settled = ContentStrengthsFor(true, 1.0f, /*opening=*/true);
+            const ContentStrengths idle = ContentStrengthsFor(false, 0.25f, /*opening=*/true);
+            const ContentStrengths closing = ContentStrengthsFor(true, 0.0f, /*opening=*/false);
+            const ContentStrengths closed = ContentStrengthsFor(true, 1.0f, /*opening=*/false);
             std::swprintf(size, 128,
                           L"opening bar=%.2f card=%.2f | settled bar=%.2f card=%.2f | idle bar=%.2f card=%.2f",
                           opening.bar, opening.card, settled.bar, settled.card, idle.bar, idle.card);
@@ -1452,6 +1454,25 @@ void TestRenderer(IslandWindow& window) {
             Check(Nearly(opening.card, 0.35f, 0.001f) && Nearly(settled.card, 1.0f, 0.001f) &&
                       Nearly(idle.card, 1.0f, 0.001f),
                   L"the card fades in with its own reveal and is solid at rest", size);
+
+            // AND THE SEQUENCING, which is what the brief asked for on top of the fade: on the way open the
+            // content is held back while the shape makes room, and on the way closed it leaves before the
+            // shape does. Asserted at the third of the movement the lead is defined at, in both directions --
+            // a function that ignored `opening` would pass the two ends above and fail here.
+            const ContentStrengths openingThird =
+                ContentStrengthsFor(true, kCardContentLeadFraction, /*opening=*/true);
+            const ContentStrengths closingThird =
+                ContentStrengthsFor(true, kCardContentLeadFraction, /*opening=*/false);
+            std::swprintf(size, 128,
+                          L"at %.2f of the movement: opening card=%.2f, closing card=%.2f "
+                          L"(closing starts at %.2f, ends at %.2f)",
+                          kCardContentLeadFraction, openingThird.card, closingThird.card,
+                          closing.card, closed.card);
+            Check(Nearly(openingThird.card, 0.35f, 0.001f),
+                  L"opening: the content waits for the shape's first third", size);
+            Check(Nearly(closing.card, 1.0f, 0.001f) && Nearly(closingThird.card, 0.35f, 0.001f) &&
+                      Nearly(closed.card, 0.35f, 0.001f),
+                  L"closing: the content is gone by the shape's first third", size);
 
             // The same thing on the pixels: the two strengths really do reach two different places.
             //
