@@ -436,6 +436,9 @@ wchar_t notificationIconSource[260] = {};
 // Short enough that a click feels immediate and long enough that the eye sees the handle travel: this is the
 // "过渡" the volume control was missing. A drag ignores it entirely -- see shownVolume.
 constexpr float kVolumeChaseSeconds = 0.12f;
+// The slider handle's own size chase: quicker than the volume's, because it answers the POINTER rather
+// than a device that has to be asked -- a hover that took 0.12 s to show would feel disconnected.
+constexpr float kHandleGrowthSeconds = 0.06f;
 int BuildSystemPanel(const island::SystemStatus& status, int installedLayoutCount, bool volumeKnown,
                      float volume, bool muted, island::TextRenderer::SystemPanelText* out,
                      int pageIndex = 0) {
@@ -827,6 +830,10 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // The music card's own bar was the other reader of this value; it was removed on request ("把音乐卡片里
     // 右上角的喇叭图标去掉吧"), and this stays because the SYSTEM PANEL's slider is drawn at it.
     float shownVolume = -1.0f;
+    // How far each slider's handle has grown (0..1), chased towards "this row is the one in hand" for the
+    // same reason the volume itself is chased: the size is an animation, and a handle that jumped 2 DIP in
+    // one frame reads as a glitch rather than as the pointer arriving.
+    float sliderHandleGrowth[2] = {0.0f, 0.0f};
     // Until when the volume's percentage stays on screen. Set for a moment after any change, so the number
     // is visible for a moment even when the slider was clicked rather than dragged.
     unsigned long long panelVolumeEchoUntil = 0;
@@ -4282,9 +4289,38 @@ float musicWavePhase = 0.0f;
                         {
                             POINT echoPoint = {};
                             GetCursorPos(&echoPoint);
+                            // WHICH ROW the pointer is on, for the handle's own size: the hit carries the
+                            // row index (0 the volume, 1 the brightness), and a drag pins it to the row the
+                            // gesture started on -- a handle that shrank because the pointer wandered off
+                            // the track mid-drag would be the slider losing the control being held.
+                            const island::SystemPanelHit echoHit =
+                                window.SystemPanelHitAtScreen(echoPoint);
                             const bool onSlider =
-                                window.SystemPanelHitAtScreen(echoPoint).target ==
-                                island::SystemPanelTarget::Slider;
+                                echoHit.target == island::SystemPanelTarget::Slider;
+                            const bool onVolumeRow =
+                                echoHit.target == island::SystemPanelTarget::Slider &&
+                                echoHit.index == 0;
+                            const bool onBrightnessRow =
+                                echoHit.target == island::SystemPanelTarget::Slider &&
+                                echoHit.index == 1;
+                            const float wanted[2] = {
+                                (onVolumeRow || (panelSliderDrag && panelSliderDragRow == 0)) ? 1.0f
+                                                                                             : 0.0f,
+                                (onBrightnessRow || (panelSliderDrag && panelSliderDragRow == 1))
+                                    ? 1.0f
+                                    : 0.0f,
+                            };
+                            for (int row = 0; row < 2; ++row) {
+                                // The same chase the volume uses, with its own (quicker) constant: the size
+                                // answers the pointer, so it should arrive about as fast as a hover.
+                                sliderHandleGrowth[row] +=
+                                    (wanted[row] - sliderHandleGrowth[row]) *
+                                    (1.0f - std::exp(-dt / kHandleGrowthSeconds));
+                                if (std::fabs(wanted[row] - sliderHandleGrowth[row]) < 0.004f) {
+                                    sliderHandleGrowth[row] = wanted[row];
+                                }
+                                frame.systemPanel.sliderEmphasis[row] = sliderHandleGrowth[row];
+                            }
                             frame.systemPanel.showVolumePercent =
                                 panelSliderDrag || onSlider ||
                                 GetTickCount64() < panelVolumeEchoUntil;

@@ -19,7 +19,22 @@
 
 #include <d2d1_3.h>
 
+#include "Theme.h"
+
 namespace island {
+
+// THE LIGHTING A GLASS SURFACE GETS FROM THE ROOM: a highlight along the top, a shade along the bottom, and
+// a hairline just inside the edge.
+//
+// ONE FUNCTION FOR THE PILL AND FOR EVERY CARD, which is the same rule the surfaces themselves follow: the
+// bar and its cards cannot end up lit differently, and there is one place to change how the material
+// behaves. Both gradients are filled over the SHAPE's own rounded rectangle, so they follow its curve --
+// an inner line drawn as a plain rectangle pokes out at the rounded ends, which is the trap this avoids.
+//
+// One theme field drives all three (`theme.gloss`): light from above and dark from below are the same
+// amount of lighting, and a theme that asks for no gloss gets a flat surface, as 默认 does.
+void DrawSurfaceLighting(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape,
+                         const Theme& theme, float opacity);
 
 // A soft shadow: nested rounded rectangles, each inflated a little and drawn fainter, which is a shadow
 // with no intermediate surface, no effect graph and no allocation. `spreadDip` is how far it reaches.

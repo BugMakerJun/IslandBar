@@ -5,10 +5,13 @@
 
 #include "Log.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace island {
 namespace {
+
+using std::min;
 
 constexpr int kNoiseSize = 256;
 std::vector<unsigned char> g_noise;
@@ -105,6 +108,16 @@ void DrawSoftShadow(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape
     if (!context || opacity <= 0.001f || spreadDip <= 0.01f) return;
     if (shape.rect.right <= shape.rect.left || shape.rect.bottom <= shape.rect.top) return;
 
+    // ONE BRUSH, RE-COLOURED per step, rather than six created and released.
+    //
+    // A solid brush can be re-coloured, which is cheaper than a device call per step and leaves nothing to
+    // release in a loop that runs twice a frame (the pill and the card). The colours are all the same black
+    // at different alphas, so `SetColor` is exactly the operation needed.
+    ID2D1SolidColorBrush* brush = nullptr;
+    if (FAILED(context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), &brush)) || !brush) {
+        return;
+    }
+
     // NESTED, WIDEST FIRST, each one fainter: six steps, each adding `spread/6`. Drawn outside-in so the
     // darker inner ones are not covered by the fainter outer ones.
     constexpr int kSteps = 6;
@@ -117,18 +130,101 @@ void DrawSoftShadow(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape
         const float alpha = opacity * (1.0f - t) * (1.0f - t) / static_cast<float>(kSteps) * 2.2f;
         if (alpha <= 0.001f) continue;
 
-        ID2D1SolidColorBrush* brush = nullptr;
-        if (FAILED(context->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, alpha), &brush)) ||
-            !brush) {
-            continue;
-        }
+        brush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, alpha));
         const D2D1_ROUNDED_RECT grown = {
             D2D1::RectF(shape.rect.left - grow, shape.rect.top - grow, shape.rect.right + grow,
                         shape.rect.bottom + grow),
             shape.radiusX + grow * 0.6f, shape.radiusY + grow * 0.6f};
         context->FillRoundedRectangle(&grown, brush);
-        brush->Release();
     }
+    brush->Release();
+}
+
+void DrawSurfaceLighting(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape,
+                         const Theme& theme, float opacity) {
+    if (!context || opacity <= 0.01f) return;
+    const float height = shape.rect.bottom - shape.rect.top;
+    const float width = shape.rect.right - shape.rect.left;
+    if (height < 6.0f || width < 6.0f || theme.gloss <= 0.001f) return;
+
+    // The gradient's own band, in DIP: a share of the shape but never the whole of a tall card, where a
+    // wash over 45% of 280 DIP would read as a second surface rather than as light.
+    const float topBand = min(height * 0.45f, 20.0f);
+    const float bottomBand = min(height * 0.35f, 26.0f);
+
+    const auto gradientFill = [&](const D2D1_COLOR_F& from, const D2D1_COLOR_F& to, float band,
+                                  bool fromTop) {
+        const D2D1_GRADIENT_STOP stops[2] = {{0.0f, from}, {1.0f, to}};
+        ID2D1GradientStopCollection* collection = nullptr;
+        if (FAILED(context->CreateGradientStopCollection(stops, 2, D2D1_GAMMA_2_2,
+                                                         D2D1_EXTEND_MODE_CLAMP, &collection)) ||
+            !collection) {
+            return;
+        }
+        D2D1_ROUNDED_RECT band1 = shape;
+        if (fromTop) {
+            band1.rect.bottom = shape.rect.top + band;
+        } else {
+            band1.rect.top = shape.rect.bottom - band;
+        }
+        ID2D1LinearGradientBrush* brush = nullptr;
+        const D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES properties = {
+            D2D1::Point2F(band1.rect.left, band1.rect.top),
+            D2D1::Point2F(band1.rect.left, band1.rect.bottom)};
+        if (SUCCEEDED(context->CreateLinearGradientBrush(properties, collection, &brush)) && brush) {
+            // Filled over the SHAPE and not over the band: filling the band's own rectangle would draw its
+            // straight bottom edge across the curve. The gradient's stops are what limit it in time; the
+            // rectangle is what limits it in space, and the shape is the only rectangle that fits.
+            context->FillRoundedRectangle(&shape, brush);
+            brush->Release();
+        }
+        collection->Release();
+    };
+
+    // Light from above: the ink at the gloss strength, gone by the bottom of its band.
+    gradientFill(ThemeInk(theme.gloss * 1.25f * opacity), ThemeInk(0.0f), topBand, /*fromTop=*/true);
+    // ... and the shade under it, which is the same lighting seen from the other side: the surface is
+    // darker where no light lands. Black rather than the ink, because the shading of a surface is the
+    // absence of light and not a colour of its own.
+    gradientFill(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f),
+                 D2D1::ColorF(0.0f, 0.0f, 0.0f, theme.gloss * 0.6f * opacity), bottomBand,
+                 /*fromTop=*/false);
+
+    // The hairline just inside the edge -- the glass's own rim, which is what makes the edge read as a
+    // surface seen through rather than as a shape drawn on the desktop. INSET by the stroke width so it
+    // cannot spill outside the shape, which is why it needs no clipping layer.
+    //
+    // AND IT IS DIRECTIONAL: bright along the top, almost gone by the bottom, because that is where the
+    // light is. A rim of one strength all the way round reads as a frame drawn inside the shape -- measured
+    // on the screen, that is exactly what the first version of this looked like -- and it fights the shade
+    // at the bottom, which is the one place the surface is supposed to be darker.
+    const float inset = 1.0f;
+    const D2D1_GRADIENT_STOP rimStops[2] = {
+        {0.0f, ThemeInk(theme.gloss * 0.95f * opacity)},
+        {1.0f, ThemeInk(theme.gloss * 0.10f * opacity)},
+    };
+    ID2D1GradientStopCollection* rimCollection = nullptr;
+    ID2D1LinearGradientBrush* rim = nullptr;
+    if (SUCCEEDED(context->CreateGradientStopCollection(rimStops, 2, D2D1_GAMMA_2_2,
+                                                        D2D1_EXTEND_MODE_CLAMP, &rimCollection)) &&
+        rimCollection) {
+        const D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES rimProperties = {
+            D2D1::Point2F(shape.rect.left, shape.rect.top),
+            D2D1::Point2F(shape.rect.left, shape.rect.bottom)};
+        if (FAILED(context->CreateLinearGradientBrush(rimProperties, rimCollection, &rim))) {
+            rim = nullptr;
+        }
+    }
+    if (rim) {
+        const D2D1_ROUNDED_RECT inner = {
+            D2D1::RectF(shape.rect.left + inset, shape.rect.top + inset,
+                        shape.rect.right - inset, shape.rect.bottom - inset),
+            shape.radiusX > inset ? shape.radiusX - inset : 0.0f,
+            shape.radiusY > inset ? shape.radiusY - inset : 0.0f};
+        context->DrawRoundedRectangle(&inner, rim, 1.0f);
+        rim->Release();
+    }
+    if (rimCollection) rimCollection->Release();
 }
 
 void DrawGrain(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape, float opacity) {

@@ -2902,6 +2902,9 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
         context->DrawRoundedRectangle(&rounded, edge, 1.0f);
         edge->Release();
     }
+    // THE SAME LIGHTING THE PILL GETS, from the same function: a card's surface and the bar's are the same
+    // material at different sizes, and this is where that stops being a claim in a comment.
+    island::DrawSurfaceLighting(context, rounded, theme, opacity);
     island::DrawGrain(context, rounded, theme.grain * opacity);
 }
 
@@ -3106,8 +3109,13 @@ void TextRenderer::DrawSystemPanel(ID2D1DeviceContext2* context, const RoundedBo
         ID2D1SolidColorBrush* handleBrush = nullptr;
         const D2D1_COLOR_F handleColour = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.96f * opacity);
         if ((handleBrush = BrushFor(context, handleColour)) != nullptr) {
+            // The handle is a touch larger while its row is the one being used (see sliderEmphasis): the
+            // change is 2 DIP on the radius, which reads as "this row" without the track moving at all.
+            const float emphasis = (i >= 0 && i < 2) ? text.sliderEmphasis[i] : 0.0f;
+            const float grown = 6.5f +
+                                2.0f * (emphasis < 0.0f ? 0.0f : (emphasis > 1.0f ? 1.0f : emphasis));
             const D2D1_ELLIPSE handle =
-                D2D1::Ellipse(D2D1::Point2F(handleX, centreY), 6.5f, 6.5f);
+                D2D1::Ellipse(D2D1::Point2F(handleX, centreY), grown, grown);
             context->FillEllipse(&handle, handleBrush);
         }
     }

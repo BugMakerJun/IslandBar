@@ -544,6 +544,12 @@ public:
         bool hasBrightness = false;
         float brightness = 0.0f;        // 0..1, the same scale as the volume
         bool showBrightnessPercent = false;
+
+        // WHETHER A SLIDER IS THE CONTROL IN HAND, per row (0 the volume, 1 the brightness): hovered or
+        // being dragged. The handle grows a little when it is, which is what every slider of this kind
+        // does -- it says which row the pointer is on without moving anything, and it gives the finger
+        // more to hold during a drag.
+        float sliderEmphasis[2] = {0.0f, 0.0f};
     };
 
     // The system panel, drawn into the card.

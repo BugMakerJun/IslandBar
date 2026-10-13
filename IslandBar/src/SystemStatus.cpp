@@ -404,123 +404,19 @@ void SystemStatusReader::Sample(SystemStatus* out) {
     out->ageMs = 0;
 }
 
-// NOT USED BY THE BAR ANY MORE, and the measurement that retired it is the reason it stays in writing.
+// WHERE THE WLAN WRITE WENT, left here because it is the kind of thing that gets re-invented.
 //
-// The tiles switch the radios through `Windows.Devices.Radios` (SystemToggles.h), which is what the shell
-// itself uses and which works here for BOTH radios. This WLAN write was tried first, and on this machine it
-// FAILS SILENTLY: all three shapes below report ERROR_SUCCESS and the radio does not move -- the user's own
-// log carries two of them, from two presses of the 飞行模式 tile:
+// This file used to carry the Wi-Fi radio's write -- `WlanSetInterface` with `wlan_intf_opcode_radio_state`,
+// in the three shapes the driver might accept. On this machine it FAILS SILENTLY: all three report
+// ERROR_SUCCESS and the radio does not move (the user's own log has two of them, from two presses of the
+// 飞行模式 tile: `wifi radio: WlanSetInterface single=0 full=0 counted=0`). A write that says success and
+// changes nothing is the failure this project keeps re-learning, and it is exactly why a tile's caption is
+// a READING rather than a memory.
 //
-//     wifi radio: WlanSetInterface single=0 full=0 counted=0
-//
-// A write that says success and changes nothing is the one failure mode this project keeps re-learning, and
-// it is precisely why the tile's caption is a READING rather than a memory. Kept rather than deleted because
-// the documented WLAN route is the fallback if a machine ever turns up where the Radios API is refused --
-// and it is labelled here so that nobody reaches for it without knowing what it did on this one.
-bool SetWifiRadioOn(bool on, unsigned long* error) {
-    if (error) *error = 0;
-
-    // Its own handle for the one write, rather than the reader's: the write comes from the click handler and
-    // the reader's handle lives on the frame loop's own sampling path, and sharing one client handle between
-    // the two would put a WLAN call on whichever thread happened to hold it.
-    DWORD negotiated = 0;
-    HANDLE client = nullptr;
-    const DWORD opened = WlanOpenHandle(2, nullptr, &negotiated, &client);
-    if (opened != ERROR_SUCCESS || !client) {
-        if (error) *error = opened;
-        return false;
-    }
-
-    bool ok = false;
-    PWLAN_INTERFACE_INFO_LIST list = nullptr;
-    const DWORD enumerated = WlanEnumInterfaces(client, nullptr, &list);
-    if (enumerated == ERROR_SUCCESS && list) {
-        for (DWORD i = 0; i < list->dwNumberOfItems && !ok; ++i) {
-            const GUID& guid = list->InterfaceInfo[i].InterfaceGuid;
-
-            // The CURRENT state is read first, because the write takes a whole WLAN_RADIO_STATE: it says what
-            // every phy should do, so a structure built from nothing would claim the machine has no phys and
-            // the call would be rejected or, worse, taken as "no opinion".
-            DWORD size = 0;
-            WLAN_RADIO_STATE* state = nullptr;
-            WLAN_OPCODE_VALUE_TYPE opcode = wlan_opcode_value_type_query_only;
-            if (WlanQueryInterface(client, &guid, wlan_intf_opcode_radio_state, nullptr, &size,
-                                   reinterpret_cast<PVOID*>(&state), &opcode) != ERROR_SUCCESS ||
-                !state) {
-                continue;
-            }
-
-            const size_t firstEntry =
-                offsetof(WLAN_RADIO_STATE, PhyRadioState) + sizeof(WLAN_PHY_RADIO_STATE);
-            if (size < firstEntry || state->dwNumberOfPhys == 0) {
-                LogLine(L"  wifi radio: the query returned %lu byte(s) and %lu phy(s); not switching",
-                        static_cast<unsigned long>(size),
-                        static_cast<unsigned long>(state->dwNumberOfPhys));
-                WlanFreeMemory(state);
-                continue;
-            }
-
-            // The write is built in a FULL-SIZE structure, and that is not a detail.
-            //
-            // The query hands back a VARIABLE-LENGTH buffer -- a count followed by one entry per phy -- while
-            // the write expects the whole WLAN_RADIO_STATE. Passing the query's own size failed with
-            // ERROR_INVALID_PARAMETER (87) on this machine: the API validated the size against the structure
-            // it declares, not against what it had just returned. So the query's bytes are copied into a
-            // zeroed full-size structure and THAT is what is written.
-            WLAN_RADIO_STATE wanted = {};
-            const size_t copy = size < sizeof(wanted) ? size : sizeof(wanted);
-            std::memcpy(&wanted, state, copy);
-            WlanFreeMemory(state);
-
-            for (DWORD phy = 0; phy < wanted.dwNumberOfPhys; ++phy) {
-                wanted.PhyRadioState[phy].dot11SoftwareRadioState =
-                    on ? dot11_radio_state_on : dot11_radio_state_off;
-            }
-
-            // Three shapes, because the API's documentation does not say which one the call wants and the
-            // drivers differ about what they accept: ONE PHY, which is what this machine takes; the full
-            // declared structure; and the count-plus-one-entry form the QUERY itself returns.
-            //
-            // Measured here: full = ERROR_INVALID_PARAMETER (87), counted = 87, single = ERROR_SUCCESS. That
-            // is why all three are tried and all three are reported -- a radio that refuses to switch and a
-            // switch that was never asked for properly look identical from the tile.
-            const DWORD fullSize = static_cast<DWORD>(sizeof(wanted));
-            const DWORD countedSize =
-                static_cast<DWORD>(offsetof(WLAN_RADIO_STATE, PhyRadioState) +
-                                   sizeof(WLAN_PHY_RADIO_STATE));
-            WLAN_PHY_RADIO_STATE one = {};
-            one.dwPhyIndex = 0;
-            one.dot11SoftwareRadioState = on ? dot11_radio_state_on : dot11_radio_state_off;
-
-            const DWORD single = WlanSetInterface(client, &guid, wlan_intf_opcode_radio_state,
-                                                  static_cast<DWORD>(sizeof(one)), &one, nullptr);
-            DWORD full = ERROR_SUCCESS;
-            DWORD counted = ERROR_SUCCESS;
-            if (single != ERROR_SUCCESS) {
-                full = WlanSetInterface(client, &guid, wlan_intf_opcode_radio_state, fullSize, &wanted,
-                                        nullptr);
-            }
-            if (single != ERROR_SUCCESS && full != ERROR_SUCCESS) {
-                counted = WlanSetInterface(client, &guid, wlan_intf_opcode_radio_state, countedSize,
-                                           &wanted, nullptr);
-            }
-            LogLine(L"  wifi radio: WlanSetInterface single=%lu full=%lu counted=%lu",
-                    static_cast<unsigned long>(single), static_cast<unsigned long>(full),
-                    static_cast<unsigned long>(counted));
-
-            const DWORD accepted = single == ERROR_SUCCESS ? single
-                                  : full == ERROR_SUCCESS   ? full
-                                                            : counted;
-            if (error) *error = accepted;   // the first refusal when all three failed
-            ok = accepted == ERROR_SUCCESS;
-        }
-        WlanFreeMemory(list);
-    } else if (error) {
-        *error = enumerated;
-    }
-
-    WlanCloseHandle(client, nullptr);
-    return ok;
-}
+// Both radios are switched through `Windows.Devices.Radios` now (SystemToggles.h), which is the mechanism
+// the shell itself uses and which works here for both. The function was deleted rather than left unused:
+// an unused fallback that nobody can verify is a trap, and the measurement above is the part worth keeping.
+// The reading in this file (`wlan_intf_opcode_radio_state`, a QUERY) is still what `wifiRadioOn` comes from
+// -- queries work; it was the write that lied.
 
 } // namespace island

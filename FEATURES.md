@@ -703,4 +703,7 @@ Wi-Fi 早就是真开关（WLAN 的 radio-state opcode）；这一轮把另外�
 | 10 | 外来实施单里的 **Scale 1.0→1.05 动画** | 不做 | —— | 与用户自己的前提"不要改形状"冲突（形状是被断言钉住的） |
 | 11 | **天气图标跟着天气走**（HANDOFF 8.93） | 开 | **A** | 原来只有一个画死的"雨云"（`DrawCloudGlyph`），于是"晴"旁边下着雨（用户截图）；现在 `SkyMarkForCode(code)` 出七种标记（太阳 / 太阳+云 / 云 / 雨 / 雪 / 雷 / 雾），与 `WeatherWordForCode` 同一张 WMO 表；未知 code 不画标记。自检 +2 条（**28 个 code 的词与标记 0 处不一致** + 报的那个 case）；截图 `captures/weather-sun.png` |
 | 12 | **状态行重排**（HANDOFF 8.94） | 开 | **A** | 删掉两组之间的**两道竖线**（`Kind::Rule` 整个移除），改用 10 DIP 留白（`groupSpaceDip`）；层级重定：时间 0.99 / 周三 0.88 / **日期 0.62 → 0.72**（原来暗得像禁用）/ 天气 0.92+0.80。截图 `captures/status-line.png`；自检 954 项 0 失败（"装得下"的断言仍通过，因为整行变窄了） |
+| 13 | **表面光照**（HANDOFF 8.95）：顶部高光渐变 + 底部阴影 + 有方向的内沿线光，**胶囊与所有卡片共用同一个函数**，全部由 `theme.gloss` 驱动（0 = 平面） | 开 | **A** | `GlassMaterial::DrawSurfaceLighting`；内缩 1 DIP 所以不需要 layer；截图 `captures/lit-{pill,panel}.png`；自检 954 项 0 失败 |
+| 14 | **滑条手柄随指针放大**（6.5 → 8.5 DIP，chase 0.06 s，拖动期间钉住起始行） | 开 | **A（待手感）** | `SystemPanelText::sliderEmphasis[2]`；"这一行是手上那一个"由 hits 的 index 决定 |
+| 15 | **每帧资源**：阴影 6 段合为 1 个画刷（每帧少 10 次设备调用）；`SetWifiRadioOn`（约 105 行死代码）删除 | 开 | **A** | 自检 954 项 0 失败；命名空间末尾留一段"它在哪失败过"的记录 |
 * 贴边（Win+←）与桌面图标的可用区域也一起变到屏幕顶端 —— 与"最大化顶满"是同一件事。

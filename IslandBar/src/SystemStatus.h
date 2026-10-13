@@ -164,14 +164,10 @@ void NetworkTooltip(const SystemStatus& status, wchar_t* out, size_t capacity);
 
 // Switches the Wi-Fi radio on or off, and reports the WLAN API's own error code.
 //
-// This is the panel's ONE real toggle, and it is deliberately the Wi-Fi radio rather than "airplane mode":
-// airplane mode means every radio, and Bluetooth cannot be switched from a plain desktop process -- there is
-// no documented interface for it (the WinRT Radios API is the only one, and it needs a package identity and
-// the `radios` capability). Half of airplane mode with the name of the whole of it would be a lie in the very
-// place the user is looking for the truth, so the tile that carries this is captioned with what it did.
-//
-// The software radio state is what is set; the hardware switch, if the machine has one, still wins.
-bool SetWifiRadioOn(bool on, unsigned long* error);
+// (The Wi-Fi radio's WRITE used to live here. It has moved to SystemToggles.h with the Bluetooth one --
+// both radios go through `Windows.Devices.Radios` now, and the note at the end of SystemStatus.cpp
+// records what the WLAN write did on this machine and why it is not the route. The radio-state QUERY
+// above is still this file's.)
 
 // The tooltip for the Bluetooth indicator.
 void BluetoothTooltip(const SystemStatus& status, wchar_t* out, size_t capacity);

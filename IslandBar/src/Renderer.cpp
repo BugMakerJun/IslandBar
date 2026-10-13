@@ -544,35 +544,10 @@ void Renderer::RenderFrame(const FrameState& frame) {
             SafeRelease(&edge);
         }
 
-        // The highlight: the ink at the theme's gloss strength, over the top third of the pill and
-        // fading out in two steps. Drawn only when the theme asks for one, so a theme switches it off
-        // by saying 0.
-        //
-        // TWO FILLS rather than a gradient brush: at these alphas (0.05-0.10) an 8-bit banding step is
-        // invisible, and this way the highlight does not need its own brush created per frame.
-        if (theme.gloss > 0.001f && rounded.rect.bottom > rounded.rect.top + 2.0f) {
-            const float top = rounded.rect.top;
-            const float band = (rounded.rect.bottom - rounded.rect.top) * 0.34f;
-            const float half = band * 0.5f;
-            ID2D1SolidColorBrush* bright = nullptr;
-            ID2D1SolidColorBrush* faint = nullptr;
-            if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(island::ThemeInk(theme.gloss), &bright)) &&
-                bright &&
-                SUCCEEDED(d2dContext_->CreateSolidColorBrush(island::ThemeInk(theme.gloss * 0.45f),
-                                                             &faint)) &&
-                faint) {
-                const D2D1_ROUNDED_RECT upper = {
-                    D2D1::RectF(rounded.rect.left, top, rounded.rect.right, top + half),
-                    rounded.radiusX, rounded.radiusY};
-                const D2D1_ROUNDED_RECT lower = {
-                    D2D1::RectF(rounded.rect.left, top + half, rounded.rect.right, top + band),
-                    rounded.radiusX, rounded.radiusY};
-                d2dContext_->FillRoundedRectangle(&upper, bright);
-                d2dContext_->FillRoundedRectangle(&lower, faint);
-            }
-            SafeRelease(&bright);
-            SafeRelease(&faint);
-        }
+        // THE LIGHTING, from the same function the cards use (GlassMaterial.h): a highlight along the top
+        // that fades down, a shade under it, and a hairline just inside the edge. It replaces two flat
+        // bands of gloss, which were the same idea drawn without following the pill's curve.
+        island::DrawSurfaceLighting(d2dContext_, rounded, theme, 1.0f);
 
         // ... and the grain over the whole surface, which is what keeps a flat translucent colour from
         // reading as plastic. Same rule as the shadow: a theme that asks for none gets none.
