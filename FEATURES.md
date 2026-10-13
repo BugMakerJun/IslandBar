@@ -706,4 +706,5 @@ Wi-Fi 早就是真开关（WLAN 的 radio-state opcode）；这一轮把另外�
 | 13 | **表面光照**（HANDOFF 8.95）：顶部高光渐变 + 底部阴影 + 有方向的内沿线光，**胶囊与所有卡片共用同一个函数**，全部由 `theme.gloss` 驱动（0 = 平面） | 开 | **A** | `GlassMaterial::DrawSurfaceLighting`；内缩 1 DIP 所以不需要 layer；截图 `captures/lit-{pill,panel}.png`；自检 954 项 0 失败 |
 | 14 | **滑条手柄随指针放大**（6.5 → 8.5 DIP，chase 0.06 s，拖动期间钉住起始行） | 开 | **A（待手感）** | `SystemPanelText::sliderEmphasis[2]`；"这一行是手上那一个"由 hits 的 index 决定 |
 | 15 | **每帧资源**：阴影 6 段合为 1 个画刷（每帧少 10 次设备调用）；`SetWifiRadioOn`（约 105 行死代码）删除 | 开 | **A** | 自检 954 项 0 失败；命名空间末尾留一段"它在哪失败过"的记录 |
+| 16 | **托盘页与其它卡片统一材质 + 格子铺满**（HANDOFF 8.96） | 开 | **A** | `DrawTrayPage` 改为调用 `FillCardSurface`（卡片材质唯一实现，含光照/边缘/颗粒/阴影）；`TrayPageFor` 新增"长进空间"（上限 68 DIP），图标按格子一半缩放（22–34）；格子底色改为**比卡面暗**（图标自带的近黑底融进去）。截图 `captures/tray-page.png`；自检 954 项 0 失败（托盘几何断言全过） |
 * 贴边（Win+←）与桌面图标的可用区域也一起变到屏幕顶端 —— 与"最大化顶满"是同一件事。

@@ -92,6 +92,10 @@ inline constexpr float kTrayPageCellGapDip   = 6.0f;
 // the 24 DIP picture inside it is still a target a finger can find.
 inline constexpr int   kTrayPageMaxColumns   = 8;
 inline constexpr float kTrayPageMinCellDip   = 38.0f;
+// The ceiling for a cell that has room to grow (see the growth step in TrayPageFor): an icon page shares
+// the card's space like the panel's tiles do, up to here. It is also the size at which the picture inside
+// stops growing -- see the icon side in DrawTrayPage, which is half the cell.
+inline constexpr float kTrayPageMaxCellDip   = 68.0f;
 
 struct TrayPageLayout {
     RectF title;          // the page's own line, at the top
@@ -177,9 +181,21 @@ inline TrayPageLayout TrayPageFor(const RoundedBox& card, int iconCount) {
         }
     }
     if (cell < 1.0f) cell = 1.0f;
+
     layout.columns = columns;
 
     const int rows = (iconCount + columns - 1) / columns;
+    // ... AND THEN EACH CELL GROWS INTO THE ROOM, capped, the way the panel's tiles share the space that is
+    // left. Without this a three-row page of sixteen icons is 152 DIP of tiles inside a 280 DIP card: the
+    // grid is centred and correct and the CARD looks half empty, which is what "看着不协调" was about. The
+    // cap is what keeps a page of five icons from turning into five postage stamps.
+    {
+        const float byWidth = (availableWidth - (columns - 1) * kTrayPageCellGapDip) / columns;
+        const float byHeight = (availableHeight - (rows - 1) * kTrayPageCellGapDip) / rows;
+        float grown = byWidth < byHeight ? byWidth : byHeight;
+        if (grown > kTrayPageMaxCellDip) grown = kTrayPageMaxCellDip;
+        if (grown > cell) cell = grown;
+    }
     const float gridWidth = columns * cell + (columns - 1) * kTrayPageCellGapDip;
     const float gridHeight = rows * cell + (rows - 1) * kTrayPageCellGapDip;
     // Centred BOTH ways: a page of four icons is not pinned to the left while a page of five fills the card,

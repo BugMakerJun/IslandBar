@@ -900,40 +900,41 @@ void TextRenderer::DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box
     ink->Release();
 }
 
+namespace {
+
+// Every card's material, in one place (defined with the system panel's drawing code further down).
+// Declared here because the tray page -- which used to fill its own surface, and therefore looked flat
+// beside a panel that had a lit one -- is drawn above the definition.
+void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity);
+
+} // namespace
+
 void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& card,
                                 const wchar_t* title, const TrayIcon* icons, int count,
                                 unsigned long long revision, float opacity, int hoveredIndex) {
     if (!context || opacity <= 0.01f) return;
 
-    // The card's own surface: the same one the panel and the music card are drawn on, so the page cannot
-    // come out looking like a different kind of object.
-    // ... and it is the THEME's surface, from the same struct FillCardSurface reads, so the tray page
-    // cannot drift from the panel beside it.
+    // THE CARD'S OWN SURFACE, from the one function that draws it (FillCardSurface): the same fill, the same
+    // edge, the same surface lighting, the same grain and the same shadow as the panel and the media card.
+    //
+    // This page used to fill its own rounded rectangle with the theme's card colour and a fringe stroke of
+    // the same colour. It matched the OTHERS' colour and nothing else -- no edge, no lighting, no shadow --
+    // which is exactly the "看着不协调" it was reported as: the panel beside it had a lit surface and this one
+    // was flat. One function draws every card's material, and this was the card that did not call it.
+    FillCardSurface(context, card, opacity);
+
     const island::Theme& trayTheme = island::CurrentTheme();
-    const D2D1_COLOR_F surface = D2D1::ColorF(trayTheme.cardFill.r, trayTheme.cardFill.g,
-                                             trayTheme.cardFill.b, trayTheme.cardFill.a * opacity);
-    D2D1_ROUNDED_RECT rounded = {};
-    rounded.rect = D2D1::RectF(card.rect.left, card.rect.top, card.rect.right, card.rect.bottom);
-    rounded.radiusX = card.radiusX;
-    rounded.radiusY = card.radiusY;
-    ID2D1SolidColorBrush* background = nullptr;
-    if ((background = BrushFor(context, surface)) != nullptr) {
-        context->FillRoundedRectangle(&rounded, background);
-        context->DrawRoundedRectangle(&rounded, background, 1.0f);
-    }
 
     const TrayPageLayout layout = TrayPageFor(card, count);
 
     if (title && title[0] != L'\0' && appRowFormat_) {
-        ID2D1SolidColorBrush* ink = nullptr;
-        if (SUCCEEDED(context->CreateSolidColorBrush(
-                D2D1::ColorF(0.86f, 0.88f, 0.92f, 0.86f * opacity), &ink)) &&
-            ink) {
+        // The title in the THEME's ink, like every other word on the card: it was a hard-coded near-white,
+        // which is the one colour that shows up as a grey patch in a theme with a coloured ink.
+        if (ID2D1SolidColorBrush* ink = BrushFor(context, island::ThemeInk(0.88f * opacity))) {
             context->DrawTextW(title, static_cast<UINT32>(std::wcslen(title)), appRowFormat_,
                                D2D1::RectF(layout.title.left, layout.title.top, layout.title.right,
                                            layout.title.bottom),
                                ink);
-            ink->Release();
         }
     }
 
@@ -942,35 +943,39 @@ void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& 
     for (int i = 0; i < layout.count; ++i) {
         const RectF& cell = layout.cells[i];
 
-        // The cell's own square, raised off the card by a wash of the theme's INK rather than by a second
-        // fixed colour: the cells belong to the card, and a hard-coded 0.11/0.11/0.14 grey read as a
-        // neutral tile inside a blue-black card as soon as there were themes to make that visible.
+        // THE CELL IS DARKER THAN THE CARD, not lighter, and the reason is the pictures that go in it.
+        //
+        // The shell snapshots these icons onto a near-black background, so a LIGHTER tile shows every one of
+        // them as a black square sitting inside it -- which is what "看着不协调" was, past the empty card.
+        // A dark tile makes the pictures' own backgrounds disappear into it, and the hairline plus the hover
+        // wash are what still say "this is a control". (The panel's own tiles stay light: nothing is drawn
+        // inside them but a glyph we choose.)
         const float radius = 10.0f;
         const D2D1_ROUNDED_RECT tile = {
             D2D1::RectF(cell.left, cell.top, cell.right, cell.bottom), radius, radius};
-        ID2D1SolidColorBrush* tileFill = nullptr;
-        // The cell is the CARD's surface lifted a little toward the theme's ink, not a fixed colour: it has
-        // to read as raised in every theme, and a hard-coded 0.11/0.11/0.14 grey became a neutral tile
-        // inside a blue-black card the moment there were themes to make that visible.
-        const auto lift = [](float base, float ink) { return base + (ink - base) * 0.08f; };
-        const D2D1_COLOR_F cellColour =
-            D2D1::ColorF(lift(trayTheme.cardFill.r, trayTheme.ink.r),
-                         lift(trayTheme.cardFill.g, trayTheme.ink.g),
-                         lift(trayTheme.cardFill.b, trayTheme.ink.b), 0.95f * opacity);
-        if ((tileFill = BrushFor(context, cellColour)) != nullptr) {
+        if (ID2D1SolidColorBrush* tileFill =
+                BrushFor(context, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.28f * opacity))) {
             context->FillRoundedRectangle(&tile, tileFill);
+        }
+        if (ID2D1SolidColorBrush* tileEdge = BrushFor(context, island::ThemeInk(0.13f * opacity))) {
+            context->DrawRoundedRectangle(&tile, tileEdge, 1.0f);
         }
         if (i == hoveredIndex) {
             ID2D1SolidColorBrush* wash = nullptr;
-            if ((wash = BrushFor(context, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity))) !=
-                nullptr) {
+            if ((wash = BrushFor(context, island::ThemeInk(0.16f * opacity))) != nullptr) {
                 context->FillRoundedRectangle(&tile, wash);
             }
         }
 
         ID2D1Bitmap1* bitmap = TrayIconBitmap(context, i, icons[i], revision);
         if (!bitmap) continue;
-        const float side = 24.0f;
+        // THE PICTURE IS HALF THE CELL, so it grows with it (see TrayPageFor's growth step): a 24 DIP icon
+        // centred in a 68 DIP cell reads as lost, and the same 24 in a 48 DIP cell is what the page was
+        // designed around. Clamped at the top because the registry's snapshots are 32 DIP.
+        const float cellDip = cell.right - cell.left;
+        float side = cellDip * 0.5f;
+        if (side < 22.0f) side = 22.0f;
+        if (side > 34.0f) side = 34.0f;
         const float centreX = (cell.left + cell.right) * 0.5f;
         const float centreY = (cell.top + cell.bottom) * 0.5f;
         const D2D1_RECT_F target = D2D1::RectF(centreX - side * 0.5f, centreY - side * 0.5f,
@@ -1340,6 +1345,7 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
 void DrawTextIn(ID2D1DeviceContext2* context, IDWriteTextFormat* format, const wchar_t* text,
                 const RectF& box, ID2D1Brush* brush, DWRITE_TEXT_ALIGNMENT horizontal,
                 DWRITE_PARAGRAPH_ALIGNMENT vertical);
+
 } // namespace
 
 void TextRenderer::DrawNotification(ID2D1DeviceContext2* context, const RoundedBox& box,
