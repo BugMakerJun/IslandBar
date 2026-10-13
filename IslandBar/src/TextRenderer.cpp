@@ -522,11 +522,13 @@ namespace {
 // disagree about the sizes they are adding up.
 struct StatusRunStyle {
     float glyphDip      = 16.0f;   // the weather glyph
-    float groupGapDip   = 4.0f;    // inside a group: 周一 / 10月12日, 小雨 / 17°
-    float ruleGapDip    = 3.0f;    // on each side of a hairline
-    float ruleDip       = 1.0f;
-    float ruleHeightDip = 10.0f;
-    float glyphGapDip   = 3.0f;    // between the weather glyph and the word beside it
+    float groupGapDip   = 4.0f;    // inside a group: 周三 / 10月14日, 晴 / 6°
+    // BETWEEN the groups, where two hairlines used to be. The brief that asked for this bar's look says
+    // "fewer borders and dividers, more white space", and a 1x10 DIP grey bar between "10月14日" and
+    // "03:30" is exactly the cheap-looking separator it means: space separates them just as well, and the
+    // sizes and weights already say which is which.
+    float groupSpaceDip = 10.0f;
+    float glyphGapDip   = 4.0f;    // between the weather glyph and the word beside it
 };
 
 constexpr StatusRunStyle kStatusRun;
@@ -538,7 +540,7 @@ constexpr StatusRunStyle kStatusRun;
 // for it to go -- "去掉前面的日历图标". The weather glyph stays, and it is now the ONE glyph, in both
 // homes (see the note on the forms below).
 struct StatusPiece {
-    enum class Kind { Rule, Text, SkyMark };
+    enum class Kind { Text, SkyMark };
     Kind kind = Kind::Text;
     const wchar_t* text = nullptr;
     IDWriteTextFormat* format = nullptr;
@@ -583,10 +585,13 @@ float TextWidthIn(IDWriteFactory3* factory, IDWriteTextFormat* format, const wch
 //
 // ONE RUN FOR BOTH HOMES, which is a simplification the calendar bought: with the calendar at its
 // head the run was 235.6 DIP and the 220 DIP pill could not hold it, so the island drew a second,
-// glyph-less form. Remove the calendar and what is left -- a hairline, the weekday, the date,
-// a hairline, the time, a hairline, the weather glyph and two words -- is about 200 DIP, which fits
-// the pill with its padding and the band with room to spare. So there is no form to choose between
-// any more, and the two places cannot even in principle disagree.
+// glyph-less form. Remove the calendar and what is left -- the weekday, the date, the time, the
+// weather mark and two words -- fits the pill with its padding and the band with room to spare, so
+// there is no form to choose between any more and the two places cannot even in principle disagree.
+//
+// THE HAIRLINES ARE GONE (see StatusRunStyle::groupSpaceDip): they were the last thing on the bar that
+// looked like a text separator rather than like a surface, and the brief this bar is being drawn to asks
+// for fewer of them, not for better ones.
 int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, const wchar_t* weekday,
                    const wchar_t* day, const wchar_t* time, const wchar_t* sky,
                    const wchar_t* temperature, int weatherCode, StatusPiece* pieces, int capacity) {
@@ -606,19 +611,15 @@ int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, co
         piece.luminance = luminance;
         push(piece);
     };
-    const auto pushRule = [&](float after) {
-        StatusPiece piece;
-        piece.kind = StatusPiece::Kind::Rule;
-        piece.widthDip = kStatusRun.ruleDip;
-        piece.afterDip = after;
-        push(piece);
-    };
-
-    pushText(weekday, formats.weekday, kStatusRun.groupGapDip, 0.95f);
-    pushText(day, formats.day, kStatusRun.ruleGapDip, 0.62f);
-    pushRule(kStatusRun.ruleGapDip);
-    pushText(time, formats.time, kStatusRun.ruleGapDip, 0.99f);
-    pushRule(kStatusRun.glyphGapDip);
+    // THE HIERARCHY, in one place: the TIME is the anchor (bigger, semibold, brightest), the weekday is
+    // solid, the DATE is clearly secondary, and the weather is a reading rather than part of the date.
+    //
+    // The date used to be 0.62, which is dimmer than anything else on the bar and read as disabled rather
+    // than as secondary -- the same complaint the brief makes about "cheap" hierarchies: a step that big
+    // looks like a mistake, not a rank.
+    pushText(weekday, formats.weekday, kStatusRun.groupGapDip, 0.88f);
+    pushText(day, formats.day, kStatusRun.groupSpaceDip, 0.72f);
+    pushText(time, formats.time, kStatusRun.groupSpaceDip, 0.99f);
     // The mark is a function of the SAME code the word came from, and it is skipped when there is no sky
     // word: an unknown code prints the temperature alone, and a cloud beside it would be a claim about a
     // sky nobody knows. Both halves of that sentence were wrong before -- the mark was drawn for every
@@ -627,10 +628,19 @@ int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, co
     cloud.kind = StatusPiece::Kind::SkyMark;
     cloud.mark = island::SkyMarkForCode(weatherCode);
     cloud.widthDip = kStatusRun.glyphDip;
+    // ... and the weather group is separated from the time by the same amount of SPACE the date is, so
+    // all three groups read as three. The mark sits tight against its own word and the temperature is a
+    // half-step behind it, which is the one place a gap is smaller than `groupGapDip`.
     cloud.afterDip = kStatusRun.glyphGapDip;
-    if (cloud.mark != island::SkyMark::None) push(cloud);
-    pushText(sky, formats.weather, kStatusRun.groupGapDip, 0.90f);
-    pushText(temperature, formats.weather, 0.0f, 0.84f);
+    if (cloud.mark == island::SkyMark::None) {
+        // No mark: the word has to carry the group's own separation itself, or it would sit closer to the
+        // time than the date does.
+        pushText(sky, formats.weather, kStatusRun.groupGapDip, 0.92f);
+    } else {
+        push(cloud);
+        pushText(sky, formats.weather, kStatusRun.groupGapDip, 0.92f);
+    }
+    pushText(temperature, formats.weather, 0.0f, 0.80f);
     return count;
 }
 
@@ -1083,21 +1093,6 @@ void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox
                                         centreY + piece.widthDip * 0.5f),
                             piece.mark, opacity);
                 break;
-
-            case StatusPiece::Kind::Rule: {
-                ID2D1SolidColorBrush* brush = nullptr;
-                if (SUCCEEDED(context->CreateSolidColorBrush(
-                        D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.26f * opacity), &brush)) &&
-                    brush) {
-                    const D2D1_ROUNDED_RECT rule = {
-                        D2D1::RectF(x, centreY - kStatusRun.ruleHeightDip * 0.5f, x + piece.widthDip,
-                                    centreY + kStatusRun.ruleHeightDip * 0.5f),
-                        piece.widthDip * 0.5f, piece.widthDip * 0.5f};
-                    context->FillRoundedRectangle(&rule, brush);
-                    brush->Release();
-                }
-                break;
-            }
 
             case StatusPiece::Kind::Text: {
                 ID2D1SolidColorBrush* brush = nullptr;
