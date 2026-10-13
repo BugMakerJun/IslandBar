@@ -1714,6 +1714,38 @@ void TestRenderer(IslandWindow& window) {
             Check(played && paused && live && noPosition && clamped,
                   L"the drawn position is projected forward while playing, and only then", timing);
 
+            // --- and what happens when the session sends NO timeline at all (2026-10-13, HANDOFF 8.74) ---
+            //
+            // Reported with the player's own card beside it: "网易云的还是有问题 歌词不动 进度条也不动".
+            // Measured: NetEase Cloud Music reports `Position 00:00 / StartTime 00:00 / EndTime 00:00`
+            // for the WHOLE song, playing -- the timeline is optional in SMTC and it simply leaves it out.
+            // The lyric line is chosen by the position, so the pill sat on the first line for the whole
+            // song, and the card printed `00:00 / 00:00` with an empty bar.
+            {
+                const bool reportsWhenPlaying =
+                    island::SessionReportsTimeline(30000, 240000);
+                const bool reportsHalf = island::SessionReportsTimeline(30000, 0) &&
+                                         island::SessionReportsTimeline(0, 240000);
+                const bool reportsNothing = !island::SessionReportsTimeline(0, 0);
+
+                const island::TrackPosition counted = island::TrackPositionFor(0, 0, 5000, 42000, true);
+                const island::TrackPosition projected =
+                    island::TrackPositionFor(30000, 240000, 2000, 0, true);
+                const island::TrackPosition none = island::TrackPositionFor(0, 0, 0, 0, false);
+
+                wchar_t timelineText[224];
+                std::swprintf(timelineText, 224,
+                              L"no timeline -> %lld (session? %d); a reading -> %lld (session? %d); "
+                              L"nothing -> %lld",
+                              counted.ms, counted.fromSession ? 1 : 0, projected.ms,
+                              projected.fromSession ? 1 : 0, none.ms);
+                Check(reportsWhenPlaying && reportsHalf && reportsNothing && counted.ms == 42000 &&
+                          !counted.fromSession && projected.ms == 32000 && projected.fromSession &&
+                          none.ms == 0 && !none.fromSession,
+                      L"a session with no timeline is counted by the bar, and one with a reading is not",
+                      timelineText);
+            }
+
             // WHICH changes are worth animating at all.
             //
             // The loop re-evaluates the current line whenever the media session reports anything (a

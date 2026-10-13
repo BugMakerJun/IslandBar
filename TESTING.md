@@ -159,6 +159,7 @@ start button: island x [1170, 1390] -> ... opacity 1.00
 | 做什么 | 应该看到 | 日志里 |
 |---|---|---|
 | **播放器"不开口"的时候**（它的系统媒体控制开关没开；或先用 `ISLANDBAR_NO_SESSION=1` 启动栏）（2026-10-13 HANDOFF 8.73 起） | 胶囊里**照样有歌词** —— 栏改读它的**窗口标题**（`歌名 - 歌手`）。可**没有封面**，岛也**打不开音乐卡片**（卡片用的是会话里的封面/进度/三个控制键，标题里没有） | `music: [cloudmusic.exe] 歌手 - 歌名 (from its window title -- this player publishes no session)`；歌词那几行尾上是 `(counted from the player's window title -- there is no session)` |
+| **放网易云的歌**（它不报时间轴）（2026-10-13 HANDOFF 8.74 起） | 胶囊里的歌词**一行行往上走**，卡片左边"已播"时间**在走** —— 右边总长是 **`--:--`**（它没报长度）、进度条**不填**。**栏是在歌的中段启动的**话，歌词会从第一行开始且一直差着那一段（不会自己收敛）：**按一下 ⏭/⏮ 或让栏从开歌就在跑**就重新对齐 | `lyrics: line N at X ms (counted by the bar -- this session reports no position)` —— 行号与毫秒都该往前走；`gsmtc_probe.exe` 对同一首歌看到的是 `Position 00:00 / EndTime 00:00` |
 | 点 播放/暂停、上一首、下一首 | 歌真的跟着变 | `music: play/pause requested` |
 | 看卡片右上角（2026-10-12 HANDOFF 8.29 起） | **没有喇叭、没有百分比、没有滑条** —— 整组控件按用户要求删掉了；名字那条来源行现在通到卡片右边距 | 日志里**不该再出现** `volume: press on the card's bar` / `volume: control opened` / `dragging the card's bar`；出现即回退。设备音量仍看第 2 节的面板滑条，单个应用的音量走子页「音量合成器」 |
 | 放一首**歌词很长**的歌，看胶囊两头（2026-10-12 HANDOFF 8.30 起） | 字**从两端淡出/淡入**（左边正在离开的字、右边正在进来的字都变暗），中间全亮；不该再有"被圆角斜切掉半个字" | 没有日志行，看画面。判定标准是自检里量过的那条：同一个字在渐隐区读 `49.84`、紧挨其内侧读 `122.87`（关掉渐隐时两者都读 `122.8`） |

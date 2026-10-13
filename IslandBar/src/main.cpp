@@ -1641,9 +1641,13 @@ float musicWavePhase = 0.0f;
     // the pill's fallback line -- so no two of them can disagree about which track is up.
     island::PlayerWindowInfo playerWindowNow;
     unsigned long long lastPlayerWindowRevision = 0;
-    // When the track on the pill appeared. This is the POSITION for the window-title source: a window
-    // title carries no playhead (see PlayerWindow.h), so its line is counted from here.
-    unsigned long long trackStartedAt = GetTickCount64();
+    // The stopwatch for a track whose position nobody reports: it runs only while the song plays, and
+    // it is reset when the track changes. Advanced in the frame loop (see TrackPositionFor).
+    double trackPlayedMs = 0.0;
+    // This frame's distance into the track, and whether the session supplied it. ONE answer, decided
+    // once per frame and read by the lyric line, the card's printed time and its bar, and the
+    // once-a-second redraw -- so none of them can disagree about where the song is.
+    island::TrackPosition track;
     bool activePresent = false;
     bool activeFromSession = false;
     bool activePlaying = false;
@@ -1946,10 +1950,10 @@ float musicWavePhase = 0.0f;
                     // 在一起似的". The comparison is on the track, not on the revision.
                     lyricsScrollDip = 0.0f;
                     lastLyricIndex = -2;
-                    // The playhead for the window-title source: it has none of its own, so the words are
-                    // counted from the moment the title appeared (see PlayerWindow.h -- the line is
-                    // aligned when the bar catches the song as it starts, and drifts when it does not).
-                    trackStartedAt = GetTickCount64();
+                    // The stopwatch restarts with the track: it is the playhead for every source that
+                    // cannot supply one (see TrackPositionFor -- aligned when the bar catches the song as
+                    // it starts, drifting when it does not).
+                    trackPlayedMs = 0.0;
                     if (activePresent) {
                         lyrics.Request(activeTitle, activeArtist);
                         if (!activeFromSession) {
@@ -3186,6 +3190,31 @@ float musicWavePhase = 0.0f;
                 static_cast<double>(frequency.QuadPart));
             previous = now;
 
+            // --- where the song is ------------------------------------------------------------
+            //
+            // Asked ONCE per frame, here, because three readers come after this point and they must not
+            // answer it differently (see TrackPositionFor): the lyric line, the card's printed time and
+            // its bar, and the redraw cadence.
+            //
+            // The stopwatch is advanced only while the song is PLAYING, so a pause leaves the words where
+            // they are -- the same rule the session's projected reading has.
+            {
+                const bool sessionTimeline =
+                    activeFromSession &&
+                    island::SessionReportsTimeline(nowPlaying.positionMs, nowPlaying.durationMs);
+                if (activePresent && !sessionTimeline && activePlaying) {
+                    trackPlayedMs += static_cast<double>(dt) * 1000.0;
+                }
+                track = island::TrackPositionFor(
+                    nowPlaying.positionMs, nowPlaying.durationMs,
+                    static_cast<long long>(GetTickCount64() - musicPositionAt),
+                    static_cast<long long>(trackPlayedMs), activePlaying);
+                // A session with a timeline but nothing playing yet: keep the caller's other sources out
+                // of it -- `TrackPositionFor` already answered, and `activePresent` says whether there is
+                // anything on the pill at all.
+                if (!activePresent) track = island::TrackPosition();
+            }
+
             // --- open the pointed-at icon button, over a few frames ----------------
             //
             // The width used to change in a single frame, and a width that jumps reads as a stutter
@@ -3297,21 +3326,14 @@ float musicWavePhase = 0.0f;
                 if (musicWavePhase > 6.2831853f * 64.0f) musicWavePhase -= 6.2831853f * 64.0f;
                 if (currentLyrics && !currentLyrics->Empty()) {
                     // The position is what selects the line, so it advances within a track without the
-                    // track itself changing -- and it has to be the PROJECTED position, not the raw
-                    // reading: the session reports once every second or two, so the line changed a
-                    // couple of seconds after the words were sung. Reported as "现在歌词和唱的有点
-                    // 对应不上". The same correction the card's progress bar uses (see
-                    // ProjectedPositionMs).
-                    // WHERE the song is. The session reports a position (and only once every second or
-                    // two, so it is projected forward); the window-title source has no position at all
-                    // and is counted from the moment its track appeared (see PlayerWindow.h).
-                    const long long sungMs =
-                        activeFromSession
-                            ? island::ProjectedPositionMs(
-                                  nowPlaying.positionMs, nowPlaying.durationMs,
-                                  static_cast<long long>(GetTickCount64() - musicPositionAt),
-                                  nowPlaying.state == island::PlaybackState::Playing)
-                            : static_cast<long long>(GetTickCount64() - trackStartedAt);
+                    // track itself changing -- and it has to be the PROJECTED one, not the raw reading:
+                    // the session reports once every second or two, so the line changed a couple of
+                    // seconds after the words were sung ("现在歌词和唱的有点对应不上"). The same numbers
+                    // the card's time and bar use are taken from the one playhead decided above, which
+                    // falls back to the bar's own stopwatch for a session that sends no timeline at all
+                    // -- NetEase Cloud Music does that, and the line sat on the first one for the whole
+                    // song before this ("歌词不动"). See TrackPositionFor.
+                    const long long sungMs = track.ms;
                     const int index = currentLyrics->LineAt(sungMs);
                     const island::LyricLine* line = currentLyrics->At(index);
                     const char* nextText = (line && line->text[0] != '\0') ? line->text : "";
@@ -3333,10 +3355,19 @@ float musicWavePhase = 0.0f;
                             lyricsScrollDip = 0.0f;   // a new line starts at its beginning
                             lyricLineAge = 0.0f;      // ... and fades in rather than appearing
                             lyricLineChanged = true;
-                            if (activeFromSession) {
+                            if (track.fromSession) {
                                 island::LogAndPrint(
                                     "  lyrics: line %d at %lld ms (the session last reported %lld ms)\n",
                                     index, sungMs, nowPlaying.positionMs);
+                            } else if (activeFromSession) {
+                                // A session that sends no timeline: the number is the bar's own stopwatch,
+                                // which is exactly what has to be checked when the words look out of step
+                                // with the singing. Measured on NetEase Cloud Music, which reports
+                                // `Position 00:00` for the whole song.
+                                island::LogAndPrint(
+                                    "  lyrics: line %d at %lld ms (counted by the bar -- this session"
+                                    " reports no position)\n",
+                                    index, sungMs);
                             } else {
                                 // No session, so no reading to compare against: the number is this
                                 // source's own count from the moment the window title appeared, which is
@@ -3401,13 +3432,11 @@ float musicWavePhase = 0.0f;
             // of seconds, which is the jumping the user saw. One redraw per second is enough
             // for a text clock and a bar that moves about 1% a second, and it only applies
             // while the card is actually open.
+            // ... and it is the SAME playhead the pill's line uses (see the top of this iteration), so
+            // the time printed on the card and the words on the island cannot disagree -- including for
+            // a session that sends no timeline, where both are the bar's own count.
             const long long shownPosition =
-                (window.State() == island::IslandState::Expanded)
-                    ? island::ProjectedPositionMs(
-                          nowPlaying.positionMs, nowPlaying.durationMs,
-                          static_cast<long long>(GetTickCount64() - musicPositionAt),
-                          nowPlaying.state == island::PlaybackState::Playing)
-                    : 0;
+                (window.State() == island::IslandState::Expanded) ? track.ms : 0;
             // The volume can be changed by the keyboard or the shell flyout, not only here, so
             // it is a redraw reason too.
             bool volumeChanged = false;
@@ -4411,27 +4440,21 @@ float musicWavePhase = 0.0f;
                 // Read by the next pass's redraw decision, like the icon row's own arrival flags.
                 statusStripAnimating = statusStripOpacity > 0.001f && statusStripOpacity < 0.999f;
 
-                // Progress, advanced locally between polls.
+                // The card's printed time and the fill of its bar, from the ONE playhead at the top of
+                // this iteration -- the same number the pill's lyric line is chosen by.
                 //
-                // The media session reports a position only once every couple of seconds, so
-                // using it directly made the bar jump in 2-second steps. The position is
-                // therefore projected forward from the moment it was received, and resynced
-                // whenever a fresh one arrives. Only when the duration is known: a live
-                // stream reports zero, and an empty bar would read as a bug.
-                if (nowPlaying.durationMs > 0 && nowPlaying.positionMs > 0) {
-                    long long projected = nowPlaying.positionMs;
-                    if (nowPlaying.state == island::PlaybackState::Playing) {
-                        projected += static_cast<long long>(GetTickCount64() - musicPositionAt);
+                // The bar needs a TOTAL, and a player that sends no timeline has none: NetEase Cloud
+                // Music reports `EndTime 00:00`, so the track is drawn (the renderer always draws it) but
+                // NEVER filled, and the total reads `--:--` rather than a `00:00` the player never said.
+                // The elapsed time still moves, because the bar is counting it -- before this, both ends
+                // showed `00:00` and nothing moved at all ("进度条也不动").
+                if (activePresent) {
+                    frame.musicPositionMs = track.ms;
+                    if (nowPlaying.durationMs > 0) {
+                        const double fraction = static_cast<double>(track.ms) /
+                                                static_cast<double>(nowPlaying.durationMs);
+                        frame.progressFraction = static_cast<float>(fraction > 1.0 ? 1.0 : fraction);
                     }
-                    if (projected > nowPlaying.durationMs) projected = nowPlaying.durationMs;
-                    if (projected < 0) projected = 0;
-
-                    const double fraction = static_cast<double>(projected) /
-                                            static_cast<double>(nowPlaying.durationMs);
-                    frame.progressFraction = static_cast<float>(fraction > 1.0 ? 1.0 : fraction);
-                    // The card prints this same projected value, so the time and the bar
-                    // cannot disagree.
-                    frame.musicPositionMs = projected;
                 }
 
                 // The chased master volume, which the SYSTEM PANEL's slider is drawn at (see shownVolume).

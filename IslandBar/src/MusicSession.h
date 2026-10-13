@@ -40,6 +40,51 @@ inline long long ProjectedPositionMs(long long positionMs, long long durationMs,
     return projected > durationMs ? durationMs : projected;
 }
 
+// Whether the session can say how far into the track it is.
+//
+// The timeline is OPTIONAL in SMTC, and a player is free to leave it out entirely. NetEase Cloud
+// Music does exactly that: measured with `gsmtc_probe` -- while PLAYING, `Position 00:00`,
+// `StartTime 00:00`, `EndTime 00:00` for the whole song. Both of the things built on the position
+// then sat still: the lyric line is chosen by it, so the pill stayed on the first line ("歌词不动"),
+// and the card printed `00:00 / 00:00` with an empty bar ("进度条也不动").
+inline bool SessionReportsTimeline(long long positionMs, long long durationMs) {
+    return positionMs > 0 || durationMs > 0;
+}
+
+// Where the bar should draw the playhead, and whether that number came from the session.
+//
+// Two sources, one answer, because three readers depend on it -- the lyric line, the card's printed
+// time and its bar, and the once-a-second redraw -- and they must not disagree:
+//
+//   * the session's own reading, projected forward between its polls, when it publishes a timeline;
+//   * otherwise a STOPWATCH the bar runs itself (see TrackPosition::fromSession), which is the same
+//     accounting the window-title source needs (PlayerWindow.h).
+//
+// The stopwatch is advanced by the caller, and only while the song is playing -- so pausing leaves
+// the words where they are, which is the rule the projected path already has.
+//
+// THE HONEST LIMIT: a stopwatch knows how long the track has been ON SCREEN, not how far into the
+// song it is. A bar started mid-song therefore begins the words at the first line and drifts until
+// the next track; catching a track as it starts is aligned. Said here, in the handover, and in the
+// reply to the person who reported it -- not papered over.
+struct TrackPosition {
+    long long ms = 0;
+    bool fromSession = false;   // false: counted by the bar (the session publishes no timeline)
+};
+
+inline TrackPosition TrackPositionFor(long long positionMs, long long durationMs,
+                                      long long sinceReadingMs, long long stopwatchMs, bool playing) {
+    TrackPosition out;
+    if (SessionReportsTimeline(positionMs, durationMs)) {
+        out.ms = ProjectedPositionMs(positionMs, durationMs, sinceReadingMs, playing);
+        out.fromSession = true;
+        return out;
+    }
+    out.ms = stopwatchMs > 0 ? stopwatchMs : 0;
+    out.fromSession = false;
+    return out;
+}
+
 inline constexpr size_t kMusicTitleCapacity  = 192;
 inline constexpr size_t kMusicArtistCapacity = 128;
 inline constexpr size_t kMusicAlbumCapacity  = 160;

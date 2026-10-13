@@ -1473,7 +1473,15 @@ void TextRenderer::DrawMusicCard(ID2D1DeviceContext2* context, const RoundedBox&
     wchar_t elapsed[16] = {};
     wchar_t total[16] = {};
     FormatPosition(text.positionMs, elapsed, 16);
-    FormatPosition(text.durationMs, total, 16);
+    // A player that publishes no timeline has no total, and `00:00` there would be a claim it never
+    // made -- the bar prints `--:--` instead, the way a flyout with an unknown length does. The elapsed
+    // time always prints, because the bar counts it itself when nobody else will (see TrackPositionFor,
+    // and NetEase Cloud Music, which reports `EndTime 00:00` for the whole song).
+    if (text.durationMs > 0) {
+        FormatPosition(text.durationMs, total, 16);
+    } else {
+        wcsncpy_s(total, 16, L"--:--", _TRUNCATE);
+    }
     draw(elapsed, appFormat_, layout.elapsed, secondaryBrush);
     draw(total, appFormat_, layout.remaining, secondaryBrush);
 
