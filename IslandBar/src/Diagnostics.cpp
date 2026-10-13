@@ -4086,6 +4086,34 @@ void TestMusicCardLayout() {
                   SessionScoreForTest(L"qqmusic.exe", true),
               L"the app name comparison ignores case");
 
+        // --- the name a user knows the player by (2026-10-13, HANDOFF 8.78) -----------------------
+        //
+        // The card's top-left corner shows the executable's ProductName, and for the players that state
+        // their own name in Chinese that is exactly right -- QQ音乐. It is not right for one of them:
+        // measured with VerQueryValueW, cloudmusic.exe carries ONE version translation (0804/04B0,
+        // Simplified Chinese) and the ProductName inside it is the English "NetEase Cloud Music", so
+        // there is no Chinese name in the file at all. Reported as "网易云音乐的名字应该改成中文的".
+        {
+            wchar_t detail[192];
+            const wchar_t* netease = KnownPlayerDisplayName(L"cloudmusic.exe");
+            const wchar_t* neteaseUpper =
+                KnownPlayerDisplayName(L"C:\\PROGRAM FILES\\CloudMusic\\CloudMusic.EXE");
+            std::swprintf(detail, 192, L"bare -> '%ls', path and case -> '%ls'",
+                          netease ? netease : L"(null)", neteaseUpper ? neteaseUpper : L"(null)");
+            Check(netease && std::wcscmp(netease, L"网易云音乐") == 0 && neteaseUpper &&
+                      std::wcscmp(neteaseUpper, L"网易云音乐") == 0,
+                  L"NetEase is named in Chinese, by bare name and by full path", detail);
+
+            // The table is a CORRECTION, not a translation of everything: a player whose own name is
+            // already the right one is deliberately absent, so the version resource keeps answering.
+            Check(KnownPlayerDisplayName(L"QQMusic.exe") == nullptr &&
+                      KnownPlayerDisplayName(L"chrome.exe") == nullptr &&
+                      KnownPlayerDisplayName(L"island_bar.exe") == nullptr &&
+                      KnownPlayerDisplayName(nullptr) == nullptr &&
+                      KnownPlayerDisplayName(L"") == nullptr,
+                  L"players that name themselves are left to their own answer");
+        }
+
         // --- the player that never publishes a session (2026-10-13, HANDOFF 8.73) -----------------
         //
         // Such a player's own window title is the only thing it says out loud, so the title has to be

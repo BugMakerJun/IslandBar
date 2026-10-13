@@ -236,6 +236,15 @@ size_t FetchAppIconForTest(const wchar_t* executablePath, uint8_t* out, size_t c
 // rather than by arranging two applications to play at once.
 int SessionScoreForTest(const wchar_t* appId, bool playing);
 
+// The name a USER knows a player by, for the players that do not state it in their own version
+// resource. nullptr when the player is not in the table -- which is the case for every player whose own
+// name is already the right one (QQ音乐's ProductName IS "QQ音乐").
+//
+// The exception that put this here: NetEase Cloud Music carries exactly ONE version translation
+// (0804/04B0, Simplified Chinese) and its ProductName in it is the English "NetEase Cloud Music", so
+// there is no Chinese name in the file to prefer and the card showed English for a Chinese application.
+const wchar_t* KnownPlayerDisplayName(const wchar_t* executableName);
+
 // How long the poll worker waits before reading the session again.
 //
 // The plain interval is two seconds, which is right for a player that updates its own status on its own

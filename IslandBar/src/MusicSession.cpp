@@ -371,6 +371,20 @@ void FillAppDisplayName(const wchar_t* appId, const wchar_t* executablePath, cha
     // 1. The session's own display name, when the application bothered to set one.
     //    (Handled by the caller, which has the WinRT object.)
 
+    // 1b. The name a user knows it by, for the players that do not state it themselves. BEFORE the
+    //     version resource, because for those players the resource is the wrong answer -- see
+    //     KnownPlayerDisplayName.
+    //     ... asked of the resolved executable AND of the id itself: a session may name a bare
+    //     "cloudmusic.exe" with nothing resolvable behind it (the icon path has the same problem, and
+    //     the id is what SMTC actually gives us).
+    const wchar_t* known = KnownPlayerDisplayName(executablePath);
+    if (!known) known = KnownPlayerDisplayName(appId);
+    if (known) {
+        WideCharToMultiByte(CP_UTF8, 0, known, -1, out, static_cast<int>(capacity), nullptr,
+                            nullptr);
+        return;
+    }
+
     // 2. The executable's version information.
     if (executablePath && executablePath[0] != L'\0') {
         DWORD ignored = 0;
@@ -511,6 +525,46 @@ size_t FetchAppIcon(const wchar_t* executablePath, uint8_t* out, size_t capacity
 }
 
 } // namespace
+
+// The name a USER knows the player by, when the player itself does not say it.
+//
+// The executable's version resource is the first source (see FillAppDisplayName) and it is usually the
+// right one: QQ音乐's ProductName IS "QQ音乐", so this table has nothing to correct there. It is not
+// always right, and the exception is worth writing down: **NetEase Cloud Music ships the string
+// "NetEase Cloud Music" as its ProductName even in its Chinese version resource** -- measured with
+// `VerQueryValueW` over `cloudmusic.exe`: it carries exactly ONE translation, 0804/04B0 (Simplified
+// Chinese, Unicode), and the name inside it is English. `FileDescription` says the same. So there is no
+// Chinese name anywhere in the file to prefer, and the card showed the English one for a Chinese
+// application -- reported as "网易云音乐的名字应该改成中文的".
+//
+// Keyed on the executable the session names (`cloudmusic.exe`), because that is the only identifier
+// available, and matched by base name so a full path and any case work. Players whose own answer is
+// already the name a user would say are deliberately NOT listed: this table is a correction, not a
+// translation of everything.
+const wchar_t* KnownPlayerDisplayName(const wchar_t* executableName) {
+    if (!executableName || executableName[0] == L'\0') return nullptr;
+
+    const wchar_t* base = std::wcsrchr(executableName, L'\\');
+    base = base ? base + 1 : executableName;
+    const wchar_t* slash = std::wcsrchr(base, L'/');
+    if (slash) base = slash + 1;
+
+    std::wstring lower(base);
+    for (wchar_t& c : lower) c = static_cast<wchar_t>(std::towlower(c));
+
+    struct Entry {
+        const wchar_t* executable;
+        const wchar_t* display;
+    };
+    static const Entry kEntries[] = {
+        {L"cloudmusic.exe", L"网易云音乐"},
+        {L"cloudmusic_pc.exe", L"网易云音乐"},
+    };
+    for (const Entry& entry : kEntries) {
+        if (lower == entry.executable) return entry.display;
+    }
+    return nullptr;
+}
 
 // The ranking, exposed so the self-test can check the comparisons that decide which session wins.
 // It is pure, so it is worth testing directly rather than by arranging two applications to play at
@@ -931,9 +985,21 @@ void MusicSession::Run() {
                         // Logged because this is the only place the answer is known, and the
                         // symptom of a failure here is a missing picture, which looks the same
                         // whether the lookup failed, the icon export failed, or the draw did.
-                        LogLine(L"  icon: app='%hs' name='%hs' -> %ls (%zu bytes)",
-                                fresh.app, fresh.appName, resolved ? executable : L"UNRESOLVED",
-                                fresh.iconSize);
+                        //
+                        // WIDE, with the two UTF-8 fields converted first. `%hs` in a wide format reads
+                        // a char* through the current locale rather than as UTF-8, so the resolved name
+                        // came out as `ç½æäºé³ä¹` -- the same defect the `music: [...]` line had
+                        // (HANDOFF 8.72/8.73), in the one line whose whole job is to print that name.
+                        {
+                            wchar_t wideApp[island::kMusicAppCapacity] = {};
+                            wchar_t wideName[island::kMusicAppNameCapacity] = {};
+                            MultiByteToWideChar(CP_UTF8, 0, fresh.app, -1, wideApp,
+                                                static_cast<int>(island::kMusicAppCapacity));
+                            MultiByteToWideChar(CP_UTF8, 0, fresh.appName, -1, wideName,
+                                                static_cast<int>(island::kMusicAppNameCapacity));
+                            LogLine(L"  icon: app='%ls' name='%ls' -> %ls (%zu bytes)", wideApp,
+                                    wideName, resolved ? executable : L"UNRESOLVED", fresh.iconSize);
+                        }
                     } else {
                         std::memcpy(fresh.appName, previous.appName, kMusicAppNameCapacity);
                         fresh.iconSize = previous.iconSize;
