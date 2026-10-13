@@ -4,6 +4,7 @@
 #include "TextRenderer.h"
 #include "Theme.h"   // the material: the card's surface, the edge, the accent and the ink
 #include "GlassMaterial.h"   // the shadow under a card and the grain over it
+#include "Weather.h"   // SkyMark: the weather mark the status line draws, per WMO code
 
 #include "WicImage.h"   // DecodeImage, for the mixer's application icons
 #include "TaskStripLayout.h"
@@ -537,12 +538,16 @@ constexpr StatusRunStyle kStatusRun;
 // for it to go -- "去掉前面的日历图标". The weather glyph stays, and it is now the ONE glyph, in both
 // homes (see the note on the forms below).
 struct StatusPiece {
-    enum class Kind { Rule, Text, Cloud };
+    enum class Kind { Rule, Text, SkyMark };
     Kind kind = Kind::Text;
     const wchar_t* text = nullptr;
     IDWriteTextFormat* format = nullptr;
     float widthDip = 0.0f;
     float afterDip = 0.0f;
+    // WHAT THE WEATHER MARK IS, carried on the piece because the drawing walks the pieces. There was no
+    // field here at all before -- the mark was drawn the same way for every sky, which is why a clear
+    // night came out as 晴 beside a cloud with rain under it ("天气这个图标对应错了 现在显示晴但是下雨的").
+    island::SkyMark mark = island::SkyMark::None;
     // The piece's own brightness, which is the hierarchy the reference is built on: the weekday and
     // the time are the bright ends of the run and the date is the quiet middle.
     float luminance = 0.93f;
@@ -584,7 +589,7 @@ float TextWidthIn(IDWriteFactory3* factory, IDWriteTextFormat* format, const wch
 // any more, and the two places cannot even in principle disagree.
 int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, const wchar_t* weekday,
                    const wchar_t* day, const wchar_t* time, const wchar_t* sky,
-                   const wchar_t* temperature, StatusPiece* pieces, int capacity) {
+                   const wchar_t* temperature, int weatherCode, StatusPiece* pieces, int capacity) {
     int count = 0;
     const auto push = [&](const StatusPiece& piece) {
         if (count < capacity) pieces[count++] = piece;
@@ -614,11 +619,16 @@ int BuildStatusRun(IDWriteFactory3* factory, const StatusRunFormats& formats, co
     pushRule(kStatusRun.ruleGapDip);
     pushText(time, formats.time, kStatusRun.ruleGapDip, 0.99f);
     pushRule(kStatusRun.glyphGapDip);
+    // The mark is a function of the SAME code the word came from, and it is skipped when there is no sky
+    // word: an unknown code prints the temperature alone, and a cloud beside it would be a claim about a
+    // sky nobody knows. Both halves of that sentence were wrong before -- the mark was drawn for every
+    // code, and always the same one.
     StatusPiece cloud;
-    cloud.kind = StatusPiece::Kind::Cloud;
+    cloud.kind = StatusPiece::Kind::SkyMark;
+    cloud.mark = island::SkyMarkForCode(weatherCode);
     cloud.widthDip = kStatusRun.glyphDip;
     cloud.afterDip = kStatusRun.glyphGapDip;
-    push(cloud);
+    if (cloud.mark != island::SkyMark::None) push(cloud);
     pushText(sky, formats.weather, kStatusRun.groupGapDip, 0.90f);
     pushText(temperature, formats.weather, 0.0f, 0.84f);
     return count;
@@ -630,39 +640,144 @@ float StatusRunWidth(const StatusPiece* pieces, int count) {
     return total;
 }
 
-// The weather glyph: a cloud with rain under it, in the line's own blue. Flat rather than glossy --
-// the reference's rendering is beyond what geometry can do at 16 DIP, and a flat blue cloud reads
-// as the same thing without an image to ship.
-void DrawCloudGlyph(ID2D1DeviceContext2* context, const D2D1_RECT_F& box, float opacity) {
-    if (!context) return;
+// The weather mark: ONE SHAPE PER SKY, drawn rather than set in a font. Flat rather than glossy, because
+// the reference's rendering is beyond what geometry can do at 16 DIP and a flat shape reads as the same
+// thing without an image to ship.
+//
+// This was a single cloud with rain under it, drawn for every code -- so 晴 was shown beside a rain cloud.
+// Reported as "天气这个图标对应错了 现在显示晴但是下雨的". The sun is the one shape not in the line's blue:
+// a warm disc is what makes "sunny" read at this size.
+void DrawSkyMark(ID2D1DeviceContext2* context, const D2D1_RECT_F& box, island::SkyMark mark,
+                 float opacity) {
+    if (!context || mark == island::SkyMark::None) return;
+
     const float cx = (box.left + box.right) * 0.5f;
     const float cy = (box.top + box.bottom) * 0.5f;
 
-    ID2D1SolidColorBrush* brush = nullptr;
-    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.46f, 0.71f, 1.00f, 0.96f * opacity),
-                                                 &brush)) &&
-        brush) {
-        // Three circles and a base, all in one colour, read as a single cloud rather than as three
-        // circles -- which is why they are drawn in one pass and never outlined.
-        context->FillEllipse(
-            D2D1::Ellipse(D2D1::Point2F(cx - 3.2f, cy - 0.2f), 3.2f, 3.0f), brush);
-        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx + 0.6f, cy - 1.6f), 3.8f, 3.6f), brush);
-        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx + 4.0f, cy - 0.4f), 2.6f, 2.4f), brush);
-        const D2D1_ROUNDED_RECT base = {D2D1::RectF(cx - 4.6f, cy - 0.6f, cx + 5.6f, cy + 2.2f),
-                                        1.4f, 1.4f};
-        context->FillRoundedRectangle(&base, brush);
-        brush->Release();
-    }
-
-    if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.66f, 0.86f, 1.00f, 0.92f * opacity),
-                                                 &brush)) &&
-        brush) {
-        for (int i = 0; i < 3; ++i) {
-            const float x = cx - 2.6f + i * 2.8f;
-            context->DrawLine(D2D1::Point2F(x, cy + 3.2f), D2D1::Point2F(x - 1.4f, cy + 6.4f),
-                              brush, 1.5f);
+    // The cloud, as three circles and a base in one colour -- they read as a single cloud rather than as
+    // three circles, which is why they are drawn in one pass and never outlined. Offset and scaled so a
+    // rain or snow cloud can leave room under it for the drops.
+    const auto cloud = [&](float offsetX, float offsetY, float scale) {
+        ID2D1SolidColorBrush* brush = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.46f, 0.71f, 1.00f, 0.96f * opacity),
+                                                     &brush)) &&
+            brush) {
+            const float x = cx + offsetX;
+            const float y = cy + offsetY;
+            context->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(x - 3.2f * scale, y - 0.2f * scale), 3.2f * scale,
+                              3.0f * scale),
+                brush);
+            context->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(x + 0.6f * scale, y - 1.6f * scale), 3.8f * scale,
+                              3.6f * scale),
+                brush);
+            context->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(x + 4.0f * scale, y - 0.4f * scale), 2.6f * scale,
+                              2.4f * scale),
+                brush);
+            const D2D1_ROUNDED_RECT base = {
+                D2D1::RectF(x - 4.6f * scale, y - 0.6f * scale, x + 5.6f * scale, y + 2.2f * scale),
+                1.4f, 1.4f};
+            context->FillRoundedRectangle(&base, brush);
+            brush->Release();
         }
-        brush->Release();
+    };
+
+    const auto sun = [&](float offsetX, float offsetY, float radius) {
+        ID2D1SolidColorBrush* brush = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(D2D1::ColorF(0.99f, 0.78f, 0.35f, 0.98f * opacity),
+                                                     &brush)) &&
+            brush) {
+            context->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(cx + offsetX, cy + offsetY), radius, radius), brush);
+            for (int i = 0; i < 8; ++i) {
+                const float angle = static_cast<float>(i) * 3.14159265f / 4.0f;
+                const float inner = radius + 1.1f;
+                const float outer = radius + 2.6f;
+                context->DrawLine(
+                    D2D1::Point2F(cx + offsetX + std::cos(angle) * inner,
+                                  cy + offsetY + std::sin(angle) * inner),
+                    D2D1::Point2F(cx + offsetX + std::cos(angle) * outer,
+                                  cy + offsetY + std::sin(angle) * outer),
+                    brush, 1.2f);
+            }
+            brush->Release();
+        }
+    };
+
+    // Returns null when the brush cannot be created, so each caller has one `if` rather than a nested one.
+    const auto lightInk = [&](float alpha) -> ID2D1SolidColorBrush* {
+        ID2D1SolidColorBrush* brush = nullptr;
+        if (SUCCEEDED(context->CreateSolidColorBrush(
+                D2D1::ColorF(0.66f, 0.86f, 1.00f, alpha * opacity), &brush)) &&
+            brush) {
+            return brush;
+        }
+        return nullptr;
+    };
+
+    switch (mark) {
+        case island::SkyMark::Sun:
+            sun(0.0f, 0.0f, 4.6f);
+            break;
+        case island::SkyMark::SunCloud:
+            // The sun peeks out from the upper left and the cloud covers its lower right.
+            sun(-3.4f, -3.0f, 3.6f);
+            cloud(1.0f, 1.4f, 0.92f);
+            break;
+        case island::SkyMark::Cloud:
+            cloud(0.0f, 0.4f, 1.0f);
+            break;
+        case island::SkyMark::Rain:
+            cloud(0.0f, -1.4f, 0.95f);
+            if (ID2D1SolidColorBrush* brush = lightInk(0.92f)) {
+                for (int i = 0; i < 3; ++i) {
+                    const float x = cx - 2.6f + static_cast<float>(i) * 2.8f;
+                    context->DrawLine(D2D1::Point2F(x, cy + 2.0f), D2D1::Point2F(x - 1.4f, cy + 5.6f),
+                                      brush, 1.5f);
+                }
+                brush->Release();
+            }
+            break;
+        case island::SkyMark::Snow:
+            cloud(0.0f, -1.4f, 0.95f);
+            if (ID2D1SolidColorBrush* brush = lightInk(0.95f)) {
+                for (int i = 0; i < 3; ++i) {
+                    const float x = cx - 2.6f + static_cast<float>(i) * 2.8f;
+                    context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x - 0.7f, cy + 3.8f), 1.1f, 1.1f),
+                                         brush);
+                }
+                brush->Release();
+            }
+            break;
+        case island::SkyMark::Thunder:
+            cloud(0.0f, -1.4f, 0.95f);
+            if (ID2D1SolidColorBrush* brush = lightInk(0.98f)) {
+                context->DrawLine(D2D1::Point2F(cx - 0.4f, cy + 2.0f),
+                                  D2D1::Point2F(cx + 1.4f, cy + 3.4f), brush, 1.6f);
+                context->DrawLine(D2D1::Point2F(cx + 1.4f, cy + 3.4f),
+                                  D2D1::Point2F(cx - 0.6f, cy + 3.8f), brush, 1.6f);
+                context->DrawLine(D2D1::Point2F(cx - 0.6f, cy + 3.8f),
+                                  D2D1::Point2F(cx + 0.6f, cy + 6.0f), brush, 1.6f);
+                brush->Release();
+            }
+            break;
+        case island::SkyMark::Fog:
+            // Three bars, the widest in the middle: fog has no shape of its own, and a cloud would claim a
+            // different weather.
+            if (ID2D1SolidColorBrush* brush = lightInk(0.90f)) {
+                const D2D1_ROUNDED_RECT bars[3] = {
+                    {D2D1::RectF(cx - 5.0f, cy - 3.4f, cx + 4.0f, cy - 1.6f), 0.9f, 0.9f},
+                    {D2D1::RectF(cx - 6.0f, cy - 0.9f, cx + 6.0f, cy + 0.9f), 0.9f, 0.9f},
+                    {D2D1::RectF(cx - 4.0f, cy + 1.6f, cx + 5.0f, cy + 3.4f), 0.9f, 0.9f},
+                };
+                for (const D2D1_ROUNDED_RECT& bar : bars) context->FillRoundedRectangle(&bar, brush);
+                brush->Release();
+            }
+            break;
+        case island::SkyMark::None:
+            break;
     }
 }
 
@@ -670,13 +785,13 @@ void DrawCloudGlyph(ID2D1DeviceContext2* context, const D2D1_RECT_F& box, float 
 
 float TextRenderer::MeasureStatusLine(const wchar_t* weekday, const wchar_t* day,
                                       const wchar_t* time, const wchar_t* sky,
-                                      const wchar_t* temperature) const {
+                                      const wchar_t* temperature, int weatherCode) const {
     if (!factory_) return 0.0f;
     const StatusRunFormats formats{statusWeekdayFormat_, statusDayFormat_, statusTimeFormat_,
                                    statusWeatherFormat_};
     StatusPiece pieces[12] = {};
     const int count = BuildStatusRun(factory_, formats, weekday, day, time, sky, temperature,
-                                     pieces, 12);
+                                     weatherCode, pieces, 12);
     return StatusRunWidth(pieces, count);
 }
 
@@ -913,7 +1028,7 @@ void TextRenderer::DrawTrayMenu(ID2D1DeviceContext2* context, const island::Rect
 
 void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box,
                                   float opacity, const wchar_t* sky, const wchar_t* temperature,
-                                  const D2D1_COLOR_F& fill) {
+                                  int weatherCode, const D2D1_COLOR_F& fill) {
     if (!context || !factory_) return;
     if (opacity <= 0.01f) return;
     if (box.rect.right <= box.rect.left) return;
@@ -948,7 +1063,7 @@ void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox
 
     StatusPiece pieces[12] = {};
     const int count = BuildStatusRun(factory_, formats, weekdayText_, dayText_, timeText_, sky,
-                                     temperature, pieces, 12);
+                                     temperature, weatherCode, pieces, 12);
     if (count <= 0) return;
     const float runWidth = StatusRunWidth(pieces, count);
 
@@ -962,11 +1077,11 @@ void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox
         const float centreY = (box.rect.top + box.rect.bottom) * 0.5f;
 
         switch (piece.kind) {
-            case StatusPiece::Kind::Cloud:
-                DrawCloudGlyph(context,
-                               D2D1::RectF(x, centreY - piece.widthDip * 0.5f, x + piece.widthDip,
-                                           centreY + piece.widthDip * 0.5f),
-                               opacity);
+            case StatusPiece::Kind::SkyMark:
+                DrawSkyMark(context,
+                            D2D1::RectF(x, centreY - piece.widthDip * 0.5f, x + piece.widthDip,
+                                        centreY + piece.widthDip * 0.5f),
+                            piece.mark, opacity);
                 break;
 
             case StatusPiece::Kind::Rule: {

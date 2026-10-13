@@ -46,6 +46,7 @@
 #include "SystemToggles.h"
 #include "Theme.h"
 #include "GlassMaterial.h"
+#include "Weather.h"   // SkyMarkForCode: the word and the mark come from the same WMO code
 #include "Motion.h"
 #include "Renderer.h"
 #include "TextRenderer.h"
@@ -6146,7 +6147,7 @@ void TestMusicCardLayout() {
                     const wchar_t* temperature = L"-12\u00b0";
 
                     const float widest =
-                        runText.MeasureStatusLine(weekday, day, time, sky, temperature);
+                        runText.MeasureStatusLine(weekday, day, time, sky, temperature, 0);
                     const float bandAvailable = kStatusStripWidthDip - kStatusStripPadDip * 2.0f;
                     const float pillAvailable = kCollapsedWidthDip - kStatusStripPadDip * 2.0f;
 
@@ -6164,7 +6165,7 @@ void TestMusicCardLayout() {
                     // A reading that is missing takes its word with it: with no sky the run is
                     // shorter, which is what a machine with no position and no city shows.
                     const float noReading =
-                        runText.MeasureStatusLine(weekday, day, time, nullptr, nullptr);
+                        runText.MeasureStatusLine(weekday, day, time, nullptr, nullptr, -1);
                     std::swprintf(fitDetail, 256, L"with a reading %.1f, without %.1f DIP", widest,
                                   noReading);
                     Check(noReading > 0.0f && noReading <= pillAvailable && noReading < widest,
@@ -7525,6 +7526,41 @@ void TestMusicCardLayout() {
                         if (again[i * 4] != noise[i * 4]) stable = false;
                     }
                     Check(stable, L"and it does not change under the caller's feet", dt6);
+                }
+
+                // THE WEATHER MARK AND THE WEATHER WORD COME FROM THE SAME CODE, which is the whole of the
+                // fix for "天气这个图标对应错了 现在显示晴但是下雨的": the line drew one cloud-with-rain for
+                // every code, so 晴 sat beside a rain cloud.
+                //
+                // Asserted over the whole WMO table, code by code, and cross-checked against the word
+                // table: a code that has a WORD but no MARK (or the reverse) is the bug class itself -- the
+                // two answers disagreeing -- so that is a check of its own rather than a coincidence.
+                {
+                    const int codes[] = {0,  1,  2,  3,  45, 48, 51, 53, 55, 56, 57, 61, 63, 65,
+                                         66, 67, 71, 73, 75, 77, 80, 81, 82, 85, 86, 95, 96, 99};
+                    int mismatched = 0;
+                    int marked = 0;
+                    for (int code : codes) {
+                        const wchar_t* word = WeatherWordForCode(code);
+                        const SkyMark mark = SkyMarkForCode(code);
+                        if ((word != nullptr) != (mark != SkyMark::None)) ++mismatched;
+                        if (mark != SkyMark::None) ++marked;
+                    }
+                    std::swprintf(dt6, 256,
+                                  L"%d known codes: %d with a mark, %d where the word and the mark disagree",
+                                  static_cast<int>(sizeof(codes) / sizeof(codes[0])), marked,
+                                  mismatched);
+                    Check(mismatched == 0,
+                          L"every code that has a word has a mark, and the other way round", dt6);
+
+                    // The reported case, named: a clear sky is the SUN, not a cloud and certainly not rain.
+                    Check(SkyMarkForCode(0) == SkyMark::Sun && SkyMarkForCode(1) == SkyMark::Sun &&
+                              SkyMarkForCode(61) == SkyMark::Rain &&
+                              SkyMarkForCode(71) == SkyMark::Snow &&
+                              SkyMarkForCode(95) == SkyMark::Thunder &&
+                              SkyMarkForCode(2) == SkyMark::SunCloud &&
+                              SkyMarkForCode(-1) == SkyMark::None,
+                          L"and the reported case is the sun: 晴 is drawn as a sun, rain as rain", dt6);
                 }
             }
         }

@@ -211,7 +211,8 @@ public:
     // A function of the STRINGS rather than of the clock, so the self-test can ask about the widest
     // run that can ever occur without waiting for that day to come round.
     float MeasureStatusLine(const wchar_t* weekday, const wchar_t* day, const wchar_t* time,
-                            const wchar_t* sky, const wchar_t* temperature) const;
+                            const wchar_t* sky, const wchar_t* temperature,
+                            int weatherCode) const;
 
     // Draws the run centred in `box`, on whatever `fill` says it is standing on.
     //
@@ -227,7 +228,7 @@ public:
     // are the reading, and either may be null (no reading yet, or no city and no position).
     void DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity,
                         const wchar_t* sky, const wchar_t* temperature,
-                        const D2D1_COLOR_F& fill);
+                        int weatherCode, const D2D1_COLOR_F& fill);
 
     // The date as its two pieces, because the run sets them apart with a gap and a weight change:
     // "周一" and "10月12日". Filled by Refresh; empty before the first call.

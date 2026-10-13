@@ -219,6 +219,9 @@ struct FrameState {
     //
     // Storage belongs to the caller and must live as long as the frame (see main.cpp's buffers).
     const wchar_t* statusSky = nullptr;
+    // The weather code the sky word and its mark BOTH come from: the line draws a mark per sky (see
+    // DrawSkyMark), and the two must be answers to the same question. -1 means no reading.
+    int statusCode = -1;
     const wchar_t* statusTemperature = nullptr;
     float          statusStripOpacity = 0.0f;
 

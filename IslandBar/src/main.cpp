@@ -5010,6 +5010,15 @@ float musicWavePhase = 0.0f;
                 frame.statusSky = statusSkyText[0] != L'\0' ? statusSkyText : nullptr;
                 frame.statusTemperature =
                     statusTemperatureText[0] != L'\0' ? statusTemperatureText : nullptr;
+                // ... and the CODE the two pieces came from, because the mark before the word is drawn
+                // from it: the line used to draw one cloud-with-rain whatever the sky was.
+                {
+                    double statusTemperatureC = 0.0;
+                    int statusWeatherCode = -1;
+                    frame.statusCode = weather.Get(&statusTemperatureC, &statusWeatherCode)
+                                           ? statusWeatherCode
+                                           : -1;
+                }
 
                 // Read by the next pass's redraw decision, like the icon row's own arrival flags.
                 statusStripAnimating = statusStripOpacity > 0.001f && statusStripOpacity < 0.999f;

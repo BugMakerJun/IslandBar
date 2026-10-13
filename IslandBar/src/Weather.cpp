@@ -377,6 +377,43 @@ const wchar_t* WeatherWordForCode(int code) {
     }
 }
 
+SkyMark SkyMarkForCode(int code) {
+    // The same WMO table as WeatherWordForCode above, and deliberately listed code by code rather than as
+    // ranges: the two tables are read side by side, and a code that is in one and not the other is what the
+    // self-test looks for.
+    switch (code) {
+        case 0:  return SkyMark::Sun;       // clear
+        case 1:  return SkyMark::Sun;       // mainly clear
+        case 2:  return SkyMark::SunCloud;  // partly cloudy
+        case 3:  return SkyMark::Cloud;     // overcast
+        case 45: return SkyMark::Fog;
+        case 48: return SkyMark::Fog;
+        case 51: return SkyMark::Rain;      // drizzle, light
+        case 53: return SkyMark::Rain;      // drizzle, moderate
+        case 55: return SkyMark::Rain;      // drizzle, dense
+        case 56: return SkyMark::Rain;      // freezing drizzle
+        case 57: return SkyMark::Rain;
+        case 61: return SkyMark::Rain;      // rain, slight
+        case 63: return SkyMark::Rain;      // rain, moderate
+        case 65: return SkyMark::Rain;      // rain, heavy
+        case 66: return SkyMark::Rain;      // freezing rain
+        case 67: return SkyMark::Rain;
+        case 71: return SkyMark::Snow;      // snow, slight
+        case 73: return SkyMark::Snow;
+        case 75: return SkyMark::Snow;
+        case 77: return SkyMark::Snow;      // snow grains
+        case 80: return SkyMark::Rain;      // rain showers
+        case 81: return SkyMark::Rain;
+        case 82: return SkyMark::Rain;      // violent rain showers
+        case 85: return SkyMark::Snow;      // snow showers
+        case 86: return SkyMark::Snow;
+        case 95: return SkyMark::Thunder;   // thunderstorm
+        case 96: return SkyMark::Thunder;   // with slight hail
+        case 99: return SkyMark::Thunder;   // with heavy hail
+        default: return SkyMark::None;
+    }
+}
+
 void WeatherLineFor(double temperatureC, int code, wchar_t* out, size_t capacity) {
     if (!out || capacity == 0) return;
     out[0] = L'\0';

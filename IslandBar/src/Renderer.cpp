@@ -708,7 +708,7 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 // NO SURFACE: the pill has already been filled with exactly the colour the strip paints
                 // for itself.
                 text_->DrawStatusLine(d2dContext_, lineBox, frame.contentOpacity, frame.statusSky,
-                                      frame.statusTemperature,
+                                      frame.statusTemperature, frame.statusCode,
                                       D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
             }
 
@@ -751,7 +751,8 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 strip.rect.right += slide;
                 text_->DrawStatusLine(d2dContext_, strip,
                                       frame.statusStripOpacity * frame.contentOpacity,
-                                      frame.statusSky, frame.statusTemperature, frame.pill.fill);
+                                      frame.statusSky, frame.statusTemperature, frame.statusCode,
+                                      frame.pill.fill);
             }
 
             // The card hangs from the control that was pressed, so its LEFT edge is moved to where that

@@ -55,6 +55,26 @@ namespace island {
 // gives: they survive any editor and any code page.
 const wchar_t* WeatherWordForCode(int code);
 
+// What the sky is DOING, for the mark the status line draws before the word.
+//
+// WHY THIS EXISTS: the line drew a cloud with rain under it, always -- whatever the code was -- so a
+// clear night was shown as 晴 beside a rain cloud. Reported as "天气这个图标对应错了 现在显示晴但是下雨的".
+// The word and the mark are two answers to the same question and they were not even being asked the same
+// thing; this makes the mark a function of the same code the word comes from, and the self-test checks the
+// two tables against each other.
+enum class SkyMark : int {
+    None,      // an unknown code: no word, and no mark to contradict it
+    Sun,       // 0, 1
+    SunCloud,  // 2
+    Cloud,     // 3
+    Fog,       // 45, 48
+    Rain,      // 51-57, 61-67, 80-82
+    Snow,      // 71-77, 85, 86
+    Thunder,   // 95-99
+};
+
+SkyMark SkyMarkForCode(int code);
+
 // The reading as it is printed: the word, then the temperature, e.g. "\u6674 21\u00b0".
 //
 // A free function over its inputs so the self-test can check the rounding and the
