@@ -1677,10 +1677,16 @@ float musicWavePhase = 0.0f;
                     // A right click left the shell's panel (and its menu) up, and the shell re-shows its
                     // taskbar while that menu is there -- so the taskbar was left invisible rather than
                     // un-layered, and this is where it is finally put away. See TrayPressFinishCleanup.
-                    island::TrayPressFinishCleanup();
-                    island::LogAndPrint("  native taskbar: put away after a tray right click\n");
-                    std::fflush(stdout);
-                } else if (!island::TrayPressInFlight() && taskbar.EnsureHidden()) {
+                    // ... AND THE SAME CALL RESTORES THE PANEL'S ALPHA, but only once the SHELL has closed
+                    // that panel: while it is still up the call leaves it invisible and stays pending, so
+                    // this runs again on the next tick. The two are separate questions, which is why the
+                    // taskbar is not the only thing asked about here any more.
+                    if (island::TrayPressFinishCleanup()) {
+                        island::LogAndPrint("  native taskbar: put away after a tray right click\n");
+                        std::fflush(stdout);
+                    }
+                }
+                if (!island::TrayPressInFlight() && taskbar.EnsureHidden()) {
                     island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
                 }

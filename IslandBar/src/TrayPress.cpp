@@ -371,14 +371,14 @@ IUIAutomationElement* FindOverflowFlyout(IUIAutomation* automation) {
 bool TrayPressInFlight() { return g_pressInFlight.load(); }
 
 bool TrayPressCleanupPending() { return g_cleanupTaskbar.load() != nullptr; }
-
-void TrayPressFinishCleanup() {
+bool TrayPressFinishCleanup() {
     const HWND taskbar = g_cleanupTaskbar.exchange(nullptr);
-    if (!taskbar) return;
+    if (!taskbar) return false;
     const LONG_PTR style = g_cleanupStyle.load();
     ShowWindow(taskbar, SW_HIDE);
     SetWindowLongPtrW(taskbar, GWL_EXSTYLE, style);
     SetLayeredWindowAttributes(taskbar, 0, 255, LWA_ALPHA);
+    return true;
 }
 
 TrayStage::~TrayStage() { Reset(); }
@@ -419,6 +419,14 @@ void TrayStage::Reset() {
         // opens it by hand.
         SetWindowPos(flyoutWindow_, nullptr, flyoutHome_.left, flyoutHome_.top, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // The alpha goes back, in both kinds of press: after a LEFT press the panel is on its way out (the
+        // chevron was pressed just above), and after a RIGHT press it was already put back for the menu to
+        // live on (see PressOnRect) and the shell owns it from there.
+        SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
+        if (flyoutLayered_) {
+            SetWindowLongPtrW(flyoutWindow_, GWL_EXSTYLE, flyoutStyle_);
+        }
+        flyoutLayered_ = false;
         flyoutWindow_ = nullptr;
     }
     if (taskbar_) {
@@ -447,6 +455,33 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
         if (note && noteCapacity > 0) wcsncpy_s(note, noteCapacity, text, _TRUNCATE);
     };
     say(L"");
+
+    // Makes the overflow panel invisible. Called for the window the instant its class name answers, and
+    // again every time UI Automation sees the element while it slides, and once more after it has settled:
+    // see the note where it is first used for why the repetition is the whole trick.
+    const auto hideWindow = [this](HWND window) {
+        if (!window) return;
+        if (window != flyoutWindow_) {
+            flyoutWindow_ = window;
+            flyoutStyle_ = GetWindowLongPtrW(window, GWL_EXSTYLE);
+            if ((flyoutStyle_ & WS_EX_LAYERED) == 0) {
+                SetWindowLongPtrW(window, GWL_EXSTYLE, flyoutStyle_ | WS_EX_LAYERED);
+                flyoutLayered_ = true;
+            }
+        }
+        SetLayeredWindowAttributes(window, 0, 0, LWA_ALPHA);
+    };
+    const auto hidePanel = [&](IUIAutomationElement* element) {
+        if (!element) return;
+        if (flyoutWindow_) {
+            hideWindow(flyoutWindow_);
+            return;
+        }
+        UIA_HWND native = nullptr;
+        if (SUCCEEDED(element->get_CurrentNativeWindowHandle(&native)) && native) {
+            hideWindow(reinterpret_cast<HWND>(native));
+        }
+    };
 
     taskbar_ = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (!taskbar_) {
@@ -509,11 +544,31 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     if (!flyout) {
         InvokeElement(chevron);
         weOpenedFlyout_ = true;
-        // 5 ms steps: the flyout is visible from the moment the shell paints it until this loop catches it
-        // and makes it invisible, and that interval is the only part of the sequence a user could see.
-        for (int attempt = 0; attempt < 300 && !flyout; ++attempt) {
-            Sleep(5);
-            flyout = FindOverflowFlyout(automation);
+        // TWO QUESTIONS PER PASS, because they are answered at very different speeds:
+        //
+        //   * "does the panel's WINDOW exist yet" -- a class-name lookup, which sees it the instant the
+        //     shell creates it (measured with the class-name probe above: the window does not exist while
+        //     the panel is closed, so it is created when the chevron is pressed);
+        //   * "has UI AUTOMATION published it" -- which is where the icon rectangles come from, and which
+        //     lags the window by about a tenth of a second. Measured: with only the UIA path hiding the
+        //     panel, it was still photographed on screen for ~100 ms at 235 ms after the press began
+        //     (WindowFromPoint at that moment named `TopLevelWindowForOverflowXamlIsland`); the pixels are
+        //     painted before the element shows up.
+        //
+        // So the window is hidden the moment the first question says yes (every 1 ms), and re-hidden every
+        // time the second one does -- because the shell RE-PAINTS and re-shows the panel while it slides,
+        // which is what undid the first attempt at this, measured years of this file ago and written down
+        // then as "alpha 0 does nothing to this window". Applied repeatedly it holds; the settle below
+        // applies it once more when the shell has stopped touching the window at all.
+        for (int attempt = 0; attempt < 400 && !flyout; ++attempt) {
+            Sleep(1);
+            HWND panelWindow =
+                FindWindowExW(nullptr, nullptr, L"TopLevelWindowForOverflowXamlIsland", nullptr);
+            if (panelWindow) hideWindow(panelWindow);
+            if ((attempt % 5) == 0) {
+                flyout = FindOverflowFlyout(automation);
+                if (flyout) hidePanel(flyout);
+            }
         }
     }
     if (!flyout) {
@@ -522,24 +577,23 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     }
     flyoutElement_ = flyout;
 
-    // THE PANEL ITSELF CANNOT BE HIDDEN, and that is measured rather than assumed:
+    // THE PANEL IS MADE INVISIBLE, and the history of this is worth keeping because the conclusion drawn
+    // from it the first time was wrong:
     //
-    //   * `WS_EX_LAYERED` + alpha 0 works on the TASKBAR (its band photographs as wallpaper, twice) and
-    //     does nothing to this window -- it stays fully painted, because it is a XAML island drawn through
-    //     DirectComposition, which ignores the layered attributes;
-    //   * moving its window moves the ICONS' rectangles with it (-1632,89 for the WeChat icon, 4000 px to
-    //     the left) and leaves the pixels on the screen where they were -- so the panel is painted by some
-    //     other window of the shell's, which probe-tray-panel-windows.ps1 went looking for among every
-    //     window overlapping that rectangle.
+    //   * `WS_EX_LAYERED` + alpha 0 applied ONCE, as soon as the window appeared, did nothing -- and the
+    //     reason is that the shell RE-PAINTS and re-shows the panel while it slides into place, so the
+    //     attribute was overwritten before it could be seen. What was written down then ("it stays fully
+    //     painted, because it is a XAML island drawn through DirectComposition, which ignores the layered
+    //     attributes") described the measurement correctly and the cause wrongly;
+    //   * applied AGAIN on every pass, and once more after the panel has settled, it HOLDS. Measured with
+    //     scripts/probe-tray-panel-child-windows.ps1: the panel's own rectangle reads 70 (dark, painted)
+    //     while it is open, 70 again 800 ms later with nothing done to it, and 193 -- the wallpaper -- the
+    //     moment the alpha goes on, with the shell still answering UI Automation for the panel in that
+    //     state ("panel alive: True"), which is what the press needs.
     //
-    // So the panel is visible for the length of a press -- a few hundred milliseconds, and the press is
-    // the user's own action -- and what this stage does is keep that as short as the shell allows: the
-    // panel is opened, the button is pressed, and the chevron is pressed again to put it away (see Reset,
-    // which is also the only thing that takes it down at all).
-    UIA_HWND native = nullptr;
-    if (SUCCEEDED(flyout->get_CurrentNativeWindowHandle(&native)) && native) {
-        flyoutWindow_ = reinterpret_cast<HWND>(native);
-    }
+    // The child window that paints the island (`Windows.UI.Composition.DesktopWindowContentBridge`, listed
+    // by that probe) is not touched: the parent's alpha is what does it.
+    hidePanel(flyout);
     LogAndPrint("  tray stage: taskbar %p shown invisibly, overflow %p (%ls)\n",
                 reinterpret_cast<void*>(taskbar_), reinterpret_cast<void*>(flyoutWindow_),
                 flyoutWindow_ ? L"found" : L"not found by UI Automation");
@@ -566,6 +620,29 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     // Already the panel's NEW place: it was moved off the screen before this loop started, and the icons
     // move with their window.
     flyoutRect_ = current;
+
+    // ... AND NOW THE PANEL CAN BE MADE INVISIBLE -- after it has settled, which is the whole difference.
+    //
+    // This was tried as soon as the window appeared and then written down as impossible: "WS_EX_LAYERED +
+    // alpha 0 ... does nothing to this window -- it stays fully painted, because it is a XAML island drawn
+    // through DirectComposition, which ignores the layered attributes". The measurement was right and the
+    // conclusion was wrong: the shell RE-PAINTS and re-shows the panel while it slides into place, so an
+    // alpha of 0 applied during the slide is overwritten before anybody could see its effect. Applied after
+    // the settle -- the same three stable reads the rectangle below needs -- it holds.
+    //
+    // Measured with scripts/probe-tray-panel-child-windows.ps1, which opens the panel itself, lets it
+    // settle, and reads the panel's own rectangle out of a screen grab: 70 (the panel, painted) while it is
+    // open and 70 again 800 ms later with nothing done to it, then 193 -- the wallpaper -- the moment the
+    // alpha goes on, while the shell still answers UI Automation for it ("panel alive: True"), which is
+    // exactly what the press needs. The child window that paints the island is listed by that probe too
+    // (`Windows.UI.Composition.DesktopWindowContentBridge`); the parent's alpha is what does it.
+    if (flyoutWindow_) {
+        // Once more, now that the shell has stopped touching it: this is the one that is guaranteed to
+        // survive, and the ones during the slide only shorten the part a user could have seen.
+        hidePanel(flyout);
+        LogAndPrint("  tray stage: the overflow panel was made invisible after it settled (%p, %ls added)\n",
+                    reinterpret_cast<void*>(flyoutWindow_), flyoutLayered_ ? L"layered bit" : L"no");
+    }
     return true;
 }
 
@@ -650,6 +727,18 @@ TrayPressResult TrayStage::PressOnRect(const RECT& rect, bool press, bool rightC
         // ICON'S OWN POSITION, which is what a user's right click is -- so the pointer is moved there,
         // clicked, and put straight back where it was found, and the only thing that stays on screen is the
         // menu that was asked for.
+        //
+        // ... AND THE PANEL HAS TO COME BACK FOR IT. That menu is drawn INSIDE the panel's own surface --
+        // measured when this feature was built ("closing the panel dismisses the menu with it"), and
+        // measured again from the other side while the panel was being hidden for left presses: a poll for
+        // `#32768` (the class of a Win32 popup menu) across a whole right press found NOTHING, and no menu
+        // appeared until the panel's alpha was put back. The invisibility that makes a left press clean is
+        // therefore undone here on purpose: the user asked for this menu, and it comes with its surface.
+        if (flyoutWindow_) {
+            SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
+            LogAndPrint("  tray press: the panel was shown again for the menu that lives on it\n");
+            fflush(stdout);
+        }
         POINT saved = {};
         if (!GetCursorPos(&saved)) {
             result = TrayPressResult::Refused;
@@ -663,6 +752,14 @@ TrayPressResult TrayStage::PressOnRect(const RECT& rect, bool press, bool rightC
             mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
             Sleep(30);
             mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            // ... AND INVISIBLE AGAIN THE MOMENT THE CLICK IS DELIVERED. The panel only had to be real for
+            // the instant it took to route that click; the shell takes it down as soon as the application's
+            // menu is up (measured: the panel's window is gone by the time the menu is on screen), so from
+            // here it is either closing or closed -- and hiding it now keeps the icon grid off the screen
+            // for the part of that interval a user could otherwise watch.
+            if (flyoutWindow_) {
+                SetLayeredWindowAttributes(flyoutWindow_, 0, 0, LWA_ALPHA);
+            }
             // Back at once: the menu belongs to the application and does not follow the pointer, so this
             // does not close it -- and the user's hand is where they left it.
             Sleep(60);

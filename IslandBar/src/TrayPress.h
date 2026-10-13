@@ -126,7 +126,9 @@ bool TrayPressInFlight();
 // and only then is the layering removed and the taskbar hidden again. Doing it at the end of the press
 // instead was measured: the shell brought the taskbar back, visible, seconds after the menu opened.
 bool TrayPressCleanupPending();
-void TrayPressFinishCleanup();
+// Returns true when the TASKBAR was put away (the panel's own restore is separate and may need several
+// rounds: it waits for the shell to close the panel the application's menu is attached to).
+bool TrayPressFinishCleanup();
 
 // THE SHELL'S TRAY, LAID OUT AND OPEN, INVISIBLY -- everything a press needs that is not the icon itself.
 //
@@ -168,6 +170,10 @@ private:
     bool layered_ = false;
     LONG_PTR style_ = 0;
     HWND flyoutWindow_ = nullptr;
+    // The overflow panel is made invisible ONCE IT HAS SETTLED (see Begin), and these are what is needed to
+    // put it back: its extended style, and whether this stage added the layered bit itself.
+    LONG_PTR flyoutStyle_ = 0;
+    bool flyoutLayered_ = false;
     // Where the shell had the panel before this stage moved it out of sight, so it can be put back.
     RECT flyoutHome_ = {};
     // IUIAutomation / IUIAutomationElement, kept as void* so this header does not have to drag in the
