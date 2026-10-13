@@ -29,6 +29,12 @@
 > * 2026-10-14 凌晨（第八批）8.94–8.95：状态行**去掉两道竖线**、日期从 0.62 提到 0.72（他截图说「太丑了」）；**两行时钟试做后按他的要求整体撤回**（触发了"通知卡片来源图标画不出来"的回归，见 8.95 末段）；随后做我列的三件：**表面光照**（顶部高光渐变 + 底部阴影 + 有方向的内沿线光，胶囊与卡片共用）、**阴影 6 段合 1 个画刷**、删掉 `SetWifiRadioOn` 死代码、**滑条手柄随指针放大**。他回「先把现在的代码上传上去吧」→ 推送 `93fe8c8` / `149563d`。
 > * 2026-10-14 凌晨（第九批）8.96：**托盘卡片与其它卡片统一材质**（`DrawTrayPage` 改为调用 `FillCardSurface`，此前它自己画了一份、所以"看着不协调"）+ 格子**长进空间**（上限 68 DIP，图标按一半缩放）+ 格子底色改为**比卡面暗**（图标自带的近黑底不再露成黑方块）。他回「代码上传吧」→ 推送 `9ff5137`。
 >
+> * 2026-10-14 凌晨（第十批）8.97：**发行包 1.3**。用户：「**给我把现在这版生成可以安装的安装包 按正式安装的方式**」。
+> 8.69 那个安装器是 **Debug** 里出的（能装、在别人机器上起不来），这次从 **Release** 出包、
+> 版本号 1.2 → 1.3（三处资源）、新增 `scripts/package-release.ps1`（出包 + `dumpbin` 依赖自检）、
+> 并在本机**按正式方式装了一遍**（Downloads 里双击的等价路径，退出码 0，进程/快捷方式/注册表/`Shell_TrayWnd` 全核对过）。
+> 附带一个真因：出包脚本里"检查静默跳过"是**我自己把路径打错了一个反斜杠**，详见 8.97。
+>
 > 约定本身不变 —— **下一次改动照样先本地、等他确认**。
 
 > **版本命名（2026-10-12 用户定）**：
@@ -5370,6 +5376,101 @@ GSMTC sessions: 1
 | **"栏没显示"被直接当成"栏的 bug"** | 会话是 0 —— 源头什么都没有 | 报"没显示"**先证明源存在**（`gsmtc_probe` + 日志里有没有 `state: music-strip`），再怀疑自己的代码 |
 | **二进制里有那个 API 的字符串** | 只说明"它能做"，不说明"它在做" | 能力的证据是**运行时测量**（会话列表），不是 `strings` |
 | **沙箱里的答案可能只是"看不见"** | 本沙箱 `Get-Process` 的 `MainWindowHandle` 全 0、EnumWindows 一个都不返回，而沙箱外同一个工具能看到 325 个窗口 | "系统里有什么"这类结论，**沙箱内外各测一次**，两次一致才敢下结论 |
+
+### 8.97 **发行包 1.3：Debug 的安装器换成 Release 的，并把出包固化成一个脚本** ✅（已在本机按正式方式安装）
+
+用户：「**给我把现在这版生成可以安装的安装包 按正式安装的方式**」。
+
+#### 交付物
+
+| 位置 | 说明 |
+|---|---|
+| `C:\PROJECT\Taskbar\IslandBar\dist\IslandBarSetup-1.3.exe` | 仓库里的发行件（`dist/` 已在 `.gitignore`） |
+| `C:\Users\18340\Downloads\IslandBarSetup-1.3.exe` | 本机这一份，**从项目树外运行**（8.69 的降权教训） |
+| 大小 / SHA256 | 2,548,224 字节（2.43 MB） / `A763BD46516339E854599297D2751F260AC291223EBDF49F4CA8B2547E21E6BC` |
+
+单文件：安装器把 `island_bar.exe` 作为资源带在自己身上（`setup/payload.rc.in`），装**当前用户**、**不需要管理员**。
+
+#### 和 8.69 那一版的区别：**Debug → Release**
+
+8.69 的包是 4,235,776 字节的 Debug 程序打出来的：本机能装，**别人机器上起不来**
+（导入 `MSVCP140D/VCRUNTIME140D/ucrtbased` —— 不可分发的调试运行库）。这次：
+
+| | `island_bar.exe` | `IslandBarSetup.exe` | 导入的 DLL |
+|---|---|---|---|
+| 8.69（Debug） | 4,235,776 | 2,435,584 | 上面那三个 + `MSVCP140D` |
+| **8.97（Release）** | **1,803,776** | **2,548,224** | 安装器 5 个（ADVAPI32/ole32/SHELL32/USER32/KERNEL32）；栏是 d2d1/d3d11/DWrite/dcomp/dwmapi/WINHTTP/wlanapi… **全是 Windows 自带的** |
+
+`dumpbin /dependents` 两个 exe 都查过，**一个 MSVC/ucrt 都没有**。安装包比 Debug 那份**大** 112 KB
+（里面的 `island_bar.exe` 是新的、链接布局不同），**大小不是判据，依赖表才是**。
+
+#### 版本号 1.2 → 1.3（写在三处资源里，没有第四处）
+
+`setup/Setup.cpp` 的 `kVersion`、`setup/payload.rc.in`、`src/island_bar.rc`。理由：线上（本机注册表里那份）
+1.2 是 10-13 的旧代码，同名会让"设置 → 应用"里两版无法区分。装完核对：
+程序属性 = `IslandBar 1.3 / 1.3.0.0`；`HKCU\...\Uninstall\IslandBar` 的 `DisplayVersion = 1.3`。
+
+#### 新增 `scripts/package-release.ps1`：出包这件事固化下来
+
+一条命令做完：build（默认 Release）→ 从**安装器自己的版本资源**读版本 → 复制成
+`dist\IslandBarSetup-<版本>.exe` → 打印大小/SHA256 → `dumpbin /dependents` 检查**没有 MSVC 运行库**
+（有就 `exit 1`）。版本号只在上面那三处，脚本里**不写第四份**（会悄悄过期而不报错）。
+
+#### 本机"正式安装"的实测（就是用户会做的动作：从 Downloads 运行）
+
+```
+IslandBar setup 1.3 -- C:\Users\18340\Downloads\IslandBarSetup-1.3.exe
+mode: install / directory: C:\Users\18340\IslandBar
+program written: C:\Users\18340\IslandBar\island_bar.exe (1803776 bytes)
+uninstaller written: C:\Users\18340\IslandBar\IslandBarUninstall.exe
+shortcut written: C:\Users\18340\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\IslandBar.lnk
+shortcut written: ...\Programs\IslandBar (safe mode).lnk
+shortcut written: ...\Programs\Startup\IslandBar.lnk
+registered under Settings > Apps (HKEY_CURRENT_USER)
+the bar has been started
+```
+
+退出码 0（`/silent`，日志 `%TEMP%\IslandBarSetup.log`）。随后逐项核对：
+
+| 检查 | 结果 |
+|---|---|
+| 进程 | `island_bar.exe` pid 24928，映像 `C:\Users\18340\IslandBar\island_bar.exe`（1,803,776 字节） |
+| 版本资源 | `IslandBar 1.3` / `1.3.0.0` |
+| 原生任务栏 | `Shell_TrayWnd` **visible=False**（栏接管了） |
+| 快捷方式 | 开始菜单 2 个 + 启动 1 个，都存在 |
+| 注册表 | `DisplayVersion=1.3`、`InstallSource=<Downloads 那份>`、`QuietUninstallString` 带 `/silent` |
+| 栏日志 | `[04:52:56] theme: 玻璃`、`native taskbar: hidden`、`integrity: same as the shell's` |
+| 画面 | `captures/install-1.3-bar.png`（胶囊：`周三 10月14日 04:53 ☀ 晴 6°`，两侧按钮/托盘图标在） |
+| 自检 | Release `--self-test`：**954 项 0 失败** |
+
+#### 真因：出包脚本里"检查静默跳过" —— 我把路径打错了一个反斜杠
+
+新脚本第一次跑出的是 `imports : NOT CHECKED (dumpbin not found)`，而"同一段代码"单独跑却正常。
+追这条花了不少时间，最后**用断点把变量当场读出来**（`Set-PSBreakpoint -Action { Get-Variable -Scope 1 }`）：
+
+```
+up=[C:\Program Files (x86)\Microsoft\Visual Studio\Installer\vswhere.exe] len=68
+```
+
+**"Microsoft" 与 "Visual" 之间多了一个反斜杠** —— 那行字面量原本写的是
+`"...\Microsoft\Visual Studio\Installer\vswhere.exe"`。`Test-Path` 说"文件不在"是**对的**；
+是我把"查不到"当成了环境问题。前面所有"环境/权限/时序"的猜测都作废。
+
+| 坑 | 真相 | 规则 |
+|---|---|---|
+| **"Test-Path 对存在的文件回 false"** | 路径里多一个 `\`（`len` 68 而不是 67） | 自检类代码**不许沉默**：失败要打出"试过哪里"；更要紧的是——**读变量的真实值，不要读"应该是它"的那行源码** |
+| **"同一段代码单独跑却正常"** | 单独跑那次是我**重打过**的（打对了）；原文件才是错的那一份 | "复现不了"先怀疑"两次的输入不是同一个" |
+| **对着 trace 一眼就下了"环境作祟"的结论** | trace 只给了"条件为假"，没给值 | 先做**能直接读出事实**的实验（断点读值 / 打印值），再谈假设 |
+
+现在的实现同时问两个来源（`[Environment]::GetFolderPath('ProgramFilesX86')` 与 `ProgramFiles(x86)`）、
+两个 API（`Test-Path` + `[System.IO.File]::Exists`），失败时把尝试过的路径打印出来。
+
+#### 教训
+
+* **发行件的判据是依赖表**，不是体积、不是"能装上"：`dumpbin /dependents` 里出现 `MSVCP*/VCRUNTIME*/ucrtbased` 就是废包。
+* **版本号要么不说，要么只有一处定义**：三处资源（两个 exe 的属性 + 卸载项显示值）都由同一轮改动一起改，
+  脚本反过来去**读**它，不再复制。
+* **交付物要从项目树外运行验证**（8.69 的降权、本次的 Downloads 路径）——用户双击的地方就是那里。
 
 ### 8.96 **托盘卡片"看着不协调"：它没调用画卡片材质的那一个函数，而且格子小到卡片半空** ✅
 

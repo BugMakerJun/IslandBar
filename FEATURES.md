@@ -708,3 +708,22 @@ Wi-Fi 早就是真开关（WLAN 的 radio-state opcode）；这一轮把另外�
 | 15 | **每帧资源**：阴影 6 段合为 1 个画刷（每帧少 10 次设备调用）；`SetWifiRadioOn`（约 105 行死代码）删除 | 开 | **A** | 自检 954 项 0 失败；命名空间末尾留一段"它在哪失败过"的记录 |
 | 16 | **托盘页与其它卡片统一材质 + 格子铺满**（HANDOFF 8.96） | 开 | **A** | `DrawTrayPage` 改为调用 `FillCardSurface`（卡片材质唯一实现，含光照/边缘/颗粒/阴影）；`TrayPageFor` 新增"长进空间"（上限 68 DIP），图标按格子一半缩放（22–34）；格子底色改为**比卡面暗**（图标自带的近黑底融进去）。截图 `captures/tray-page.png`；自检 954 项 0 失败（托盘几何断言全过） |
 * 贴边（Win+←）与桌面图标的可用区域也一起变到屏幕顶端 —— 与"最大化顶满"是同一件事。
+
+---
+
+## 二十九、发行包（2026-10-14，HANDOFF 8.97）
+
+用户：「**给我把现在这版生成可以安装的安装包 按正式安装的方式**」。安装器本身在 8.69 就有了
+（`IslandBarSetup.exe`，单文件、自带 `island_bar.exe`、装当前用户、不需要管理员），这一轮是把它
+**从 Debug 换成 Release、给出可复制的出包步骤、并在本机按正式方式装了一遍**。
+
+| # | 行为 | 默认 | 证据等级 | 证据 |
+|---|---|---|---|---|
+| 1 | **发行件从 Release 出**：`dist\IslandBarSetup-1.3.exe`（2,548,224 字节，SHA256 `A763BD46…E21E6BC`），里面是 1,803,776 字节的 Release 程序 | 开 | **A** | `dumpbin /dependents`：安装器只有 5 个系统 DLL（ADVAPI32/ole32/SHELL32/USER32/KERNEL32），栏只有 Windows 自带的（d2d1/d3d11/DWrite/dcomp/dwmapi/WINHTTP/wlanapi…），**没有 `MSVCP*/VCRUNTIME*/ucrtbased`** —— 这一条正是 8.69 那版 Debug 包的死因（装得上、在别人机器上起不来） |
+| 2 | **版本号 1.2 → 1.3**，只写三处资源：`setup/Setup.cpp`、`setup/payload.rc.in`、`src/island_bar.rc` | —— | **A** | 装完 `island_bar.exe` 属性 = `IslandBar 1.3 / 1.3.0.0`；`HKCU\...\Uninstall\IslandBar\DisplayVersion = 1.3` |
+| 3 | **出包固化**：`scripts/package-release.ps1`（build → 读资源里的版本 → 复制到 `dist\` → 打印大小/SHA256 → 依赖自检，有 MSVC 运行库就 `exit 1`） | —— | **A** | 实跑输出：`imports : 5 DLL(s), none of the MSVC runtime`；`check-scripts.ps1` 57 个脚本 0 问题；版本号在脚本里**不存在第四份**（去读 exe 的属性） |
+| 4 | **正式安装（每用户）**：程序 + 卸载器 + 开始菜单 2 个快捷方式（`IslandBar.lnk` / `IslandBar (safe mode).lnk`，后者带 `--keep-taskbar`）+ 启动文件夹 1 个 + `设置→应用` 里的卸载项 | 开机自启 **开** | **A** | 从 `Downloads` 运行 1.3 包，退出码 0，日志逐行（见 HANDOFF 8.97）；随后核对进程映像/大小、三个快捷方式、两个注册表键、`Shell_TrayWnd` **visible=False**、截图 `captures/install-1.3-bar.png`；Release 自检 **954 项 0 失败** |
+| 5 | **卸载**（`/uninstall`，设置保留；`/remove-settings` 连设置一起，固定区进回收站） | —— | **A（8.69 实测，本轮未复测）** | 8.69 的实测表：两个快捷方式、两个注册表键、`island_bar.exe` 都没了，且**别的目录里正在跑的栏不受影响**（按映像路径匹配） |
+
+**边界**：包只做**每用户**安装（`%USERPROFILE%\IslandBar`，不碰 `Program Files`，所以没有 UAC）；
+没有开始菜单的"卸载"入口之外的维护界面（`NoModify/NoRepair`）；未签名 —— SmartScreen 会提示"未知发布者"。

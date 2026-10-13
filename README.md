@@ -57,6 +57,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Con
 然后：按左舱的 **chevron（^）** 打开快捷设置面板，按 **开始**，或点任意**应用图标**。
 点灵动岛或面板外的任何地方，面板会收起。
 
+## 装一个发行包
+
+`IslandBarSetup.exe` 是**一个文件**（安装器把栏作为资源带在自己身上），双击即装：
+
+* 装**当前用户**、**不需要管理员**（只写 `%USERPROFILE%\IslandBar` 和 `HKCU`）；
+* 开始菜单两个入口（`IslandBar` / `IslandBar (safe mode)`，后者不隐藏系统任务栏）+ 开机自启 +
+  `设置 → 应用` 里的卸载项；
+* 运行库是**静态链接**的（`/MT`），所以目标机器只要有 Windows 11 就行。
+
+出包：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\IslandBar\scripts\package-release.ps1
+```
+
+它会构建 Release、按**安装器自己的版本资源**给文件命名（`dist\IslandBarSetup-<版本>.exe`），
+并用 `dumpbin /dependents` 确认包里**没有** MSVC 运行库（有就报错退出 —— 那种包装得上、在别的电脑上起不来）。
+
 ## 自检
 
 `island_bar.exe --self-test` 运行**数百项运行时断言**，覆盖：显示器度量、圆角矩形命中测试、

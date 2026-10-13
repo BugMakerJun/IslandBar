@@ -1,6 +1,6 @@
 # IslandBar 手工自测清单
 
-> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 929 项）覆盖几何、解析、像素，
+> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 954 项）覆盖几何、解析、像素，
 > 但"鼠标点下去到底发生什么"必须在真人手里过一遍。
 > **已脱敏**：命令里的 `$env:USERPROFILE` 就是你的用户目录（本文档按 PowerShell 写，所以用这个变量而不是 `%USERPROFILE%`）。
 >
@@ -9,8 +9,9 @@
 > 想边点边看：
 > `Get-Content $env:USERPROFILE\IslandBar\island_bar.log -Wait -Tail 40`
 >
-> 启动方式：双击 `$env:USERPROFILE\IslandBar\IslandBar (replace taskbar).lnk`
-> （replace = 隐藏原生任务栏；keep = 两个都留着，调试用）。
+> 启动方式：双击开始菜单里的 `IslandBar`（= 隐藏原生任务栏）；想两个任务栏都留着就双击
+> `IslandBar (safe mode)`（带 `--keep-taskbar`，调试用）。两个快捷方式都在
+> `$env:APPDATA\Microsoft\Windows\Start Menu\Programs\` 下。
 
 ---
 
@@ -372,9 +373,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar
 # 最近 20 行日志
 Get-Content $env:USERPROFILE\IslandBar\island_bar.log -Tail 20
 
-# 全部自检（929 项：几何 / 解析 / 像素）
+# 全部自检（954 项：几何 / 解析 / 像素）
 & "$env:USERPROFILE\IslandBar\island_bar.exe" --self-test
 
 # Windows 侧最新的真通知（这条通道的调试口）
 & "$env:USERPROFILE\IslandBar\island_bar.exe" --toast-dump 5
 ```
+
+---
+
+## 5e. 安装包：装一遍 / 卸一遍（2026-10-14，HANDOFF 8.97）
+
+**包在哪**：`C:\PROJECT\Taskbar\IslandBar\dist\IslandBarSetup-1.3.exe`
+（本机还有一份在 `Downloads`，那正是"用户会双击的位置"）。
+
+**装**：双击它。不需要管理员（只写你自己的目录和 `HKCU`），结束时会弹一句"装好了"。
+
+**应该看到**（装完立刻）：
+
+* 系统任务栏消失，顶部出现灵动岛（如果栏本来就在跑，它会先被关掉、再换成装好的那一份）；
+* 开始菜单里有 `IslandBar` 和 `IslandBar (safe mode)`；
+* `设置 → 应用` 里有 `IslandBar 1.3`，可以在这里卸载；
+* **下次登录它会自己起来**（启动文件夹里有它的快捷方式）。
+
+**日志**：`%TEMP%\IslandBarSetup.log`（那个目录写不进去时会落在安装程序旁边）。最后两行应该是
+`registered under Settings > Apps (HKEY_CURRENT_USER)` 和 `the bar has been started`。
+
+**卸**：`设置 → 应用 → IslandBar → 卸载`。**你的设置和固定区会被保留**
+（`weather.txt`、`start_folder.txt`、`Start\` 里那些快捷方式）。想连它们一起清掉，手动跑
+`& "$env:USERPROFILE\IslandBar\IslandBarUninstall.exe" /uninstall /remove-settings`
+—— 固定区是**进回收站**，不是永久删除。
+
+**卸完应该**：任务栏回来了、开始菜单两个快捷方式没了、`设置 → 应用` 里也看不到 IslandBar 了。
+
+**装到别的电脑上**：那台机器只要能跑 Windows 11 就够了（运行库是静态链接进 exe 的）。
+第一次运行会被 SmartScreen 拦一下（包没签名）：点 `更多信息 → 仍要运行`。
+拿不准就先双击 `IslandBar (safe mode)` —— 它**不隐藏**系统任务栏。
