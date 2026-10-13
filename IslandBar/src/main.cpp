@@ -2306,6 +2306,7 @@ float musicWavePhase = 0.0f;
                         std::fflush(stdout);
                         RunTrayMenuAction(trayIcons, taskWindows, trayMenuCell, action);
                         if (action == island::TrayMenuAction::Open ||
+                            action == island::TrayMenuAction::CloseWindow ||
                             action == island::TrayMenuAction::ApplicationMenu) {
                             // The card goes with the press, which is what the shell does with its own
                             // flyout: the application's window or menu is what the user is waiting for.
@@ -5214,6 +5215,40 @@ void RunTrayMenuAction(const island::TrayIcons& icons, island::WindowList& windo
                                                    SW_SHOWNORMAL);
             island::LogAndPrint(L"  tray menu: opened the folder of '%ls' (result %lld)\n", path,
                                 static_cast<long long>(reinterpret_cast<INT_PTR>(result)));
+            std::fflush(stdout);
+            break;
+        }
+        case island::TrayMenuAction::CloseWindow: {
+            // "关闭" on OUR side can only mean "ask it to close", and that is `WM_CLOSE`: the application
+            // gets the request, saves what it wants to save, and may put up its own prompt. Terminating the
+            // process would be the other way to make a window go away, and it is not offered here for the
+            // obvious reason -- it takes the decision out of the application's hands.
+            //
+            // POSTED, not sent: `SendMessage` would sit in this thread while the application runs its own
+            // modal prompt (an unsaved-document dialog), and the bar draws on this thread.
+            //
+            // An application that lives in the tray closes its window INTO the tray rather than quitting --
+            // WeChat and QQ音乐 both do -- so this closes the window and does not end the process. Its own
+            // 退出 is still the last entry of this menu, and that is stated in the handover rather than
+            // papered over with a label like "退出" that this entry cannot honour.
+            HWND first = WindowOfImageInList(windows, BaseNameOf(path));
+            int closed = 0;
+            if (first) {
+                for (int i = 0; i < windows.Count(); ++i) {
+                    const island::TaskEntry& entry = windows.At(i);
+                    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                                 entry.processId);
+                    if (!process) continue;
+                    wchar_t image[MAX_PATH] = {};
+                    DWORD length = MAX_PATH;
+                    const bool havePath = QueryFullProcessImageNameW(process, 0, image, &length) != FALSE;
+                    CloseHandle(process);
+                    if (!havePath || !SameImage(BaseNameOf(image), BaseNameOf(path))) continue;
+                    if (PostMessageW(entry.handle, WM_CLOSE, 0, 0)) ++closed;
+                }
+            }
+            island::LogAndPrint(L"  tray menu: asked '%ls' to close %d window(s)\n", BaseNameOf(path),
+                                closed);
             std::fflush(stdout);
             break;
         }

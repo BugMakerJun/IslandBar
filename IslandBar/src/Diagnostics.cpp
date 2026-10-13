@@ -6817,10 +6817,11 @@ void TestMusicCardLayout() {
                                       ? static_cast<int>(all[withEverything - 1])
                                       : -1,
                                   withNothing, withPath);
-                    Check(withEverything == 4 && all[0] == TrayMenuAction::Open &&
+                    Check(withEverything == 5 && all[0] == TrayMenuAction::Open &&
                               all[1] == TrayMenuAction::ActivateWindow &&
                               all[2] == TrayMenuAction::OpenLocation &&
-                              all[3] == TrayMenuAction::ApplicationMenu &&
+                              all[3] == TrayMenuAction::CloseWindow &&
+                              all[4] == TrayMenuAction::ApplicationMenu &&
                               withNothing == 2 && bare[0] == TrayMenuAction::Open &&
                               bare[1] == TrayMenuAction::ApplicationMenu && withPath == 3,
                           L"the menu offers only what can be done, and the application's own menu last",

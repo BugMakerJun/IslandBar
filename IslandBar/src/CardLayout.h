@@ -161,6 +161,7 @@ enum class TrayMenuAction : int {
     Open,             // the icon's own default action -- exactly what a left click on it does
     ActivateWindow,   // bring a window of that application to the front
     OpenLocation,     // the folder the executable lives in, with the file selected
+    CloseWindow,      // ask the application to close its window (WM_CLOSE: graceful, it may prompt)
     ApplicationMenu,  // the application's own menu, through the shell (slow, and at the icon's corner)
 };
 
@@ -170,6 +171,7 @@ inline const wchar_t* TrayMenuLabel(TrayMenuAction action) {
         case TrayMenuAction::Open:            return L"打开";
         case TrayMenuAction::ActivateWindow:  return L"显示窗口";
         case TrayMenuAction::OpenLocation:    return L"打开文件位置";
+        case TrayMenuAction::CloseWindow:     return L"关闭窗口";
         case TrayMenuAction::ApplicationMenu: return L"应用自己的菜单…";
     }
     return L"";
@@ -193,6 +195,7 @@ inline int TrayMenuEntriesFor(const TrayMenuFacts& facts, TrayMenuAction* out, i
     add(TrayMenuAction::Open);
     if (facts.hasWindow) add(TrayMenuAction::ActivateWindow);
     if (facts.hasExePath) add(TrayMenuAction::OpenLocation);
+    if (facts.hasWindow) add(TrayMenuAction::CloseWindow);
     add(TrayMenuAction::ApplicationMenu);
     return count;
 }
