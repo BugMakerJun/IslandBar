@@ -162,6 +162,7 @@ enum class TrayMenuAction : int {
     ActivateWindow,   // bring a window of that application to the front
     OpenLocation,     // the folder the executable lives in, with the file selected
     CloseWindow,      // ask the application to close its window (WM_CLOSE: graceful, it may prompt)
+    QuitApplication,  // END the application's processes -- the forceful one, behind a second press
     ApplicationMenu,  // the application's own menu, through the shell (slow, and at the icon's corner)
 };
 
@@ -172,9 +173,21 @@ inline const wchar_t* TrayMenuLabel(TrayMenuAction action) {
         case TrayMenuAction::ActivateWindow:  return L"显示窗口";
         case TrayMenuAction::OpenLocation:    return L"打开文件位置";
         case TrayMenuAction::CloseWindow:     return L"关闭窗口";
+        case TrayMenuAction::QuitApplication: return L"结束应用";
         case TrayMenuAction::ApplicationMenu: return L"应用自己的菜单…";
     }
     return L"";
+}
+
+// The same label for an entry that is ARMED -- waiting for the press that carries it out.
+//
+// Only one entry has a second state, and it is the one that cannot be taken back: 结束应用 ends the
+// application's processes, so it gives the application no chance to save. The first press says so in
+// words ("再点一次"), which is the same arrangement the Start card's power list uses for sign-out,
+// restart and shutdown.
+inline const wchar_t* TrayMenuArmedLabel(TrayMenuAction action) {
+    if (action == TrayMenuAction::QuitApplication) return L"再点一次：结束应用";
+    return TrayMenuLabel(action);
 }
 
 // What the icon can actually do, so that the menu never offers a row that does nothing.
@@ -196,6 +209,7 @@ inline int TrayMenuEntriesFor(const TrayMenuFacts& facts, TrayMenuAction* out, i
     if (facts.hasWindow) add(TrayMenuAction::ActivateWindow);
     if (facts.hasExePath) add(TrayMenuAction::OpenLocation);
     if (facts.hasWindow) add(TrayMenuAction::CloseWindow);
+    add(TrayMenuAction::QuitApplication);
     add(TrayMenuAction::ApplicationMenu);
     return count;
 }

@@ -6817,15 +6817,27 @@ void TestMusicCardLayout() {
                                       ? static_cast<int>(all[withEverything - 1])
                                       : -1,
                                   withNothing, withPath);
-                    Check(withEverything == 5 && all[0] == TrayMenuAction::Open &&
+                    Check(withEverything == 6 && all[0] == TrayMenuAction::Open &&
                               all[1] == TrayMenuAction::ActivateWindow &&
                               all[2] == TrayMenuAction::OpenLocation &&
                               all[3] == TrayMenuAction::CloseWindow &&
-                              all[4] == TrayMenuAction::ApplicationMenu &&
-                              withNothing == 2 && bare[0] == TrayMenuAction::Open &&
-                              bare[1] == TrayMenuAction::ApplicationMenu && withPath == 3,
+                              all[4] == TrayMenuAction::QuitApplication &&
+                              all[5] == TrayMenuAction::ApplicationMenu &&
+                              withNothing == 3 && bare[0] == TrayMenuAction::Open &&
+                              bare[1] == TrayMenuAction::QuitApplication &&
+                              bare[2] == TrayMenuAction::ApplicationMenu && withPath == 4,
                           L"the menu offers only what can be done, and the application's own menu last",
                           trayDetail);
+                    // The one entry with a second state says so in words, and only that one does.
+                    wchar_t armedDetail[192];
+                    std::swprintf(armedDetail, 192, L"'%ls' / '%ls'",
+                                  TrayMenuArmedLabel(TrayMenuAction::QuitApplication),
+                                  TrayMenuArmedLabel(TrayMenuAction::Open));
+                    Check(std::wcscmp(TrayMenuArmedLabel(TrayMenuAction::QuitApplication),
+                                      L"再点一次：结束应用") == 0 &&
+                              std::wcscmp(TrayMenuArmedLabel(TrayMenuAction::Open), L"打开") == 0,
+                          L"an armed entry says what the second press will do, and only it changes",
+                          armedDetail);
                 }
                 {
                     // Where: the box hangs off the point it was opened for, and stays inside the card --

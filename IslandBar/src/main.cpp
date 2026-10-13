@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cwchar>       // wcstoul / wcstol / wcstof: the diagnostic environment settings
 #include <cwctype>      // towlower: comparing an executable's name with a window's process image
+#include <tlhelp32.h>   // CreateToolhelp32Snapshot: ending every process of one image
 #include <memory>       // make_unique: the sound page's worker object
 #include <vector>
 
@@ -703,6 +704,9 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, const wchar_t* forcedState,
     int trayMenuCell = -1;
     island::TrayMenuAction trayMenuActions[island::kMaxTrayMenuEntries] = {};
     int trayMenuActionCount = 0;
+    // Whether 结束应用 has been asked for once and is waiting for the press that carries it out. Cleared
+    // whenever the menu opens or closes: an armed entry must not survive the menu it was armed in.
+    bool trayQuitArmed = false;
     // Which level of the panel's card is showing -- the tiles, the 声音输出 page, or the tray page. Held
     // for the card's whole life, like the owner: the card is on screen for the length of its own exit, so
     // the level it was opened with is also what it leaves with (see NextPanelLevel, and the three places
@@ -2299,7 +2303,25 @@ float musicWavePhase = 0.0f;
                 // out from under the menu.
                 if (window.TrayMenuIsOpen()) {
                     const int row = window.TrayMenuRowHovered();
+                    // ARMED, NOT DONE. 结束应用 is the one entry that cannot be taken back -- it ends the
+                    // application's processes and gives it no chance to save -- so the first press only says
+                    // what the second will do (the row's own label changes; see TrayMenuArmedLabel) and the
+                    // menu stays open, so the second press is the same gesture in the same place. The Start
+                    // card's power list is arranged the same way, for the same reason.
+                    if (row >= 0 && row < trayMenuActionCount &&
+                        trayMenuActions[row] == island::TrayMenuAction::QuitApplication &&
+                        !trayQuitArmed) {
+                        trayQuitArmed = true;
+                        // WIDE, because this line is Chinese: the narrow overload widens its argument a byte
+                        // at a time, which is how `结束应用` came out as `ç»æåºç¨` in the log while the
+                        // lines around it read correctly (the same defect HANDOFF 8.72/8.73 records).
+                        island::LogAndPrint(
+                            L"  tray menu: 结束应用 armed -- the same row again carries it out\n");
+                        std::fflush(stdout);
+                        continue;
+                    }
                     window.CloseTrayMenu();
+                    trayQuitArmed = false;
                     if (row >= 0 && row < trayMenuActionCount) {
                         const island::TrayMenuAction action = trayMenuActions[row];
                         island::LogAndPrint(L"  tray menu: %ls\n", island::TrayMenuLabel(action));
@@ -2945,6 +2967,7 @@ float musicWavePhase = 0.0f;
                     trayMenuActionCount = island::TrayMenuEntriesFor(facts, trayMenuActions,
                                                                      island::kMaxTrayMenuEntries);
                     window.OpenTrayMenu(trayMenuCell, trayMenuActionCount);
+                    trayQuitArmed = false;   // a new menu starts unarmed
                     wchar_t flatMenuName[128] = {};
                     island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d)\n",
                                         FlatName(trayIcons.At(trayMenuCell).name, flatMenuName, 128),
@@ -3699,7 +3722,9 @@ float musicWavePhase = 0.0f;
                     frame.trayMenuRowCount = rows;
                     for (int i = 0; i < rows; ++i) {
                         frame.trayMenuRows[i] = menu.rows[i];
-                        frame.trayMenuLabels[i] = island::TrayMenuLabel(trayMenuActions[i]);
+                        frame.trayMenuLabels[i] =
+                            trayQuitArmed ? island::TrayMenuArmedLabel(trayMenuActions[i])
+                                          : island::TrayMenuLabel(trayMenuActions[i]);
                     }
                 }
                 // ... and the three washes, each a spring toward "the pointer is on it" (see
@@ -5156,6 +5181,35 @@ bool SameImage(const wchar_t* a, const wchar_t* b) {
     return *a == L'\0' && *b == L'\0';
 }
 
+// Ends every process of that image, and returns how many were ended.
+//
+// THE FORCEFUL PATH, and the only one that can promise what the entry says. A tray application's window
+// closes INTO the tray rather than quitting -- WeChat and QQ Music both do -- so "ask it to close" cannot
+// deliver "the application is gone". This is what Task Manager's 结束任务 does, which is why it is offered
+// only behind a second press (see TrayMenuArmedLabel) and why its label says 结束 rather than 关闭: the
+// user is told which of the two they are asking for.
+int TerminateProcessesOfImage(const wchar_t* image) {
+    if (!image || image[0] == L'\0') return 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+
+    int ended = 0;
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            // `szExeFile` is the bare name, which is the same thing the tray's record is compared by.
+            if (!SameImage(entry.szExeFile, image)) continue;
+            HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, entry.th32ProcessID);
+            if (!process) continue;
+            if (TerminateProcess(process, 0)) ++ended;
+            CloseHandle(process);
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return ended;
+}
+
 // The first window of that image in the bar's OWN task list -- the same list the icon row draws, so "show
 // the window" acts on the window whose icon the user would have clicked.
 HWND WindowOfImageInList(island::WindowList& windows, const wchar_t* image) {
@@ -5249,6 +5303,13 @@ void RunTrayMenuAction(const island::TrayIcons& icons, island::WindowList& windo
             }
             island::LogAndPrint(L"  tray menu: asked '%ls' to close %d window(s)\n", BaseNameOf(path),
                                 closed);
+            std::fflush(stdout);
+            break;
+        }
+        case island::TrayMenuAction::QuitApplication: {
+            const int ended = TerminateProcessesOfImage(BaseNameOf(path));
+            island::LogAndPrint(L"  tray menu: ended %d process(es) of '%ls'\n", ended,
+                                BaseNameOf(path));
             std::fflush(stdout);
             break;
         }
