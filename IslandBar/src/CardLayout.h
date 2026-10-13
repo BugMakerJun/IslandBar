@@ -87,6 +87,11 @@ enum class CardOwner {
 inline constexpr int   kTrayPageColumns      = 5;
 inline constexpr float kTrayPageCellDip      = 48.0f;   // the cell a 16 DIP picture sits in
 inline constexpr float kTrayPageCellGapDip   = 6.0f;
+// The grid FITS itself to the card (see TrayPageFor), and these are its two limits: it may use more columns
+// than kTrayPageColumns when that is what makes the rows fit, and a cell may not shrink past the point where
+// the 24 DIP picture inside it is still a target a finger can find.
+inline constexpr int   kTrayPageMaxColumns   = 8;
+inline constexpr float kTrayPageMinCellDip   = 38.0f;
 
 struct TrayPageLayout {
     RectF title;          // the page's own line, at the top
@@ -113,22 +118,84 @@ inline TrayPageLayout TrayPageFor(const RoundedBox& card, int iconCount) {
     layout.title.top = card.rect.top + 6.0f;
     layout.title.bottom = layout.title.top + titleHeight - 8.0f;
 
-    const int columns = iconCount < kTrayPageColumns ? iconCount : kTrayPageColumns;
+    // THE GRID FITS THE CARD, however many icons there are.
+    //
+    // It did not, and the limit was invisible: five columns times two rows held ten, this machine has
+    // sixteen, and the page drew the first ten and silently dropped the rest -- reported as "托盘卡片里没有
+    // 显示全啊" over a photograph of five-by-two with empty space beneath it. The cap that dropped them
+    // (kMaxTrayIcons used to be 10) was written for the ROW this page replaced, and nothing here checked
+    // that the grid it computed was inside the card it was drawn in. The self-test did not catch it because
+    // its counts were 1, 3, 6 and 10 -- exactly the numbers that fit. (Same lesson as HANDOFF 8.71: an
+    // assertion whose parameters are the lucky ones measures the luck.)
+    //
+    // So the column count and the cell size are DERIVED, from the card: as many columns as the width takes,
+    // up to kTrayPageMaxColumns, and the cell that makes those rows fit the height, never below
+    // kTrayPageMinCellDip -- and if the cell would go below it, one more column (one fewer row) and try
+    // again. Everything below is measured from the card, so this cannot disagree with `TrayPageCellAt`
+    // (which calls this function) and cannot overflow however many icons the registry holds.
+    const float cardHeight = card.rect.bottom - card.rect.top;
+    const float availableWidth = cardWidth - 32.0f;              // 16 DIP either side
+    const float availableHeight = cardHeight - titleHeight - 18.0f;
+
+    int columns = kTrayPageColumns < iconCount ? kTrayPageColumns : iconCount;
+    float cell = kTrayPageCellDip;
+    if (iconCount > 1) {
+        // FULL SIZE FIRST. A grid whose cells are still 48 DIP beats one that fits in fewer columns by
+        // shrinking them: sixteen icons came out as 5/5/5/1 with 45 DIP cells, which reads as a row that
+        // lost its icons, while six columns holds the same sixteen in THREE rows at full size. So the
+        // search takes the first column count that keeps a full-size cell, and only then the first that
+        // merely clears kTrayPageMinCellDip -- and if neither does, the widest grid this page allows.
+        int bestColumns = 0;
+        float bestCell = 0.0f;
+        for (int candidate = kTrayPageColumns; candidate <= kTrayPageMaxColumns; ++candidate) {
+            const int rows = (iconCount + candidate - 1) / candidate;
+            const float byWidth = (availableWidth - (candidate - 1) * kTrayPageCellGapDip) / candidate;
+            const float byHeight = (availableHeight - (rows - 1) * kTrayPageCellGapDip) / rows;
+            float candidateCell = kTrayPageCellDip;
+            if (byWidth < candidateCell) candidateCell = byWidth;
+            if (byHeight < candidateCell) candidateCell = byHeight;
+
+            const bool fullSize = candidateCell >= kTrayPageCellDip - 0.01f;
+            const bool pressable = candidateCell >= kTrayPageMinCellDip - 0.01f;
+            if (fullSize) {
+                bestColumns = candidate;
+                bestCell = kTrayPageCellDip;
+                break;
+            }
+            if (!bestColumns && pressable) {
+                bestColumns = candidate;
+                bestCell = candidateCell;
+            }
+            if (candidate == kTrayPageMaxColumns && !bestColumns) {
+                bestColumns = candidate;
+                bestCell = candidateCell;
+            }
+        }
+        if (bestColumns > 0) {
+            columns = bestColumns < iconCount ? bestColumns : iconCount;
+            cell = bestCell;
+        }
+    }
+    if (cell < 1.0f) cell = 1.0f;
     layout.columns = columns;
-    const float gridWidth = columns * kTrayPageCellDip + (columns - 1) * kTrayPageCellGapDip;
-    // Centred, so a page of four icons is not pinned to the left while a page of five fills the card.
-    float left = card.rect.left + (cardWidth - gridWidth) * 0.5f;
-    float top = card.rect.top + titleHeight + 8.0f;
+
+    const int rows = (iconCount + columns - 1) / columns;
+    const float gridWidth = columns * cell + (columns - 1) * kTrayPageCellGapDip;
+    const float gridHeight = rows * cell + (rows - 1) * kTrayPageCellGapDip;
+    // Centred BOTH ways: a page of four icons is not pinned to the left while a page of five fills the card,
+    // and a page that only needs one row sits in the middle of the room rather than under the heading.
+    const float left = card.rect.left + (cardWidth - gridWidth) * 0.5f;
+    const float top = card.rect.top + titleHeight + 8.0f + (availableHeight - gridHeight) * 0.5f;
 
     for (int i = 0; i < iconCount; ++i) {
         const int column = i % columns;
         const int row = i / columns;
-        RectF cell;
-        cell.left = left + column * (kTrayPageCellDip + kTrayPageCellGapDip);
-        cell.top = top + row * (kTrayPageCellDip + kTrayPageCellGapDip);
-        cell.right = cell.left + kTrayPageCellDip;
-        cell.bottom = cell.top + kTrayPageCellDip;
-        layout.cells[i] = cell;
+        RectF placed;
+        placed.left = left + column * (cell + kTrayPageCellGapDip);
+        placed.top = top + row * (cell + kTrayPageCellGapDip);
+        placed.right = placed.left + cell;
+        placed.bottom = placed.top + cell;
+        layout.cells[i] = placed;
     }
     return layout;
 }

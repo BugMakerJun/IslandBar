@@ -6423,13 +6423,19 @@ void TestMusicCardLayout() {
                 const RoundedBox trayCard =
                     BoxForState(IslandState::Expanded,
                                 AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
-                for (int count : {1, 3, 6, kMaxTrayIcons}) {
+                // The counts are the ones that MATTER, not the ones that fit: this machine has sixteen tray
+                // icons, and the old list stopped at ten -- exactly the number five columns and two rows
+                // hold -- so the grid could overflow the card and nothing said so until a photograph did
+                // ("托盘卡片里没有显示全啊").
+                for (int count : {1, 3, 6, 10, 16, kMaxTrayIcons}) {
                     const TrayPageLayout page = TrayPageFor(trayCard, count);
                     bool inside = page.count == count && page.columns > 0 &&
-                                  page.columns <= kTrayPageColumns;
+                                  page.columns <= kTrayPageMaxColumns;
+                    float smallestCell = 1e9f;
                     bool noOverlap = true;
                     for (int i = 0; i < page.count; ++i) {
                         const RectF& cell = page.cells[i];
+                        if (cell.right - cell.left < smallestCell) smallestCell = cell.right - cell.left;
                         if (cell.left < trayCard.rect.left || cell.right > trayCard.rect.right ||
                             cell.top < trayCard.rect.top || cell.bottom > trayCard.rect.bottom) {
                             inside = false;
@@ -6443,12 +6449,15 @@ void TestMusicCardLayout() {
                         }
                     }
                     std::swprintf(trayDetail, 256,
-                                  L"%d icons -> %d columns, first cell %.0f (w%.0f), last cell bottom %.0f",
+                                  L"%d icons -> %d columns, first cell %.0f (w%.1f, min %.1f), "
+                                  L"last cell bottom %.0f of %.0f",
                                   count, page.columns, page.cells[0].left,
                                   page.cells[0].right - page.cells[0].left,
-                                  page.cells[count - 1].bottom);
+                                  smallestCell, page.cells[count - 1].bottom, trayCard.rect.bottom);
                     Check(inside, L"every tray cell is inside the card it is drawn in", trayDetail);
                     Check(noOverlap, L"no two tray cells overlap", trayDetail);
+                    Check(smallestCell >= kTrayPageMinCellDip - 0.01f,
+                          L"... and every cell is still big enough to press", trayDetail);
                     Check(page.cells[0].top > trayCard.rect.top + 30.0f,
                           L"the grid starts below the page's heading", trayDetail);
                 }

@@ -756,8 +756,11 @@ inline constexpr float kTrayIconDip         = 30.0f;   // the button; the pictur
 inline constexpr float kTrayPictureDip      = 16.0f;
 inline constexpr float kTrayGapDip          = 2.0f;
 inline constexpr float kTrayRightMarginDip  = 6.0f;
-// Bounded because a row of every icon an application ever registered is a row nothing can be read from.
-inline constexpr int   kMaxTrayIcons        = 10;
+// Bounded, because an unbounded list is a list nobody can draw -- but generously, and the PAGE fits whatever
+// is inside this bound by shrinking its cells (see TrayPageFor). It used to be 10, written when the tray was
+// a ROW along the bar; the page dropped everything past the tenth and said nothing, which is how this machine
+// came to show ten of its sixteen icons ("托盘卡片里没有显示全啊").
+inline constexpr int   kMaxTrayIcons        = 24;
 
 // ONE BUTTON, and the icons behind it, which is the second half of what the user asked for:
 //
