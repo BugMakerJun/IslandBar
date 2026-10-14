@@ -1,78 +1,78 @@
 # =====================================================================
 #  src/CMakeLists.txt
-#  The bar itself.
+#  The bar itself: one executable, built from the modules below.
 #
-#  NOTE: this file was lost -- something in the tooling deleted it while the
+#  The modules are directories, and an include is written from THIS directory --
+#  `#include "core/Log.h"`, not `#include "Log.h"`. The include root is therefore
+#  src/, and a file that moves between modules breaks the build loudly instead of
+#  silently resolving through a stale entry on the search path.
+#
+#  NOTE: this file was lost once -- something in the tooling deleted it while the
 #  project was being edited, and there was no version control to recover it from.
-#  It has been reconstructed from the source list, the README's build notes and
-#  what the build needs; the target name, the manifest embedding and the C++/WinRT
-#  setup are all load-bearing and are explained below because the reasons were
-#  written down here once and are worth keeping.
+#  The target name, the manifest embedding and the C++/WinRT setup are load-bearing,
+#  and the reasons are written down here because they were written down here once.
 # =====================================================================
 
 add_executable(island_bar
     main.cpp
-    AppBar.cpp
-    StartMenu.cpp
-    SystemStatus.cpp
-    SystemToggles.cpp
-    AudioVolume.cpp
-    Diagnostics.cpp
-    DisplayBrightness.cpp
-    GlassMaterial.cpp
-    IslandWindow.cpp
-    Log.cpp
-    Lyrics.cpp
-    MiniJson.cpp
-    Monitor.cpp
-    Motion.cpp
-    MusicSession.cpp
-    NativeTaskbar.cpp
-    Notification.cpp
-    NotificationIcon.cpp
-    NotificationPipe.cpp
-    PlayerWindow.cpp
-    Renderer.cpp
-    SoundOutput.cpp
-    TextRenderer.cpp
-    Theme.cpp
-    ThumbnailPreview.cpp
-    ToastStore.cpp
-    TrayIcons.cpp
-    TrayPress.cpp
-    StartApps.cpp
-    Weather.cpp
-    WeChatWatch.cpp
-    WicImage.cpp
-    WindowList.cpp
+
+    # --- app: the window, and what hangs off it ----------------------
+    app/AppBar.cpp
+    app/IslandWindow.cpp
+    app/PlayerWindow.cpp
+
+    # --- core: pure logic and the plumbing everything shares ---------
+    core/Log.cpp
+    core/MiniJson.cpp
+    core/Motion.cpp
+
+    # --- media: what is playing, and what it looks like --------------
+    media/AudioVolume.cpp
+    media/Lyrics.cpp
+    media/MusicSession.cpp
+    media/SoundOutput.cpp
+    media/WicImage.cpp
+
+    # --- platform: the Win32 and shell APIs the bar stands on --------
+    platform/DisplayBrightness.cpp
+    platform/GlassMaterial.cpp
+    platform/Monitor.cpp
+    platform/NativeTaskbar.cpp
+    platform/ThumbnailPreview.cpp
+    platform/WindowList.cpp
+
+    # --- render: everything that puts pixels on the composition ------
+    render/Renderer.cpp
+    render/TextRenderer.cpp
+    render/Theme.cpp
+
+    # --- services: the channels that bring things in -----------------
+    services/Notification.cpp
+    services/NotificationIcon.cpp
+    services/NotificationPipe.cpp
+    services/ToastStore.cpp
+    services/WeChatWatch.cpp
+
+    # --- shell: the shell's own controls, mirrored -------------------
+    shell/StartApps.cpp
+    shell/StartMenu.cpp
+    shell/SystemStatus.cpp
+    shell/SystemToggles.cpp
+    shell/TrayIcons.cpp
+    shell/TrayPress.cpp
+    shell/Weather.cpp
+
+    # --- selftest: the runtime assertions (-self-test) ---------------
+    selftest/Diagnostics.cpp
 )
 
+# src/ is the include root: the modules are directories under it, and every
+# `#include "module/Name.h"` is resolved from here.
 target_include_directories(island_bar PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # --- C++/WinRT, for the system media controls (Windows.Media.Control) ---------
-#
-# The projection headers ship with the Windows SDK under cppwinrt\winrt, but they
-# are not on the default include path, and the Windows Runtime APIs they wrap are
-# reached through WindowsApp.lib rather than a classic import library.
-#
-# /await is required with /permissive- (set at the top level): the WinRT headers
-# use awaitable types that the standard does not allow otherwise.
-if(MSVC)
-    set(ISLANDBAR_WINSDK_ROOT
-        "$ENV{WindowsSdkDir}Include\\${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}")
-
-    if(EXISTS "${ISLANDBAR_WINSDK_ROOT}/cppwinrt/winrt")
-        target_include_directories(island_bar PRIVATE
-            "${ISLANDBAR_WINSDK_ROOT}/cppwinrt")
-    else()
-        message(WARNING
-            "cppwinrt projection headers not found under ${ISLANDBAR_WINSDK_ROOT}; "
-            "the media controls will not compile")
-    endif()
-
-    target_compile_options(island_bar PRIVATE /await)
-    target_link_libraries(island_bar PRIVATE windowsapp.lib)
-endif()
+# island_bar, gsmtcprobe and geoprobe all need it, so it lives in one place.
+islandbar_enable_cppwinrt(island_bar)
 
 # --- the application manifest ------------------------------------------------
 #

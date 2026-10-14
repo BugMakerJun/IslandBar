@@ -1,0 +1,42 @@
+# =====================================================================
+#  The house style, as far as it can be stated mechanically.
+#
+#  Written from the source as it stands rather than adopted from a template:
+#  4-space indent, the brace on the same line, `Type* name`, one statement per
+#  line where a line has room for one.
+#
+#  .clang-format is NOT applied to the existing tree, and that is deliberate: a
+#  reformat of 48k lines would bury every real change for a long time. It describes
+#  what new code looks like, and what a file looks like once it is being edited for
+#  another reason anyway.
+#
+#  SortIncludes is off: the includes in this project carry trailing comments that
+#  say why each one is there ("FetchAppIconForTest: the same icon path the media
+#  card uses"), and reordering them would detach the note from its include.
+# =====================================================================
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+IndentCaseLabels: true
+
+PointerAlignment: Left
+DerivePointerAlignment: false
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+SpacesBeforeTrailingComments: 1
+
+NamespaceIndentation: None
+SortIncludes: false
+FixNamespaceComments: true
+MaxEmptyLinesToKeep: 1

@@ -1,7 +1,7 @@
 # =====================================================================
 #  restore-desktop.ps1 -- put the work area back if the bar left it wrong
 #
-#      powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\restore-desktop.ps1
+#      powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\restore-desktop.ps1
 #
 #  Why this exists
 #  ---------------

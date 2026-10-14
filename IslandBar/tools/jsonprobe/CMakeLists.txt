@@ -8,8 +8,8 @@
 
 add_executable(jsonprobe
     main.cpp
-    "${CMAKE_SOURCE_DIR}/src/MiniJson.cpp"
-    "${CMAKE_SOURCE_DIR}/src/Notification.cpp"
+    "${CMAKE_SOURCE_DIR}/src/core/MiniJson.cpp"
+    "${CMAKE_SOURCE_DIR}/src/services/Notification.cpp"
 )
 
 target_include_directories(jsonprobe PRIVATE "${CMAKE_SOURCE_DIR}/src")

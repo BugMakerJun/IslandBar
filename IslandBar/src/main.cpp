@@ -25,16 +25,16 @@
 #include <memory>       // make_unique: the sound page's worker object
 #include <vector>
 
-#include "AppBar.h"
-#include "StartMenu.h"
-#include "TaskStripLayout.h"
-#include "WindowList.h"
-#include "AudioVolume.h"
-#include "Diagnostics.h"
-#include "Geometry.h"
-#include "IslandWindow.h"
-#include "Log.h"
-#include "Monitor.h"
+#include "app/AppBar.h"
+#include "shell/StartMenu.h"
+#include "core/TaskStripLayout.h"
+#include "platform/WindowList.h"
+#include "media/AudioVolume.h"
+#include "selftest/Diagnostics.h"
+#include "core/Geometry.h"
+#include "app/IslandWindow.h"
+#include "core/Log.h"
+#include "platform/Monitor.h"
 #include <dwmapi.h>
 #include <thread>
 #include <powrprof.h>   // SetSuspendState, for the Start card's power list
@@ -43,28 +43,28 @@
 #define SECURITY_WIN32
 #include <security.h>   // GetUserNameExW, for the name in that card's footer
 #include <sddl.h>       // ConvertSidToStringSidW, to find the account picture
-#include "Motion.h"
-#include "MusicSession.h"
-#include "NativeTaskbar.h"
-#include "Lyrics.h"
-#include "Notification.h"
-#include "NotificationIcon.h"
-#include "NotificationPipe.h"
-#include "PlayerWindow.h"
-#include "ToastStore.h"
-#include "TrayIcons.h"
-#include "TrayPress.h"
-#include "DisplayBrightness.h"   // the brightness row: DDC/CI, the only interface this machine has
-#include "SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
-#include "Theme.h"               // the material: colours and edges, switchable, plus themes\*.txt
-#include "WeChatWatch.h"
-#include "StatePolicy.h"
-#include "SoundOutput.h"
-#include "SystemStatus.h"
-#include "WicImage.h"
-#include "Weather.h"
-#include "ThumbnailPreview.h"
-#include "Renderer.h"
+#include "core/Motion.h"
+#include "media/MusicSession.h"
+#include "platform/NativeTaskbar.h"
+#include "media/Lyrics.h"
+#include "services/Notification.h"
+#include "services/NotificationIcon.h"
+#include "services/NotificationPipe.h"
+#include "app/PlayerWindow.h"
+#include "services/ToastStore.h"
+#include "shell/TrayIcons.h"
+#include "shell/TrayPress.h"
+#include "platform/DisplayBrightness.h"   // the brightness row: DDC/CI, the only interface this machine has
+#include "shell/SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
+#include "render/Theme.h"               // the material: colours and edges, switchable, plus themes\*.txt
+#include "services/WeChatWatch.h"
+#include "core/StatePolicy.h"
+#include "media/SoundOutput.h"
+#include "shell/SystemStatus.h"
+#include "media/WicImage.h"
+#include "shell/Weather.h"
+#include "platform/ThumbnailPreview.h"
+#include "render/Renderer.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")

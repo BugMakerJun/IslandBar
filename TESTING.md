@@ -20,7 +20,7 @@
 **做**：开一个 PowerShell，粘这一行（会弹一条真的 Windows 通知）：
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\toast-test.ps1 -Title "构建完成" -Body "0 errors, 3 warnings"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\IslandBar\scripts\toast-test.ps1 -Title "构建完成" -Body "0 errors, 3 warnings"
 ```
 
 **应该看到**：系统通知出现在角落的**同时**，**灵动岛向左右各宽出一截**，里面显示 `ToastTest · 构建完成`
@@ -166,23 +166,23 @@ start button: island x [1170, 1390] -> ... opacity 1.00
 | 看卡片右上角（2026-10-12 HANDOFF 8.29 起） | **没有喇叭、没有百分比、没有滑条** —— 整组控件按用户要求删掉了；名字那条来源行现在通到卡片右边距 | 日志里**不该再出现** `volume: press on the card's bar` / `volume: control opened` / `dragging the card's bar`；出现即回退。设备音量仍看第 2 节的面板滑条，单个应用的音量走子页「音量合成器」 |
 | 放一首**歌词很长**的歌，看胶囊两头（2026-10-12 HANDOFF 8.30 起） | 字**从两端淡出/淡入**（左边正在离开的字、右边正在进来的字都变暗），中间全亮；不该再有"被圆角斜切掉半个字" | 没有日志行，看画面。判定标准是自检里量过的那条：同一个字在渐隐区读 `49.84`、紧挨其内侧读 `122.87`（关掉渐隐时两者都读 `122.8`） |
 | 盯着胶囊看**歌词换句**的那一下 | **上下各半个行**：旧句往上滚出、新句从下面滚上来，两行各被一行高的窗口切掉一半 —— 这是**竖滚的定义**，不是缺陷（2026-10-12：8.31 曾改成原地淡入淡出，用户当天要求改回，见 HANDOFF 8.32） | 没有日志行，看画面。只有用户明确说"切换时不要出现两行"时才该动它 —— 那是把过渡换成原地淡入淡出的唯一理由 |
-| 换一首**没有封面**的歌，把鼠标移到岛上开卡片（2026-10-12 HANDOFF 8.33 起） | 卡片是一块**深色卡面**，字和进度条都在卡面里，**不该**是"字直接飘在壁纸上" | 想确认那首歌到底有没有封面：跑 `build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe`，看 `Thumbnail: present/none` —— `none` 就是这首歌没发布封面，栏只能给它一块自己的底面 |
+| 换一首**没有封面**的歌，把鼠标移到岛上开卡片（2026-10-12 HANDOFF 8.33 起） | 卡片是一块**深色卡面**，字和进度条都在卡面里，**不该**是"字直接飘在壁纸上" | 想确认那首歌到底有没有封面：跑 `.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe`，看 `Thumbnail: present/none` —— `none` 就是这首歌没发布封面，栏只能给它一块自己的底面 |
 | 连续切两首歌，第二首**封面晚到**（2026-10-12 HANDOFF 8.42 起） | 第二首的封面必须**真的换成它自己的**；日志全对但画面不换，就是缓存键重复那类缺陷 | 日志正常不足以判定（`dropped`/`arrived late`/`decoded` 都会齐）；判定要看**画面**。核按钮：自检里 `a new cover with a repeated revision is not the old bitmap`（读数 `A cached 1, B cached 1, A still cached 0`）|
 | 切歌时盯住卡片左边那块（2026-10-12 HANDOFF 8.41 起） | 新歌**没有封面时**显示 **♪ 占位符**（绝不能还是上一首的专辑图）；播放器随后发出封面就自动换上 | 日志：换歌那行下面应是 `music: cover NONE` + `music: cover dropped (the new track has none yet)`；若封面稍后到达会再出现 `music: cover arrived late (N bytes)` |
 | 看**灵动岛右边**那个**三个点**的圆钮（2026-10-12 HANDOFF 8.56 + 8.57 起） | 布局应该是 `[⌄][⊞] 岛 [•••] [应用图标…]` —— 三点圆钮**紧贴灵动岛右侧**（不是贴屏幕右缘），应用图标行从它右边开始。**点它 → 弹出卡片**，标题「托盘」，里面是**正在运行**且注册过托盘图标的程序（微信、QQ音乐、Steam、Clash…）的图标网格（每行 5 个）；再点按钮或点栏外收回去。**卡片里的图标目前点了没动作**（见下）。鼠标划过按钮/格子有白色高亮 | 日志：`tray: 16 icon(s) from the registry (27 entr(ies), 402 process(es) seen)`（启动）、`tray: N icon(s) (N of M registered applications are running)`（增减时）、点按钮时 `tray: card open` / `card closed`。**单独核对**：`island_bar.exe --tray-dump`（**要复制到项目目录外再跑**：项目树里的 exe 是低完整性，进程快照只能看到低完整性的进程，只会匹配到 3 个而不是 16 个）。想在没有托盘图标时排查：`HKCU\Control Panel\NotifyIconSettings` 里有几条、对应 exe 是否在跑。想不看点击就拍到卡片：`ISLANDBAR_TRAY_PAGE=1` |
 | **在托盘卡片里右键一个图标**（2026-10-14 HANDOFF 8.80 起） | **立刻**弹出**栏自己的**菜单（不开系统托盘、不等 300–600 ms）：`打开` / `显示窗口` / `打开文件位置` / `关闭窗口` / `结束应用` / `应用自己的菜单…`（没有窗口的应用会少"显示窗口"和"关闭窗口"两行）。`关闭窗口` 是"请它关窗"（收进托盘的应用就只是收进托盘，日志 `tray menu: asked … to close N window(s)`）；`结束应用` 是**真的结束掉**（`tray menu: ended N process(es) of …`），**要按两次** —— 第一次那行会变成「再点一次：结束应用」。菜单挂在那一格的右下角、**始终在卡片里**；指针划过某行有白色高亮；点某行执行；**点别处就关掉，且那一次点击被吃掉**（不吞就会顺手按到菜单底下的图标） | `tray menu: opened for '<应用名>' (N entries: window=1 path=1)`；点某行后 `tray menu: <那一行的名字>`；若那行是 `应用自己的菜单…`，接着会出现 `tray press: … (right click)` → `native taskbar: put away after a tray right click` |
 | **开一个全屏游戏**（2026-10-12 HANDOFF 8.54 + 8.55 起） | 平时顶部**什么都不该有**：没有胶囊、没有日期时间行、没有图标行、没有 Start/系统键（修之前这些会画在游戏上）。鼠标划到屏幕顶部也**不该弹出音乐卡片**。**来一通电话或一条通知时，只出现"岛"那一条**（纸条/通话条 + 里面的话），**左右两侧依旧干净** —— 那行日期时间和两边的按钮图标都不该冒出来；几秒后纸条自己收回去。**全屏时点岛**应该还能把消息消掉 | 日志：`fullscreen: an application has the screen -- the bar stands down` → 退出全屏 `fullscreen: over -- the bar is back`；全屏时来通知应有 `state: notice-strip`。**判定要点**：① 普通**最大化**窗口**不会**触发退场（它覆盖的是工作区、不是整屏）—— 若最大化窗口也让栏消失，就是 `WindowCoversMonitor` 判错了；② 全屏+通知时若左右两侧也冒出来，就是 `frame.fullscreenApp` 没传进渲染器（自检里对应 `island band=26.53, first icon=0.00, Start button=0.00`） |
-| 鼠标**停在**某个应用图标上（2026-10-12 HANDOFF 8.51 + 8.52 + 8.53 起） | 停约 **350 ms** 后，图标下面弹出一张**圆角卡片**：顶部一行是**那个窗口自己的图标 + 标题**（太长会省略号），下面是**实时画面**。**所有卡片同一个尺寸**（276×198 DIP，9 个图标都一样大、离栏距离也一样），窗口的比例只体现在画面里：画面在槽内等比缩放并居中，**窄窗口左右留卡面、宽窗口上下留卡面**（不会变形、也不会撑大卡片）。**已经在显示时，顺着图标横移会立刻换成隔壁那个**（不等第二次 350 ms）；鼠标离开图标行就消失。**扫过一排图标时不该每个都闪一下**（只有停住才出）。卡片（音乐卡/面板）开着时不显示。预览本身**点不进去**（穿透） | 日志：`preview: hwnd … -> card x,y WxH, picture WxH (compositor says AxB), shown=1, hr=0x00000000`。**三条判定**：① `card` **必须恒为 276x198**（不是=new 大小不一致）；② `picture` 的宽高比要等于 `compositor says` 的宽高比（例如 `247x160` vs `1282x829`：1.544 vs 1.546）= 没压扁；③ `shown=0` 或 `compositor says 0x0` = 这个窗口画不出来（提权窗口/跨桌面）。想单独验证配方：`build\Debug\tools\thumbprobe\Debug\thumb_probe.exe`（复制到项目树外再跑）—— 它会显示两个自己的窗口，**绿色**出现即说明这台机器的 DWM 缩略图可用 |
+| 鼠标**停在**某个应用图标上（2026-10-12 HANDOFF 8.51 + 8.52 + 8.53 起） | 停约 **350 ms** 后，图标下面弹出一张**圆角卡片**：顶部一行是**那个窗口自己的图标 + 标题**（太长会省略号），下面是**实时画面**。**所有卡片同一个尺寸**（276×198 DIP，9 个图标都一样大、离栏距离也一样），窗口的比例只体现在画面里：画面在槽内等比缩放并居中，**窄窗口左右留卡面、宽窗口上下留卡面**（不会变形、也不会撑大卡片）。**已经在显示时，顺着图标横移会立刻换成隔壁那个**（不等第二次 350 ms）；鼠标离开图标行就消失。**扫过一排图标时不该每个都闪一下**（只有停住才出）。卡片（音乐卡/面板）开着时不显示。预览本身**点不进去**（穿透） | 日志：`preview: hwnd … -> card x,y WxH, picture WxH (compositor says AxB), shown=1, hr=0x00000000`。**三条判定**：① `card` **必须恒为 276x198**（不是=new 大小不一致）；② `picture` 的宽高比要等于 `compositor says` 的宽高比（例如 `247x160` vs `1282x829`：1.544 vs 1.546）= 没压扁；③ `shown=0` 或 `compositor says 0x0` = 这个窗口画不出来（提权窗口/跨桌面）。想单独验证配方：`.\IslandBar\build\Debug\tools\thumbprobe\Debug\thumb_probe.exe`（复制到项目树外再跑）—— 它会显示两个自己的窗口，**绿色**出现即说明这台机器的 DWM 缩略图可用 |
 | 放一个**全屏应用**（浏览器按 F11）（2026-10-12 HANDOFF 8.50 起） | 顶部条带被一条满宽深色条填掉，**高度等于你任务栏的厚度**（改任务栏大小/用别的机器都跟着变，不再是写死 32）；退出全屏恢复胶囊 | 日志：`fullscreen: over, back to the pill`；`--appbar` 时还有 `appbar: ABM_SETPOS asking for 0,0 2560x42` → `registered -- work area was …, now …`，退出时 `appbar: released (work area restored)` |
-| 看 `星期 · 日期 · 时间 · 天气` 这一行长什么样、出现在哪（2026-10-12 HANDOFF 8.45 + 8.46 + 8.48 + 8.49 起） | **一条，两个位置**。样式按参考图（日历图标已按你要求去掉）：`周一 10月12日 | 17:49 | [云雨] 小雨 17°` —— 周一是亮的粗体、日期更暗更小、时间最大最亮、两条细竖线分格、天气前面是蓝色云雨图标。**空闲**在胶囊里面，**放音乐 / 有消息 / 来电**时挪到 ⌄ 系统按钮**左边那条带子里**（同一条，图标也在），**淡入**而不是弹出。鼠标划过它不反应（箭头、点下去穿透）。**关掉播放器**才回到岛内（有会话就算占用，**暂停不算**） | 没有"显示在哪"的日志行，看画面；判定标准是自检量过的：`widest run 195.0 DIP; pill 204.0 available, band 252.0`（两条 fit + "胶囊才是紧的那个"）+ `StatusPlacementFor` 的"两种情况下都恰好一个家"。天气（2026-10-12 HANDOFF 8.47 起**默认走系统定位**）：`weather: position from Windows -> 41.775863, 123.442448` → `weather: 16.7 C, code 51 -> 小雨 17°`；状态行 `state: music-strip` / `notice-strip`。定不到位置时日志会写明原因（`location is denied for this program` / `no fix (0x…)`），那就改 `%USERPROFILE%\IslandBar\weather.txt`（**取消注释**一行城市名，或写 `39.9042,116.4074`）—— 文件里**有**一行时它覆盖定位，重启栏或等 15 分钟。要单独确认定位：`build\Debug\tools\geoprobe\Debug\geo_probe.exe`（复制到项目树外再跑，见 START-HERE）。要在有音乐时看空闲态：`ISLANDBAR_NO_MEDIA=1` 起一份诊断实例 |
-| 手动切歌后**封面没出来**（2026-10-12 HANDOFF 8.44 起） | 先别怪栏：日志里若持续出现 `music: cover retry N -> the player still has none`（每约 2 秒一行，最多 5 行），说明**栏在问、播放器没给** | 再跑 `build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 看同一首歌是不是 `Thumbnail: none` —— 是，就是播放器没有；若 `present` 而栏一直 `retry ... none`，那才是栏的读取问题，告诉我 |
+| 看 `星期 · 日期 · 时间 · 天气` 这一行长什么样、出现在哪（2026-10-12 HANDOFF 8.45 + 8.46 + 8.48 + 8.49 起） | **一条，两个位置**。样式按参考图（日历图标已按你要求去掉）：`周一 10月12日 | 17:49 | [云雨] 小雨 17°` —— 周一是亮的粗体、日期更暗更小、时间最大最亮、两条细竖线分格、天气前面是蓝色云雨图标。**空闲**在胶囊里面，**放音乐 / 有消息 / 来电**时挪到 ⌄ 系统按钮**左边那条带子里**（同一条，图标也在），**淡入**而不是弹出。鼠标划过它不反应（箭头、点下去穿透）。**关掉播放器**才回到岛内（有会话就算占用，**暂停不算**） | 没有"显示在哪"的日志行，看画面；判定标准是自检量过的：`widest run 195.0 DIP; pill 204.0 available, band 252.0`（两条 fit + "胶囊才是紧的那个"）+ `StatusPlacementFor` 的"两种情况下都恰好一个家"。天气（2026-10-12 HANDOFF 8.47 起**默认走系统定位**）：`weather: position from Windows -> 41.775863, 123.442448` → `weather: 16.7 C, code 51 -> 小雨 17°`；状态行 `state: music-strip` / `notice-strip`。定不到位置时日志会写明原因（`location is denied for this program` / `no fix (0x…)`），那就改 `%USERPROFILE%\IslandBar\weather.txt`（**取消注释**一行城市名，或写 `39.9042,116.4074`）—— 文件里**有**一行时它覆盖定位，重启栏或等 15 分钟。要单独确认定位：`.\IslandBar\build\Debug\tools\geoprobe\Debug\geo_probe.exe`（复制到项目树外再跑，见 START-HERE）。要在有音乐时看空闲态：`ISLANDBAR_NO_MEDIA=1` 起一份诊断实例 |
+| 手动切歌后**封面没出来**（2026-10-12 HANDOFF 8.44 起） | 先别怪栏：日志里若持续出现 `music: cover retry N -> the player still has none`（每约 2 秒一行，最多 5 行），说明**栏在问、播放器没给** | 再跑 `.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 看同一首歌是不是 `Thumbnail: none` —— 是，就是播放器没有；若 `present` 而栏一直 `retry ... none`，那才是栏的读取问题，告诉我 |
 | 放歌时**别把鼠标移到岛上**，等它自然换歌（2026-10-12 HANDOFF 8.43 起） | 胶囊里那条**声波的颜色应该跟着新歌变**（以前不动鼠标就一直是上一首的颜色）| 日志：换歌后应出现 `music: cover decoded 宽x高`，且那一帧前后**没有** `state: expanded`（= 卡片没打开也解码了）|
 | 切歌后**封面还是空的**（2026-10-12 HANDOFF 8.40 起） | 应在一两秒内自己补上；日志里出现 `music: cover arrived late (N bytes)` 就是补上了 | 若仍是空的，跑探针看这首歌到底有没有封面：`gsmtc_probe.exe` 的 `Thumbnail: present/none`。**present 而栏写 `cover NONE` = 栏的读取出了问题**（8.40 修的就是这个：长度为 0 的流以前会被拒绝） |
 | 在**QQ音乐自己的窗口里**点切歌（2026-10-12 HANDOFF 8.39 起） | 新歌标题一秒内换上；封面若播放器晚发，**一两秒内自己出现**，不需要重启栏 | 日志：`music: cover NONE (0 bytes)` 之后若出现 **`music: cover arrived late (N bytes)`**，就是"晚到的封面被接住了"（这正是以前必须重启才能看到的那种）；轮询行距应 ≈1 秒（旧版是 2 秒） |
 | 点卡片上的 ⏭ ⏮ 切歌（2026-10-12 HANDOFF 8.38 起） | 新歌的**标题、封面、歌词**在**一秒内**换过来（以前要 2-3 秒） | 日志：`music: next requested` → `music: transport next accepted` → 新歌那行的时间差。跳曲后 4 秒内轮询是 ~250 ms 一次，所以新歌一出现就会被读到 |
-| 遇到**没有封面**的歌（封面上是个 ♪ 占位符） | 这说明**播放器没发封面**，不是栏丢图 | 两个证据：日志里 `music: cover NONE (0 bytes)`（而不是 `present` + `decoded`）；`build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 显示 `Thumbnail: none` |
+| 遇到**没有封面**的歌（封面上是个 ♪ 占位符） | 这说明**播放器没发封面**，不是栏丢图 | 两个证据：日志里 `music: cover NONE (0 bytes)`（而不是 `present` + `decoded`）；`.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 显示 `Thumbnail: none` |
 | 鼠标从**卡片上的按钮**（⏮ ⏸ ⏭）、**图标行**、**开始/系统键**、**面板磁贴和滑条**上慢慢划过去（2026-10-12 HANDOFF 8.37 起） | 这些地方是**小手**；胶囊本身、卡片上的封面/文字、卡片外的空白是**箭头** | 没有日志行，看光标。想复核：自检里 7 条断言（738 项全绿），或临时把指针挪到某点再读 `GetCursorInfo` 与 `LoadCursor(IDC_HAND)` 是否同一个句柄 |
-| 想知道**封面到底有没有取到**（2026-10-12 HANDOFF 8.36 起） | 日志里每首歌各一行：`music: cover present (N bytes, revision R)` + `music: cover decoded 宽x高` = 拿到了；`cover NONE` = **播放器没发**（探针也会显示 `Thumbnail: none`）；`COULD NOT DECODE` = 发了但栏解不开 | 三个证据按顺序看：① `build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 的 `Thumbnail:`；② 栏日志的两行 `music: cover`；③ 都不对才看渲染/卡片截图 |
+| 想知道**封面到底有没有取到**（2026-10-12 HANDOFF 8.36 起） | 日志里每首歌各一行：`music: cover present (N bytes, revision R)` + `music: cover decoded 宽x高` = 拿到了；`cover NONE` = **播放器没发**（探针也会显示 `Thumbnail: none`）；`COULD NOT DECODE` = 发了但栏解不开 | 三个证据按顺序看：① `.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 的 `Thumbnail:`；② 栏日志的两行 `music: cover`；③ 都不对才看渲染/卡片截图 |
 | **打一通微信电话**，然后**别碰岛**，等一条消息进来（2026-10-12 HANDOFF 8.34 起） | 通话条（头像+绿计时+电平条）出现 → 消息顶掉它 → **消息 6 秒后通话条自己回来**，整通电话都在；点一下岛则只消掉消息，**通话留着** | 日志：`wechat: call announced as '通话中'`；**不该**在通话还在时出现 `state: collapsed`。没有真人电话时用 `scripts\fake-call-window.ps1`（把 `powershell.exe` 复制成 `WeixinCallProbe.exe` 再跑它，窗口在屏幕外） |
 | 让纸条显示一句**长英文**（例如 `--notify "hello there my friend again" --app WeChat`） | 一句话**在一行里**（放不下就滚动），**不该**出现"上面半句 + 下面半个词" | 没有日志行；判定与自检同一条：墨迹必须是**一段**，折行是两段（`16 rows, 2 band(s)` 是缺陷、`13 rows, 1 band(s)` 才对） |
 | 放着音乐去**点 ⌃ 开面板**（2026-10-12 修的那条） | 胶囊里**仍然是歌词**（没有歌词就是歌名），**不是时间**；面板自己开着 | 日志没有专门一行，看画面即可 —— 判据见 8.12：有卡片时胶囊那条带的像素必须和没卡片时**完全一样** |
@@ -232,7 +232,7 @@ lyrics: line 7 at 51230 ms (the session last reported 49800 ms)
 想单独试一首歌的抓取（不碰你的栏，只发两次 HTTPS）：
 
 `
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\verify-panel-anchor.ps1 -LyricsProbe -Title "歌名" -Artist "歌手"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\IslandBar\scripts\verify-panel-anchor.ps1 -LyricsProbe -Title "歌名" -Artist "歌手"
 `
 
 它会打印网易云与 QQ **两个服务各自的** URL、HTTP 状态、响应前 400 字节和各自结论。
@@ -362,7 +362,7 @@ Windows 的模糊背板在这套窗口上按整个窗口矩形生效（不是按
 **如果一切都乱了**（栏被任务管理器强杀之后，任务栏一直不回来）：
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\restore-desktop.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\IslandBar\scripts\restore-desktop.ps1
 ```
 
 它会把 shell 任务栏显示回来、把工作区按任务栏算回去；只有在两样都做不到时才重启 Explorer。
@@ -384,7 +384,7 @@ Get-Content $env:USERPROFILE\IslandBar\island_bar.log -Tail 20
 
 ## 5e. 安装包：装一遍 / 卸一遍（2026-10-14，HANDOFF 8.97）
 
-**包在哪**：`C:\PROJECT\Taskbar\IslandBar\dist\IslandBarSetup-1.3.exe`
+**包在哪**：`.\IslandBar\dist\IslandBarSetup-1.3.exe`
 （本机还有一份在 `Downloads`，那正是"用户会双击的位置"）。
 
 **装**：双击它。不需要管理员（只写你自己的目录和 `HKCU`），结束时会弹一句"装好了"。

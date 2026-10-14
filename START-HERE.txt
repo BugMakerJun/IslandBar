@@ -1,10 +1,10 @@
-﻿ISLANDBAR - READ THIS FIRST
+ISLANDBAR - READ THIS FIRST
 ===========================
 
 Full cross-session handoff document:
 
     FEATURES.md  (same folder) -- WHAT IS ACTUALLY DONE. Read this first.
-                                    README.md overstates progress; FEATURES.md
+                                    ..\README.md overstates progress; FEATURES.md
                                     marks every feature A/B/C/D with its evidence.
 
     HANDOFF.md   (same folder as this file, written in Chinese)
@@ -113,7 +113,7 @@ WHERE THE WEATHER'S POSITION COMES FROM (2026-10-12, HANDOFF 8.47):
 
 Ask the machine directly, without the bar:
 
-    build\Debug\tools\geoprobe\Debug\geo_probe.exe
+    .\IslandBar\build\Debug\tools\geoprobe\Debug\geo_probe.exe
 
 Copy it OUT of the project tree first (anything whose image lives under
 C:\PROJECT\Taskbar starts at LOW integrity here), and expect a one-time Windows
@@ -122,7 +122,7 @@ machine worked it out itself, IPAddress means it asked a service across the netw
 
 AND THE SAME FOR THE HOVER PREVIEW (2026-10-12, HANDOFF 8.51):
 
-    build\Debug\tools\thumbprobe\Debug\thumb_probe.exe
+    .\IslandBar\build\Debug\tools\thumbprobe\Debug\thumb_probe.exe
 
 Two windows of its own, a DWM live thumbnail between them, every HRESULT
 printed -- because the bar's own preview reported S_OK from every call and drew
@@ -151,7 +151,7 @@ program never runs. In cmd, quote the path directly or use `start /wait ""`.
 
 Verify the toolchain (read-only):
 
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\verify-toolchain.ps1"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\verify-toolchain.ps1"
 
 
 THREE RULES THAT COST REAL TIME TO LEARN

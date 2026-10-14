@@ -178,7 +178,7 @@ if ($new.Count -gt 0) {
             $bmp = New-Object System.Drawing.Bitmap $mw, $mh
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($mx, $my, 0, 0, (New-Object System.Drawing.Size $mw, $mh))
-            $dir = 'C:\PROJECT\Taskbar\IslandBar\captures'
+            $dir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'captures'
             if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
             $bmp.Save((Join-Path $dir 'probe-menu-after-hide.png'), [System.Drawing.Imaging.ImageFormat]::Png)
             $g.Dispose(); $bmp.Dispose()

@@ -94,42 +94,83 @@
 ## 3. 目录结构
 
 ```
-C:\PROJECT\Taskbar\                   ← 已改名完成（阶段 0-c ✅）
-├─ HANDOFF.md                        ← 本文档
-├─ START-HERE.txt                    英文速查 + 三条铁律
-├─ setup-toolchain.ps1               工具链安装（已完成，正常不用再跑）
-├─ verify-toolchain.ps1              环境验证（只读，随时可跑）
-└─ IslandBar\                        ← C++ 主项目
-   ├─ CMakeLists.txt                 顶层工程（C++20、/W4、UNICODE）
-   ├─ README.md                      项目说明（英文）
-   ├─ docs\                          验证截图
-   ├─ src\                           ← 真正的程序
-   │   ├─ CMakeLists.txt             island_bar 目标 + manifest 嵌入
-   │   ├─ island_bar.manifest        PerMonitorV2 DPI 声明（**必须**）
-   │   ├─ Geometry.h                 度量常量 + 唯一的圆角矩形命中判定
-   │   ├─ CardLayout.h               卡片控件位置（通知卡 / 音乐卡），三处共用
-   │   ├─ WicImage.h / .cpp          WIC 图片编解码（专辑封面 + 模糊背景）
-   │   ├─ Lyrics.h / .cpp            LRC 解析 + 行查找 + 网易云抓取（工作线程 + WinHTTP）
-   │   ├─ Log.h / .cpp               日志（所有控制台写都过的守卫）
-   │   ├─ MiniJson.h / .cpp          手写 JSON 读取（只为通知协议）
-   │   ├─ Monitor.h / .cpp           工作区、DPI、任务栏厚度的推导
-   │   ├─ Motion.h / .cpp            四态几何 + 插值 + 缓动曲线
-   │   ├─ MusicSession.h / .cpp      SMTC 现在播放（Windows.Media.Control + C++/WinRT）
-   │   ├─ NativeTaskbar.h / .cpp     隐藏/恢复原生任务栏（含 UIPI 检测）
-   │   ├─ Notification.h / .cpp      通知模型 + 有界存储
-   │   ├─ NotificationPipe.h/.cpp    命名管道服务器与客户端
-   │   ├─ IslandWindow.h / .cpp      窗口：置顶、不抢焦点、区域级穿透、悬停
-   │   ├─ Renderer.h / .cpp          D3D11 + D2D + DComp 合成器 + 像素回读
-   │   ├─ TextRenderer.h / .cpp      DirectWrite 时钟与卡片文字
-   │   ├─ Diagnostics.h / .cpp       运行时自检（283 项）+ 任务栏诊断
-   │   └─ main.cpp                   入口：自检 / 演示 / 常驻 / 任务栏诊断 / 歌词测试
-   ├─ tools\smoke\                   工具链冒烟测试
-   ├─ tools\jsonprobe\               独立 JSON+通知解析 harness
-   ├─ scripts\
-   │   ├─ env.ps1                    dot-source 后获得 MSVC 环境变量
-   │   └─ build.ps1                  配置 + 编译 + 运行冒烟测试
-   └─ build\Debug\                   构建产物（可删，删不掉时见 4.1）
+C:\PROJECT\Taskbar\                   ← 工作区（= git 仓库根）
+├─ HANDOFF.md                       本文档
+├─ FEATURES.md                      功能清单（A/B/C/D + 证据）
+├─ TESTING.md                       验收步骤
+├─ START-HERE.txt                   英文速查 + 铁律
+├─ docs\                            验证截图（`.gitignore` 排除）
+├─ .gitattributes                    行尾策略：仓库内 LF，检出按平台
+└─ IslandBar\                       ← 项目本体（GitHub 上就是这个名字）
+    ├─ CMakeLists.txt               顶层工程（C++20、/W4、UNICODE、静态 CRT）
+    ├─ CMakePresets.json            debug / release 两套预设
+    ├─ README.md                    项目说明（英文）
+    ├─ README.zh-CN.md              项目说明（中文）
+    ├─ .clang-format                房规；**不回溯格式化既有代码**
+    ├─ cmake\WinRt.cmake           C++/WinRT 设置（栏本体 + 两个探针共用）
+    ├─ scripts\                     全部 PowerShell（环境 / 构建 / 探针 / 截图）
+    │   ├─ env.ps1                  dot-source 后获得 MSVC 环境变量
+    │   ├─ build.ps1                配置 + 编译 + 运行冒烟测试
+    │   ├─ setup-toolchain.ps1      工具链安装（已完成，正常不用再跑）
+    │   └─ verify-toolchain.ps1     环境验证（只读，随时可跑）
+    ├─ src\                         ← 栏本体：一个目录一个模块
+    │   ├─ CMakeLists.txt           island_bar 目标 + manifest 嵌入
+    │   ├─ main.cpp                 入口：自检 / 演示 / 常驻 / 各诊断子命令
+    │   ├─ island_bar.manifest      PerMonitorV2 DPI 声明（**必须**）
+    │   ├─ island_bar.rc            版本资源
+    │   ├─ app\                     IslandWindow / AppBar / PlayerWindow
+    │   ├─ core\                    Geometry / Motion / StatePolicy / CardLayout /
+    │   │                           TaskStripLayout / Log / MiniJson
+    │   ├─ platform\                Monitor / NativeTaskbar / WindowList /
+    │   │                           DisplayBrightness / GlassMaterial / ThumbnailPreview
+    │   ├─ media\                   MusicSession / Lyrics / SoundOutput / AudioVolume / WicImage
+    │   ├─ render\                  Renderer / TextRenderer / Theme
+    │   ├─ shell\                   StartMenu / StartApps / SystemStatus /
+    │   │                           SystemToggles / Weather / TrayIcons / TrayPress
+    │   ├─ services\                Notification* / ToastStore / WeChatWatch
+    │   └─ selftest\Diagnostics     运行时自检（`-self-test`）
+    ├─ tools\                       开发探针（smoke / jsonprobe / gsmtcprobe /
+    │                               geoprobe / thumbprobe），都不随程序发布
+    ├─ setup\                       安装器（把 island_bar.exe 嵌成资源）
+    ├─ build\                       构建产物（可删，删不掉时见 4.1）
+    └─ backups\ captures\ dist\     本地快照 / 截图 / 发行包（`.gitignore` 排除）
 ```
+
+**边界**：`Taskbar\` 是工作区（本文档、功能清单、验收步骤、截图），
+`IslandBar\` 是**项目本体**，和 GitHub 上的仓库对应 —— CMake 工程根、脚本、构建产物都在里面。
+所有脚本都用 `Split-Path -Parent (Split-Path -Parent $PSCommandPath)` 推导项目根，
+所以从工作区根调用是 `.\IslandBar\scripts\build.ps1`，在项目目录里则是 `.\scripts\build.ps1`。
+
+### 3.1 2026-10-14：模块化 + 清死代码（本轮）
+
+用户的要求是「整体检查有没有无用代码，避免面多加水水多加面，把目录按正式 C++ 工程整理清楚」。
+**只动结构和死代码，不动行为**：
+1. **模块化**：`src\` 按依赖方向分成 8 个模块目录，include 一律写成 `"模块/头文件.h"`
+   （include 根是 `src\`）。**同一个文件搬错模块会直接编译不过，不会再靠搜索路径蒙对。**
+   三份复制粘贴的 C++/WinRT 设置合成 `cmake\WinRt.cmake` 的一个函数；
+   每个探针的说明从根 CMakeLists 挪进 `tools\CMakeLists.txt`。
+2. **清死代码**：按项目自己的老规矩「**0 调用者的代码不留**」删掉——
+   `src\SysStatusProbe.cpp`（整份孤立探测程序，从没进过构建）、
+   14 个只声明只定义没人调的函数、11 个头文件里没人调的内联访问器，
+   以及它们撑着的只写字段：`Log.cpp` 那个 16 KB 日志镜像缓冲 + 两个 Appender（曾被
+   `ReadLog` 读，而 `ReadLog` 零调用）、`toggleCount_` / `fetchCount_` / `lastReason_` /
+   `AppBar::reserved_`。另外 `weixin-watch.txt`（`watch-weixin.ps1` 的运行输出）被当源码提交过，
+   已删并进 `.gitignore`。
+
+**由此暴露并修掉的 `/W4` 真问题**（此前被截断的构建输出盖住了）：
+`CardLayout.h` 未使用的 `cardWidth`、`TextRenderer.cpp` 未使用的 `trayTheme`、
+`Theme.cpp` 未使用的 `read`、`thumbprobe` 里 `ULONGLONG`→`DWORD` 的窄化，
+以及 3 处变量遮蔽（`Diagnostics.cpp` 的 `ink`/`card`/`layout`、`TrayPress.cpp` 的 `hr`）。
+
+**同一轮里做过的、中途又退回去的一件事**：曾把 `IslandBar\` 整层提升到工作区根（扁平化），
+因为一度理解成「仓库根就是工程根」。用户随后指出：**工作区仍叫 `Taskbar`，代码放在它下面的
+`IslandBar\` 里，与 GitHub 一致** —— 于是原样退回，本轮只有模块化和清死代码留了下来。
+（中途还试过把工作区级文档收进 `docs\`，同样按用户要求摊回工作区根；`docs\` 回到只放截图。）
+
+**证据**：`.\IslandBar\scripts\build.ps1 -Config Debug -Clean` 与 `-Config Release -Clean`
+全量重编译，**0 warning / 0 error**（改动前同样全量编译是 7 条 warning）；
+`.\IslandBar\scripts\check-scripts.ps1` 59 个脚本全过。
+**没有**改任何运行时逻辑：自检项数、几何常量、API 调用序列都没动。
 
 ---
 
@@ -162,39 +203,39 @@ C:\PROJECT\Taskbar\                   ← 已改名完成（阶段 0-c ✅）
 **跑冒烟测试**（配置 + 编译 + 运行，一条命令）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\IslandBar\scripts\build.ps1" -Config Debug -RunSmoke
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.ps1" -Config Debug -RunSmoke
 ```
 
 **跑自检**（编译 + 283 项运行时断言，退出码 = 失败数）：
 
 ```powershell
 # 先编译（会顺带编译 island_bar.exe）
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\IslandBar\scripts\build.ps1" -Config Debug
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.ps1" -Config Debug
 
 # 再自检；退出码 0 = 全绿
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test
 ```
 
 **真的把岛体挂到屏幕上**：
 
 ```powershell
 # 常驻：移动鼠标到胶囊上会摊开；退出时恢复任务栏
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe"
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe"
 
 # 保留原生任务栏（开发时对比用）
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --keep-taskbar
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --keep-taskbar
 
 # 三态循环演示（不需要鼠标，适合截图/肉眼验证）
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --demo
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --demo
 
 # 用示例数据轮播三个音乐状态（歌词条 / 悬停 / 卡片），各 4 秒，适合截图
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --music-preview
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --music-preview
 
 # 验证在线歌词抓取（沙箱无外网，必须你在普通 shell 里跑）
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --lyrics-test "一直很安静" "阿桑"
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --lyrics-test "一直很安静" "阿桑"
 
 # 探测能不能隐藏任务栏，不启动主程序
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
 
 # 发一条通知给正在运行的岛体（推送通道的客户端）
 & "..." --notify "Build finished" --body "0 errors, 3 warnings" --app DSH
@@ -207,8 +248,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\Isla
 > cmd 里要么直接引号调用，要么 `start /wait`：
 >
 > ```bat
-> "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
-> start /wait "" "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test
+> ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+> start /wait "" ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test
 > ```
 >
 > **要保存输出，一律用 `cmd /c "... > file 2>&1"`。**
@@ -218,7 +259,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\Isla
 > **0 字节的空文件**（实测），必须走 cmd：
 >
 > ```bat
-> cmd /c "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test > log.txt 2>&1
+> cmd /c ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --self-test > log.txt 2>&1
 > ```
 >
 > 另外 `--probe-taskbar` 的**退出码有含义**：0 = 能隐藏任务栏，1 = 被 UIPI 挡住，
@@ -243,14 +284,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\Isla
 **手动获取 MSVC 环境**（需要直接调 `cl.exe` 时）：
 
 ```powershell
-. C:\PROJECT\Taskbar\IslandBar\scripts\env.ps1
+. .\IslandBar\scripts\env.ps1
 cl
 ```
 
 **验证环境完好**（只读，不改任何东西）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\PROJECT\Taskbar\verify-toolchain.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\verify-toolchain.ps1"
 ```
 
 > 注意：`dotnet` 相关命令在这台机器上**不可用**（只有不成对的 dotnet 宿主，没有 SDK）。C++ 构建不依赖它。
@@ -367,7 +408,7 @@ Set-Content $f -Value $c      # 又把乱码写成 UTF-8 → 原始字节永久�
    一行检查：
 
    ```powershell
-   python -c "d=open(r'C:\PROJECT\Taskbar\HANDOFF.md',encoding='utf-8').read(); print('FFFD:', d.count(chr(0xFFFD)))"
+python -c "d=open(r'.\HANDOFF.md',encoding='utf-8').read(); print('FFFD:', d.count(chr(0xFFFD)))"
    ```
 
 ---
@@ -511,12 +552,12 @@ UIPI 因此**静默丢弃**全部五种隐藏方法（`ShowWindow` / `SetWindowP
 
 ```powershell
 # PowerShell：必须用调用运算符
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
 ```
 
 ```bat
 REM cmd.exe：不能写 &，直接引号调用
-"C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
+".\IslandBar\build\Debug\src\Debug\island_bar.exe" --probe-taskbar
 ```
 
 **万一把任务栏弄没了**（被强杀、崩溃）：
@@ -716,7 +757,7 @@ start click: sent
 
 | 从哪里启动 | 进程的完整性级别 | 依据 |
 |---|---|---|
-| `C:\PROJECT\Taskbar\IslandBar\build\…\island_bar.exe` | **LOW** | bar 自己打印 `integrity: LOWER than the shell's`；用 PowerShell 读它自己的 token 也是 LOW |
+| `.\IslandBar\build\…\island_bar.exe` | **LOW** | bar 自己打印 `integrity: LOWER than the shell's`；用 PowerShell 读它自己的 token 也是 LOW |
 | 同一份 exe **复制到 `%TEMP%` 或 `C:\Users\<用户>\IslandBar\`** | **MEDIUM** | bar 自己打印 `integrity: same as the shell's` |
 | 用**任务计划程序**启动的 `cmd.exe`（对照） | MEDIUM | `whoami /groups` |
 | Explorer / 本 PowerShell | MEDIUM | 同上 |
@@ -3355,7 +3396,7 @@ const float hoveredWidthDip =
 实测：日志现在在
 
 ```
-C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.log
+.\IslandBar\build\Debug\src\Debug\island_bar.log
 ```
 
 **这个路径我能直接读，用户也能直接在开发工具里打开。** 同一个文件。
@@ -3398,7 +3439,7 @@ C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.log
 #### 新增 `scripts\collect-trace.ps1`（一条命令，输出落盘）
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\collect-trace.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\IslandBar\scripts\collect-trace.ps1
 ```
 
 - 启动程序、**等它退出**（用户关窗口）
@@ -3866,7 +3907,7 @@ CMake Error at CMakeLists.txt:70 (add_subdirectory):
 我在本轮多次用过这个命令来清理构建残留：
 
 ```powershell
-Get-ChildItem 'C:\PROJECT\Taskbar\IslandBar\build' -Recurse -Include '*.old','*.stale' |
+Get-ChildItem '.\IslandBar\build' -Recurse -Include '*.old','*.stale' |
   ForEach-Object { Remove-Item $_.FullName -Force }
 ```
 
@@ -5188,7 +5229,7 @@ self-test with the defect reintroduced: exit=4 FAIL=4
 即**这个开发沙箱完全没有外网**。所以歌词抓取必须由用户在普通 shell 里验证：
 
 ```powershell
-& "C:\PROJECT\Taskbar\IslandBar\build\Debug\src\Debug\island_bar.exe" --lyrics-test "就让这大雨全都落下" "容祖儿"
+& ".\IslandBar\build\Debug\src\Debug\island_bar.exe" --lyrics-test "就让这大雨全都落下" "容祖儿"
 ```
 
 现在这条命令会明确打印**失败原因**（搜不到／没歌词／请求失败／响应格式不对），
@@ -5385,7 +5426,7 @@ GSMTC sessions: 1
 
 | 位置 | 说明 |
 |---|---|
-| `C:\PROJECT\Taskbar\IslandBar\dist\IslandBarSetup-1.3.exe` | 仓库里的发行件（`dist/` 已在 `.gitignore`） |
+| `.\IslandBar\dist\IslandBarSetup-1.3.exe` | 仓库里的发行件（`dist/` 已在 `.gitignore`） |
 | `C:\Users\18340\Downloads\IslandBarSetup-1.3.exe` | 本机这一份，**从项目树外运行**（8.69 的降权教训） |
 | 大小 / SHA256 | 2,548,224 字节（2.43 MB） / `A763BD46516339E854599297D2751F260AC291223EBDF49F4CA8B2547E21E6BC` |
 
@@ -8092,8 +8133,8 @@ island_bar  : music: cover NONE (0 bytes) ← 栏拒绝读
 #### 三、复现用的命令
 
 ```
-build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe              # 看 Thumbnail: present/none
-build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe --skip-next  # 发一次跳曲，逐秒看播放器多久才动
+.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe              # 看 Thumbnail: present/none
+.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe --skip-next  # 发一次跳曲，逐秒看播放器多久才动
 ```
 ### 8.39 **切歌 4-5 秒 + 封面"关掉再开才有" —— 栏只问过播放器一次封面** ✅
 
@@ -8338,7 +8379,7 @@ music: cover COULD NOT DECODE 0x0                  ← 发了，但这一栏解�
 
 #### 顺手记下的一条工具用法
 
-**"这首歌到底有没有封面"不再靠猜**：`build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 会直接打印 `Thumbnail: present|none`。以后"封面/背景不见了"先跑它，再看栏。
+**"这首歌到底有没有封面"不再靠猜**：`.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe` 会直接打印 `Thumbnail: present|none`。以后"封面/背景不见了"先跑它，再看栏。
 
 ### 8.32 **竖滚改回来了（用户要求）—— 8.31 的交叉淡入淡出撤掉** ✅
 

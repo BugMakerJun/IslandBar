@@ -248,7 +248,8 @@ int main() {
 
     // Ten seconds of message loop, with the source repainting twice a second so that a LIVE thumbnail is
     // distinguishable from a stale one: the white bar moves.
-    const DWORD started = GetTickCount64();
+    // ULONGLONG, which is what GetTickCount64 returns: narrowed to DWORD it would wrap every 49 days.
+    const ULONGLONG started = GetTickCount64();
     while (GetTickCount64() - started < 10000) {
         MSG message = {};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {

@@ -96,7 +96,7 @@ function Save-Shot($rect, $name) {
     $bmp = New-Object System.Drawing.Bitmap $w, $h
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($rect.L, $rect.T, 0, 0, (New-Object System.Drawing.Size $w, $h))
-    $dir = 'C:\PROJECT\Taskbar\IslandBar\captures'
+    $dir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'captures'
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
     $bmp.Save((Join-Path $dir $name), [System.Drawing.Imaging.ImageFormat]::Png)
     $g.Dispose(); $bmp.Dispose()

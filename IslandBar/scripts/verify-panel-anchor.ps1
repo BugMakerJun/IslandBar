@@ -51,7 +51,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$repo     = 'C:\PROJECT\Taskbar\IslandBar'
+# Derived from this script's own location, never hardcoded (see START-HERE rule 1).
+$repo     = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $buildDir = Join-Path $repo 'build\Debug\src\Debug'
 # `-Binary old` used to mean "a copy of the previous build, kept under another name". DELETED: a
 # differently-named copy of this executable HANGS `Start-Process` when it is launched through this

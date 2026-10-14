@@ -33,8 +33,8 @@ Write-Host "[snapshot] dest: $Dest"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 
 # The things that cannot be regenerated: sources, build files, scripts, docs.
-$items = @('src', 'tools', 'scripts', 'CMakeLists.txt', 'README.md',
-           'island_bar.manifest')
+$items = @('src', 'tools', 'setup', 'cmake', 'scripts', 'CMakeLists.txt',
+           'README.md', 'README.zh-CN.md')
 
 $copied = 0
 foreach ($item in $items) {
@@ -59,7 +59,8 @@ foreach ($item in $items) {
     Write-Host "[snapshot]   $item"
 }
 
-# The handoff and the feature list live one level up, in the workspace root.
+# The handoff, the feature list and the quick reference live at the top of the WORKSPACE,
+# one level above this project: they describe the session, not the build.
 $workspace = Split-Path -Parent $Root
 foreach ($doc in @('HANDOFF.md', 'FEATURES.md', 'START-HERE.txt')) {
     $source = Join-Path $workspace $doc

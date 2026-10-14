@@ -1,7 +1,7 @@
 # =====================================================================
 #  run.ps1 -- build island_bar, make sure no stale copy is running, start it
 #
-#      powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\run.ps1
+#      powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run.ps1
 #
 #  This exists because a whole round of feedback was spent on a STALE BINARY: the
 #  executable in build\Debug was older than the source, so the fixes under discussion

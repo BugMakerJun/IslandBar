@@ -1,6 +1,6 @@
 # =====================================================================
 #  env.ps1 -- dot-source this to get the build environment in a session
-#      . C:\PROJECT\Taskbar\IslandBar\scripts\env.ps1
+#      . .\scripts\env.ps1
 #
 #  ASCII-only on purpose. Do not add non-ASCII text to this file:
 #  Windows PowerShell 5.1 reads .ps1 files using the system ANSI codepage

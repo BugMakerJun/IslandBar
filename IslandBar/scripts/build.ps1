@@ -1,8 +1,8 @@
 # =====================================================================
 #  build.ps1 -- configure, build, and optionally run the smoke test
 #
-#      powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\build.ps1
-#      ... -File C:\PROJECT\Taskbar\IslandBar\scripts\build.ps1 -Config Release -Clean
+#      powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
+#      ... -File .\scripts\build.ps1 -Config Release -Clean
 #
 #  ASCII-only on purpose. Do not add non-ASCII text to this file.
 # =====================================================================

@@ -249,29 +249,60 @@ Flags:
 ## Layout
 
 ```
-CMakeLists.txt          top-level project (C++20, /W4, UNICODE)
-scripts\env.ps1         imports the MSVC environment into a session
-scripts\build.ps1       configure + build + optional smoke run
-scripts\snapshot.ps1    timestamped local snapshot of the source tree
-tools\smoke\            toolchain smoke test and API capability probe
-tools\jsonprobe\        the JSON parser, exercised on its own
-src\                    the bar
-  Geometry.h              metrics + THE rounded-rect hit test (one copy, shared)
-  Monitor.h/.cpp          work area, DPI, inferred taskbar thickness
-  Motion.h/.cpp           the island's states, their geometry and the interpolation
-  StatePolicy.h           which shape the pointer and the panel ask for
-  TaskStripLayout.h       the two decks: where every button goes, and its hit test
-  CardLayout.h            the card's contents: tiles, sliders, the gear, the music card
-  WindowList.h/.cpp       the open windows, in a stable order
-  AppBar.cpp              claiming the screen edge, and being refused
-  NativeTaskbar.h/.cpp    hide/restore the shell taskbar (+ UIPI detection)
-  SystemStatus.h/.cpp     WLAN, Bluetooth, volume, power, input method
-  IslandWindow.h/.cpp     window: topmost, no focus steal, pass-through, hover
-  Renderer.h/.cpp         D3D11 + Direct2D + DirectComposition + pixel readback
-  TextRenderer.h/.cpp     DirectWrite: the clock, the tiles, the icons
-  Diagnostics.h/.cpp      the runtime self-test
-  main.cpp                entry point: --self-test, --demo, or run the bar
-  island_bar.manifest     PerMonitorV2 DPI awareness
+CMakeLists.txt            the top-level project (C++20, /W4, UNICODE, static CRT)
+CMakePresets.json         the same two configurations, one preset at a time
+cmake/WinRt.cmake         the C++/WinRT setup the bar and two probes share
+scripts/env.ps1           imports the MSVC environment into a session
+scripts/build.ps1         configure + build + optional smoke run
+scripts/snapshot.ps1      timestamped local snapshot of the source tree
+docs/                     the handoff, the feature list, the verified screenshots
+
+src/                      the bar -- one directory per module
+  main.cpp                  entry: --self-test, --demo, or run the bar
+  island_bar.manifest       PerMonitorV2 DPI awareness
+  island_bar.rc             the version resource
+  app/                      the window, and what hangs off it
+    IslandWindow            window: topmost, no focus steal, pass-through, hover
+    AppBar                  claiming the screen edge, and being refused
+    PlayerWindow            the mini player that follows a window
+  core/                     pure logic, and what everything shares
+    Geometry.h              metrics + THE rounded-rect hit test (one copy, shared)
+    Motion                  the island's states, their geometry and the interpolation
+    StatePolicy.h           which shape the pointer and the panel ask for
+    TaskStripLayout.h       the two decks: where every button goes, and its hit test
+    CardLayout.h            the card's contents: tiles, sliders, the gear, the music card
+    Log                     every console write goes through here
+    MiniJson                the JSON reader behind the notification protocol
+  platform/                 the Win32 and shell APIs the bar stands on
+    Monitor                 work area, DPI, inferred taskbar thickness
+    NativeTaskbar           hide/restore the shell taskbar (+ UIPI detection)
+    WindowList              the open windows, in a stable order
+    DisplayBrightness       DDC/CI, with every write read back
+    GlassMaterial           the backdrop materials
+    ThumbnailPreview        DWM live thumbnails
+  media/                    what is playing, and what it looks like
+    MusicSession            SMTC now-playing (C++/WinRT)
+    Lyrics                  LRC parsing, and the search behind it
+    SoundOutput             the mixer; AudioVolume, the master volume
+    WicImage                image decode: album art, the blurred wash
+  render/                   everything that puts pixels on the composition
+    Renderer                D3D11 + Direct2D + DirectComposition + pixel readback
+    TextRenderer            DirectWrite: the clock, the tiles, the icons
+    Theme                   the colour sets
+  shell/                    the shell's own controls, mirrored
+    StartMenu, StartApps    the Start button and its pinned apps
+    SystemStatus            WLAN, Bluetooth, volume, power, input method
+    SystemToggles           switching radios and night light, and reading the result back
+    Weather                 the reading on the status line
+    TrayIcons, TrayPress    the tray, and pressing its icons
+  services/                 the channels that bring things in
+    Notification*           the model, the named pipe, the sender's icon
+    ToastStore              Windows' own toast database
+    WeChatWatch             the call and message watcher
+  selftest/Diagnostics      the runtime self-test (-self-test)
+
+tools/                    development probes; none of them is shipped
+setup/                    the installer, with the bar embedded in it
 ```
 
 ## Notes for contributors

@@ -1,7 +1,7 @@
 # =====================================================================
 #  measure-start-hover.ps1 -- does the Start card ask for frames while the pointer moves?
 #
-#      powershell -NoProfile -ExecutionPolicy Bypass -File .\captures\measure-start-hover.ps1
+#      powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure-start-hover.ps1
 #          -Left 1090 -Top 30 -Right 1520 -Bottom 300
 #
 #  This is a MEASUREMENT, not a fix. It starts the bar with the picker open, walks the

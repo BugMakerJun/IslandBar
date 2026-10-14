@@ -9,6 +9,8 @@
 #      build/         rebuilt by scripts\build.ps1 (54 MB)
 #      backups/       timestamped local snapshots from scripts\snapshot.ps1 (15 MB)
 #      captures/      frame dumps written by the app while it runs (28 MB)
+#      dist/          the release package built by scripts\package-release.ps1
+#      weixin-watch.txt  the transcript watch-weixin.ps1 writes (a run's output, not source)
 #      docs/*.png     screenshots; the drawings they show come from the source
 #
 #  The PNGs are the awkward case. They are genuinely useful -- they are how
@@ -54,8 +56,8 @@ CTestTestfile.cmake
 # --- local snapshots and runtime dumps --------------------------------
 backups/
 captures/
-IslandBar/backups/
-IslandBar/captures/
+# watch-weixin.ps1 writes its transcript to the repository root; it is a record of one run.
+weixin-watch.txt
 
 # --- screenshots ------------------------------------------------------
 # The documentation itself is text and IS committed; only the images are not.

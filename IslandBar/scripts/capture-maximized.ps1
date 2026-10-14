@@ -58,7 +58,7 @@ if ([CaptureProbe.Win]::FindWindow('Shell_TrayWnd', $null) -eq [IntPtr]::Zero) {
     exit 2
 }
 
-$captures = 'C:\PROJECT\Taskbar\IslandBar\captures'
+$captures = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'captures'
 New-Item -ItemType Directory -Force -Path $captures | Out-Null
 
 $wnd = [CaptureProbe.Win]::MakeWindow()

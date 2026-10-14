@@ -99,7 +99,9 @@ Start-Sleep -Seconds 4
 "   window rect      : " + (RectOf $wnd)
 
 "4. the bar's log:"
-$path = 'C:\Users\18340\IslandBar\island_bar.log'
+# Derived from the current user, not written out: this file carried one person's account name,
+# and every other script in this folder already derives it the same way.
+$path = Join-Path $env:USERPROFILE 'IslandBar\island_bar.log'
 Get-Content $path -Encoding UTF8 -Tail 40 | Select-String -Pattern 'work area|maximized window' |
     Select-Object -Last 6 | ForEach-Object { "   " + $_.Line }
 

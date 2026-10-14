@@ -1,3 +1,22 @@
+# =====================================================================
+#  IslandBar -- the top-level build
+#
+#  A Windows 11 taskbar replacement: a Dynamic-Island style bar at the top of the
+#  screen, carrying the Start button, the open windows and a quick-settings panel,
+#  and hiding the shell's own taskbar. C++20, Direct2D, DirectComposition.
+#
+#  The tree:
+#      src/       the bar itself, one directory per module (src/CMakeLists.txt)
+#      tools/     development probes; none of them is shipped (tools/CMakeLists.txt)
+#      setup/     the per-user installer, which carries the bar inside itself
+#      cmake/     shared CMake modules
+#      scripts/   the PowerShell that builds, runs, drives and photographs the bar
+#      docs/      the handoff, the feature list, and the verified screenshots
+#
+#  Build it with scripts\build.ps1. That script finds the toolchain -- the CMake
+#  bundled with Visual Studio, the Windows SDK -- in a way a bare `cmake` does not.
+# =====================================================================
+
 cmake_minimum_required(VERSION 3.20)
 
 project(IslandBar LANGUAGES CXX
@@ -43,12 +62,16 @@ if(MSVC)
     add_link_options(/DEBUG:FULL)
 endif()
 
-option(ISLANDBAR_BUILD_SMOKE "Build the toolchain smoke test" ON)
 option(ISLANDBAR_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 if(MSVC AND ISLANDBAR_WARNINGS_AS_ERRORS)
     add_compile_options(/WX)
 endif()
+
+# --- helper modules --------------------------------------------------
+# The C++/WinRT setup. The bar and two of the probes need it, so it is written once.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(WinRt)
 
 # --- Third-party dependencies ----------------------------------------
 # sqlite3 is vendored as the amalgamation, fetched at configure time.
@@ -69,47 +92,10 @@ if(ISLANDBAR_FETCH_SQLITE)
 endif()
 
 # --- Targets ---------------------------------------------------------
-if(ISLANDBAR_BUILD_SMOKE)
-    add_subdirectory(tools/smoke)
-endif()
-
-# A standalone harness for the JSON reader and the notification layer. It links
-# only those two modules, so a hang in the parser cannot be mistaken for a hang in
-# the DirectComposition setup that surrounds it in the main self-test.
-option(ISLANDBAR_BUILD_JSONPROBE "Build the JSON/notification probe" ON)
-if(ISLANDBAR_BUILD_JSONPROBE)
-    add_subdirectory(tools/jsonprobe)
-endif()
-
-# Asks whether WeChat reports its calls through the media session API. That
-# decides whether the call pill can be driven from the C++/WinRT media path the
-# bar already uses, or has to be driven from WeChat's call window instead. The
-# question cannot be asked from PowerShell on this machine, whose WindowsRuntime
-# interop is not loadable, so it needs a C++/WinRT program -- this one.
-option(ISLANDBAR_BUILD_GSMTCPROBE "Build the media-session capability probe" ON)
-if(ISLANDBAR_BUILD_GSMTCPROBE)
-    add_subdirectory(tools/gsmtcprobe)
-endif()
-
-# Asks Windows for the machine's own position. The weather on the status line needs
-# coordinates, and the two sources that can supply them are a city in weather.txt and
-# this -- so whether this works, and what it answers on a machine whose traffic leaves
-# through a proxy, has to be measured rather than assumed. See tools/geoprobe.
-option(ISLANDBAR_BUILD_GEOPROBE "Build the location capability probe" ON)
-if(ISLANDBAR_BUILD_GEOPROBE)
-    add_subdirectory(tools/geoprobe)
-endif()
-
-# Two windows of one ordinary program, and a DWM thumbnail between them. The bar's own preview said
-# "registered, visible, right place, nothing drawn", and separating the recipe from the machine needed a
-# program that does nothing else. See tools/thumbprobe.
-option(ISLANDBAR_BUILD_THUMBPROBE "Build the DWM thumbnail probe" ON)
-if(ISLANDBAR_BUILD_THUMBPROBE)
-    add_subdirectory(tools/thumbprobe)
-endif()
-
-# The real bar: the DComp/D2D window foundation plus the phase 0-d self-test.
+# The bar first: the installer embeds its executable, and two of the probes are
+# compiled from its sources.
 add_subdirectory(src)
+add_subdirectory(tools)
 
 # The installer: carries the bar inside itself, installs it for the current user, and
 # uninstalls it again. It needs the bar, so it comes after it.

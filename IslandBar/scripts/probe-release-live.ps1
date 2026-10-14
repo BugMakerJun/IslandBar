@@ -78,7 +78,8 @@ function SetWorkArea([int]$l, [int]$t, [int]$r, [int]$b) {
 function LogTail([int]$lines) {
     # The bar's log lives beside the deployed executable (Log.cpp). A missing log is reported rather
     # than ignored: the whole point of several checks here is what the bar wrote down.
-    $path = 'C:\Users\18340\IslandBar\island_bar.log'
+    # Derived from the current user rather than written out, so this file carries nobody's account name.
+    $path = Join-Path $env:USERPROFILE 'IslandBar\island_bar.log'
     if (-not (Test-Path $path)) { return @('<no log file at ' + $path + '>') }
     return (Get-Content $path -Encoding UTF8 -Tail $lines)
 }

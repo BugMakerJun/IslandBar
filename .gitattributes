@@ -1,0 +1,24 @@
+# =====================================================================
+#  Line endings, stated rather than inherited.
+#
+#  Every file in this repository is STORED with LF and checked out with the
+#  platform's own ending. That was already the behaviour here -- core.autocrlf
+#  produced it -- but that setting is per-machine, so a contributor whose setting
+#  differs sees whole files as changed and every diff becomes unreadable. One line
+#  here, and the policy travels with the repository.
+#
+#  To renormalise a tree that has drifted:
+#      git add --renormalize .
+# =====================================================================
+
+* text=auto
+
+# The files that are edited most, named so the intent is visible at a glance.
+*.cpp   text
+*.h     text
+*.rc    text
+*.ps1   text
+*.cmake text
+*.md    text
+*.txt   text
+CMakeLists.txt text

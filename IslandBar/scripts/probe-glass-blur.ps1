@@ -116,7 +116,9 @@ function Snapshot([string]$name, [int]$x, [int]$y, [int]$w, [int]$h) {
     $bmp = New-Object System.Drawing.Bitmap $w, $h
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($x, $y, 0, 0, (New-Object System.Drawing.Size $w, $h))
-    $bmp.Save("C:\PROJECT\Taskbar\IslandBar\captures\glass-$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+    $dir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'captures'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $bmp.Save((Join-Path $dir "glass-$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
     $g.Dispose(); $bmp.Dispose()
 }
 
