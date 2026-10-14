@@ -6206,6 +6206,77 @@ void TestMusicCardLayout() {
                 Check(withStrip.bottom == withoutStrip.bottom,
                       L"the strip does not make the region taller", regionDetail);
             }
+
+            // THE DECK AND THE ROW'S RIGHT END FOLLOW THE NOTICE STRIP, IN THE REGION AND IN THE HIT TEST.
+            //
+            // These are the two assertions that would have caught the defect reported with a photograph of
+            // the bar during a call: "通话或者通知的时候左侧是开始菜单和系统按钮点不了，右侧还有少一部分".
+            //
+            // Both halves were the same mistake in two places. The hit test asked for the controls from the
+            // RESTING PILL while the drawing placed them from the strip, so the Start button and the panel
+            // toggle were painted 100 DIP to the left of where the pointer was accepted. And the region's
+            // RIGHT edge was measured from the resting pill while its LEFT edge followed the strip, so the
+            // region stopped short of the row it is supposed to cover -- and the region clips PAINTING as
+            // well as input, which is why the right-hand end of the row was not on screen at all.
+            //
+            // Written against the row the renderer lays out rather than against the region's own inputs,
+            // because the property is "the region covers what is drawn" and not "these two numbers are
+            // equal" -- and the two numbers being equal is exactly what was once true and wrong.
+            {
+                MonitorGeometry stripMonitor;
+                stripMonitor.screen = {0, 0, 2560, 1440};
+                stripMonitor.work = {0, 0, 2560, 1408};
+                stripMonitor.dpi = 96;
+                stripMonitor.dpiY = 96;
+                // Screen-sized window rect and 96 dpi, so one DIP is one pixel and the two sides of each
+                // comparison below are in the same units.
+                const RECT windowRect = {0, 0, 2560, 360};
+                const IslandAnchor stripAnchor = AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f);
+                const RoundedBox restingPill = BoxForState(IslandState::Collapsed, stripAnchor);
+                const RoundedBox noticeStrip = BoxForState(IslandState::NoticeStrip, stripAnchor);
+
+                constexpr int kIcons = 8;
+                constexpr int kTrayIcons = 15;
+                const RECT region = IslandWindow::InputRegionFor(
+                    stripMonitor, IslandState::NoticeStrip, stripAnchor, noticeStrip, 0.0f, kIcons,
+                    0.0f, kTrayIcons);
+
+                // The row exactly as the renderer lays it out with a strip up: from the strip's own edge,
+                // pushed one button along by the tray button.
+                const RoundedBox rowWithTray =
+                    RowAnchorWithTray(RowAnchorBox(noticeStrip, restingPill), kTrayIcons > 0);
+                const float rowRightDip =
+                    TaskIconButtonAt(rowWithTray, kIcons - 1, kIcons, kIcons - 1, 1.0f).right;
+
+                wchar_t stripDetail[256];
+                std::swprintf(stripDetail, 256,
+                              L"row ends at %.0f DIP, region ends at %ld px (strip right %.0f)", rowRightDip,
+                              region.right, noticeStrip.rect.right);
+                Check(static_cast<float>(region.right) >= rowRightDip - 1.0f,
+                      L"the region covers the right end of the icon row while the notice strip is up",
+                      stripDetail);
+
+                // The deck, from the pointer's side: the Start button is placed from the box the row is
+                // anchored to, so a strip moves it -- and a point on it, as drawn, must be the bar's. The
+                // same point is then asked again with the resting pill standing in for the strip, and the
+                // answer must be the opposite: that IS the defect, stated as a predicate rather than as two
+                // coordinates.
+                const RectF startOnStrip = StartButtonFor(RowAnchorBox(noticeStrip, restingPill));
+                const RectF startOnPill = StartButtonFor(restingPill);
+                const POINT onStart = {
+                    static_cast<LONG>((startOnStrip.left + startOnStrip.right) * 0.5f),
+                    static_cast<LONG>((startOnStrip.top + startOnStrip.bottom) * 0.5f)};
+                std::swprintf(stripDetail, 256, L"start drawn %.0f..%.0f, from the pill %.0f..%.0f DIP",
+                              startOnStrip.left, startOnStrip.right, startOnPill.left, startOnPill.right);
+                Check(IslandWindow::ShouldAcceptPointer(stripMonitor, windowRect, onStart,
+                                                        IslandState::NoticeStrip, kIcons, 0.0f, false,
+                                                        kTrayIcons, noticeStrip),
+                      L"the Start button is the bar's where the notice strip draws it", stripDetail);
+                Check(!IslandWindow::ShouldAcceptPointer(stripMonitor, windowRect, onStart,
+                                                         IslandState::NoticeStrip, kIcons, 0.0f, false,
+                                                         kTrayIcons, restingPill),
+                      L"... and it is not the bar's where the resting pill would put it", stripDetail);
+            }
         }
 
         // The weather's own arithmetic: the code table, the rounding, and the two wire formats.

@@ -573,9 +573,14 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     if (fitting > 0) {
         // From the row's own box, which the tray button has moved along -- the same box the icons are
         // DRAWN from, so the region cannot stop short of them.
-        rowRight = TaskIconButtonAt(RowAnchorWithTray(restingIsland, trayIconCount > 0), fitting - 1,
-                                    fitting, fitting - 1, 1.0f)
-                       .right;
+        //
+        // THE SAME BOX AS `rowLeft`, which is the whole point and was not true: the left edge above is
+        // measured from `rowWithTray`, which follows the notice strip, while this end was measured from the
+        // RESTING PILL. While a strip was up the two ends were therefore 100 DIP apart -- the region
+        // stopped short of the row it is supposed to cover, and the region CLIPS, so the right-hand end of
+        // the row and the tray icons beside it were never painted at all. Reported as "右侧还有少一部分",
+        // with a photograph of the bar in exactly that state.
+        rowRight = TaskIconButtonAt(rowWithTray, fitting - 1, fitting, fitting - 1, 1.0f).right;
     }
     if (rowRight > right) right = rowRight;
 
@@ -765,7 +770,8 @@ int IslandWindow::IconAtScreen(POINT screenPoint) const {
 
 bool IslandWindow::HitTestScreen(POINT screenPoint) const {
     return ShouldAcceptPointer(monitor_, rect_, screenPoint, motion_.Target(),
-                               RowButtonCount(), cardLeftDip_, fullscreenApp_, trayIconCount_);
+                               RowButtonCount(), cardLeftDip_, fullscreenApp_, trayIconCount_,
+                               motion_.Current());
 }
 
 void IslandWindow::SetFullscreenApp(bool fullscreenApp) {
@@ -989,7 +995,8 @@ IslandAnchor IslandWindow::CurrentAnchor() const {
 
 bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                        POINT screenPoint, IslandState state, int iconCount,
-                                       float cardLeftDip, bool fullscreenApp, int trayIconCount) {
+                                       float cardLeftDip, bool fullscreenApp, int trayIconCount,
+                                       const RoundedBox& currentShape) {
     // THE BAR IS NOT THERE WHILE A FULL-SCREEN APPLICATION IS IN FRONT.
     //
     // Nothing of it is drawn in that state (see Renderer::RenderFrame), so there is nothing to point at
@@ -1025,9 +1032,23 @@ bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const REC
     // click-through, the icon could not be hovered, and it could not be clicked. The icons were
     // drawn correctly and were completely inert.
     //
-    // The island's own box is used rather than the current shape's, because the icons are positioned
-    // from the island and the row must not move as the state changes.
-    const RoundedBox island = IslandBoxFor(widthDip, kCollapsedWidthDip, kCollapsedHeightDip);
+    // WHERE THE CONTROLS ARE is asked of the SAME box the drawing asks of: the resting pill in every state
+    // but the notice strip, and the notice strip itself while one is up (see RowAnchorBox).
+    //
+    // This was the resting pill UNCONDITIONALLY, and the notice strip is 420 DIP wide against the pill's
+    // 220 -- so while a call or a message was up, the Start button and the panel toggle were PAINTED 100
+    // DIP to the left of where this function looked for them: visible, and unclickable. Reported as exactly
+    // that ("通话或者通知的时候左侧是开始菜单和系统按钮点不了"), with a screenshot, during a call.
+    //
+    // The old line's reasoning is kept because it is right about CARDS: the row must not move as the state
+    // changes, and RowAnchorBox answers with the resting pill for every width between the pill and a card.
+    // The notice strip is the one shape that is meant to push the row along, and it is the one this now
+    // follows. A default-constructed box means "no animated shape supplied" -- the same convention
+    // InputRegionFor uses -- so the self-test's calls read exactly as they did.
+    const RoundedBox restingPill = IslandBoxFor(widthDip, kCollapsedWidthDip, kCollapsedHeightDip);
+    const RoundedBox island =
+        (currentShape.rect.right > currentShape.rect.left) ? RowAnchorBox(currentShape, restingPill)
+                                                          : restingPill;
 
     // ... AND WITH A FULL-SCREEN APPLICATION IN FRONT, ONLY THE ISLAND IS THE BAR.
     //
@@ -1186,7 +1207,8 @@ void IslandWindow::UpdatePointerState() {
                                    localY >= column.top && localY <= column.bottom;
         }
         const bool accepted = ShouldAcceptPointer(monitor_, rect_, cursor, motion_.Target(),
-                                                  RowButtonCount(), cardLeftDip_);
+                                                  RowButtonCount(), cardLeftDip_, false, 0,
+                                                  motion_.Current());
 
         // `haveTrace_` distinguishes the first poll from a genuine transition.
         if (!haveTrace_ || accepted != lastAccepted_) {
@@ -1345,7 +1367,7 @@ void IslandWindow::UpdatePointerState() {
 
     const bool inside =
         ShouldAcceptPointer(monitor_, rect_, cursor, motion_.Target(), RowButtonCount(),
-                            cardLeftDip_);
+                            cardLeftDip_, false, 0, motion_.Current());
     if (inside != pointerInside_) {
         pointerInside_ = inside;
         pointerInsideChanged_ = true;

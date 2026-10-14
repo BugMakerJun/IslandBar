@@ -173,7 +173,8 @@ public:
     static bool ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                     POINT screenPoint, IslandState state, int iconCount = 0,
                                     float cardLeftDip = 0.0f, bool fullscreenApp = false,
-                                    int trayIconCount = 0);
+                                    int trayIconCount = 0,
+                                    const RoundedBox& currentShape = RoundedBox{});
 
     // Told by the frame loop, which measures it (see island::FullScreenAppInFront). The hit test is
     // answered here, so it has to be told the same thing the renderer was.
