@@ -246,9 +246,7 @@ struct Learned {
 // The handle is never freed on purpose: freeing it would be the very thing that used to leave dangling import
 // slots behind. When this process dies the system removes the hook, and the pinned modules stay mapped and
 // inert in the applications that already have them.
-HHOOK g_globalHook = nullptr;
 HMODULE g_hookModule = nullptr;
-HHOOK GlobalHook() { return g_globalHook; }
 
 // The lines already in the cache: what this run must not duplicate, and what it may have to correct (an
 // application that changed its callback message).
@@ -505,9 +503,26 @@ int CountCoveredIcons(const TrayIcons& icons) {
     return covered;
 }
 
+// Loads the staged copy of the module and keeps it for the session. NO HOOK IS INSTALLED HERE.
+//
+// A GLOBAL HOOK CANNOT BE USED WITH THIS DLL, and that is measured rather than cautious. The mechanism
+// itself is MyDockFinder's (HANDOFF 8.110: `One global WH_GETMESSAGE hook`), and it was built and it worked
+// -- but on 2026-10-15, minutes after it went in, the user reported "黑屏": Clash Verge's window came up
+// black. Measured with the hook installed against the same application restarted without it:
+//
+//     island running   -> 6 msedgewebview2 processes, the window's client area mean brightness 0  (blank)
+//     island closed    -> 12 msedgewebview2 processes, mean brightness 56 (its normal dark UI, rendered)
+//
+// and our module was mapped in clash-verge.exe but in NONE of the WebView2 processes. Chromium's
+// RendererCodeIntegrity (Microsoft-signed images only, on by default for renderer processes) refuses a
+// pending injection of an UNSIGNED module: the renderer never finishes starting, so nothing is ever painted.
+// MyDockFinder's dockmod64.dll is a signed commercial binary, which is why one global hook works for it and
+// not for this project's build.
+//
+// So the module is offered to the TRAY APPLICATIONS on the card, one process at a time (see
+// LearnTrayCallbacks) -- a scope that never includes a browser or a webview, and that the pin (TrayHook.cpp)
+// then makes permanent for the life of each of those processes.
 bool InstallTrayHook() {
-    if (g_globalHook) return true;
-
     // --- where this bar and the module are ------------------------------------------------
     wchar_t self[MAX_PATH] = {};
     if (GetModuleFileNameW(nullptr, self, MAX_PATH) == 0) return false;
@@ -536,17 +551,8 @@ bool InstallTrayHook() {
         return false;
     }
 
-    // dwThreadId = 0: the whole desktop, which is the point. The module then follows every GUI process,
-    // including ones started long after this line ran.
-    g_globalHook = SetWindowsHookExW(WH_GETMESSAGE, reinterpret_cast<HOOKPROC>(procedure), g_hookModule, 0);
-    if (!g_globalHook) {
-        LogAndPrint(L"  tray hook: the global hook was REFUSED (%lu) -- every press keeps whatever the cache "
-                    L"already says, and applications are learned one at a time or not at all\n",
-                    GetLastError());
-        return false;
-    }
-    LogAndPrint(L"  tray hook: one global WH_GETMESSAGE hook installed from %ls -- the module now follows "
-                L"every GUI process, the ones running now and the ones started later\n",
+    LogAndPrint(L"  tray hook: module ready at %ls (offered to tray applications only -- a global hook is "
+                L"refused by signed-only renderer processes, see TrayLearn.cpp)\n",
                 modulePath.c_str());
     return true;
 }
@@ -556,21 +562,25 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     result.icons = icons.Count();
     const ULONGLONG start = GetTickCount64();
 
-    // The module and the one global hook: installed once, on the main thread, and held for the session (see
-    // the note at the top of this file). If it could not be installed there is nothing to learn from.
+    // The staged module, loaded once (see InstallTrayHook for why there is no global hook any more).
     if (!InstallTrayHook()) return result;
 
     // --- the report starts empty, so everything in it belongs to this run -----------------
     const std::wstring report = HomePath(kReportFile);
     if (!report.empty()) DeleteFileW(report.c_str());
 
-    // --- the applications of the card, for the report only ---------------------------------
+    // --- ONE THREAD HOOK PER TRAY APPLICATION, and nothing else ---------------------------------
     //
-    // NO HOOK IS INSTALLED PER APPLICATION ANY MORE. The one global hook (see the top of this file) is what
-    // delivers the module now, to every GUI process that pumps a message -- the ones running today, the ones
-    // started in an hour, and the shell itself. What is collected here is the list of applications the card
-    // cares about, so the pass can say how many of them are already being watched.
+    // This is the scope that matters: the applications on the card, the heaviest process of each (measured:
+    // WeChat runs five and its tray window lives in the largest), and every thread of that process. A browser
+    // or a webview renderer is never in this list unless the user has a tray icon from one, and Chromium's
+    // signed-only renderer rule (see InstallTrayHook) is exactly why the scope has to be this narrow.
+    //
+    // A hook that cannot be installed is not an error: a process that refuses an injected module reports
+    // through `appsReached` below.
     std::vector<DWORD> tried;
+    std::vector<HHOOK> hooks;
+    const FARPROC procedure = GetProcAddress(g_hookModule, "IslandTrayHookProc");
     for (int i = 0; i < icons.Count(); ++i) {
         const std::wstring exe = BaseNameLower(icons.ExePathAt(i));
         if (exe.empty()) continue;
@@ -578,6 +588,26 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
         if (pid == 0 || std::find(tried.begin(), tried.end(), pid) != tried.end()) continue;
         tried.push_back(pid);
         ++result.appsTried;
+        if (!procedure) continue;
+
+        // The threads, from a snapshot: SetWindowsHookEx takes one thread per call, and a process that is
+        // already holding the module needs no hook at all -- which is the normal case after the first pass,
+        // because the module pins itself where it lands (TrayHook.cpp).
+        if (ModuleAlreadyIn(pid)) continue;
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) continue;
+        THREADENTRY32 entry = {};
+        entry.dwSize = sizeof(entry);
+        if (Thread32First(snapshot, &entry)) {
+            do {
+                if (entry.th32OwnerProcessID != pid) continue;
+                const HHOOK installed = SetWindowsHookExW(WH_GETMESSAGE,
+                                                          reinterpret_cast<HOOKPROC>(procedure),
+                                                          g_hookModule, entry.th32ThreadID);
+                if (installed) hooks.push_back(installed);
+            } while (Thread32Next(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
     }
 
     // --- the signal that makes applications register again -------------------------------
@@ -594,10 +624,15 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     Sleep(1200);
     Sleep(1500);
 
-    // THE HOOK AND THE MODULE ARE NOT GIVEN BACK, and that is the change this pass exists for. Removing the
-    // hook was what used to leave Explorer and wallpaper64.exe with import slots pointing at an unloaded
-    // module (HANDOFF 8.109); keeping it means every application that starts later is covered without any
-    // further pass. The module stays mapped in this process too, which is what keeps the hook handle valid.
+    // THE HOOKS ARE UNHOOKED NOW, AND THAT IS HARMLESS, WHICH IS THE POINT OF THE PIN.
+    //
+    // Releasing the hook used to be what left Explorer and wallpaper64.exe with import slots pointing at an
+    // unloaded module (HANDOFF 8.109). It is safe now because the module pinned itself inside each of those
+    // processes: the code its slots point at stays mapped for the life of the process, and the detour keeps
+    // reporting every registration from then on. Only this process's reference to the hook goes away -- the
+    // handles are released rather than kept, because a hook held by a thread that has exited is a handle
+    // nobody will ever release.
+    for (HHOOK installed : hooks) UnhookWindowsHookEx(installed);
 
     // ... and "already watched" counts as reached: see ModuleAlreadyIn.
     for (DWORD pid : tried) {

@@ -52,14 +52,18 @@ struct TrayLearnResult {
     long long ms = 0;      // how long the whole thing took
 };
 
-// THE GLOBAL HOOK, INSTALLED ONCE AND HELD FOR THE SESSION -- MyDockFinder's own mechanism (HANDOFF 8.103:
-// its Dockmod.exe calls SetWindowsHookExA and dockmod64.dll then appears in the shell and in a list of
-// applications, including ones started later).
+// Loads the staged copy of the module next to the bar and keeps it for the session. Called once from the main
+// thread at startup, before any learning pass.
 //
-// Called from the main thread at startup, before any learning pass. On success the module follows every GUI
-// process on the desktop -- today's and tomorrow's -- and pins itself in each one it lands in, so a press has
-// something to send the moment an application registers. Every failure is reported in the log and is not
-// fatal: without the hook the presses use whatever the cache already holds.
+// THE MODULE IS OFFERED TO TRAY APPLICATIONS ONLY, one process at a time, in LearnTrayCallbacks below.
+// MyDockFinder installs ONE global hook and lets it reach every GUI process (HANDOFF 8.103); that was built
+// here too, and it had to be withdrawn the same day: with it installed, Clash Verge's window came up black.
+// Measured both ways -- `island running` gave 6 WebView2 processes and a client area of mean brightness 0,
+// `island closed` gave 12 and brightness 56 with the UI rendered. Chromium refuses a pending injection of an
+// UNSIGNED module into its renderer processes (RendererCodeIntegrity), and MyDockFinder's own DLL is a signed
+// commercial binary, which is why one global hook works for it and not for this build. See TrayLearn.cpp.
+//
+// A failure is reported in the log and is not fatal: without the module a press uses whatever the cache holds.
 bool InstallTrayHook();
 
 // Learns what every running tray application's callback is, and writes the cache.

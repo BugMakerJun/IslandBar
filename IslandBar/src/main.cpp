@@ -965,6 +965,14 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // -1 rather than the count read above: the first refresh in the loop then reports the tray's size
     // once, at startup, which is the line to look for when the tray is empty.
     int lastTrayCount = -1;
+    // The applications that still have no callback entry at the last attempt, and the two things that keep
+    // that attempt from becoming a loop. See the tray tick: a pass is offered again only when the SET of
+    // applications to try has changed (a new tray application appeared), never on a timer.
+    std::wstring lastUncovered;
+    // Shared with the worker and on the heap: the worker is detached, and a detached thread writing to a
+    // local of a function that has already returned is a crash waiting for the user to close the bar.
+    std::shared_ptr<std::atomic<bool>> learnInFlight = std::make_shared<std::atomic<bool>>(false);
+    unsigned long long lastLearnAttempt = 0;
     island::IslandWindow window;
     if (!window.Create(monitor, /*show=*/true)) {
         island::LogAndPrint("FATAL: could not create the window (error %lu)\n", GetLastError());
@@ -4188,6 +4196,42 @@ float musicWavePhase = 0.0f;
                         std::fflush(stdout);
                     }
 
+                    // ... AND ONE MORE PASS WHEN A TRAY APPLICATION APPEARS THAT HAS NEVER BEEN REACHED.
+                    //
+                    // With the module offered per application (see shell/TrayLearn.h -- a global hook is
+                    // refused by Chromium's signed-only renderer rule), an application that starts after this
+                    // bar did has no module in it and nothing will learn its callback. So the tick compares
+                    // the set of applications that still have no entry with the set it tried last time and
+                    // offers the module again when it CHANGED -- a new application, or one that has just
+                    // started. The set-changed test is what keeps this from becoming a three-second pass
+                    // every five seconds for the applications that refuse a module outright (QQ Music's
+                    // self-protection, an elevated one, an AppContainer): they are the same set each time.
+                    const std::wstring uncovered = island::UncoveredApplications(trayIcons);
+                    if (!uncovered.empty() && uncovered != lastUncovered &&
+                        !learnInFlight->load() &&
+                        GetTickCount64() - lastLearnAttempt >= 15000) {
+                        lastUncovered = uncovered;
+                        lastLearnAttempt = GetTickCount64();
+                        learnInFlight->store(true);
+                        island::LogAndPrint("  tray learn: the applications without a callback have changed "
+                                            "(%ls) -- offering the module again (background)\n",
+                                            uncovered.c_str());
+                        std::fflush(stdout);
+                        std::thread([learnInFlight]() {
+                            island::TrayIcons icons;
+                            icons.Refresh();
+                            const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+                            island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in "
+                                                "%d of them and was ALREADY watching %d more, %d "
+                                                "registration(s) captured, %d new entr(ies) -- %d of %d "
+                                                "icon(s) have a callback entry (in %lld ms)",
+                                                learned.appsTried, learned.appsReached,
+                                                learned.appsAlreadyWatched, learned.captured,
+                                                learned.newEntries, learned.covered, learned.icons,
+                                                learned.ms);
+                            learnInFlight->store(false);
+                        }).detach();
+                    }
                 }
                 frame.trayIcons = trayIcons.Count() > 0 ? &trayIcons.At(0) : nullptr;
                 frame.trayIconCount =
