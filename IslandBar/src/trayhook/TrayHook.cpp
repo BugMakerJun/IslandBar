@@ -90,25 +90,96 @@ struct PatchCount {
     int alreadyOurs = 0;
 };
 
+// The module a code address belongs to, and its file name.
+HMODULE ModuleOfAddress(void* address, const wchar_t** leafOut) {
+    if (leafOut) *leafOut = nullptr;
+    if (!address) return nullptr;
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(address), &module) ||
+        !module) {
+        return nullptr;
+    }
+    static wchar_t path[MAX_PATH];   // one walk at a time, and this is only used for its file name
+    path[0] = 0;
+    if (GetModuleFileNameW(module, path, MAX_PATH) == 0) return module;
+    const wchar_t* leaf = wcsrchr(path, L'\\');
+    if (leafOut) *leafOut = leaf ? leaf + 1 : path;
+    return module;
+}
+
+bool IsOurs(const wchar_t* leaf) {
+    if (!leaf) return false;
+    return _wcsicmp(leaf, L"island_tray_hook.dll") == 0 ||
+           _wcsicmp(leaf, L"probe-tray-notifyicon-hook.dll") == 0;
+}
+
+// MAY THIS IMPORT SLOT BE REDIRECTED? The slot's NAME has already said it is Shell_NotifyIcon; this decides
+// whether the value sitting in it may be overwritten. Three states may be taken over, and everything else is
+// left exactly as it is:
+//
+//   * shell32's own function, which is the normal case;
+//   * an EARLIER COPY OF OURS: measured, an application hooked by a previous build (or by the probe that came
+//     before this module) keeps its slot pointing at that older module. The first version of this walk only
+//     replaced slots holding shell32's address, so those applications reported "0 slots" and stayed unwatched
+//     until somebody restarted them -- which is exactly what the user hit;
+//   * the linker's delay-load stub, which lives in the module being walked.
+//
+// Somebody else's hook (MyDockFinder's, another tray tool's) is not ours to replace. Neither is an address
+// that cannot be placed in any module at all: an earlier version of this treated that as "a stub, take it",
+// and the walk then redirected junk -- 816 slots in Explorer, 288 in Razer, 78 in WeChat, all of them
+// unrelated APIs pointed at Shell_NotifyIconW. Conservative by default is the correction.
+bool MayTakeOver(void* address, HMODULE ownModule) {
+    if (!address) return false;
+    const wchar_t* leaf = nullptr;
+    HMODULE owner = ModuleOfAddress(address, &leaf);
+    if (!owner) return false;                   // not in any loaded module: not ours to touch
+    if (owner == ownModule) return true;        // the linker's delay-load stub
+    if (IsOurs(leaf)) return true;              // an older copy of ours
+    return leaf && _wcsicmp(leaf, L"shell32.dll") == 0;
+}
+
+// Does this import slot NAME Shell_NotifyIcon? The name is the criterion, and it is the one the first version
+// of this walk lacked: without it, "the slot belongs to shell32" was mistaken for "the slot is the function we
+// want", and every one of an application's shell32 imports was redirected to this module's detour.
+bool SlotNames(IMAGE_THUNK_DATA* slot, IMAGE_THUNK_DATA* byName, BYTE* base, const char* wanted) {
+    if (!slot || !byName || !wanted) return false;
+    if (byName->u1.Ordinal & IMAGE_ORDINAL_FLAG) return false;
+    const IMAGE_IMPORT_BY_NAME* hint = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + byName->u1.AddressOfData);
+    return hint && strcmp(reinterpret_cast<const char*>(hint->Name), wanted) == 0;
+}
+
+// How many slots one process may legitimately have redirected at once. An application imports
+// Shell_NotifyIcon once, sometimes twice (A and W), across a handful of its own modules -- so a walk that
+// wants to redirect dozens has gone wrong, and the honest answer is to stop rather than to keep pointing
+// somebody else's imports at our function.
+const int kMaxRedirectsPerProcess = 8;
+
 // One import slot by address: an ordinary import already holds the address being replaced.
 //
 // `patch` false means COUNT ONLY, which is how the watch checks below ask "what points at the detour right
 // now" without touching anything. The first version of that check passed a null target instead and got its
 // early return: it reported 0 while the detour was demonstrably being called.
-void PatchThunkArray(IMAGE_THUNK_DATA* thunks, void* target, void* detour, PatchCount* count, bool patch) {
-    if (!thunks || !detour || !count) return;
-    for (; thunks->u1.Function; ++thunks) {
-        void* current = reinterpret_cast<void*>(thunks->u1.Function);
-        if (current == detour) {
+void PatchThunkArray(IMAGE_THUNK_DATA* iat, IMAGE_THUNK_DATA* byName, BYTE* base, void* targetW, void* detourW,
+                     void* targetA, void* detourA, PatchCount* count, bool patch, HMODULE ownModule) {
+    if (!iat || !detourW || !detourA || !count) return;
+    for (; iat->u1.Function; ++iat, byName = byName ? byName + 1 : nullptr) {
+        void* current = reinterpret_cast<void*>(iat->u1.Function);
+        if (current == detourW || current == detourA) {
             ++count->alreadyOurs;
             continue;
         }
-        if (!patch || !target || current != target) continue;
+        if (!patch) continue;
+        const bool wantsW = (current == targetW) || SlotNames(iat, byName, base, "Shell_NotifyIconW");
+        const bool wantsA = (current == targetA) || SlotNames(iat, byName, base, "Shell_NotifyIconA");
+        if (!wantsW && !wantsA) continue;
+        if (!MayTakeOver(current, ownModule)) continue;
+        if (count->patched >= kMaxRedirectsPerProcess) continue;   // see kMaxRedirectsPerProcess
         DWORD old = 0;
-        if (!VirtualProtect(&thunks->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) continue;
-        thunks->u1.Function = reinterpret_cast<ULONG_PTR>(detour);
+        if (!VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) continue;
+        iat->u1.Function = reinterpret_cast<ULONG_PTR>(wantsW ? detourW : detourA);
         DWORD ignored = 0;
-        VirtualProtect(&thunks->u1.Function, sizeof(void*), old, &ignored);
+        VirtualProtect(&iat->u1.Function, sizeof(void*), old, &ignored);
         ++count->patched;
     }
 }
@@ -116,7 +187,7 @@ void PatchThunkArray(IMAGE_THUNK_DATA* thunks, void* target, void* detour, Patch
 // One delay-loaded slot, by NAME: its slot may still hold the linker's stub rather than the function, so an
 // address comparison would miss it.
 void PatchDelaySlot(IMAGE_THUNK_DATA* slot, IMAGE_THUNK_DATA* byName, const char* wanted, void* detour,
-                    PatchCount* count, bool patch) {
+                    PatchCount* count, bool patch, HMODULE ownModule) {
     if (!slot || !byName || !wanted || !detour || !count) return;
     if (byName->u1.Ordinal & IMAGE_ORDINAL_FLAG) return;
     const IMAGE_IMPORT_BY_NAME* hint = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(byName->u1.AddressOfData);
@@ -126,6 +197,7 @@ void PatchDelaySlot(IMAGE_THUNK_DATA* slot, IMAGE_THUNK_DATA* byName, const char
         return;
     }
     if (!patch) return;
+    if (!MayTakeOver(reinterpret_cast<void*>(slot->u1.Function), ownModule)) return;
     DWORD old = 0;
     if (!VirtualProtect(&slot->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) return;
     slot->u1.Function = reinterpret_cast<ULONG_PTR>(detour);
@@ -153,9 +225,12 @@ void PatchModuleUnchecked(HMODULE module, size_t imageSize, void* targetW, void*
             reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + imports.VirtualAddress);
         for (; descriptor->Name && descriptor->Name < imageSize; ++descriptor) {
             if (descriptor->FirstThunk == 0 || descriptor->FirstThunk >= imageSize) continue;
-            IMAGE_THUNK_DATA* first = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor->FirstThunk);
-            PatchThunkArray(first, targetW, detourW, count, patch);
-            PatchThunkArray(first, targetA, detourA, count, patch);
+            IMAGE_THUNK_DATA* iat = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor->FirstThunk);
+            IMAGE_THUNK_DATA* byName =
+                descriptor->OriginalFirstThunk ? reinterpret_cast<IMAGE_THUNK_DATA*>(
+                                                     base + descriptor->OriginalFirstThunk)
+                                               : nullptr;
+            PatchThunkArray(iat, byName, base, targetW, detourW, targetA, detourA, count, patch, module);
         }
     }
 
@@ -170,8 +245,8 @@ void PatchModuleUnchecked(HMODULE module, size_t imageSize, void* targetW, void*
             IMAGE_THUNK_DATA* byName = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor->rvaINT);
             int slots = 0;
             for (; iat->u1.Function && slots < 4096; ++iat, ++byName, ++slots) {
-                PatchDelaySlot(iat, byName, "Shell_NotifyIconW", detourW, count, patch);
-                PatchDelaySlot(iat, byName, "Shell_NotifyIconA", detourA, count, patch);
+                PatchDelaySlot(iat, byName, "Shell_NotifyIconW", detourW, count, patch, module);
+                PatchDelaySlot(iat, byName, "Shell_NotifyIconA", detourA, count, patch, module);
             }
         }
     }
@@ -186,8 +261,7 @@ PatchCount WalkProcessImports(void* targetW, void* detourW, void* targetA, void*
         if (Module32FirstW(snapshot, &entry)) {
             do {
                 __try {
-                    PatchModuleUnchecked(entry.hModule, entry.modBaseSize, targetW, detourW, targetA,
-                                         detourA, &count, patch);
+                    PatchModuleUnchecked(entry.hModule, entry.modBaseSize, targetW, detourW, targetA, detourA, &count, patch);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                     // A module whose headers do not walk cleanly is skipped: measured, an unguarded walk
                     // killed the target process on its third module.
