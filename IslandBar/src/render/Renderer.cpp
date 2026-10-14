@@ -634,22 +634,42 @@ void Renderer::RenderFrame(const FrameState& frame) {
             // The lyric strip shows the current lyric INSTEAD of the clock: the strip
             // is the same height as the resting pill, so there is room for one line
             // and the time is the less useful of the two while music plays.
-            if (frame.state == IslandState::NoticeStrip) {
-                // A CALL first: same strip, different thing to say -- and it says it with a timer and a level
-                // meter rather than with words, because that is what the reference does.
+            // Keyed on WHAT IS BEING ANNOUNCED rather than on the state, which is the same correction the
+            // music branch below already carries and for the same reason: `state` is the TARGET, so it is
+            // Expanded for the whole of a card. This branch used to test `state == NoticeStrip`, so opening
+            // the Start card (or the panel, or the tray page) while a call was running dropped the call out
+            // of the strip and let the lyric take it -- the island looked like the ordinary playing bar for
+            // as long as the card was up. Reported with two photographs of one call: the call strip before
+            // the press, and the lyric in its place with the card open.
+            //
+            // The priority is the one this whole block is documented as having -- a call, then a message,
+            // then the lyric, then the time -- and it now holds whatever the card is doing.
+            const bool announcing = frame.callUp || (frame.noticeLine && frame.noticeLine[0] != '\0');
+            if (announcing) {
+                // WHERE: the strip while the strip is the bar's own shape, and the PILL once a card is up.
+                // The same rule the lyric below follows with `lineBox`, and for the same reason -- once a
+                // card is up, `box` IS the card, and the bar's own line belongs in the pill that is still
+                // on screen beneath it.
+                const RoundedBox& noticeBox = intoPill ? lineBox : box;
                 if (frame.callUp) {
-                    text_->DrawCallStrip(d2dContext_, box, frame.callStrip, frame.contentOpacity);
-                } else if (frame.noticeLine && frame.noticeLine[0] != '\0') {
-                // The message, in the widened island, in place of the clock -- the same trade the lyric strip
-                // makes, and for the same reason: while the strip is up, the time is the less useful of the
-                // two things the one line could hold.
+                    // A CALL first: same strip, different thing to say -- and it says it with a timer and a
+                    // level meter rather than with words, because that is what the reference does.
+                    text_->DrawCallStrip(d2dContext_, noticeBox, frame.callStrip, frame.contentOpacity);
+                } else {
+                    // The message, in place of the clock -- the same trade the lyric strip makes, and for the
+                    // same reason: while the strip is up, the time is the less useful of the two things the
+                    // one line could hold.
+                    //
                     // The track-line draw is reused rather than a new one written: it already scrolls a line
                     // that is too long for its box, which is exactly what a long title needs in a 420 DIP strip.
-                    text_->DrawTrackLine(d2dContext_, box, frame.noticeLine, 0.0f,
+                    text_->DrawTrackLine(d2dContext_, noticeBox, frame.noticeLine, 0.0f,
                                          frame.contentOpacity);
-                } else {
-                    text_->DrawClock(d2dContext_, box, frame.clock, frame.contentOpacity);
                 }
+            } else if (frame.state == IslandState::NoticeStrip) {
+                // The strip is up with nothing to announce -- the clock is the only thing it can still say,
+                // and it keeps the strip's own box rather than the pill's, which is what it did before this
+                // branch was split.
+                text_->DrawClock(d2dContext_, box, frame.clock, frame.contentOpacity);
             } else if (frame.restingState == IslandState::MusicStrip) {
                 // The wave first, so the words are on top of it. Only while music is what the bar is
                 // showing: a wave is a reading of the music, not of the bar.
