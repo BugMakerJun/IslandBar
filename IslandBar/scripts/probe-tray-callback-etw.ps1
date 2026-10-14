@@ -42,7 +42,12 @@ param(
     [switch]$Right,
     [int]$Seconds = 3,
     [string]$Exe = "$env:USERPROFILE\IslandBar\island_bar.exe",
-    [string]$Session = 'IslandBarTray'
+    [string]$Session = 'IslandBarTray',
+    # -Watch: do not press anything; trace for -Seconds and let somebody else press by hand. Used to learn
+    # from a dock that DOES press by posting the application's own callback (MyDockFinder does: measured --
+    # its tray module trayico.exe imports PostMessage and nothing else, so its press is a message, and the
+    # application then RETRIEVES that message, which is the one event that carries the message number).
+    [switch]$Watch
 )
 
 $ErrorActionPreference = 'Continue'
@@ -102,9 +107,14 @@ if (-not (Test-Path $etl)) { 'the trace did not start (this needs administrator)
 "pressing cell $Cell with the real-click route while the trace runs"
 $arguments = @('--tray-press', "$Cell", '--fire')
 if ($Right) { $arguments += '--right' }
-$press = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
-Start-Sleep -Seconds $Seconds
-if (-not $press.HasExited) { Start-Sleep -Seconds 2 }
+if ($Watch) {
+    "no press from this script: press a tray icon BY HAND now ($Seconds seconds)"
+    Start-Sleep -Seconds $Seconds
+} else {
+    $press = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
+    Start-Sleep -Seconds $Seconds
+    if (-not $press.HasExited) { Start-Sleep -Seconds 2 }
+}
 & logman stop $Session -ets | Out-Null
 Start-Sleep -Milliseconds 500
 "trace stopped: " + [math]::Round((Get-Item $etl).Length / 1MB, 1) + " MB"

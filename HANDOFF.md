@@ -10840,6 +10840,26 @@ state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
 
 `showcursor-hide` 那条便宜路我用**屏幕像素**去验，得到的是"inconclusive"——**GDI 的 `CopyFromScreen` 从不包含光标**（光标由系统合成，不在屏幕 DC 的位图里），所以"拍一下看光标在不在"这个办法根本不能用（要拍就得走 `Windows.Graphics.Capture`/DXGI 复制）。这条实验要么改成问用户的眼睛，要么改用 DXGI 捕获；探针先留在 `scripts/probe-cursor-hide.ps1`，注释里记了这一点。
 
+### 8.103 **用户把 MyDockFinder 装回来跑起来了 —— 三条实测，把"完全一致"变成一条不需要注入的路** ✅（待校准）
+
+用户 2026-10-15 凌晨 02:5x 启动 MyDockFinder 并贴了截图：**它的托盘是它自己的一格网格，右键某一格，应用自己的菜单就出现在那一格里**。趁它跑着，我量到三件事（都可复现）：
+
+| 证据 | 结论 |
+|---|---|
+| `Get-Process explorer \| % Modules`：**`dockmod64.dll` 在 explorer 里**；同一份 DLL 同时在 ChatGPT、msedge、微信、QQ音乐、WindowsTerminal、clash-verge 等**一堆应用**里 | MyDockFinder 的做法是**全局消息钩子**（它导出 `GetMsgProc_TRAY` + `CallNextHookEx`，`Dockmod.exe` 导入 `SetWindowsHookExA`），**装进 shell 和各个应用**——这正是它能"知道每个应用的回调消息号"的原因：它看得见 shell 发给应用的那条消息 |
+| `dumpbin /imports trayico.exe`（它的托盘模块，255 KB）：**唯一相关的导入是 `PostMessageA`** —— 没有 `SendInput`、没有 `SetCursorPos`、没有 `mouse_event` | **它的托盘点击是"发一条消息"，不是"点鼠标"**：所以指针一动不动，而菜单出现在它自己的格子里（因为它自己带坐标发出去，应用照坐标摆菜单——用户截图就是证据） |
+| `Dock_64.exe`（引擎）才导入 `SendInput`/`GetCursorPos`/`WindowFromPoint`/`ReadProcessMemory`/`SetWindowsHookEx`，字符串里有 `Shell_TrayWnd`/`TrayNotifyWnd` | 引擎管别的功能与状态；托盘那一条是 `trayico.exe` 的一条消息 |
+
+#### 由此得到的路线：**不注入、也一样**（探针 `-Watch` 模式）
+
+MyDockFinder 是靠"装进应用去看"才知道那条消息号的；而**消息号还可以从 Win32k 追踪里读出来**——它 Post 出去后，应用会**取件**，取件事件（event 76）**带消息号**，这正是我们自己按（真实点击，shell 用 SendMessage 送过去）时看不到的东西。
+
+那次 60 秒追踪（`-Watch`，用户在里面手点了几格）里，WeGame 的线程取到的消息分布是：`0x0113`(WM_TIMER) ×5138、`0x0658` ×1104、`0x0000` ×147、**`0x0922` ×6**、`0x000F`(WM_PAINT) ×2。**`0x0922` 是唯一"罕见且落在应用范围(`0x400..0xBFFF`)"的那条** —— 与"用户点了几次"的数量级吻合，是 WeGame 托盘回调的头号候选。
+
+下一步（一个校准实验就能定案）：用户在 MyDockFinder 里每右键一格 → 追踪里应正好多一条 `0x0922`；然后用**我们自己**的 `PostMessage(WeGame 的托盘窗口, 0x0922, wParam=uid, lParam=MAKELPARAM(WM_CONTEXTMENU, y) 与坐标)` 试着让菜单出现在我们卡片的格子上。成了就是：**指针不动 + 菜单在我们点的那一格 + 零注入**（只多一次"学习"步骤，比 MyDockFinder 还干净）。
+
+保留回退：学不到 / 应用升级换了消息号 / 副作用不明时，一律退回现在的真实点击路线。
+
 #### 剩下的（如实说）
 
 - 指针仍会跳到图标上再跳回来（这是真实输入路线的固有代价，用户已接受）；
