@@ -10583,3 +10583,92 @@ state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
 |---|---|---|
 | **一个功能可以靠"规则没覆盖到"活着** | 音乐卡的旧通路是"没有规则匹配 → 状态留在 Expanded" | 修一条规则时要问：**有没有东西正靠这条缝活着**？（7.82 修面板时没问） |
 | **文档承诺与代码行为漂移** | README 一直写着"Hover → Expanded: 封面/曲名/艺人/控制" | 文档里的承诺是**需求**，不是历史描述；用户会按它期待 |
+
+---
+
+## 待办：托盘卡片里的点击（2026-10-15，**未修**，交给下一个会话）
+
+这一段是为了让下一个会话不必从头研究：现象、证据、已经谈出来的机制与计划都在这里。
+动手前先读 `AGENTS.md`（协作流程：先研究 → 给方案 → 等用户确认 → 实现 → 用户测试 → 才 push）。
+
+### 现象（用户实测，两条路分开）
+
+1. **左键"打开"（打开应用/主面板）：完全没有反应。**
+2. **右键"应用自己的菜单"：菜单确实出来了，但是**（a）菜单弹出的位置不对——用户右击的格子在屏幕
+   约 `(1330,196)`，菜单却出现在屏幕左上角（约 `x 70..270, y 75..320`）；**（b）原生托盘会"闪"一下。**
+
+截图：`C:\Users\18340\AppData\Local\Temp\codex-clipboard-451b90da-...png`（菜单出现在左上角那次）。
+
+### 证据：日志只记到一半（这本身就是问题）
+
+```
+00:17:53  tray menu: opened for 'WeGame' (4 entries: window=0 path=1)
+00:17:56  tray menu: 打开
+00:17:56  tray press: cell 6 'WeGame'
+00:17:57  tray stage: taskbar 00000000000100F8 shown invisibly, overflow 000000008009DC (found)
+00:17:57  tray stage: the overflow panel was made invisible after it settled (...)
+          ← 之后没有任何一行说明这次 press 的结果
+```
+
+`TrayPress.cpp` 只打印 stage（`LogAndPrint` 在 597 / 643 / 739 行），**真正的 UIA Invoke 是黑盒**：
+没有"在哪个元素上调用 / 有几个 Pattern / HRESULT / 之后有没有新窗口"。所以"没到达"和"到达但被
+忽略"从日志上分不开——这正是项目自己反复写下的那条规则。
+
+### 机制（`TrayPress.h` 的头注释，先读它）
+
+- 绘制来自注册表（`InitialTooltip` / `IconGuid`）；**按下必须由 shell 做**。
+- 位置来自 `Shell_NotifyIconGetRect(NOTIFYICONIDENTIFIER)`；溢出面板没打开过时，shell 对**每个**图标
+  都返回同一个"假矩形"（雪佛龙那格），所以要先隐形地把面板打开（`TrayStage`）。
+- 左键：在那个矩形上用 **UI Automation Invoke**。右键：**把面板显示出来**（日志 739 行那句
+  `the panel was shown again for the menu that lives on it`）再给 shell 面板 POST 一条右键消息。
+  → 右键那个"闪"，很可能就是"把面板显示出来"这一步本身。
+
+### 研究结论（与 ChatGPT 谈的第 15、16 轮，2026-10-15 凌晨）
+
+| 结论 | 依据 |
+|---|---|
+| **真实工具基本不用 UIA Invoke**：拿图标屏幕位置 → `SetCursorPos` 到中心 → `SendInput` 左键按下/抬起（右键同理）。托盘应用最终期待的是 **shell 转发的真实鼠标行为** | 这解释了"左键完全没反应"：Invoke 不是真实输入路径 |
+| **溢出面板里那些按钮的 UIA 支持不稳定**：有的版本暴露 Button/Invoke，有的只是视觉元素；**即使有 Invoke 也可能只作用于 shell 自己** | 与"右键 POST 能出菜单、左键 Invoke 什么都不发生"一致 |
+| **我们自己的 TOPMOST 栏会抢走注入点击的命中**：判序是"顶层 Z 序 → hit-test → 目标窗口"，而 **alpha 0 的 layered window 默认仍参与命中**（除非 `WS_EX_TRANSPARENT` 或改区域） | 实施前必须确认注入的点击到底落在谁身上 |
+| **最可能不成立的前置条件**是"面板真实可交互地可见"：alpha 0 只隐藏视觉，不保证 shell 与输入路由正常 | 其次是 `SetCursorPos` 会让用户鼠标跳一下（体验取舍，不是技术障碍） |
+| 没有通用替代：给托盘图标所属窗口发消息不可行（回调窗口不公开），`ITray`/`IShellView` 等内部接口版本风险太高，**不做核心依赖** | 产品级答案：真实输入注入为主、UIA 保留为回退 |
+
+### 计划（尚未动手）
+
+**第一步 · 右键那条（收益确定，先做）**，按六步：
+
+1. 显示面板（同现在）；
+2. **等面板布局稳定**（现在是"出现后立刻隐形"，要改成"等到布局完成"）；
+3. `Shell_NotifyIconGetRect` 取真实矩形，算中心点屏幕坐标；
+4. **`SetCursorPos` 到那个点**——不要依赖消息参数里的坐标，shell 的托盘菜单直接读当前光标位置
+   （这正是菜单出现在 (0,0) 附近的原因）；
+5. 此时再 POST 右键消息；
+6. **等菜单真的打开之后**，才隐藏溢出容器（提前隐藏会让菜单失去 owner → 这就是那个"闪"）。
+
+代价要写进验收：`SetCursorPos` 会**真的移动用户的光标**（之后要复原）。如果用户不接受鼠标跳动，
+就要去实测"带正确坐标 POST 给 tray host"那条替代路，而它被判断为不可靠。
+
+**第二步 · 左键那条（先把黑盒变成可读）**：
+
+- 加日志：矩形的四个数、在该点找到的 UIA 元素的 `Name` / `ControlType` / `RuntimeId` /
+  `BoundingRectangle` / `IsOffscreen` / `IsEnabled`、**当前支持哪些 Pattern**（`CurrentPattern` 的
+  HRESULT，而不是只记 Invoke）、Invoke 的开始与结束时间戳、以及之后 **200 ms 内**是否有
+  `WindowOpened` / `MenuOpened` / `FocusChanged` 事件（ChatGPT 强调：**HRESULT 干净不代表应用响应了**）。
+- 加一个 `ISLANDBAR_*` 风格的环境变量，让整套 press 在**任务栏与面板真实可见**的状态下跑一次：
+  可见能开、隐藏不能开 → 时序/可见性问题；两种都不行 → 元素或应用兼容性问题。
+
+**第三步 · 按日志与实验的结果改**：把左键从 UIA Invoke 改成**真实输入注入**（同一矩形 +
+`SetCursorPos` + `SendInput`），并且**注入前先确认我们的窗口不会抢走这次命中**（这是新增的关键前置，
+早期方案里没有）。`MOUSEEVENTF_ABSOLUTE` 归一化坐标、是否需要临时把我们的窗口设成不命中，都要实测。
+
+**验收（三条，都能截图或录屏）**：左键能开出应用窗口或主面板；右键菜单出现在**用户右击的那个格子
+附近**；整个过程**原生托盘不再可见地闪**。
+
+### 状态（写这段时的机器状态）
+
+- 盘上跑的是 pid 38008（含到 `6fafcfd` 为止的全部修复）。
+- 远端 GitHub：`3218b63`。本地比它多三笔**未推**：`d5d3b5d`（卡片移动时用廉价材质）、
+  `6fafcfd`（材质粘滞，修"移动时闪烁"）。
+- 今天已经推上去的 8 笔在 `3218b63`；`AGENTS.md` 与 `START-HERE.txt` 的流程说明也在其中。
+- 本机 **github.com 现在通了**（`git fetch` / `git push` 都成功）——`captures/push-via-api.ps1`
+  那套 API 绕行不再必需，必要时才回退到它。
