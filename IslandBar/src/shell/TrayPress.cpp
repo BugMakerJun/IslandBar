@@ -577,6 +577,179 @@ int PanelIconCount(IUIAutomation* automation, IUIAutomationElement* element) {
 
 bool TrayPressInFlight() { return g_pressInFlight.load(); }
 
+// ---- the posted-callback route, learned once per application (2026-10-15 late) ------------------------
+//
+// MEASURED, and this is the whole reason it exists: an application's tray icon can be pressed WITHOUT
+// touching the pointer, by posting the application's own callback message to its own tray window. On WeChat
+// that put its tray menu -- 退出微信 and all -- at the coordinates this bar passed, with the pointer sitting
+// still, and nothing injected anywhere (HANDOFF 8.104; the screenshot is captures/wx-A1.png).
+//
+// THE LAYOUT IS THE PART THAT COSTS (NOTIFYICONDATA.uCallbackMessage):
+//
+//   v4 (modern):  LOWORD(lParam) = the notification, HIWORD(lParam) = the icon's uid,
+//                 and the ANCHOR POINT is in wParam (low word x, high word y).
+//   v3 (older):   wParam = uid, lParam = the mouse message (WM_RBUTTONUP and friends).
+//
+// The first two attempts used the v3-looking spelling with coordinates bolted into lParam's high word; both
+// were delivered, both were retrieved by the application, and both were ignored. This is not guessable.
+//
+// WHAT IS CACHED, AND WHY A FILE. Per application: the message number, the class of the window it has to be
+// posted to, and the icon's uid. The message number cannot be looked up anywhere (the shell's registry entry
+// carries UID, IconGuid, path, tooltip and icon, and no callback message) and cannot be observed from this
+// side either (the shell delivers it without it passing through any queue this process can see), so it is
+// LEARNED once with a short Win32k trace -- scripts/probe-tray-callback-etw.ps1 -- and written here:
+//
+//     %USERPROFILE%\IslandBar\tray_callbacks.txt
+//     # exe|message|window class|uid
+//     Weixin.exe|0x8385|Qt51514WxTrayIconMessageWindowClass|0
+//
+// AN APPLICATION WITH NO ENTRY IS PRESSED THE OLD WAY (a real click), and so is one whose entry does not
+// lead to a window: the file is the switch, and deleting a line is the way back.
+struct TrayCallback {
+    wchar_t exe[64] = {};
+    unsigned message = 0;
+    wchar_t windowClass[128] = {};
+    unsigned uid = 0;
+    // WHICH PRESS THIS ENTRY IS ALLOWED TO CARRY, learned the same way it was learned at all: by trying it.
+    // A right click works (measured on WeChat: the menu came up at the anchor). A LEFT click does not, and
+    // the reason is the foreground lock: the application's own handler calls SetForegroundWindow, and a
+    // background process is refused, so a window that is merely BEHIND does not come forward. Five spellings
+    // of the left-click notification were tried and none of them activated WeChat, while MyDockFinder's own
+    // left press does activate it -- its engine imports SendInput, so that route is more than a post.
+    // Until that is built here, a left press keeps the real click (which does satisfy the foreground rules).
+    bool rightClickOnly = false;
+};
+
+std::wstring BaseNameLower(const wchar_t* path) {
+    if (!path || !*path) return std::wstring();
+    const wchar_t* slash = std::wcsrchr(path, L'\\');
+    std::wstring name = slash ? std::wstring(slash + 1) : std::wstring(path);
+    std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+    return name;
+}
+
+// The learned entries, read once per press. A missing file is not an error: it means "nothing learned yet",
+// which is the state every application starts in.
+std::vector<TrayCallback> ReadTrayCallbacks() {
+    std::vector<TrayCallback> entries;
+    wchar_t home[MAX_PATH] = {};
+    const DWORD length = GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return entries;
+    std::wstring file = std::wstring(home) + L"\\IslandBar\\tray_callbacks.txt";
+
+    FILE* stream = nullptr;
+    if (_wfopen_s(&stream, file.c_str(), L"r, ccs=UTF-8") != 0 || !stream) return entries;
+    wchar_t line[512] = {};
+    while (std::fgetws(line, 512, stream)) {
+        std::wstring text = line;
+        const size_t comment = text.find(L'#');
+        if (comment != std::wstring::npos) text = text.substr(0, comment);
+        std::vector<std::wstring> fields;
+        size_t start = 0;
+        for (;;) {
+            const size_t bar = text.find(L'|', start);
+            std::wstring field = text.substr(start, bar == std::wstring::npos ? std::wstring::npos
+                                                                              : bar - start);
+            while (!field.empty() && (field.back() == L'\r' || field.back() == L'\n' ||
+                                      field.back() == L' ' || field.back() == L'\t')) {
+                field.pop_back();
+            }
+            while (!field.empty() && (field.front() == L' ' || field.front() == L'\t')) field.erase(0, 1);
+            fields.push_back(field);
+            if (bar == std::wstring::npos) break;
+            start = bar + 1;
+        }
+        if (fields.size() < 3 || fields[0].empty() || fields[1].empty()) continue;
+        TrayCallback entry;
+        std::transform(fields[0].begin(), fields[0].end(), entry.exe, ::towlower);
+        const bool hex = fields[1].size() > 2 && fields[1][0] == L'0' &&
+                         (fields[1][1] == L'x' || fields[1][1] == L'X');
+        entry.message = static_cast<unsigned>(
+            std::wcstoul(fields[1].c_str() + (hex ? 2 : 0), nullptr, hex ? 16 : 10));
+        wcsncpy_s(entry.windowClass, fields[2].c_str(), _TRUNCATE);
+        if (fields.size() > 3) entry.uid = static_cast<unsigned>(std::wcstoul(fields[3].c_str(), nullptr, 10));
+        if (fields.size() > 4) entry.rightClickOnly = _wcsicmp(fields[4].c_str(), L"right") == 0;
+        if (entry.message) entries.push_back(entry);
+    }
+    std::fclose(stream);
+    return entries;
+}
+
+// The application's window of the class the entry names. False when it is not running, has no such window
+// yet (a tray icon that has not registered), or when nothing is known about it.
+bool CallbackWindowFor(const TrayPressRequest& request, const TrayCallback& entry, HWND* out) {
+    const std::vector<DWORD> pids = PidsForImage(request.exePath);
+    if (pids.empty()) return false;
+    for (HWND window : WindowsOf(pids)) {
+        wchar_t cls[128] = {};
+        if (!GetClassNameW(window, cls, 128)) continue;
+        if (_wcsicmp(cls, entry.windowClass) == 0) {
+            *out = window;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Posts that callback and waits for the application to answer. False means "this route was not taken" --
+// nothing learned, no such window, or the post itself failed -- and the caller is expected to fall back.
+//
+// THE ANCHOR IS WHERE THE POINTER ALREADY IS. The user pressed a cell in this bar's tray card, so the pointer
+// is on that cell and has not been moved: passing it through is what puts the menu under the cell the user
+// clicked rather than at the application's own icon in the screen's corner. (On WeChat this is measured: the
+// menu came up at exactly the coordinates passed in.)
+bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPressOutcome* outcome) {
+    const std::vector<TrayCallback> entries = ReadTrayCallbacks();
+    const std::wstring exe = BaseNameLower(request.exePath);
+    const TrayCallback* entry = nullptr;
+    for (const TrayCallback& candidate : entries) {
+        if (exe == candidate.exe) {
+            entry = &candidate;
+            break;
+        }
+    }
+    if (!entry) return false;
+    if (entry->rightClickOnly && !rightClick) return false;   // see the note on rightClickOnly: fall back
+
+    HWND window = nullptr;
+    if (!CallbackWindowFor(request, *entry, &window)) return false;
+    POINT anchor = {};
+    if (!GetCursorPos(&anchor)) return false;
+
+    const WindowWatch watch = TakeWindowWatch(request);
+    const HWND foregroundBefore = GetForegroundWindow();
+
+    // v4: the anchor in wParam (low word x, high word y), the notification and the icon's uid in lParam.
+    const WPARAM wparam = static_cast<WPARAM>(MAKELONG(anchor.x, anchor.y));
+    const LPARAM lparam = static_cast<LPARAM>(
+        MAKELONG(rightClick ? WM_CONTEXTMENU : 0x0400 /* NIN_SELECT */, entry->uid));
+    const BOOL posted = PostMessageW(window, entry->message, wparam, lparam);
+    if (!posted) return false;
+
+    wchar_t target[160] = {};
+    wchar_t cls[128] = {};
+    GetClassNameW(window, cls, 128);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    std::swprintf(target, 160, L"class '%ls' of pid %lu (posted, not clicked)", cls, pid);
+
+    const bool answered = WatchApplicationForAnswer(watch, foregroundBefore, outcome ? outcome->answer : nullptr,
+                                                    outcome ? sizeof(outcome->answer) / sizeof(wchar_t) : 0);
+    if (outcome) {
+        outcome->route = L"a posted callback";
+        outcome->pointerMoved = false;
+        outcome->result = TrayPressResult::Pressed;
+        outcome->appAnswered = answered;
+        wcsncpy_s(outcome->target, sizeof(outcome->target) / sizeof(wchar_t), target, _TRUNCATE);
+    }
+    LogAndPrint(L"  tray press: posted 0x%04X to %ls, the pointer was NOT moved (anchor %ld,%ld) -- the "
+                L"application %ls\n",
+                entry->message, target, anchor.x, anchor.y,
+                answered ? L"answered" : L"has not been seen to answer yet, and nothing else was done about "
+                                       L"it (pressing twice would be worse)");
+    return true;
+}
+
 bool TrayPressCleanupPending() {
     return g_cleanupTaskbar.load() != nullptr || g_cleanupPanel.load() != nullptr;
 }
@@ -1054,7 +1227,11 @@ TrayPressResult TrayStage::ClickOnRect(const TrayPressRequest& request, const RE
     if (!GetCursorPos(&saved)) return TrayPressResult::Refused;
     const POINT centre = {(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
 
-    if (outcome) outcome->panelShownMs = 0;
+    if (outcome) {
+        outcome->route = L"a real click";
+        outcome->pointerMoved = true;
+        outcome->panelShownMs = 0;
+    }
     if (visibleRun_) {
         LogAndPrint("  tray press: nothing was hidden in this run, so nothing has to be revealed\n");
     } else {
@@ -1201,6 +1378,12 @@ TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press, bool
     TrayPressOutcome outcome;
     // Before the taskbar is touched: the bar's watchdog must not hide it in the middle of this.
     PressInFlight inFlight;
+
+    // THE POSTED CALLBACK FIRST, when this application has one learned (see the note above TrayCallback). It
+    // does not move the pointer, does not show the shell's taskbar or its overflow panel, and takes about
+    // ten milliseconds -- and it is how the press looks identical to MyDockFinder's. Everything below is the
+    // route that moves the pointer, kept as the fallback for every application without an entry.
+    if (press && SendTrayCallback(request, rightClick, &outcome)) return outcome;
 
     TrayStage stage;
     wchar_t note[160] = {};

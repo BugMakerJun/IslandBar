@@ -125,6 +125,12 @@ struct TrayPressOutcome {
     // is wide now (see main.cpp) and the facts live in the outcome instead of in a printf, so that a
     // future call site cannot lose them the same way.
     long long clickMs = 0;         // when the click left this process, from the start of the press
+    // WHICH ROUTE RAN. There are two again (2026-10-15 late): "a posted callback" -- the application's own
+    // tray message, sent straight to its window, which is what makes the press invisible -- and "a real
+    // click", the pointer-moving route below, which is now the fallback. The field was deleted when there
+    // was only one route; a switch that can hold one value is dead weight, two are not.
+    const wchar_t* route = L"?";
+    bool pointerMoved = false;     // whether the press had to move the user's pointer (a real click does)
     wchar_t target[160] = {};      // what was under the pointer: "class 'X' of pid N", and whose it is
     bool targetIsOurs = false;     // ... and whether that window is this bar's own
     bool madeClickThrough = false; // whether this bar had to be taken out of the hit test for the click

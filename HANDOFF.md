@@ -10898,6 +10898,33 @@ PostMessage(trayWindow,
 
 产品化：`TrayPress` 里加一条"**先 Post 再回退**"的路 —— 若缓存里有该应用的 (消息号, 窗口类) 就发一条 v4 回调（坐标 = 卡片那一格的屏幕位置），**200–1500 ms 内应用没有任何反应就照旧走真实点击**；缓存文件放 `%USERPROFILE%\IslandBar\tray_callbacks.txt`。指针不动、菜单落在用户点的那一格，失败时行为与今天完全一致。
 
+### 8.105 **产品化完成：右键走"发消息"，左键照旧真实点击** ✅（已部署，等用户测）
+
+| 文件 | 改了什么 |
+|---|---|
+| `shell/TrayPress.cpp/.h` | 新增"**已学到的回调**"这条路：读 `%USERPROFILE%\IslandBar\tray_callbacks.txt`（每行 `exe\|消息号\|窗口类\|uid\|[both\|right]`）→ 按 exe 找条目 → 按类名在**该应用的窗口**里找到那个托盘窗口 → `PostMessage`（v4 布局：锚点坐标在 wParam，通知码与 uid 在 lParam）→ 用现成的"应用有没有回应"检测确认。**锚点 = 调用时的光标位置**（用户点下去的那一刻就在那一格上，不需要往请求里传几何）。`TrayPressOutcome` 恢复 `route` 字段并加 `pointerMoved`，日志里能分辨两条路 |
+| `main.cpp` | 日志加 `via %ls`（哪条路）与一行 `the pointer was NOT moved -- <应用回应>`；走消息那条不再打印"矩形的 0,0"和"没看到菜单"这种会误导的行 |
+| 缓存文件 | `%USERPROFILE%\IslandBar\tray_callbacks.txt`，已写入微信那行（末尾 `right`）。**删掉一行就是回退** |
+
+#### 实测（部署后，命令行）
+
+```
+右键（cell 5 微信）: posted 0x8385 to class 'Qt51514WxTrayIconMessageWindowClass' of pid 8816
+                     (posted, not clicked), the pointer was NOT moved (anchor 1254,789)
+                     -- the application answered: its own 'Qt51514QWindowPopupSaveBits' at 1230,765 210x92
+                     -> pressed [right click] via a posted callback, lookup 0 ms, press 0 ms
+左键（cell 5 微信）: -> pressed via a real click … the application answered -- the foreground window is now
+                     its 'Qt51514QWindowIcon'     ← 老行为原样保留（窗口被带到前台）
+```
+
+右键：**0 ms、指针一格没动、菜单出现在锚点旁边** ✓✓（今天早些时候的截图 `captures/wx-A1.png` 是同一效果的证据，那时锚点是 1300,400）。左键：**照旧真实点击**，行为与 8.99 完全一致。
+
+#### 左键为什么没走上这条路（实测，别再试一遍）
+
+左键的通知码试了 **5 种**（v4 的 `NIN_SELECT`、`WM_LBUTTONUP`、`WM_LBUTTONDOWN`，以及 v3 的 `wParam=uid` 两种）：**PostMessage 全部成功、微信全部取件、但它的窗口一次都没到前台**。原因基本可以定：应用的处理里要 `SetForegroundWindow`，**后台进程调它会被系统拒绝**——窗口只是"在后面"时就不会被带出来（真实点击满足前台规则，所以那条路一直有效）。MyDockFinder 的左键**能**激活，是因为它的引擎 `Dock_64.exe` 还导入 `SendInput` —— 它那条路不止"发一条消息"。
+
+所以缓存条目可以只声明 `right`（默认 `both`）。**微信先只开右键**；等哪天要做左键，正确的下一步是"发消息 + 一个不移动指针的激活手段（ALT 键 + `SetForegroundWindow`）"，那是另一件事，得先写方案。
+
 #### 剩下的（如实说）
 
 - 指针仍会跳到图标上再跳回来（这是真实输入路线的固有代价，用户已接受）；

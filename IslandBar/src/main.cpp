@@ -6036,12 +6036,17 @@ void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
         // CRT cannot convert that to bytes and MSVC empties the whole line instead of failing loudly. Three
         // presses were diagnosed as "the Invoke hung" on the strength of those blank lines. See Log.h.
         island::LogAndPrint(
-            L"  tray press: '%ls' -> %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), lookup "
+            L"  tray press: '%ls' -> %ls via %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), lookup "
             L"%lld ms, press %lld ms\n",
-            request.name, island::TrayPressResultName(outcome.result), outcome.shellName,
+            request.name, island::TrayPressResultName(outcome.result), outcome.route, outcome.shellName,
             outcome.rect.left, outcome.rect.top, outcome.rect.right - outcome.rect.left,
             outcome.rect.bottom - outcome.rect.top, outcome.lookupMs, outcome.pressMs);
-        if (outcome.clickMs > 0) {
+        // THE POSTED ROUTE SAYS SO EXPLICITLY, because "the pointer never moved" is the whole point of it and
+        // there is nothing else in the log that would show it: this line is the one to look for.
+        if (!outcome.pointerMoved) {
+            island::LogAndPrint(L"  tray press: the pointer was NOT moved%s -- %ls\n",
+                                outcome.targetIsOurs ? L"" : L"", outcome.answer);
+        } else if (outcome.clickMs > 0) {
             island::LogAndPrint(L"  tray press: the click left at %lld ms; it was aimed at %ls%s; the "
                                 L"panel was made hit-testable at %lld ms and transparent again at %lld "
                                 L"ms\n",
@@ -6049,7 +6054,7 @@ void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
                                 outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
                                 outcome.panelShownMs, outcome.panelHiddenMs);
         }
-        if (rightClick) {
+        if (rightClick && outcome.pointerMoved) {
             if (outcome.menuWaitMs < 0) {
                 island::LogAndPrint(L"  tray press: no menu window was seen in 600 ms\n");
             } else {
@@ -6223,21 +6228,28 @@ int RunTrayPress(int index, bool fire, bool rightClick) {
     // the button found on the shell's rectangle -- and only the Invoke is left out.
     const island::TrayPressOutcome outcome = island::PressTrayIcon(request, fire, rightClick);
     if (SUCCEEDED(comHr)) CoUninitialize();
-    island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", outcome.rect.left,
-                        outcome.rect.top, outcome.rect.right - outcome.rect.left,
-                        outcome.rect.bottom - outcome.rect.top);
-    island::LogAndPrint(L"  -> %ls%ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
+    if (outcome.pointerMoved) {
+        island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", outcome.rect.left,
+                            outcome.rect.top, outcome.rect.right - outcome.rect.left,
+                            outcome.rect.bottom - outcome.rect.top);
+    } else {
+        // The posted route never asks the shell anything, and saying "0,0 0x0" would read like a failure.
+        island::LogAndPrint(L"  no rectangle was needed: the application was told directly\n");
+    }
+    island::LogAndPrint(L"  -> %ls%ls via %ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
                         island::TrayPressResultName(outcome.result),
-                        rightClick ? L" [right click]" : L"", outcome.shellName, outcome.lookupMs,
-                        outcome.pressMs);
-    if (outcome.clickMs > 0) {
+                        rightClick ? L" [right click]" : L"", outcome.route, outcome.shellName,
+                        outcome.lookupMs, outcome.pressMs);
+    if (!outcome.pointerMoved) {
+        island::LogAndPrint(L"  the pointer was NOT moved -- %ls\n", outcome.answer);
+    } else if (outcome.clickMs > 0) {
         island::LogAndPrint(L"  the click left at %lld ms, aimed at %ls%s; the panel was made "
                             L"hit-testable at %lld ms and transparent again at %lld ms\n",
                             outcome.clickMs, outcome.target,
                             outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
                             outcome.panelShownMs, outcome.panelHiddenMs);
     }
-    if (rightClick) {
+    if (rightClick && outcome.pointerMoved) {
         if (outcome.menuWaitMs < 0) {
             island::LogAndPrint(L"  no window of the application's came up in 600 ms, so no menu was seen\n");
         } else {
