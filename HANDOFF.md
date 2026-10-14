@@ -10777,6 +10777,35 @@ state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
 
 自检 0 失败、`island_smoke` PASS；Debug/Release 都能编；盘上跑的是这一版（`island_bar.exe.bak-20261015-0133` 是之前那版）；本地提交见下一次 commit，**未推**。另外 `git stash`（list 第 1 条）里存着一份**没有通过认证**的实验：把"等待稳定"从面板改成**按图标自身的矩形**、并把进程/窗口快照挪到"露面板"之前——两条改动各自都有实测理由（面板的元素矩形会先稳、图标还在动；拍摄快照要 ~300 ms，而"露面板"离点击超过 ~300 ms 时点击就不生效），但合起来在我这边的连续按压里没能稳定通过，所以先收起来，等有干净的验证手段再用。
 
+### 8.101 **触摸注入：指针不动是真的，"能按动托盘图标"不是真的** ❌（一条已证伪的无注入路线）
+
+用户在 8.100 之后否掉了"移动指针"这条路：「不行现在做的 鼠标还是会闪 试试第三种办法吧」。在动"注入 explorer 学回调消息"之前，先测了一个**不需要注入任何人的进程、而且根本不移动指针**的公开 API 候选：触摸注入（`InitializeTouchInjection` + `InjectTouchInput`，Windows 8+）。
+
+#### 测出来的三件事（脚本 `scripts/probe-tray-touch-press.ps1` + `captures/touchprobe.cpp`）
+
+| 问题 | 结果 |
+|---|---|
+| 这台机器（**没有触摸屏**）能不能注入触摸？ | **能**。C++ 探针：`InitializeTouchInjection=1`、`down=1`、`update=1`、`up=1`，四次调用 `GetLastError()` 都是 0。**用 PowerShell 走同一套 P/Invoke 全部失败**（`ERROR_INVALID_PARAMETER`，结构体大小已核对为 96/144 都对）——所以探针里改成调用那个 60 行的 C++ 小程序；这个"绑定失败"一开始骗了我，值得记下来 |
+| 注入的触摸**会不会移动鼠标指针**？ | **不会**。探针在注入前后各读一次 `GetCursorPos`：`1849,1094` → `1849,1094`（一格没动） |
+| 能不能按动 shell 托盘面板里的图标？ | **不能**。面板开着、落点 `2394,109` 被 `WindowFromPoint` 确认为面板本身（`TopLevelWindowForOverflowXamlIsland`），触摸三个事件都成功注入，**应用自己的窗口一个都没出现**（前后都是 29 个）。连续两次同样的结果 |
+
+结论：这条路的两个卖点里，"不移动指针"成立、"能按动托盘"不成立——shell 的溢出面板（XAML island / InputSite）不接受注入的触摸当作真实手势。评审第二十二轮对它的判断（"XAML island 不保证接受注入触摸；提升成鼠标也不是等价真实点击的保证"）在这一点上是对的，只是它猜的原因是"没有触摸硬件"，实测原因是**面板不认**。
+
+于是"不移动指针"这个要求，剩下的唯一候选就是评审排在最后的那个：**（第三步）注入 explorer 的观察模块——先学会应用自己的托盘回调消息，之后按压变成一条 `PostMessage`**。它的代价、风险与回退见下一节。
+
+#### 8.101 续：**那条路按原设计走不通，但有一条不需要注入的替代**
+
+在写那个模块之前先做了两个便宜的检查，结果把"观察模块"这个设计本身推翻了：
+
+1. **注册表里没有回调消息号。** `HKCU\Control Panel\NotifyIconSettings` 每一项的字段就是 `UID`、`IconGuid`、`ExecutablePath`、`InitialTooltip`、`IconSnapshot`、`IsPromoted`、`Publisher`（逐项看过）——没有 `uCallbackMessage`。
+2. **在 explorer 侧也观察不到它。** `WH_GETMESSAGE` 钩子只能看到"被**这个线程的消息循环取走**的消息"，也就是发往 **explorer 自己窗口**的那些；而 shell 通知应用托盘回调是**跨进程投递**，它出现在**应用**的队列里，不在 explorer 的队列里。所以"在 shell 的 UI 线程上挂 GetMsgProc 去看 shell→应用的消息"这个做法从原理上就不成立（MyDockFinder 的 `GetMsgProc_TRAY` 更有可能是用来盯**任务栏自己窗口**上的消息，即状态同步，而不是学回调）。
+
+**但换一个观察者就有了：这台机器的 ETW 里有 `Microsoft-Windows-Win32k/Messages` 这个关键字**（`logman query providers "{8C416C79-D49B-4F01-A467-E56D3AA8234C}"` 列出来了，另有 `MessagePump`、`TouchInput`、`PointerInput`）。于是"学一条回调消息"可以完全不做注入：
+
+> `logman start` 起一个只带那个关键字的短追踪 → 用**现在的真实点击**按一次那个图标（这一次本来就会成功）→ `logman stop` → `tracerpt` 把 etl 解成 CSV → 在我们已知的目标窗口句柄上读出**消息号与 wParam/lParam** → 按 (可执行名, 图标 uid) 缓存下来。之后这个应用的按压就可以先试一条 `PostMessage`（不动指针），并且**保留现在的真实点击作为回退**（试着发出去、200 ms 内应用没有回应就照旧点一次）。
+
+代价与门槛：追踪要**管理员**权限（一次性，学到就缓存），解码用系统自带的 `tracerpt`（不需要自己写消费者），事件量很大但只跑一两秒。**没有注入任何人的进程**，符合项目的硬约束。
+
 #### 剩下的（如实说）
 
 - 指针仍会跳到图标上再跳回来（这是真实输入路线的固有代价，用户已接受）；
