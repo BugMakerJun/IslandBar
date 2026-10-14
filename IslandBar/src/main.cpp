@@ -2353,7 +2353,18 @@ float musicWavePhase = 0.0f;
                 panelSliderDrag = false;
                 mixerSliderDragRow = -1;
                 mixerSliderDragPid = 0;
-                window.SetState(resting);
+                // TO THE NOTICE STRIP, NOT TO `resting`, WHILE A CALL OR A MESSAGE IS UP.
+                //
+                // `resting` is the ordinary shape -- the lyric strip, or the plain pill -- and putting the
+                // island there is what "变回普通" was. With a call running: a click on a button opened its
+                // card (correct), closing the card ran this line, and the island settled as the ordinary
+                // strip for 220 ms before the policy above put the notice back. The log has the pair:
+                // `state: music-strip` at 23:00:51.122 and `state: notice-strip` at 23:00:51.345.
+                //
+                // A notice is not a card, so dismissing a card has no business retiring it. This is the only
+                // place a card is put away -- every click-outside branch calls this lambda -- so the shape
+                // can now only ever go card -> notice strip while something is being announced.
+                window.SetState(active == nullptr ? resting : island::IslandState::NoticeStrip);
             };
             // A click, routed to whatever it landed on. The icon row is checked FIRST because the
             // icons are not the island: a click on one asks to switch to that window, and must not
