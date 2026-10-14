@@ -11179,3 +11179,29 @@ g_globalHook = SetWindowsHookExW(WH_GETMESSAGE, IslandTrayHookProc, 载入的内
 - 安装器 `IslandBarSetup.exe` 目前**只带 `island_bar.exe`**，没带 `island_tray_hook.dll`——全新安装会没有托盘学习。要补（`setup/CMakeLists.txt` + `payload.rc.in` + `Setup.cpp` 各一小段）。
 - 模块现在进的是**每个 GUI 进程**（含 msedge、WidgetService 这类与托盘无关的）。这是 MyDockFinder 的做法，也是用户接受的那条路（"更新坏了再改"），但杀软/反作弊的敏感度比"逐应用装钩子"高，值得记一笔。
 - 学习仍然依赖应用**调用 `Shell_NotifyIcon`**。真要让 ChatGPT/Razer 那类也能按，唯一已知的替代是从 shell 的**投递**里学（`WH_CALLWNDPROC` 看 shell 发给应用的 SENT 消息，正是本轮量出 v3 拼法的那条通道），但它需要先有一次真实点击——与"不要真实点击"冲突，所以没做。观察通道（标记文件 `tray_watch.txt`）仍在 `TrayHook.cpp` 里，下次要量随时可用。
+
+### 8.111 **`uVersion` 和 `uTimeout` 是同一个字段：版本不能只从 NIM_ADD 读** ✅（已实测）
+
+用户 2026-10-15 07:0x 让我参看 `https://www.cnblogs.com/findumars/p/5086716.html`（《系统托盘编程完全指南》，原文 hellocpp.net，2004 年，三部分）。它是**应用侧**教程，没有"从外部按别人的图标"的办法——所以它不改变结论，反而把 8.109/8.110 的结论补齐了出处：
+
+1. 回调契约白纸黑字：`uCallbackMessage` 由**应用自己填**，通知到达时 "uID 的值即为 wParam，lParam 为鼠标事件，如 WM_LBUTTONDOWN" —— 正是 8.109 从 clash-verge 进程内部量到的那一对消息，说明那是**标准语义**而不是某个应用的特殊行为；同时说明消息号除了"进到应用里看"没有任何 API 会公布。
+2. **第三部分贴出的结构体定义里，`uVersion` 与 `uTimeout` 是同一个 `union`**：
+
+```c
+        union {
+            UINT  uTimeout;
+            UINT  uVersion;
+        } DUMMYUNIONNAME;
+```
+
+   所以 `NIM_ADD` 里读到的 version **是超时槽**，多数应用是 0 —— "从没说过"，不是"v3"。真正的版本只在随后的 `NIM_SETVERSION` 调用里，而那行**我们的读取器原来是直接跳过的**。
+3. `TaskbarCreated` **只发给顶层窗口**（印证我们用 `HWND_BROADCAST`，也印证托盘回调窗口必须是应用的顶层窗口）；气球那一组通知（`NIN_BALLOON*`，`WM_USER+2..5`）也会打在同一个回调上——观察通道会多记几行，按压力式是固定配方，不受影响。
+
+**改了两处**：
+
+| 位置 | 改动 |
+|---|---|
+| `TrayLearn.cpp::HarvestReport` | 新增"第一遍"先扫 `NIM_SETVERSION` 行，把 (exe, uid/guid) → 版本 收集起来，再在生成条目时覆盖 `NIM_ADD` 带来的那个值（先读后应用，所以两次调用的先后顺序无关）。本机现在没有任何应用调过 `NIM_SETVERSION`（日志里 0 行），所以这半只对将来的应用有用 |
+| `TrayPress.cpp` 的 attempts 表 | 版本为 **0（未声明）** 时不再只试一种配方：先试 **shell 自己那一对 `downup3`**，再试文档写法的 `select`。理由正是上面那个 union —— "0" 不能当成 v3，只试一种就会把一个真 v4 应用误判成"忽略回调"并写进缓存 `none`，那一格从此永远不发 |
+
+**实测**（清掉 clash-verge 记录的配方、版本为 0 再按）：第一次按压 **93 ms 命中**（说明先试的那一对就是对的，没有付出 400 ms 的代价），随后把 `downup3` 记回缓存；第二次按压走单次投递。自检与 smoke 都是 PASS。

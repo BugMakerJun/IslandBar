@@ -322,6 +322,56 @@ void HarvestReport(TrayLearnResult* result) {
     const std::wstring report = HomePath(kReportFile);
     std::vector<Learned> learned;
     if (!report.empty()) {
+        // ---- PASS ONE: THE VERSION AN APPLICATION ACTUALLY ASKED FOR ------------------------------------
+        //
+        // NOTIFYICONDATA's `uVersion` shares its storage with `uTimeout` -- one `union` in the structure, and
+        // the classic reference for this API prints it exactly that way (cnblogs.com/findumars/p/5086716,
+        // "系统托盘编程完全指南", part 3). So the value read at NIM_ADD is the TIMEOUT slot for most
+        // applications and reads 0, which means "never said" rather than "version 3"; the shell only learns
+        // the real one from the NIM_SETVERSION call that normally follows it, and that call is a line this
+        // reader used to skip entirely.
+        //
+        // Read first and applied afterwards, so the order the two calls arrived in cannot matter.
+        struct VersionFact {
+            std::wstring exe;
+            unsigned uid = 0;
+            std::wstring guid;
+            unsigned version = 4;
+        };
+        std::vector<VersionFact> versions;
+        {
+            FILE* stream = nullptr;
+            if (_wfopen_s(&stream, report.c_str(), L"r, ccs=UTF-8") == 0 && stream) {
+                wchar_t line[1024] = {};
+                while (fgetws(line, 1024, stream)) {
+                    if (!wcsstr(line, L"NIM_SETVERSION")) continue;
+                    wchar_t exe[260] = {};
+                    if (!Field(line, L"exe", exe, 260)) continue;
+                    unsigned uid = 0;
+                    unsigned version = 0;
+                    if (!FieldNumber(line, L"uid", &uid, false)) continue;
+                    if (!FieldNumber(line, L"version", &version, false)) continue;
+                    if (version != 3 && version != 4) continue;
+                    wchar_t guid[64] = {};
+                    if (Field(line, L"guid", guid, 64) && guid[0] == L'-') guid[0] = 0;
+                    versions.push_back(VersionFact{BaseNameLower(exe), uid, guid, version});
+                }
+                fclose(stream);
+            }
+        }
+        const auto statedVersion = [&versions](const std::wstring& exe, unsigned uid,
+                                              const std::wstring& guid) -> unsigned {
+            for (const VersionFact& fact : versions) {
+                if (fact.exe != exe) continue;
+                if (!guid.empty() || !fact.guid.empty()) {
+                    if (fact.guid == guid) return fact.version;
+                    continue;
+                }
+                if (fact.uid == uid) return fact.version;
+            }
+            return 0;   // nothing said: the caller keeps whatever the registration itself carried
+        };
+
         FILE* stream = nullptr;
         if (_wfopen_s(&stream, report.c_str(), L"r, ccs=UTF-8") == 0 && stream) {
             wchar_t line[1024] = {};
@@ -362,6 +412,9 @@ void HarvestReport(TrayLearnResult* result) {
                 item.uid = uid;
                 item.version = version;
                 item.guid = guid;
+                // ... and the version from the NIM_SETVERSION call wins when there was one: see pass one.
+                const unsigned stated = statedVersion(item.exe, item.uid, item.guid);
+                if (stated) item.version = stated;
                 ++result->captured;
                 learned.push_back(item);
             }

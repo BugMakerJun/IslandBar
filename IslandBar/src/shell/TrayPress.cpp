@@ -717,6 +717,16 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
         attempts[attemptCount++] = Attempt{WM_LBUTTONUP, true, true, true};
     } else if (entry->leftSpelling == TrayCallback::LeftSpelling::DownThenUp3) {
         attempts[attemptCount++] = Attempt{WM_LBUTTONUP, true, true, false};
+    } else if (entry->version == 0) {
+        // "NEVER SAID" IS NOT "VERSION 3", and the press cannot tell the two apart from the version field
+        // alone: uVersion shares its storage with uTimeout in NOTIFYICONDATA (see TrayLearn.cpp, and the
+        // classic API reference it cites), so an application that IS version 4 can perfectly well have
+        // registered with a 0 in that slot. So an unknown version tries the pair the SHELL itself sends --
+        // measured working, and the recipe two of two applications on this machine answered -- and then the
+        // documented v4 spelling. Trying only one of them is what would write a false "this application
+        // ignores its callback" into the cache and cost that cell its invisible press for good.
+        attempts[attemptCount++] = Attempt{WM_LBUTTONUP, true, true, false};
+        attempts[attemptCount++] = Attempt{NIN_SELECT, false, true, true};
     } else if (v4) {
         attempts[attemptCount++] = Attempt{NIN_SELECT, false, true, true};
         attempts[attemptCount++] = Attempt{WM_LBUTTONUP, true, true, false};
