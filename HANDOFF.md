@@ -10993,3 +10993,29 @@ PostMessage(trayWindow,
 - 探针 DLL 现在**留在** explorer / 微信 / Steam / Wallpaper Engine / clash-verge 等进程里（只记录、功能无影响），**要等这些进程重启才消失**；报告文件 `%USERPROFILE%\IslandBar\tray_notify_calls.txt` 会继续长。
 - 产品化方案（钩子 + `TaskbarCreated` 触发学习 + 覆盖日志 + 学不到的继续走真实点击）**还没写**，等用户点头；"真实点击彻底删掉"目前**做不到**，因为上面四类应用抓不到。
 - ChatGPT 评审帖（第 28 轮）**没谈成**：会话报 `Model not found`，根页显示"无法加载你的账户"，用户重新登录后仍然这样。
+
+### 8.108 **自动学习上线：应用侧的钩子模块 + 广播触发 + 版本感知的按压**（2026-10-15 凌晨，用户："今天就把这个完善好"）
+
+#### 8.108.1 做了什么（都是产品代码，已部署）
+
+| 文件 | 内容 |
+|---|---|
+| `src/trayhook/TrayHook.cpp`（新，DLL `island_tray_hook.dll`）| 装进应用后，把该进程**自己的导入表**里 `Shell_NotifyIconW/A` 的槽位改指到 detour；每次注册把 `(exe, pid, 调用者模块, hwnd, uid, msg, version, flags, tip)` 追加到 `%USERPROFILE%\IslandBar\tray_learned.txt`。**只改指针，不改 shell 的函数体** |
+| `src/shell/TrayLearn.{h,cpp}`（新）| 驱动器：把模块逐个提供给运行中的托盘应用（每个应用取**最重的那个进程**，因为微信 5 个进程里托盘窗口在最大的那个）→ 发一次 `TaskbarCreated` 让应用重新注册 → 读报告、用 `GetClassNameW` 把窗口解析成类名 → 合并进 `tray_callbacks.txt`（新增 `version` 字段；`|click` 的行不会被覆盖） |
+| `src/shell/TrayPress.cpp` | ① 按压布局**按应用注册的 version 走**：v4（4）= 锚点在 wParam；v3（0/3）= `wParam=uid, lParam=鼠标消息`（坐标由应用读当前光标，而光标就在用户点的那一格）。② **发出去没回应**（1.5 s 内应用什么都没做）→ 这一次回退真实点击，并往缓存那行写 `click`，以后不再浪费 1.5 s |
+| `src/main.cpp` | 启动时后台学一次（已有条目齐全就跳过）；新增 `--tray-learn` 命令行；启动日志多一行覆盖率 |
+
+#### 8.108.2 实测（都在这台机器上）
+
+- 自检 **PASS**（部署的那份 exe）、`island_smoke` **PASS**、Debug 与 Release 都能编。
+- 对照应用（`probe-tray-registrar.exe`）：uid 7 / msg 0xABCD / tip `ISLANDBAR-PROBE-4711` / version 4 —— 五个已知字段全部对上。
+- 真实应用自动抓到并写进缓存：`wallpaper64.exe`（uid 1000, msg **0x0400**, class `WPETrayWindow`, version 4）、`Steam`（uid 1, msg **0x0401**, 调用者 `vgui2_s.DLL`）、`clash-verge`（uid 2, msg **0x1772**）、explorer 的蓝牙图标（msg 0x0403）。其中 WPE 与 clash-verge 的 (uid, msg) 与"读 explorer 内存"那条独立路线**完全一致**。
+- 当前覆盖率：**3-4 / 12-14** 个卡片图标（其余见 8.107.2 的四类）。
+- 工具上的一个坑已修：`PatchCount` 现在分别报"改了几格 / 已有几格本来就指着我们"。之前 install 时报 0 格却照样抓到调用，是**计数与事实不符**（还差点变成一条误导下一轮的日志）；现在 install 与"调用时刻复核"两处一致（`1 slot(s) redirected ... watching=yes` + `watch check ... 1 slot(s)`）。
+
+#### 8.108.3 遗留（如实说）
+
+1. **CLI 汇总行的 `captured/new entries` 偶尔报 0**，而同一次运行的报告文件里确实有调用；缓存的合并本身是好的（条目确实出现了）。下次先查这一处解析/读取窗口。
+2. **旧探针 DLL 仍留在** Steam / explorer / 微信 / clash-verge 里（它们占着导入表槽位，所以产品模块看到的是"0 格"）；**重启这些进程就干净**。产品自己的模块装进去后**按设计常驻**（要一直看着注册）。
+3. 四类够不着的应用（微信动态取地址、QQ音乐拒绝注入、任务管理器提权、ChatGPT 是 AppContainer）继续走"已学到的行 / 真实点击"。
+4. **"真实点击彻底删掉"仍然做不到**：卡在这四类上；能删的是"大部分应用不再需要它"。

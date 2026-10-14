@@ -60,6 +60,7 @@ add_executable(island_bar
     shell/SystemStatus.cpp
     shell/SystemToggles.cpp
     shell/TrayIcons.cpp
+    shell/TrayLearn.cpp
     shell/TrayPress.cpp
     shell/Weather.cpp
 
@@ -122,3 +123,9 @@ if(TARGET sqlite3)
     target_link_libraries(island_bar PRIVATE sqlite3)
     target_compile_definitions(island_bar PRIVATE ISLANDBAR_HAVE_SQLITE=1)
 endif()
+
+# --- the module that lives inside other applications -------------------------
+#
+# A separate binary on purpose: it is loaded into OTHER processes to watch them register their tray icons
+# (see trayhook/TrayHook.cpp), and it is written beside the bar because that is where the bar loads it from.
+add_subdirectory(trayhook)

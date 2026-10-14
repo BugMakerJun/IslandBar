@@ -54,6 +54,7 @@
 #include "app/PlayerWindow.h"
 #include "services/ToastStore.h"
 #include "shell/TrayIcons.h"
+#include "shell/TrayLearn.h"
 #include "shell/TrayPress.h"
 #include "platform/DisplayBrightness.h"   // the brightness row: DDC/CI, the only interface this machine has
 #include "shell/SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
@@ -1238,6 +1239,40 @@ unsigned long long lastMusicMeterMs = 0;
     island::LogAndPrint("  tray: %d icon(s) from the registry (%d entr(ies), %d process(es) seen)",
                         trayAtStart, trayIcons.Examined(), trayIcons.ProcessesSeen());
     std::fflush(stdout);
+
+    // --- learning every tray callback, on a worker, once a session --------------------------------
+    //
+    // A press is invisible only when it is the application's OWN callback message posted to its own tray
+    // window, and that message number used to be learned by hand, one application at a time, with an
+    // administrator prompt and a third-party program in the room. It is learned here instead: a small module
+    // is offered to every running tray application, every application is asked to register its icon again
+    // (the standard TaskbarCreated broadcast), and what comes back is written into the cache the press path
+    // reads (see shell/TrayLearn.h -- including what this cannot reach).
+    //
+    // ON A WORKER because it takes about three seconds, and SKIPPED when every icon is already known: the
+    // broadcast makes applications re-add their icons, which is harmless but pointless to repeat once the
+    // answers are in the file.
+    {
+        const int coveredNow = island::CountCoveredIcons(trayIcons);
+        if (coveredNow >= trayAtStart) {
+            island::LogAndPrint("  tray learn: %d of %d icon(s) already have a callback entry -- not asking "
+                                "again", coveredNow, trayAtStart);
+        } else {
+            island::LogAndPrint("  tray learn: %d of %d icon(s) known; asking the applications to register "
+                                "again (background)", coveredNow, trayAtStart);
+            std::thread([]() {
+                island::TrayIcons icons;
+                icons.Refresh();
+                const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+                island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in %d, %d "
+                                    "registration(s) captured, %d new entr(ies) -- %d of %d icon(s) have a "
+                                    "callback entry (in %lld ms)",
+                                    learned.appsTried, learned.appsReached, learned.captured,
+                                    learned.newEntries, learned.covered, learned.icons, learned.ms);
+            }).detach();
+        }
+        std::fflush(stdout);
+    }
 
     // --- the Start card's own state -------------------------------------------------------------------
     //
@@ -6211,6 +6246,30 @@ int RunTraySurface() {
 // here. Everything the live click does is done, including the walk through the shell's tray, so what this
 // prints is what a click produces -- the difference being `--fire`, without which the button is found and
 // reported but not pressed.
+// Learns the tray callbacks of everything running, and prints what it got. Its own command because the
+// learning is otherwise a background step of a live session, and a question about it should not need a
+// running bar to be answered.
+int RunTrayLearn() {
+    island::TrayIcons icons;
+    const int count = icons.Refresh();
+    const int coveredBefore = island::CountCoveredIcons(icons);
+    island::LogAndPrint(L"tray learn: %d icon(s) on the card, %d of them known; offering the module to every "
+                        L"application and asking each to register again\n",
+                        count, coveredBefore);
+    const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+    island::LogAndPrint(L"tray learn: tried %d application(s), the module loaded in %d, %d registration(s) "
+                        L"captured, %d new entr(ies)\n",
+                        learned.appsTried, learned.appsReached, learned.captured, learned.newEntries);
+    island::LogAndPrint(L"tray learn: %d of %d icon(s) now have a callback entry (before: %d), %lld ms\n",
+                        learned.covered, learned.icons, coveredBefore, learned.ms);
+    wchar_t home[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+    island::LogAndPrint(L"tray learn: the cache is %ls\\IslandBar\\tray_callbacks.txt and the raw capture is "
+                        L"%ls\\IslandBar\\tray_learned.txt\n",
+                        home, home);
+    return learned.covered > coveredBefore ? 0 : 1;
+}
+
 int RunTrayPress(int index, bool fire, bool rightClick) {
     island::TrayIcons icons;
     const int count = icons.Refresh();
@@ -7124,6 +7183,11 @@ int main(int argc, char** argv) {
             const int surfaceResult = RunTraySurface();
             island::CloseLog();
             return surfaceResult;
+        }
+        if (std::strcmp(argv[i], "--tray-learn") == 0) {
+            const int learnResult = RunTrayLearn();
+            island::CloseLog();
+            return learnResult;
         }
         // --tray-press N: press the Nth icon of the card's list, exactly as a click on its cell does.
         // The card's own cells cannot be clicked from a script on this machine (see ISLANDBAR_CLICK_AT),

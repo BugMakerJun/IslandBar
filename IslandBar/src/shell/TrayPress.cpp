@@ -618,6 +618,15 @@ struct TrayCallback {
     // left press does activate it -- its engine imports SendInput, so that route is more than a post.
     // Until that is built here, a left press keeps the real click (which does satisfy the foreground rules).
     bool rightClickOnly = false;
+    // THE VERSION THE APPLICATION REGISTERED WITH, and it decides how the callback is packed. v4 (4) carries
+    // the anchor in wParam and the notification plus the uid in lParam; v3 (and 0, which means "never said")
+    // carries the uid in wParam and the mouse message in lParam, with the anchor left to the current cursor --
+    // which is the cell the user just pressed, so the menu still lands where it should.
+    unsigned version = 4;
+    // THE APPLICATION DID NOTHING when its callback was posted, so this bar does the real click instead from
+    // now on. Learned the same way as everything else here: by trying it (see the note in SendTrayCallback).
+    // The cache spells it `click`, and that is also what a hand-written line can say.
+    bool realClickOnly = false;
 };
 
 std::wstring BaseNameLower(const wchar_t* path) {
@@ -668,7 +677,16 @@ std::vector<TrayCallback> ReadTrayCallbacks() {
             std::wcstoul(fields[1].c_str() + (hex ? 2 : 0), nullptr, hex ? 16 : 10));
         wcsncpy_s(entry.windowClass, fields[2].c_str(), _TRUNCATE);
         if (fields.size() > 3) entry.uid = static_cast<unsigned>(std::wcstoul(fields[3].c_str(), nullptr, 10));
-        if (fields.size() > 4) entry.rightClickOnly = _wcsicmp(fields[4].c_str(), L"right") == 0;
+        if (fields.size() > 4) {
+            entry.rightClickOnly = _wcsicmp(fields[4].c_str(), L"right") == 0;
+            entry.realClickOnly = _wcsicmp(fields[4].c_str(), L"click") == 0;
+        }
+        // The learned files carry the registered version from HANDOFF 8.107 on; a line written before that
+        // says nothing, and the default is what such a line was written for.
+        if (fields.size() > 5) {
+            const unsigned parsed = static_cast<unsigned>(std::wcstoul(fields[5].c_str(), nullptr, 10));
+            entry.version = (parsed == 0 || parsed == 3 || parsed == 4) ? parsed : 4;
+        }
         if (entry.message) entries.push_back(entry);
     }
     std::fclose(stream);
@@ -691,6 +709,47 @@ bool CallbackWindowFor(const TrayPressRequest& request, const TrayCallback& entr
     return false;
 }
 
+// Rewrites the entry's cache line as `click`: the application was posted its own callback and did nothing
+// with it, so from now on this bar presses the real way for that icon instead of spending a second and a half
+// discovering the same thing again. The line stays in the file, so it can be edited or deleted by hand.
+void MarkCallbackAsRealClick(const TrayPressRequest& request) {
+    wchar_t home[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) == 0) return;
+    const std::wstring file = std::wstring(home) + L"\\IslandBar\\tray_callbacks.txt";
+    FILE* stream = nullptr;
+    if (_wfopen_s(&stream, file.c_str(), L"r, ccs=UTF-8") != 0 || !stream) return;
+    std::vector<std::wstring> lines;
+    wchar_t buffer[1024] = {};
+    while (fgetws(buffer, 1024, stream)) lines.push_back(buffer);
+    fclose(stream);
+
+    const std::wstring exe = BaseNameLower(request.exePath);
+    bool changed = false;
+    for (std::wstring& line : lines) {
+        if (line.empty() || line[0] == L'#') continue;
+        const size_t first = line.find(L'|');
+        const size_t second = first == std::wstring::npos ? std::wstring::npos : line.find(L'|', first + 1);
+        const size_t third = second == std::wstring::npos ? std::wstring::npos : line.find(L'|', second + 1);
+        const size_t fourth = third == std::wstring::npos ? std::wstring::npos : line.find(L'|', third + 1);
+        if (fourth == std::wstring::npos) continue;
+        std::wstring name = line.substr(0, first);
+        std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+        const unsigned uid = static_cast<unsigned>(std::wcstoul(line.substr(third + 1).c_str(), nullptr, 10));
+        if (name != exe || (request.hasUid && uid != request.uid)) continue;
+        const size_t end = line.find_first_of(L"\r\n", fourth + 1);
+        const std::wstring tail = end == std::wstring::npos ? std::wstring() : line.substr(end);
+        line = line.substr(0, fourth + 1) + L"click" + tail;
+        changed = true;
+        break;
+    }
+    if (!changed) return;
+    if (_wfopen_s(&stream, file.c_str(), L"w, ccs=UTF-8") != 0 || !stream) return;
+    for (const std::wstring& line : lines) fputws(line.c_str(), stream);
+    fclose(stream);
+    LogAndPrint(L"  tray press: the cache now says 'click' for %ls -- that press will not be posted again\n",
+                exe.c_str());
+}
+
 // Posts that callback and waits for the application to answer. False means "this route was not taken" --
 // nothing learned, no such window, or the post itself failed -- and the caller is expected to fall back.
 //
@@ -710,6 +769,7 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     }
     if (!entry) return false;
     if (entry->rightClickOnly && !rightClick) return false;   // see the note on rightClickOnly: fall back
+    if (entry->realClickOnly) return false;                   // it ignored the post once: see the note above
 
     HWND window = nullptr;
     if (!CallbackWindowFor(request, *entry, &window)) return false;
@@ -719,10 +779,17 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     const WindowWatch watch = TakeWindowWatch(request);
     const HWND foregroundBefore = GetForegroundWindow();
 
-    // v4: the anchor in wParam (low word x, high word y), the notification and the icon's uid in lParam.
-    const WPARAM wparam = static_cast<WPARAM>(MAKELONG(anchor.x, anchor.y));
-    const LPARAM lparam = static_cast<LPARAM>(
-        MAKELONG(rightClick ? WM_CONTEXTMENU : 0x0400 /* NIN_SELECT */, entry->uid));
+    // THE LAYOUT IS THE APPLICATION'S, and the entry's version is what says which one it is (v4 versus v3 --
+    // see NOTIFYICONDATA.uCallbackMessage, and the note at the top of this file for the two wrong guesses
+    // that cost a round).
+    const WPARAM wparam = (entry->version >= 4)
+                              ? static_cast<WPARAM>(MAKELONG(anchor.x, anchor.y))
+                              : static_cast<WPARAM>(entry->uid);
+    const LPARAM lparam = (entry->version >= 4)
+                              ? static_cast<LPARAM>(MAKELONG(rightClick ? WM_CONTEXTMENU : 0x0400 /* NIN_SELECT */,
+                                                             entry->uid))
+                              : static_cast<LPARAM>(rightClick ? WM_RBUTTONUP
+                                                               : NIN_SELECT /* 0x0400, the same number */);
     const BOOL posted = PostMessageW(window, entry->message, wparam, lparam);
     if (!posted) return false;
 
@@ -735,6 +802,20 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
 
     const bool answered = WatchApplicationForAnswer(watch, foregroundBefore, outcome ? outcome->answer : nullptr,
                                                     outcome ? sizeof(outcome->answer) / sizeof(wchar_t) : 0);
+
+    // NOT ANSWERED MEANS NOT DONE, and the press must not be silently lost: the application may want the
+    // shell's own click (its handler is driven by the shell forwarding mouse behaviour) rather than a posted
+    // message. So the verdict is written into the cache -- this icon is pressed the real way from now on --
+    // and this press falls back, which is what makes the difference between "one slow click" and "a button
+    // that does nothing".
+    if (!answered) {
+        LogAndPrint(L"  tray press: posted 0x%04X to %ls and the application did nothing with it in 1.5 s "
+                    L"(%ls) -- pressing the real way instead, and the cache now says so\n",
+                    entry->message, target, outcome ? outcome->answer : L"no answer");
+        MarkCallbackAsRealClick(request);
+        return false;
+    }
+
     if (outcome) {
         outcome->route = L"a posted callback";
         outcome->pointerMoved = false;
