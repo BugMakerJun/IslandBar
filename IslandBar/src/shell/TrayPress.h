@@ -124,13 +124,12 @@ struct TrayPressOutcome {
     // that never finished -- and the next session concluded that the Invoke had hung. The format string
     // is wide now (see main.cpp) and the facts live in the outcome instead of in a printf, so that a
     // future call site cannot lose them the same way.
-    const wchar_t* route = L"?";   // which press ran: "a real click" or "UI Automation's Invoke"
     long long clickMs = 0;         // when the click left this process, from the start of the press
     wchar_t target[160] = {};      // what was under the pointer: "class 'X' of pid N", and whose it is
     bool targetIsOurs = false;     // ... and whether that window is this bar's own
     bool madeClickThrough = false; // whether this bar had to be taken out of the hit test for the click
-    long long panelShownMs = 0;    // when the overflow panel was put back on screen for the click
-    long long panelHiddenMs = 0;   // ... and when it was taken off it again (0 = never, or not needed)
+    long long panelShownMs = 0;    // when the overflow panel was made hit-testable for the click
+    long long panelHiddenMs = 0;   // ... and when it was made transparent again (0 = never, or not needed)
     RECT menuRect = {};            // the application's menu, when one was seen (the right-click route)
     wchar_t menuClass[160] = {};   // what came up, in words (class, rectangle, whose window it is)
     long long menuWaitMs = -1;     // ms after the click it was seen; -1 = nothing appeared in the budget
@@ -149,18 +148,13 @@ struct TrayPressOutcome {
 // click means in the shell's tray -- and it is the only route to a menu item like "退出": UI Automation
 // publishes no right-click pattern, so that half is a real click delivered at the icon (see TrayStage).
 //
-// THREE SWITCHES, all of them for measurements that would otherwise need a rebuild:
+// ONE SWITCH, for a measurement that would otherwise need a rebuild (two others lived here until their
+// questions were answered -- see the note where the switch is read):
 //
 //   ISLANDBAR_TRAY_PRESS_VISIBLE=1    the whole press runs with the shell's taskbar and overflow panel
 //                                     actually on screen. Everything here exists to keep them off it, and
 //                                     that is also what hides the answer to "does this press work at all"
 //                                     behind "does it work while invisible": one switch, one experiment.
-//   ISLANDBAR_TRAY_PRESS_NO_REVEAL=1  never put the panel's alpha back for the click. If the press works
-//                                     this way the reveal was never needed and the last visible trace of
-//                                     the shell's icon grid can go.
-//   ISLANDBAR_TRAY_PRESS_ROUTE=invoke the left press goes back to UI Automation's Invoke -- the route the
-//                                     bar used before it learned to inject a click, kept as a switch so
-//                                     the two can be measured against each other without a rebuild.
 TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press, bool rightClick);
 
 // Whether a press is in flight right now.
@@ -216,12 +210,13 @@ public:
 
     RECT FlyoutRect() const { return flyoutRect_; }
 
-    // The panel back on screen for the length of one click, and off it again afterwards.
+    // The panel made hit-testable for the length of one click, and transparent again afterwards.
     //
     // The icon being pressed lives in that panel, and a click is routed by position: the panel is the
-    // window that has to receive it. It is invisible (alpha 0) for the rest of the press, and the two calls
-    // below are the only places that change that -- see the measurements in PressOnRect for what the shell
-    // does and does not tolerate.
+    // window that has to receive it. Windows does not hit-test a layered window at alpha 0, which is the
+    // whole reason these two calls exist -- and the alpha it comes back at is 1, so that the shell's icon
+    // grid is never painted on the way past (see ShowPanelForClick). The panel is at alpha 0 for the rest
+    // of the press, and these are the only two places that change it.
     void ShowPanelForClick();
     void HidePanelAfterClick();
     bool PanelStillShowing() const;

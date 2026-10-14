@@ -6036,14 +6036,15 @@ void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
         // CRT cannot convert that to bytes and MSVC empties the whole line instead of failing loudly. Three
         // presses were diagnosed as "the Invoke hung" on the strength of those blank lines. See Log.h.
         island::LogAndPrint(
-            L"  tray press: '%ls' -> %ls via %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), "
-            L"lookup %lld ms, press %lld ms\n",
-            request.name, island::TrayPressResultName(outcome.result), outcome.route, outcome.shellName,
+            L"  tray press: '%ls' -> %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), lookup "
+            L"%lld ms, press %lld ms\n",
+            request.name, island::TrayPressResultName(outcome.result), outcome.shellName,
             outcome.rect.left, outcome.rect.top, outcome.rect.right - outcome.rect.left,
             outcome.rect.bottom - outcome.rect.top, outcome.lookupMs, outcome.pressMs);
         if (outcome.clickMs > 0) {
             island::LogAndPrint(L"  tray press: the click left at %lld ms; it was aimed at %ls%s; the "
-                                L"panel was revealed at %lld ms and hidden at %lld ms\n",
+                                L"panel was made hit-testable at %lld ms and transparent again at %lld "
+                                L"ms\n",
                                 outcome.clickMs, outcome.target,
                                 outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
                                 outcome.panelShownMs, outcome.panelHiddenMs);
@@ -6225,13 +6226,13 @@ int RunTrayPress(int index, bool fire, bool rightClick) {
     island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", outcome.rect.left,
                         outcome.rect.top, outcome.rect.right - outcome.rect.left,
                         outcome.rect.bottom - outcome.rect.top);
-    island::LogAndPrint(L"  -> %ls%ls via %ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
+    island::LogAndPrint(L"  -> %ls%ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
                         island::TrayPressResultName(outcome.result),
-                        rightClick ? L" [right click]" : L"", outcome.route, outcome.shellName,
-                        outcome.lookupMs, outcome.pressMs);
+                        rightClick ? L" [right click]" : L"", outcome.shellName, outcome.lookupMs,
+                        outcome.pressMs);
     if (outcome.clickMs > 0) {
-        island::LogAndPrint(L"  the click left at %lld ms, aimed at %ls%s; the panel was revealed at "
-                            L"%lld ms and hidden at %lld ms\n",
+        island::LogAndPrint(L"  the click left at %lld ms, aimed at %ls%s; the panel was made "
+                            L"hit-testable at %lld ms and transparent again at %lld ms\n",
                             outcome.clickMs, outcome.target,
                             outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
                             outcome.panelShownMs, outcome.panelHiddenMs);

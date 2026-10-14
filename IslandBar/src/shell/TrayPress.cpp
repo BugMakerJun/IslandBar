@@ -51,29 +51,20 @@ std::atomic<HWND> g_cleanupPanel{nullptr};
 std::atomic<LONG_PTR> g_cleanupPanelStyle{0};
 std::atomic<bool> g_cleanupPanelUnlayer{false};
 
-// The three measurement switches. See TrayPress.h for what each of them is for; they are read once per
-// press so that a run cannot change its mind halfway through.
-struct PressSwitches {
-    bool visible = false;    // ISLANDBAR_TRAY_PRESS_VISIBLE: nothing is hidden or revealed at all
-    bool noReveal = false;   // ISLANDBAR_TRAY_PRESS_NO_REVEAL: the panel stays invisible for the click
-    bool invokeLeft = false; // ISLANDBAR_TRAY_PRESS_ROUTE=invoke: the left press is a UIA Invoke again
-};
-
+// The one measurement switch left. It is read once per press so that a run cannot change its mind halfway.
+//
+// TWO OTHERS WERE HERE AND ARE GONE (2026-10-15): `..._NO_REVEAL` proved that without the panel being put
+// back on screen neither button does anything, and `..._ROUTE=invoke` reproduced the route this file used
+// to take -- which is how it was measured that the route does nothing. Both questions are answered, and a
+// switch that reproduces an answered question is a second code path nobody will ever run again.
 bool SwitchOn(const wchar_t* name) {
     wchar_t value[32] = {};
     const DWORD length = GetEnvironmentVariableW(name, value, 32);
     return length > 0 && length < 32 && value[0] != L'0';
 }
 
-PressSwitches ReadPressSwitches() {
-    PressSwitches switches;
-    switches.visible = SwitchOn(L"ISLANDBAR_TRAY_PRESS_VISIBLE");
-    switches.noReveal = SwitchOn(L"ISLANDBAR_TRAY_PRESS_NO_REVEAL");
-    wchar_t route[32] = {};
-    const DWORD length = GetEnvironmentVariableW(L"ISLANDBAR_TRAY_PRESS_ROUTE", route, 32);
-    switches.invokeLeft = length > 0 && length < 32 && std::wcscmp(route, L"invoke") == 0;
-    return switches;
-}
+// ISLANDBAR_TRAY_PRESS_VISIBLE: nothing is hidden or revealed, so somebody can watch what a press does.
+bool VisibleRunWanted() { return SwitchOn(L"ISLANDBAR_TRAY_PRESS_VISIBLE"); }
 
 // Marks the press for the frame loop, and clears it whatever way the function returns.
 class PressInFlight {
@@ -290,9 +281,11 @@ bool InvokeElement(IUIAutomationElement* element) {
 //     hit testing -- alpha hides the pixels, not the window -- so what is under the point has to be
 //     MEASURED before the click, and the bar has to step out of the way if it turns out to be us.
 //
-// `mouse_event` and not `SendInput`: the right-click route was measured working with it (see the history in
-// PressOnRect), and the two go through the same kernel input path. The pointer genuinely moves, which is a
-// trade the user accepted in exchange for the press working at all -- it is put back straight afterwards.
+// THE PRESS IS ONE `SendInput` QUEUE (2026-10-15, on the review's advice and its own reason): the move is
+// still a `SetCursorPos` -- what matters is not how the pointer gets there but that the press and its
+// release cannot be separated -- and the pair goes out as one item in the input queue instead of two calls
+// with a sleep between them. The pointer genuinely moves, which is a trade the user accepted in exchange
+// for the press working at all; it is put back straight afterwards.
 
 // What would receive a click at `point`, in words, and whether that window is this bar's own.
 void DescribeWindowAt(POINT point, wchar_t* out, size_t capacity, bool* isOurs) {
@@ -321,8 +314,7 @@ void DescribeWindowAt(POINT point, wchar_t* out, size_t capacity, bool* isOurs) 
 // `WS_EX_TRANSPARENT` and not an emptied window region: the region is also what the bar's own hit testing
 // and its input contract are built on, and zeroing it for a moment would flicker the bar itself. The bit is
 // put back when this object dies, which is after the click has been delivered AND the answer waited for --
-// input is queued, so a bit removed immediately after `mouse_event` could be gone before the click is
-// routed.
+// input is queued, so a bit removed immediately after the click is sent could be gone before it is routed.
 class ClickThroughGuard {
 public:
     explicit ClickThroughGuard(HWND window) : window_(window) {
@@ -747,8 +739,7 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     };
     say(L"");
 
-    const PressSwitches switches = ReadPressSwitches();
-    visibleRun_ = switches.visible;
+    visibleRun_ = VisibleRunWanted();
 
     // Makes the overflow panel invisible. Called for the window the instant its class name answers, and
     // again every time UI Automation sees the element while it slides, and once more after it has settled:
@@ -1009,8 +1000,15 @@ long long TrayStage::SinceBegin() const { return begunAt_ ? MillisSince(begunAt_
 
 void TrayStage::ShowPanelForClick() {
     if (!flyoutWindow_ || visibleRun_) return;
-    SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
-    LogAndPrint("  tray press: the panel was put back on screen for the click (%lld ms in)\n",
+    // ALPHA 1, NOT 255. The panel has to stop being TRANSPARENT, because Windows does not hit-test a
+    // layered window whose alpha is 0 -- that is the rule the click depends on, and it is measured twice
+    // over in this file (with the panel at alpha 0 `WindowFromPoint` over the icon answers the desktop, and
+    // a press that never reveals the panel is a press that does nothing at all). Nothing else about the
+    // reveal needs to be visible, so it is not: at 1 of 255 the panel paints 0.4% of its content over
+    // whatever is behind it, which measures as the wallpaper (see scripts/measure-tray-panel.ps1, which
+    // reads the panel's own rectangle through a whole press).
+    SetLayeredWindowAttributes(flyoutWindow_, 0, 1, LWA_ALPHA);
+    LogAndPrint("  tray press: the panel was made hit-testable for the click (alpha 1, %lld ms in)\n",
                 SinceBegin());
 }
 
@@ -1060,23 +1058,10 @@ TrayPressResult TrayStage::PressOnRect(const TrayPressRequest& request, const RE
     }
     if (press && outcome) LogElementFacts(button, L"tray press");
 
-    const PressSwitches switches = ReadPressSwitches();
     TrayPressResult result = TrayPressResult::Found;
     rightClicked_ = press && rightClick;
-    if (press && !rightClick) {
-        if (switches.invokeLeft) {
-            // THE ROUTE THIS FILE USED TO TAKE, behind a switch so the two can be measured against each
-            // other without a rebuild. It is what the round-14 experiment ran: the element is found, the
-            // Invoke reports S_OK or not, and the application does whatever it does about it -- which on
-            // this machine was nothing at all, three presses in a row.
-            if (outcome) outcome->route = L"UI Automation's Invoke (ISLANDBAR_TRAY_PRESS_ROUTE=invoke)";
-            result = InvokeElement(button) ? TrayPressResult::Pressed : TrayPressResult::Refused;
-            if (outcome) outcome->clickMs = SinceBegin();
-        } else {
-            result = ClickOnRect(request, rect, false, outcome);
-        }
-    } else if (press) {
-        result = ClickOnRect(request, rect, true, outcome);
+    if (press) {
+        result = ClickOnRect(request, rect, rightClick, outcome);
     }
     button->Release();
     return result;
@@ -1086,38 +1071,31 @@ TrayPressResult TrayStage::PressOnRect(const TrayPressRequest& request, const RE
 //
 // The sequence, in the order the plan of that round fixed it:
 //
-//   1. the panel is put back on screen (it is alpha 0 for the rest of the press) -- measured: with the
-//      panel invisible the application's menu does not appear at all, and a click has to be routed by
-//      position into the window the icon lives in;
+//   1. the panel is made hit-testable -- alpha 1, not 0 and not 255 -- because that is the one thing the
+//      shell's side of this needs, and anything more paints the icon grid on the user's screen. Measured
+//      both ways: with the panel left transparent the application's menu does not appear at all and the
+//      left press does nothing, and with it made opaque the grid is visible for 15-38 ms in every press;
+//      see ShowPanelForClick;
 //   2. what is UNDER the point is measured before anything is clicked. This bar is TOPMOST and covers the
 //      same band as the shell's tray; an alpha-0 layered window is still hit-tested, so if the answer is
 //      "this bar" the bar steps out of the way for the length of the delivery (ClickThroughGuard);
 //   3. the pointer is moved to the icon's own centre, the button goes down and up -- a real click, which is
 //      what a tray application is listening for (see the note at the top of the helpers above);
-//   4. LEFT: the panel goes off the screen again at once, and the application is watched for 200 ms for a
+//   4. LEFT: the panel is made transparent again at once, and the application is watched for 1.5 s for a
 //      window of its own or a foreground change, because a clean return is not an answer;
-//      RIGHT: the panel is LEFT UP until the application's menu has actually appeared (measured: hiding it
-//      first is what the round-15 note blamed for the flash, and an ownerless menu is worse than a flash),
-//      and only then is it taken off the screen again;
+//      RIGHT: the panel is LEFT ALONE until the application's menu has actually appeared (measured: an
+//      ownerless menu is worse than anything this costs), and only then is it made transparent again;
 //   5. the pointer is put back where the user's hand was, since the menu belongs to the application and
 //      does not follow the pointer.
 TrayPressResult TrayStage::ClickOnRect(const TrayPressRequest& request, const RECT& rect, bool rightClick,
                                        TrayPressOutcome* outcome) {
-    const PressSwitches switches = ReadPressSwitches();
     POINT saved = {};
     if (!GetCursorPos(&saved)) return TrayPressResult::Refused;
     const POINT centre = {(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
 
-    if (outcome) {
-        outcome->route = L"a real click";
-        outcome->panelShownMs = 0;
-    }
-    if (switches.noReveal) {
-        LogAndPrint("  tray press: the panel is being left invisible for the click "
-                    "(ISLANDBAR_TRAY_PRESS_NO_REVEAL)\n");
-    } else if (visibleRun_) {
-        LogAndPrint("  tray press: nothing was hidden in this run, so nothing has to be revealed "
-                    "(ISLANDBAR_TRAY_PRESS_VISIBLE)\n");
+    if (outcome) outcome->panelShownMs = 0;
+    if (visibleRun_) {
+        LogAndPrint("  tray press: nothing was hidden in this run, so nothing has to be revealed\n");
     } else {
         ShowPanelForClick();
         if (outcome) outcome->panelShownMs = SinceBegin();
@@ -1135,7 +1113,7 @@ TrayPressResult TrayStage::ClickOnRect(const TrayPressRequest& request, const RE
     }
     {
         // The guard lives for the whole delivery AND the wait: input is queued, so a bit taken off straight
-        // after `mouse_event` could be gone before the click is routed.
+        // after the click is sent could be gone before that click is routed.
         ClickThroughGuard guard(under);
         if (guard.applied()) {
             wchar_t after[160] = {};
@@ -1152,14 +1130,28 @@ TrayPressResult TrayStage::ClickOnRect(const TrayPressRequest& request, const RE
         const WindowWatch watch = TakeWindowWatch(request);
         const HWND foregroundBefore = GetForegroundWindow();
 
+        // THE POINTER FIRST, AND CONFIRMED RATHER THAN SLEPT THROUGH. The click is routed by position, so a
+        // click that arrives before the move has landed lands on whatever the pointer used to be over. The
+        // previous version guessed that 30 ms was enough; this asks, and gives up after 100 ms. Two pixels
+        // of tolerance because the coordinates the shell reports are not always the ones the pointer can
+        // hold (the review's warning about rounding, and the reason the centre of the rectangle is used
+        // rather than an edge).
         SetCursorPos(centre.x, centre.y);
-        // No click without the pointer actually being there, and no click without a moment for the move to
-        // land: the click is routed by position, so one that arrives before the move lands on whatever the
-        // pointer used to be over.
-        Sleep(30);
-        mouse_event(rightClick ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-        Sleep(30);
-        mouse_event(rightClick ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            POINT now = {};
+            GetCursorPos(&now);
+            if (std::abs(now.x - centre.x) <= 2 && std::abs(now.y - centre.y) <= 2) break;
+            Sleep(5);
+        }
+        // ... AND THE PRESS GOES OUT AS ONE QUEUE. Down and up used to be two calls with a 30 ms sleep
+        // between them, which is two chances for something else to happen between a press and its release;
+        // in one SendInput they are one item in the input queue.
+        INPUT events[2] = {};
+        events[0].type = INPUT_MOUSE;
+        events[0].mi.dwFlags = rightClick ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
+        events[1].type = INPUT_MOUSE;
+        events[1].mi.dwFlags = rightClick ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
+        SendInput(2, events, sizeof(INPUT));
         if (outcome) outcome->clickMs = SinceBegin();
 
         if (rightClick) {

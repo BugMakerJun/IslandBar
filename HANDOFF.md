@@ -10718,3 +10718,34 @@ state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
 - **面板滑入的那一段（25–112 ms，随运行不同）仍然会露一下**（shell 自己的动画在重画，alpha 0 按不干净）。它比原来小得多（原来是"面板被搬到左上角 + 一直留着"），但还没到"完全看不见"。下一轮可试的两条，都没有实测过：①滑入期间**连面板的画布子窗口一起按住**（`Windows.UI.Composition.DesktopWindowContentBridge`，8.79 明确决定没碰的那一层），②**开局就把面板开着但隐形、整段会话不关**（那样每次按压都没有滑入）。两条都有副作用，先测再定。
 - 左键对**某些应用**可能仍然"没反应"，因为那就是那个应用的托盘图标自己的行为（WeGame 就是）。真正的兜底是卡片菜单里的「打开」/「显示窗口」两项。
 - 自检 **0 失败**、`island_smoke` PASS、Debug 与 Release 都能编（唯一警告 `C4456` 在 `main.cpp:4710` 与 `Diagnostics.cpp:6251`，先于本次改动就存在）。盘上跑的已经是这一版（`island_bar.exe.bak-20261015-0040` 是上一版），**未推**。
+
+### 8.99 **托盘按压：一次 SendInput，面板只做到 alpha 1 —— 8.98 的两条收尾都成了** ✅（等用户测）
+
+用户批准做"第一步 + 第二步"（第三步注入先不做），并加了一条约束：**不要"面多加水、水多加面"地堆代码**。
+按项目流程先把设计拿给评审搭档（第二十轮），它的意见与我的落地：
+
+| 位置 | 改动 | 依据 |
+|---|---|---|
+| `TrayPress.cpp::ClickOnRect` | 按下+抬起合成**一次 `SendInput` 队列**（原来是两次 `mouse_event` + 中间 30 ms）；`SetCursorPos` 之后**轮询 `GetCursorPos` 直到坐标到位**（容差 2 px，上限 100 ms）代替原来的 blind `Sleep(30)` | 评审第二十轮：单个队列消除"移动还没落地就点击"的竞态；并建议保留 `SetCursorPos` 定位、只合并 DOWN/UP |
+| `TrayPress.cpp::ShowPanelForClick` | 点击前的"露面板"从 **alpha 255 改成 alpha 1** | 8.98 的两条实测合起来就是答案：面板 alpha 0 时**不参与命中**（`WindowFromPoint` 在图标处答的是桌面；`NO_REVEAL` 那次左右键全都不生效），而 alpha 1 已经能让它被命中，屏幕上的贡献只有 1/255 |
+| 三处 | 删掉 `ISLANDBAR_TRAY_PRESS_NO_REVEAL`、`ISLANDBAR_TRAY_PRESS_ROUTE=invoke` 两个开关与 `TrayPressOutcome::route` 字段（它们要问的问题都有答案了，留着就是第二条没人会走的代码路径），只留 `ISLANDBAR_TRAY_PRESS_VISIBLE` | 用户的新约束 + 评审："已完成验证使命的开关应删掉，旧的 UIA 路径分支、一次性实验字段一起清理" |
+
+#### 实测（本机，栏关闭时跑 CLI；`measure-tray-panel.ps1 -Cell 5 -Seconds 2`）
+
+| 指标 | 改前（8.98 那一版） | 改后 |
+|---|---|---|
+| 面板可见帧（5 次） | 5/5 次都能量到，**15–38 ms**（1–3 个采样点） | **5/5 次 `the panel was never on screen during the press`**（0 个采样点） |
+| 一次按压的时长 | 469–922 ms | **297–391 ms**（点击发生在 46–47 ms，原来 125 ms） |
+| 左键（微信 cell 5） | `the application answered -- the foreground window is now its 'Qt51514QWindowIcon'` | 同左，仍然成立 |
+| 右键（WeGame cell 6） | `the menu is up 62–79 ms … its own 'TWINCONTROL' at 2144,109 250x280` | `the menu is up 93 ms … 'TWINCONTROL' at 2144,109 250x280`（图标矩形 2374,89 40x40） |
+| 16 帧连拍（原来那一段会拍到网格） | `captures/press-burst/f00.png` 能看到面板与图标网格 | 16 帧全部是壁纸（42.7），`captures/press-burst/worst-frame.png` 只有应用自己的菜单 |
+
+顺带说明探针那条：**先跑了现成的 `probe-tray-panel-child-windows.ps1`**（没有新写脚本），它量到的是一个已经知道的事实——面板**停稳之后** alpha 0 就能把它藏住（mean 43.98 对 102.65），
+真正漏光是**滑入那一段**。所以第二步不是去按子窗口（评审也劝过：别去维护子窗口列表），而是把"露出来"这件事本身降到最小：alpha 1。
+
+#### 剩下的（如实说）
+
+- 指针仍会跳到图标上再跳回来（这是真实输入路线的固有代价，用户已接受）；
+- shell 给图标弹的 tooltip 偶尔仍会出现一下（8.98 里记过；它不是我们画的，也没找到可靠办法按掉）；
+- 第三步（注入 shell 学回调消息）**没有做**，用户的意思是"一和二效果不好再做三"，而现在一和二都达到了验收；
+- 自检 **0 失败**、`island_smoke` PASS、Debug 与 Release 都能编；盘上跑的已是这一版（备份 `island_bar.exe.bak-20261015-0040` 与 `…-0120` 是之前两版），**未推**。
