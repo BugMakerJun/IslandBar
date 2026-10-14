@@ -762,10 +762,16 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     const std::wstring exe = BaseNameLower(request.exePath);
     const TrayCallback* entry = nullptr;
     for (const TrayCallback& candidate : entries) {
-        if (exe == candidate.exe) {
-            entry = &candidate;
-            break;
-        }
+        if (exe != candidate.exe) continue;
+        // THE UID IS PART OF THE IDENTITY, and that is a correction rather than a description: this lookup
+        // used to take the first line of that application, which was right while every application had
+        // exactly one icon and one hand-written line. Learning changed that -- explorer alone registers
+        // several, and one of the lines this file learned is the Bluetooth icon -- so an exe-only match would
+        // post the BLUETOOTH icon's message at whichever explorer cell the user pressed. An icon registered
+        // by GUID has no uid to match on, and for those the real click stays.
+        if (!request.hasUid || candidate.uid != request.uid) continue;
+        entry = &candidate;
+        break;
     }
     if (!entry) return false;
     if (entry->rightClickOnly && !rightClick) return false;   // see the note on rightClickOnly: fall back
