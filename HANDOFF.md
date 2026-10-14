@@ -10943,3 +10943,53 @@ PostMessage(trayWindow,
 - shell 给图标弹的 tooltip 偶尔仍会出现一下（8.98 里记过；它不是我们画的，也没找到可靠办法按掉）；
 - 第三步（注入 shell 学回调消息）**没有做**，用户的意思是"一和二效果不好再做三"，而现在一和二都达到了验收；
 - 自检 **0 失败**、`island_smoke` PASS、Debug 与 Release 都能编；盘上跑的已是这一版（备份 `island_bar.exe.bak-20261015-0040` 与 `…-0120` 是之前两版），**未推**。
+
+### 8.107 **读 explorer 内存那条路 = 抽奖；改走"在应用里挂钩 Shell_NotifyIcon"**（2026-10-15 凌晨，用户："做"）
+
+#### 8.107.1 结论先说
+
+- **"从外部只读 explorer 内存拿 (窗口, 回调消息号)"判为不可靠，不做进产品。** 形状是真的、字段也是真的，但它不是一张表：
+
+| 偏移 | 内容 | 怎么验的 |
+|---|---|---|
+| +00 | 应用托盘窗口 hwnd | 微信那项指向 `Qt51514WxTrayIconMessageWindowClass` |
+| +08 | 图标 uid | clash-verge=2、Razer=3、Wallpaper Engine=1000，与注册表逐个对上 |
+| +20 | 标识串（路径，或打包应用 `{GUID}\...\app.exe`） | 12 个候选自己能对上自己的 exe |
+| +44 | NOTIFYICON_VERSION | 微信 4、WPE 4 |
+| +48 | **回调消息号** | 微信那项读到 **0x8385**，正是我们独立学到的地面真值 |
+
+  但：当场只覆盖 **5 / 15** 个图标；**没人按任何东西**它自己从 12 条变 8 条（发一次标准 `TaskbarCreated` 广播之后）；微信那条（唯一有地面真值的那条）**消失**了；任务管理器一个图标却有 **8 条**几乎相同的记录 —— 是会被回收复用的堆对象。同期 shell 通过 UIA 明确公布 **11 / 15** 个图标（微信在里面）。判据对不上 → 不写。
+
+#### 8.107.2 改走的那条：应用侧挂钩文档化 API（探针已跑通）
+
+`SetWindowsHookEx(WH_GETMESSAGE, 线程 id)` 把 `probe-tray-notifyicon-hook.dll` 装进**一个**目标进程（不需管理员），模块在该进程里把**自己的导入表**里 `Shell_NotifyIconW/A` 的槽位改指到我们的 detour，于是**应用一注册托盘图标就把 (窗口, uid, 回调消息号, version, tooltip) 交出来** —— 零手工学习、不需要 MyDockFinder 在场。这就是 MyDockFinder 的机制（它的 dockmod64 同时装在 explorer 和各应用里）。
+
+新增探针（都在 `IslandBar/scripts/`）：
+
+| 文件 | 作用 |
+|---|---|
+| `probe-tray-notifyicon-hook.cpp` | 挂钩模块：导入表重定向 + 逐行报告到 `%USERPROFILE%\IslandBar\tray_notify_calls.txt` |
+| `probe-tray-registrar.cpp` | **已知答案的对照应用**：注册 uid 7 / msg 0xABCD / tip `ISLANDBAR-PROBE-4711` 的图标 |
+| `probe-tray-notifyicon.ps1` | 驱动器：`-Target <名字|registrar>` `-ProcessId N` `-Seconds N` `-NoBroadcast`；默认发一次 `TaskbarCreated` 逼各应用重新注册 |
+
+实测（都在 `%USERPROFILE%\IslandBar` 下、正常权限跑）：
+
+- **对照应用通过**：`call W NIM_ADD ... hwnd ... uid 7 msg 0xABCD tip "ISLANDBAR-PROBE-4711"` + `NIM_SETVERSION ... version 4` —— 五个已知字段全部对上 ✓✓
+- **真实应用通过**：`clash-verge` 广播后重新注册，抓到 `uid 2 msg 0x1772 hwnd 0x60B7C`（与内存扫描独立得到同一组值 ✓）；`steam` 抓到 `uid 1 msg 0x0401 caller vgui2_s.DLL`；`wallpaper64` 抓到 `uid 1000 msg 0x0400 version 4`（同样与内存扫描一致 ✓）；explorer 里的蓝牙图标 `msg 0x0403` ✓
+- **装不进去/抓不到的，也量清楚了**：
+  * `ChatGPT`：AppContainer（Untrusted IL）→ `SetWindowsHookEx` 直接返回错误 87；
+  * `任务管理器`：**High** 完整性（提权）→ Medium 进程注入不了；
+  * `QQ音乐`：Medium，但**模块根本没被加载**（98 个线程钩子都接受了，DLL 从未 attach）——腾讯系自我保护挡住了注入；
+  * `微信`：模块进得去、钩子也装上了，但它的导入表里**没有** `Shell_NotifyIconW` 的槽位（Qt 是动态取地址调用的）→ 需要"改代码"式的内联钩子才能覆盖。
+
+#### 8.107.3 踩到的三个坑（下次别再踩）
+
+1. **钩子过程必须来自那个 DLL**：给 PowerShell 的委托地址，跨进程时系统**一声不响地不调用**（模块 attach 了、钩子过程一次没跑）。要用 `GetProcAddress(dll, "TrayNotifyIconHookProc")`。
+2. **目标线程必须真的取消息**：DLL 是在线程下一次 `GetMessage/PeekMessage` 取到消息时加载的。对照应用第一次 `Sleep` 等 6 秒 → 钩子晚到 5 秒、什么都没抓到；第二次空队列 `PeekMessage` 也不够 → 加一个 50ms 的 `SetTimer` 才 attach 成功。
+3. **导入表遍历要边界检查 + SEH**：不检查时在目标进程第 3 个模块上直接把它打死（实测崩过一次）；加 `SizeOfImage` 边界与 `__try/__except` 后，18 个模块走完只打中 1 个槽位（正解）。
+
+#### 8.107.4 遗留（如实说）
+
+- 探针 DLL 现在**留在** explorer / 微信 / Steam / Wallpaper Engine / clash-verge 等进程里（只记录、功能无影响），**要等这些进程重启才消失**；报告文件 `%USERPROFILE%\IslandBar\tray_notify_calls.txt` 会继续长。
+- 产品化方案（钩子 + `TaskbarCreated` 触发学习 + 覆盖日志 + 学不到的继续走真实点击）**还没写**，等用户点头；"真实点击彻底删掉"目前**做不到**，因为上面四类应用抓不到。
+- ChatGPT 评审帖（第 28 轮）**没谈成**：会话报 `Model not found`，根页显示"无法加载你的账户"，用户重新登录后仍然这样。
