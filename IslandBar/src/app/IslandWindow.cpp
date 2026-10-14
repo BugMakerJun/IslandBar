@@ -396,7 +396,8 @@ bool IslandWindow::TakePress(POINT* screenPoint) {
 RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState state,
                                   const IslandAnchor& anchor, const RoundedBox& current,
                                   float cardLeftDip, int taskIconCount,
-                                  float statusStripWidthDip, int trayIconCount) {
+                                  float statusStripWidthDip, int trayIconCount,
+                                  bool noticeStripUp) {
     // The bounding box of what the bar actually DRAWS, in window pixels.
     //
     // Horizontally it runs from the left of the state's own shape to the right of the longest icon row
@@ -540,8 +541,12 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     // This has to be here and not only in the renderer. The region decides what can be CLICKED, so a row
     // that is drawn clear of the card but regioned underneath it is a row of icons that look right and
     // cannot be pressed.
+    // The same notice-aware box the hit test uses (see ShouldAcceptPointer): while a call or a message is
+    // being announced the bar's own box is the 420 DIP strip in every state, so the row, the deck and this
+    // region cannot disagree with what is drawn -- with or without a card open.
     const RoundedBox restingIsland =
-        IslandBoxFor(widthDip, kCollapsedWidthDip, kCollapsedHeightDip);
+        IslandBoxFor(widthDip, noticeStripUp ? island::kNoticeStripWidthDip : kCollapsedWidthDip,
+                     kCollapsedHeightDip);
     // Where the ICON ROW is measured from: the pill, or the notice strip while one is up. The row has to
     // start clear of whatever shape is beside it, and the region is what decides whether the icons can be
     // pressed at all.
@@ -641,7 +646,7 @@ void IslandWindow::ApplyInputRegion() {
     // only the renderer knows about is a plan the clickable area cannot keep up with.
     const RECT region =
         InputRegionFor(monitor_, motion_.Target(), anchor, motion_.Current(), cardLeftDip_,
-                       taskButtonCount_, statusStripWidthDip_, trayIconCount_);
+                       taskButtonCount_, statusStripWidthDip_, trayIconCount_, noticeStripUp_);
 
     // Skipped when it is the same rectangle as last time.
     //
@@ -771,7 +776,7 @@ int IslandWindow::IconAtScreen(POINT screenPoint) const {
 bool IslandWindow::HitTestScreen(POINT screenPoint) const {
     return ShouldAcceptPointer(monitor_, rect_, screenPoint, motion_.Target(),
                                RowButtonCount(), cardLeftDip_, fullscreenApp_, trayIconCount_,
-                               motion_.Current());
+                               motion_.Current(), noticeStripUp_);
 }
 
 void IslandWindow::SetFullscreenApp(bool fullscreenApp) {
@@ -996,7 +1001,7 @@ IslandAnchor IslandWindow::CurrentAnchor() const {
 bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                        POINT screenPoint, IslandState state, int iconCount,
                                        float cardLeftDip, bool fullscreenApp, int trayIconCount,
-                                       const RoundedBox& currentShape) {
+                                       const RoundedBox& currentShape, bool noticeStripUp) {
     // THE BAR IS NOT THERE WHILE A FULL-SCREEN APPLICATION IS IN FRONT.
     //
     // Nothing of it is drawn in that state (see Renderer::RenderFrame), so there is nothing to point at
@@ -1045,7 +1050,18 @@ bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const REC
     // The notice strip is the one shape that is meant to push the row along, and it is the one this now
     // follows. A default-constructed box means "no animated shape supplied" -- the same convention
     // InputRegionFor uses -- so the self-test's calls read exactly as they did.
-    const RoundedBox restingPill = IslandBoxFor(widthDip, kCollapsedWidthDip, kCollapsedHeightDip);
+    //
+    // ... AND WHILE A CALL OR A MESSAGE IS BEING ANNOUNCED, THAT BOX IS THE NOTICE STRIP -- in every state,
+    // including while a card is open. The strip is not a state of its own: the state while a card is up is
+    // Expanded, so a test written against the state cannot see the notice at all, which is how this box came
+    // to be the pill while the bar was drawing the strip. `noticeStripUp` is the frame loop's answer, set
+    // once per frame (see SetNoticeStripUp), and it is the same answer the renderer and the region get.
+    //
+    // What it fixes, reported with a photograph of a call: with a card open the bar's own capsule collapsed
+    // to the pill's 220 DIP and the call strip -- 420 -- was clipped into it ("是在通话中 但是长度你给缩回去了").
+    const RoundedBox restingPill =
+        IslandBoxFor(widthDip, noticeStripUp ? island::kNoticeStripWidthDip : kCollapsedWidthDip,
+                     kCollapsedHeightDip);
     const RoundedBox island =
         (currentShape.rect.right > currentShape.rect.left) ? RowAnchorBox(currentShape, restingPill)
                                                           : restingPill;
@@ -1208,7 +1224,7 @@ void IslandWindow::UpdatePointerState() {
         }
         const bool accepted = ShouldAcceptPointer(monitor_, rect_, cursor, motion_.Target(),
                                                   RowButtonCount(), cardLeftDip_, false, 0,
-                                                  motion_.Current());
+                                                  motion_.Current(), noticeStripUp_);
 
         // `haveTrace_` distinguishes the first poll from a genuine transition.
         if (!haveTrace_ || accepted != lastAccepted_) {
@@ -1367,7 +1383,7 @@ void IslandWindow::UpdatePointerState() {
 
     const bool inside =
         ShouldAcceptPointer(monitor_, rect_, cursor, motion_.Target(), RowButtonCount(),
-                            cardLeftDip_, false, 0, motion_.Current());
+                            cardLeftDip_, false, 0, motion_.Current(), noticeStripUp_);
     if (inside != pointerInside_) {
         pointerInside_ = inside;
         pointerInsideChanged_ = true;

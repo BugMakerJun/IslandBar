@@ -2044,6 +2044,12 @@ float musicWavePhase = 0.0f;
                 if (call != nullptr && !call->read) active = call;
             }
 
+            // ... AND THE WINDOW IS TOLD THE SAME ANSWER, because it cannot work it out for itself: while a
+            // card is open its state is Expanded, and a notice is not a state -- it is something the bar is
+            // saying. Everything that lays out the bar's own controls asks the window for this (see
+            // SetNoticeStripUp), so the drawing, the hit test and the window region agree about one box.
+            window.SetNoticeStripUp(active != nullptr);
+
             // --- what is playing ---
             if (musicAvailable) {
                 // ... AND ONCE AT STARTUP, whatever the revision says.
@@ -4503,8 +4509,18 @@ float musicWavePhase = 0.0f;
                 // or from the card, and the pill's fill drew that rectangle in the pill's near-opaque
                 // black -- a dark band under the island for 200 ms per transition. The resting box is
                 // derived from the anchor, so it is the pill regardless of what is animating.
-                frame.restingPill = island::BoxForState(island::IslandState::Collapsed,
-                                                        window.CurrentAnchor());
+                // ... AND IT IS THE NOTICE STRIP WHILE A CALL OR A MESSAGE IS BEING ANNOUNCED -- in every
+                // state, including while a card is open.
+                //
+                // The note above ("the resting box is the pill regardless of what is animating") was true, and
+                // it is exactly what made a call strip collapse to the pill's width the moment a card was
+                // opened: everything drawn from this box -- the bar's own capsule, the deck, the icon row, and
+                // the line inside it -- was measured from a 220 DIP pill while the bar was announcing. The same
+                // answer the window is given below (SetNoticeStripUp), from the same frame.
+                frame.restingPill =
+                    island::BoxForState(active != nullptr ? island::IslandState::NoticeStrip
+                                                          : island::IslandState::Collapsed,
+                                        window.CurrentAnchor());
                 // ... and WHAT the bar shows at rest, which is what the pill's own line is chosen by
                 // (see FrameState::restingState). A card does not change this, which is the point.
                 frame.restingState = resting;

@@ -174,7 +174,14 @@ public:
                                     POINT screenPoint, IslandState state, int iconCount = 0,
                                     float cardLeftDip = 0.0f, bool fullscreenApp = false,
                                     int trayIconCount = 0,
-                                    const RoundedBox& currentShape = RoundedBox{});
+                                    const RoundedBox& currentShape = RoundedBox{},
+                                    bool noticeStripUp = false);
+
+    // Whether a call or a message is being announced. The window cannot work this out for itself: while a
+    // card is open the state is Expanded, and a notice is not a state -- it is something the bar is SAYING.
+    // Set once per frame by the frame loop, and read only to choose the box the bar's own controls are laid
+    // out from (see the note in ShouldAcceptPointer).
+    void SetNoticeStripUp(bool up) { noticeStripUp_ = up; }
 
     // Told by the frame loop, which measures it (see island::FullScreenAppInFront). The hit test is
     // answered here, so it has to be told the same thing the renderer was.
@@ -386,7 +393,8 @@ public:
                                const IslandAnchor& anchor,
                                const RoundedBox& current = RoundedBox{},
                                float cardLeftDip = 0.0f, int taskIconCount = -1,
-                               float statusStripWidthDip = 0.0f, int trayIconCount = 0);
+                               float statusStripWidthDip = 0.0f, int trayIconCount = 0,
+                               bool noticeStripUp = false);
 
     // The anchor the current box geometry is derived from.
     IslandAnchor CurrentAnchor() const;
@@ -569,6 +577,8 @@ private:
     // Non-zero while the status strip (the date, the time and the weather) is up, in DIPs. Held here so
     // the input region can cover it; see SetStatusStripWidth.
     float statusStripWidthDip_ = 0.0f;
+    // See SetNoticeStripUp.
+    bool  noticeStripUp_ = false;
     // Whether a full-screen application is in front, as measured by the frame loop. Held here because the
     // hit test is answered here: while it is set, only the island is the bar. See SetFullscreenApp.
     bool fullscreenApp_ = false;

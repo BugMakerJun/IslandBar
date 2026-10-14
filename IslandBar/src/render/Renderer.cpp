@@ -662,9 +662,18 @@ void Renderer::RenderFrame(const FrameState& frame) {
                                                                                                  : "date"));
                 static const char* lastSource = nullptr;
                 static bool lastIntoPill = false;
-                if (source != lastSource || intoPill != lastIntoPill) {
+                static float lastBoxLeft = 0.0f;
+                static float lastBoxRight = 0.0f;
+                // The box is part of the change test on purpose: the first version watched only the source
+                // and the pill flag, so a strip that COLLAPSED from 420 DIP to the pill's 220 while the
+                // source stayed "call" printed nothing -- the one thing the report was about was invisible
+                // in the line written to make it visible.
+                if (source != lastSource || intoPill != lastIntoPill ||
+                    box.rect.left != lastBoxLeft || box.rect.right != lastBoxRight) {
                     lastSource = source;
                     lastIntoPill = intoPill;
+                    lastBoxLeft = box.rect.left;
+                    lastBoxRight = box.rect.right;
                     LogLine(L"  strip says: %hs (state %ls, resting %ls, cardUp %d, intoPill %d, "
                             L"box %.0f..%.0f)",
                             source, StateName(frame.state), StateName(frame.restingState),
