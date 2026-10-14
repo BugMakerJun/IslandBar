@@ -37,6 +37,11 @@
 #include <string.h>
 #include <wchar.h>
 
+// Declared HERE, at file scope, rather than inside the anonymous namespace below: the pin needs an address
+// that is inside this module, and pinning is what stops the loader from ever unloading it. Inside the
+// namespace the definition below would be a second, differently linked function of the same name.
+extern "C" __declspec(dllexport) LRESULT CALLBACK IslandTrayHookProc(int code, WPARAM wparam, LPARAM lparam);
+
 namespace {
 
 CRITICAL_SECTION g_lock;
@@ -80,6 +85,82 @@ void ReportLine(const wchar_t* format, ...) {
     LeaveCriticalSection(&g_lock);
 }
 
+// =====================================================================
+//  TEMPORARY MEASUREMENT -- WHAT THE SHELL ACTUALLY SENDS TO THE TRAY WINDOW
+//
+//  DELETE THIS WHOLE BLOCK once the answer is written down in HANDOFF (and the marker file it needs).
+//
+//  The question it answers: pressing clash-verge's tray icon with a posted message does nothing, in EIGHT
+//  shapes (v3 and v4 packing, WM_LBUTTONUP / NIN_SELECT / WM_LBUTTONDOWN+UP / WM_LBUTTONDBLCLK), while the
+//  RIGHT button of the same icon opens its menu from a single post and a REAL click on the left does restore
+//  its window. So the shell sends something this module does not know how to spell, and the only place that
+//  can be seen is inside the application: this module is already there, pinned.
+//
+//  Two channels, because "sent" and "posted" are different Windows mechanisms and the project has already
+//  measured that the shell's own notification does not appear in a message queue trace:
+//
+//    * WH_CALLWNDPROC, installed on this process's threads from inside      -> messages SENT to the window
+//    * this module's existing WH_GETMESSAGE procedure (see below)           -> messages POSTED to it
+//
+//  Off unless the marker file exists, so it costs nothing and logs nothing in a normal session.
+// =====================================================================
+volatile LONG g_callbackMessage = 0;   // the callback message the application registered (from NIM_ADD)
+void* volatile g_trayWindow = nullptr; // ... and the window it registered
+bool g_watch = false;
+HHOOK g_sentHooks[96] = {};
+int g_sentHookCount = 0;
+
+bool MarkerPresent() {
+    wchar_t home[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) == 0) return false;
+    wchar_t path[MAX_PATH] = {};
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\IslandBar\\tray_watch.txt", home);
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+void ReportObserved(const wchar_t* channel, HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    wchar_t cls[96] = {};
+    if (window) GetClassNameW(window, cls, 96);
+    ReportLine(L"observed %ls pid %lu hwnd %p class \"%ls\" msg 0x%04X wparam 0x%08X lparam 0x%08X",
+               channel, GetCurrentProcessId(), window, cls, message, static_cast<unsigned>(wparam),
+               static_cast<unsigned>(lparam));
+}
+
+// Everything at or above WM_USER is the application's own business: a window procedure is sent no end of
+// WM_* bookkeeping, and only the private range can be the tray callback.
+bool WorthObserving(UINT message) {
+    return message >= WM_USER || message == (UINT)g_callbackMessage;
+}
+
+LRESULT CALLBACK SentProc(int code, WPARAM wparam, LPARAM lparam) {
+    if (code >= 0 && lparam && g_watch) {
+        const CWPSTRUCT* call = reinterpret_cast<const CWPSTRUCT*>(lparam);
+        if (call && WorthObserving(call->message)) {
+            ReportObserved(L"sent", call->hwnd, call->message, call->wParam, call->lParam);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+// One CALLWNDPROC hook per thread of this process. hMod is NULL because the procedure lives in this very
+// process (documented for exactly this case), and the hooks are deliberately never removed: this module is
+// pinned and the process is about to be measured, not lived in.
+void InstallSentWatch() {
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 entry = {};
+    entry.dwSize = sizeof(entry);
+    if (Thread32First(snapshot, &entry)) {
+        do {
+            if (entry.th32OwnerProcessID != GetCurrentProcessId()) continue;
+            if (g_sentHookCount >= 96) break;
+            const HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, SentProc, nullptr, entry.th32ThreadID);
+            if (hook) g_sentHooks[g_sentHookCount++] = hook;
+        } while (Thread32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+}
+
 // What one walk found: how many slots were redirected, and how many ALREADY pointed at the detour. The
 // second number is the one that answers "is this application being watched", and it is not the same question
 // as the first: measured, a process reported 0 redirects and then captured four calls anyway, which sent the
@@ -88,6 +169,10 @@ void ReportLine(const wchar_t* format, ...) {
 struct PatchCount {
     int patched = 0;
     int alreadyOurs = 0;
+    // How many of `patched` held an address that was in NO loaded module -- i.e. a slot this walk REPAIRED
+    // rather than redirected. See OwnerOfSlot: a copy of this module that was unloaded leaves exactly that,
+    // and it is what crashed Explorer and wallpaper64.exe on this machine on 2026-10-15.
+    int healed = 0;
 };
 
 // The module a code address belongs to, and its file name.
@@ -110,9 +195,49 @@ HMODULE ModuleOfAddress(void* address, const wchar_t** leafOut) {
 
 bool IsOurs(const wchar_t* leaf) {
     if (!leaf) return false;
-    return _wcsicmp(leaf, L"island_tray_hook.dll") == 0 ||
-           _wcsicmp(leaf, L"probe-tray-notifyicon-hook.dll") == 0;
+    // ANY VERSION OF THIS MODULE, by prefix rather than by exact name.
+    //
+    // The module is deployed under a content-stamped file name (see TrayLearn.cpp: the copy in the target
+    // process is PINNED and therefore locked, so a new build must arrive as a new file). An application can
+    // therefore hold slots pointing at `island_tray_hook-3f2a....dll` while this copy is
+    // `island_tray_hook-91bc....dll`, and the newer copy is the one that has to take those slots over.
+    if (_wcsnicmp(leaf, L"island_tray_hook", 16) == 0) return true;
+    return _wcsicmp(leaf, L"probe-tray-notifyicon-hook.dll") == 0;
 }
+
+// WHAT A SLOT HOLDS RIGHT NOW, which is the question "may this be overwritten" is really asking.
+//
+// This used to be a yes/no over three cases, and the case it refused is the one that shipped a crash: an
+// address that belongs to NO loaded module. Measured on this machine (2026-10-15): the earlier build
+// unhooked and unloaded itself at the end of the learning window while applications' import slots still
+// pointed at its detour, so Explorer crashed six times, wallpaper64.exe four times (Application log:
+// module `island_tray_hook.dll_unloaded`, exception 0xc0000005 at offset 0x10a0 -- the detour's entry).
+//
+// A slot NAMED Shell_NotifyIcon (the name is checked before this, see PatchThunkArray) whose value is in no
+// module at all is either that dangling pointer or a stub of a module that has been unloaded: either way the
+// value is unusable, and pointing it at a live function is the repair rather than a risk. Every OTHER case
+// is unchanged, including the one that stays out of bounds: a real module that is not ours, not shell32 and
+// not the importing module itself (MyDockFinder's own hook, for one) is never touched.
+enum class SlotOwner {
+    NotOurs,   // inside some other module of the application's
+    Shell,     // shell32's own function: the normal case
+    Ours,      // an earlier copy of this module, or of the probe that came before it
+    Stub,      // the importing module's own delay-load stub
+    Orphan,    // in no loaded module: a dangling pointer left by a copy of ours that was unloaded
+};
+
+SlotOwner OwnerOfSlot(void* address, HMODULE ownModule) {
+    if (!address) return SlotOwner::NotOurs;
+    const wchar_t* leaf = nullptr;
+    HMODULE owner = ModuleOfAddress(address, &leaf);
+    if (!owner) return SlotOwner::Orphan;
+    if (owner == ownModule) return SlotOwner::Stub;
+    if (IsOurs(leaf)) return SlotOwner::Ours;
+    if (leaf && _wcsicmp(leaf, L"shell32.dll") == 0) return SlotOwner::Shell;
+    return SlotOwner::NotOurs;
+}
+
+bool MayTakeOver(SlotOwner owner) { return owner != SlotOwner::NotOurs; }
 
 // MAY THIS IMPORT SLOT BE REDIRECTED? The slot's NAME has already said it is Shell_NotifyIcon; this decides
 // whether the value sitting in it may be overwritten. Three states may be taken over, and everything else is
@@ -129,16 +254,6 @@ bool IsOurs(const wchar_t* leaf) {
 // that cannot be placed in any module at all: an earlier version of this treated that as "a stub, take it",
 // and the walk then redirected junk -- 816 slots in Explorer, 288 in Razer, 78 in WeChat, all of them
 // unrelated APIs pointed at Shell_NotifyIconW. Conservative by default is the correction.
-bool MayTakeOver(void* address, HMODULE ownModule) {
-    if (!address) return false;
-    const wchar_t* leaf = nullptr;
-    HMODULE owner = ModuleOfAddress(address, &leaf);
-    if (!owner) return false;                   // not in any loaded module: not ours to touch
-    if (owner == ownModule) return true;        // the linker's delay-load stub
-    if (IsOurs(leaf)) return true;              // an older copy of ours
-    return leaf && _wcsicmp(leaf, L"shell32.dll") == 0;
-}
-
 // Does this import slot NAME Shell_NotifyIcon? The name is the criterion, and it is the one the first version
 // of this walk lacked: without it, "the slot belongs to shell32" was mistaken for "the slot is the function we
 // want", and every one of an application's shell32 imports was redirected to this module's detour.
@@ -173,7 +288,8 @@ void PatchThunkArray(IMAGE_THUNK_DATA* iat, IMAGE_THUNK_DATA* byName, BYTE* base
         const bool wantsW = (current == targetW) || SlotNames(iat, byName, base, "Shell_NotifyIconW");
         const bool wantsA = (current == targetA) || SlotNames(iat, byName, base, "Shell_NotifyIconA");
         if (!wantsW && !wantsA) continue;
-        if (!MayTakeOver(current, ownModule)) continue;
+        const SlotOwner owner = OwnerOfSlot(current, ownModule);
+        if (!MayTakeOver(owner)) continue;
         if (count->patched >= kMaxRedirectsPerProcess) continue;   // see kMaxRedirectsPerProcess
         DWORD old = 0;
         if (!VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) continue;
@@ -181,6 +297,7 @@ void PatchThunkArray(IMAGE_THUNK_DATA* iat, IMAGE_THUNK_DATA* byName, BYTE* base
         DWORD ignored = 0;
         VirtualProtect(&iat->u1.Function, sizeof(void*), old, &ignored);
         ++count->patched;
+        if (owner == SlotOwner::Orphan) ++count->healed;
     }
 }
 
@@ -197,13 +314,15 @@ void PatchDelaySlot(IMAGE_THUNK_DATA* slot, IMAGE_THUNK_DATA* byName, const char
         return;
     }
     if (!patch) return;
-    if (!MayTakeOver(reinterpret_cast<void*>(slot->u1.Function), ownModule)) return;
+    const SlotOwner owner = OwnerOfSlot(reinterpret_cast<void*>(slot->u1.Function), ownModule);
+    if (!MayTakeOver(owner)) return;
     DWORD old = 0;
     if (!VirtualProtect(&slot->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) return;
     slot->u1.Function = reinterpret_cast<ULONG_PTR>(detour);
     DWORD ignored = 0;
     VirtualProtect(&slot->u1.Function, sizeof(void*), old, &ignored);
     ++count->patched;
+    if (owner == SlotOwner::Orphan) ++count->healed;
 }
 
 // Every offset is checked against the module's SizeOfImage before it is followed: measured, an unchecked walk
@@ -357,6 +476,12 @@ void LogCall(const char* which, DWORD message, const void* data, void* returnAdd
     for (wchar_t* p = tip; *p; ++p) {
         if (*p == L'\n' || *p == L'\r' || *p == L'"') *p = L' ';
     }
+    // TEMPORARY (see the block above): remember what this application registered, so the two observation
+    // channels know what to look for. Removed with the rest of that block.
+    if (message == NIM_ADD && callback) {
+        g_callbackMessage = static_cast<LONG>(callback);
+        g_trayWindow = window;
+    }
     // The hook count is repeated here on purpose: measured, the "hooked ... 0 slot(s)" line was written in
     // one process that then captured calls anyway, and a future session reading only that line would
     // conclude the mechanism cannot work. Whatever the reading at install time says, this line is the count
@@ -386,6 +511,48 @@ BOOL WINAPI DetourShellNotifyIconA(DWORD message, PNOTIFYICONDATAA data) {
 
 void EnsureHooked() {
     if (InterlockedCompareExchange(&g_state, 1, 0) != 0) return;
+
+    // The application's file name, for every line written from here on.
+    wchar_t self[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    const wchar_t* leaf = wcsrchr(self, L'\\');
+    const wchar_t* exe = leaf ? leaf + 1 : self;
+
+    // ---- PIN THIS MODULE IN THIS PROCESS, BEFORE THE FIRST SLOT IS TOUCHED ---------------------------------
+    //
+    // This is the fix for the crash this module shipped on 2026-10-15, and the reason it is first rather
+    // than best-effort.
+    //
+    // What happened: the bar unhooked and freed this module at the end of its learning window, the loader
+    // then unloaded the copy inside each application, and the import slots this walk had redirected kept
+    // pointing at the detour's address -- in a page that no longer belonged to anything. The next time the
+    // application called Shell_NotifyIcon it jumped into freed memory. Measured in the Application log:
+    // Explorer.EXE six times, wallpaper64.exe four times, module `island_tray_hook.dll_unloaded`, exception
+    // 0xc0000005 / 0xc000041d, fault offset 0x10a0 -- the detour's own entry point.
+    //
+    // GET_MODULE_HANDLE_EX_FLAG_PIN makes the loader ignore every later FreeLibrary for this module, for the
+    // life of this process. The slot therefore always points at code that is still mapped, whether the hook
+    // has been removed or the bar has exited. The cost is honest and has to be stated: the file this module
+    // was loaded from stays locked until the application restarts, which is why the bar stages it under a
+    // content-stamped name (see TrayLearn.cpp) instead of loading `island_tray_hook.dll` directly.
+    //
+    // If the pin FAILS the walk does not run at all: a redirected slot that can be unloaded again is exactly
+    // the state that crashed those applications, and "not watching this application" is the safe answer.
+    HMODULE pinned = nullptr;
+    const BOOL pinOk = GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&IslandTrayHookProc), &pinned);
+    if (!pinOk || !pinned) {
+        const DWORD error = GetLastError();
+        // 2 = decided, and the decision was "no": the hook procedure must not try this again on every
+        // message, and the bar is told why in the report.
+        InterlockedExchange(&g_state, 2);
+        ReportLine(L"hooked pid %lu exe %ls: REFUSED -- this module could not be pinned in the process "
+                   L"(error %lu), so not one import slot was touched",
+                   GetCurrentProcessId(), exe, error);
+        return;
+    }
+
     HMODULE shell = GetModuleHandleW(L"shell32.dll");
     if (!shell) shell = LoadLibraryW(L"shell32.dll");
     void* targetW = shell ? reinterpret_cast<void*>(GetProcAddress(shell, "Shell_NotifyIconW")) : nullptr;
@@ -397,23 +564,55 @@ void EnsureHooked() {
         WalkProcessImports(targetW, reinterpret_cast<void*>(&DetourShellNotifyIconW), targetA,
                            reinterpret_cast<void*>(&DetourShellNotifyIconA), true);
     InterlockedExchange(&g_hooked, count.patched + count.alreadyOurs);
-    wchar_t self[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    const wchar_t* leaf = wcsrchr(self, L'\\');
-    ReportLine(L"hooked pid %lu exe %ls: %d slot(s) redirected, %d already pointing here; watching=%ls",
-               GetCurrentProcessId(), leaf ? leaf + 1 : self, count.patched, count.alreadyOurs,
+    ReportLine(L"hooked pid %lu exe %ls: %d slot(s) redirected (%d of them repaired a pointer into a module "
+               L"that is no longer loaded), %d already pointing here, this module is pinned; watching=%ls",
+               GetCurrentProcessId(), exe, count.patched, count.healed, count.alreadyOurs,
                (count.patched + count.alreadyOurs) ? L"yes"
                                                    : L"no -- it does not import Shell_NotifyIcon, so its tray "
                                                      L"code resolves the function by itself and this module "
                                                      L"cannot see it");
+
+    // TEMPORARY: two channels onto what the shell sends this application's tray window. Off unless the marker
+    // file exists; see the note at the top of that block.
+    if (MarkerPresent()) {
+        g_watch = true;
+        InstallSentWatch();
+        ReportLine(L"observing pid %lu exe %ls: marker present, %d thread(s) hooked for SENT messages and "
+                   L"the posted channel is on", GetCurrentProcessId(), exe, g_sentHookCount);
+    }
 }
 
 } // namespace
 
 // The hook procedure the bar installs. It is inert: it looks at no message and changes none. Its presence is
 // what gets this module loaded into the application at all, and the first call is what does the hooking.
+//
+// IT MAY NOT THROW, AND THAT IS NOT DEFENSIVENESS. This runs inside somebody else's message pump: an
+// exception that leaves it either kills the application (measured on this machine as exception 0xc000041d,
+// "a fatal exception escaped a user callback", which is how wallpaper64.exe died twice on 2026-10-15) or is
+// swallowed and leaves the hook in an unknown state. Every failure mode this module has is already reported
+// through the report file, so the answer is to let nothing escape.
 extern "C" __declspec(dllexport) LRESULT CALLBACK IslandTrayHookProc(int code, WPARAM wparam, LPARAM lparam) {
-    EnsureHooked();
+    __try {
+        EnsureHooked();
+        // TEMPORARY (see the observation block above): messages the application PULLS OUT OF ITS QUEUE that
+        // are for its own tray window, or that carry its registered callback number. The filter is what keeps
+        // this from logging the application's whole private message traffic.
+        if (g_watch && code >= 0 && lparam) {
+            const MSG* message = reinterpret_cast<const MSG*>(lparam);
+            // ... and only the private message range for the tray window: measured, its queue carries a
+            // WM_TIMER every few milliseconds, which is the application beating, not the shell pressing.
+            if (message &&
+                (message->message == (UINT)g_callbackMessage ||
+                 (message->hwnd == g_trayWindow && message->message >= WM_USER))) {
+                ReportObserved(L"posted", message->hwnd, message->message, message->wParam, message->lParam);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_state, 2);   // see EnsureHooked: no second attempt after a failure
+        ReportLine(L"hook procedure pid %lu: the install raised 0x%08lX and the application was left "
+                   L"untouched", GetCurrentProcessId(), static_cast<unsigned long>(GetExceptionCode()));
+    }
     return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 

@@ -11029,3 +11029,86 @@ PostMessage(trayWindow,
 3. 修好后实测：新起的 clash-verge 被自动抓到（`uid 2, msg 0x1772, version 0`）并写进缓存 ✓；计数恢复正常（每个应用 0 或 1 格）。覆盖率 4 → 5 / 14。WeChat 仍是 `0 slot(s)`（Qt 动态取地址，符合 8.107.2）。另外注意：卡片只给出 12 个格子，而学习的列表是 14 个 —— **clash-verge 在列表里但不在格子里**（所以它今天还按不到）。
 
 结论（写给用户）：**重启一次之后**，凡是"静态导入 Shell_NotifyIcon 且允许被注入"的应用都会在启动学习里自动拿到回调，不必逐应用学；微信 / QQ音乐 / 任务管理器 / ChatGPT 这四类仍然只能真实点击。
+
+### 8.109 **托盘：崩 Explorer 的悬空指针修好了；模块改成常驻；左键终于找到 shell 真正的拼法** ✅（已部署，等用户测）
+
+用户 2026-10-15 05:2x 的指令是"把托盘全部完成，要和 MyDockFinder 的实现方式一样"。按方案（crash → 覆盖率 → 左键 → 删真实点击 → 卡片）从头做，这一节记的是**已经落地并实测过的**部分，以及**没做完的**部分（照实写）。
+
+#### 8.109.1 先止血：上一版留下的悬空导入槽会崩 Explorer（判决性证据）
+
+上一节的自动学习在结束时 `UnhookWindowsHookEx` + `FreeLibrary`，**注入到应用里的那份模块被系统卸掉，而应用的导入表槽位仍指着它的 detour 地址**（偏移 `0x10a0`）。事件日志（Application / Application Error，本机）：
+
+| 时间 | 进程 | 出错模块 | 异常 |
+|---|---|---|---|
+| 03:41–03:53 | `Explorer.EXE` ×6 | `island_tray_hook.dll` / `…_unloaded` | 0xc0000005 / 0xc000041d，偏移 0x10a0 |
+| 03:41–05:15 | `wallpaper64.exe` ×4 | 同上（另有 4 次写 `steammdmp64.dll`） | 同上 |
+
+**修法（`src/trayhook/TrayHook.cpp`）**：改任何槽位之前，在目标进程里 `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | …PIN, 本模块内地址)` —— 被 PIN 住的模块进程存活期间不会卸载，槽位永远有效；PIN 失败就**一格都不改**（宁可不看，也不能再留悬空指针）。同时把钩子过程整体包进 `__try/__except`（0xc000041d 就是异常逃出回调）。
+
+**顺带修好了已经悬空的那三处**：`MayTakeOver` 原来的规则是"不在任何已加载模块里的地址不动"，而悬空指针正好落在这一格。现在按"**槽位名必须是 `Shell_NotifyIconW/A`**"（这是 8.108.4 用 816 格那次事故换来的前提）+ 值属于"shell32 / 我们自己（`island_tray_hook*` 前缀，因为现在是多版本共存）/ 导入模块自己的延迟加载桩 / **不在任何模块里（即悬空）**"才接管，其余一律不动。实测报告原文：
+
+```
+hooked pid 20916 exe steam.exe: 2 slot(s) redirected (2 of them repaired a pointer into a module that is no longer loaded) … this module is pinned
+watch check pid 11936: 5 slot(s) point at the detour at the moment of the first call (install time said 5)
+```
+
+（Explorer 从"2 格"变成 5 格，多出来的 3 格就是被修好的悬空槽。）
+
+**PIN 的代价与部署方式**：文件在应用进程存活期间会被锁住，所以**构建产物 `island_tray_hook.dll` 永远不直接加载**——bar 在启动时按**内容哈希**复制一份 `island_tray_hook-<FNV64>.dll` 再加载（`TrayLearn.cpp::StageHookModule`），内容变了就是新文件名，锁不住；旧分身能删就删（删不掉=还有进程在跑上一版）。实测部署目录里现在有 3 个分身，分别在 Explorer / steam / clash-verge / Razer 里被钉住。
+
+**验收（本机实测）**：学习窗口结束、bar 进程退掉之后，`island_tray_hook-…dll` **仍留在 Explorer(11936) / steam(20916) / clash-verge(7568) / RazerAppEngine(20460) 的模块表里**；06:00 之后 Application 日志**没有**任何 `island_tray_hook*` 崩溃事件（之前三小时 10 次）；`--self-test` PASS、`island_smoke` PASS、Debug 与 Release 都能编。
+
+#### 8.109.2 模块常驻 = 覆盖率不再是"一次性"的
+
+模块现在**留在应用里**（PIN + 槽位仍然指着我们的 detour），所以**它以后每一次注册都会被写进报告文件** —— 应用自己重启、某个图标只在游戏运行时出现，都会在下一 tick 被捡到：
+
+- `TrayLearn.cpp::HarvestLearnedCallbacks()`：只读报告文件并合并（不需要注入、不需要广播、不需要等），`main.cpp` 的托盘刷新定时器（5 s）里调用；
+- `UncoveredApplications()`：还没学到的应用集合，**只有这个集合发生变化时**才再跑一次安装（新启动的应用），拒绝注入的那些不会每 5 秒重试一次；
+- 启动行的数字改成诚实版：`tried 4 application(s), the module loaded in 0 of them and was ALREADY watching 3 more` —— 上一版这句在常驻之后会读成"一个都没装上"，而实际上全机都在被观察。
+
+#### 8.109.3 左键：shell 真正发的不是"一条消息"，而是**两条 SendMessage**
+
+这是这一轮最值钱的发现，而且**猜是猜不出来的**。用户要求"左键也要像 MyDockFinder 一样不搬指针"，8.105 的结论是"PostMessage 五种通知码都送达、应用都取件、窗口一次都没到前台"。
+
+本轮的实测过程（全部在本机、clash-verge、窗口先最小化，使"有没有效果"无可争议）：
+
+1. 用**八种** `PostMessage` 形态打它（v3/v4 两种打包 × `WM_LBUTTONUP`/`NIN_SELECT`/`WM_LBUTTONDOWN+UP`/`WM_LBUTTONDBLCLK`）：**没有一种有效果**；同样的形状打**右键**却当场出菜单（`#32768`，指针不动）；
+2. 一次**真实点击**能恢复它的窗口 → 说明应用确实响应 shell 的点击，是我们拼错了；
+3. 于是把事情交给"**在应用里面看**"：我们的模块本来就钉在 clash-verge 里，加一条**只在标记文件存在时才开**的观察通道（`WH_CALLWNDPROC` 看 SENT + 原有的 `WH_GETMESSAGE` 过程看 POSTED，`TrayHook.cpp` 里标着 TEMPORARY 的那一段，标记文件 `%USERPROFILE%\IslandBar\tray_watch.txt`），然后制造一次真实点击。报告原文：
+
+```
+observed sent pid 7568 hwnd 0x2021E class "tray_icon_app" msg 0x1772 wparam 0x00000002 lparam 0x00000201
+observed sent pid 7568 hwnd 0x2021E class "tray_icon_app" msg 0x1772 wparam 0x00000002 lparam 0x00000202
+```
+
+**结论**：shell 给一个 v3 应用发的是 `WM_LBUTTONDOWN` 然后 `WM_LBUTTONUP`，两条都是 **SendMessage**（同步发送、不经过队列，所以 ETW 的队列追踪永远看不到它，MyDockFinder 的全局钩子能看到的也正是这个）。用 `SendMessageTimeoutW` 复现这一对，**clash-verge 的窗口立刻恢复并到前台，指针一格没动**；只发 UP、或者把同样的值 Post 出去，都没有任何效果。
+
+#### 8.109.4 落地：按"配方"投递，试出来的就记住
+
+| 位置 | 内容 |
+|---|---|
+| `TrayPress.cpp::DeliverMessage` | 左键走 `SendMessageTimeoutW`（`SMTO_ABORTIFHUNG`，上限 1500 ms：别人家的应用不许把 bar 拖住）；右键仍用**实测有效**的 `PostMessageW` |
+| `TrayPress.cpp` 的 attempts 表 | 键的**配方**有三档：`select`（v4 打包 + `NIN_SELECT`，文档写法）、`downup3`（uid/wParam + 裸鼠标消息，**就是 shell 的写法**）、`downup4`（v4 打包 + DOWN/UP）。缓存里没记过配方时：v3 应用直接 `downup3`；v4 应用先 `select`（等 400 ms，因为会响的应用平均 78–93 ms 就有反应）再 `downup3`——**没被回应的那一次等于没有副作用，所以不会把 toggle 变成两次** |
+| 缓存第 7 个字段 | 试成的那一档写回 `tray_callbacks.txt`（`…|both|0|downup3`），以后一次投递搞定。实测：v4 标记下第 1 次按压 1594 ms 内含两段并记住 `downup3`，第 2 次就只用一次 |
+| `TrayPress.cpp` 的"已在前台也算回应" | 左键的目的就是"应用到前台"，所以**它本来就在前台**也是答案。实测：clash-verge 连按 3 次（每次先最小化）→ **3/3 恢复 + 到前台 + 指针不动**；第 3 次的答案原文是 `its own window was in front before the press and still is`。没有这条规则时，一个表现完全正常的应用会被判成"忽略回调"并写进 `click`，从此永久退回真实点击 |
+| `TrayPress.cpp::BringApplicationForward` + `AllowSetForegroundWindow` | 消息之后如果应用还是没在前台（`#32769`/pid 判定），由**我们**把它的主窗口（无属主、非 tool、最大的可见顶层窗口）带到前台；`AllowSetForegroundWindow` 在**发消息之前**给出（用户点我们那一格时前台就是我们），让应用自己的 `SetForegroundWindow` 合法 |
+
+**另外补上的两个判据**（都来自这一轮的误判）：应用"**把窗口收起来**"也算回应（clash-verge 的左键是开关，原来只认"新窗口出现/前台转移"，于是把成功当成失败）；以及 `CountCoveredIcons` 里 **GUID 注册的图标不再计数**——它的 `uid` 默认是 0，会拿 Explorer 蓝牙那行（uid 0）冒充覆盖。
+
+#### 8.109.5 现状与遗留（如实说）
+
+- 本机覆盖率 **2–3 / 10**：`clash-verge`（`uid 2, msg 0x1772, class tray_icon_app`，配方 `downup3`）、`steam`（`uid 1, msg 0x0401, vguiPopupWindow`）、`explorer` 蓝牙（`uid 0, msg 0x0403`）。其余格子是 **GUID 注册**的图标（ChatGPT / Explorer 的网络、音量 / SecurityHealth）或没被注入的应用（Razer、NVIDIA）——GUID 图标没有 uid 可打包，回调路线按设计打不了它们。
+- **真实点击仍在**（未覆盖的应用走它），第 3 步"删掉真实点击"要等覆盖率先上去；第 4 步"按不动的格子打开我们卡片自己的菜单"没做。
+- **`GetProcAddress` 重定向没做**（微信那类运行时取地址的应用仍靠手工 ETW 学的那一行）。
+- **QQ音乐 / 任务管理器 / AppContainer 的探针没做**（全局钩子能不能进），所以"覆盖全部"还没有答案。
+- 观察通道留在 `TrayHook.cpp`（标记文件开着才有输出，正常会话零成本），下次量新应用直接用它，比 ETW 那套快得多。
+- 报告文件在多个进程同时追加时会**偶尔丢一行**（实测丢过 Explorer 的 `hooked pid` 行）；数据行（`call …`）没丢过，先记在这里。
+
+**复现/验收命令**（都要在 `%USERPROFILE%\IslandBar` 下、正常权限跑）：
+
+```
+island_bar.exe --tray-press 2 --fire          # 左键：应用窗口到前台，日志 "the pointer was NOT moved"
+island_bar.exe --tray-press 2 --fire --right  # 右键：应用自己的菜单，指针不动
+Get-Content tray_callbacks.txt | Select-String 'clash-verge'   # 第 7 个字段 = 试出来的配方
+Select-String -Path tray_learned.txt -Pattern 'hooked pid'     # "…repaired a pointer…" 与 "this module is pinned"
+```

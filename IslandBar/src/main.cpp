@@ -23,6 +23,7 @@
 #include <cwctype>      // towlower: comparing an executable's name with a window's process image
 #include <tlhelp32.h>   // CreateToolhelp32Snapshot: ending every process of one image
 #include <memory>       // make_unique: the sound page's worker object
+#include <atomic>       // the flag the tray-learning worker shares with the frame loop
 #include <vector>
 
 #include "app/AppBar.h"
@@ -955,6 +956,22 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // -1 rather than the count read above: the first refresh in the loop then reports the tray's size
     // once, at startup, which is the line to look for when the tray is empty.
     int lastTrayCount = -1;
+    // THE APPLICATIONS THAT STILL HAVE NO CALLBACK ENTRY AT THE LAST ATTEMPT, and the two things that keep
+    // that attempt from becoming a loop.
+    //
+    // The module is resident once it is inside an application (it pins itself -- see TrayHook.cpp), so its
+    // report keeps arriving all session and the tray-refresh tick harvests it for free. What a resident
+    // module cannot do is reach an application that was not running when the module was offered, so that
+    // case needs a new pass -- and only that case: the applications which refuse a module entirely (QQ
+    // Music's self-protection, an elevated one, an AppContainer) refuse it for the same reason every time,
+    // and retrying them every few seconds would cost three seconds of a worker thread forever. Hence the
+    // signature: a pass is offered again only when the SET of uncovered applications has changed.
+    std::wstring lastUncovered;
+    // Shared with the worker rather than a plain bool, and on the heap rather than on this frame: the worker
+    // is detached, and a detached thread that writes to a local of a function which has already returned is
+    // a crash waiting for the user to close the bar at the wrong moment.
+    std::shared_ptr<std::atomic<bool>> learnInFlight = std::make_shared<std::atomic<bool>>(false);
+    unsigned long long lastLearnAttempt = 0;
 
     island::IslandWindow window;
     if (!window.Create(monitor, /*show=*/true)) {
@@ -1264,11 +1281,12 @@ unsigned long long lastMusicMeterMs = 0;
                 island::TrayIcons icons;
                 icons.Refresh();
                 const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in %d, %d "
-                                    "registration(s) captured, %d new entr(ies) -- %d of %d icon(s) have a "
-                                    "callback entry (in %lld ms)",
-                                    learned.appsTried, learned.appsReached, learned.captured,
-                                    learned.newEntries, learned.covered, learned.icons, learned.ms);
+                island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in %d of them "
+                                    "and was ALREADY watching %d more, %d registration(s) captured, %d new "
+                                    "entr(ies) -- %d of %d icon(s) have a callback entry (in %lld ms)",
+                                    learned.appsTried, learned.appsReached, learned.appsAlreadyWatched,
+                                    learned.captured, learned.newEntries, learned.covered, learned.icons,
+                                    learned.ms);
             }).detach();
         }
         std::fflush(stdout);
@@ -4152,6 +4170,50 @@ float musicWavePhase = 0.0f;
                                             trayNow, trayIcons.RunningApps(), trayIcons.Examined());
                         std::fflush(stdout);
                     }
+
+                    // Whatever the resident module has written since the last tick. No injection, no
+                    // broadcast, no waiting: an application that has already been reached keeps reporting
+                    // every registration for the rest of the session, and this is where those become
+                    // pressable (see shell/TrayLearn.h).
+                    const int harvested = island::HarvestLearnedCallbacks();
+                    if (harvested > 0) {
+                        island::LogAndPrint("  tray learn: %d registration(s) arrived from applications "
+                                            "already reached by the module -- %d of %d icon(s) have a "
+                                            "callback entry now",
+                                            harvested, island::CountCoveredIcons(trayIcons), trayNow);
+                        std::fflush(stdout);
+                    }
+
+                    // ... and a pass for applications this bar has not reached yet -- a NEW application only,
+                    // see the note on `lastUncovered` above.
+                    const std::wstring uncovered = island::UncoveredApplications(trayIcons);
+                    const bool worthTrying = !uncovered.empty() && uncovered != lastUncovered &&
+                                             !learnInFlight->load() &&
+                                             GetTickCount64() - lastLearnAttempt >= 15000;
+                    if (worthTrying) {
+                        lastUncovered = uncovered;
+                        lastLearnAttempt = GetTickCount64();
+                        learnInFlight->store(true);
+                        island::LogAndPrint("  tray learn: %d icon(s) still without a callback, and the set "
+                                            "of applications to try has changed (%ls) -- offering the module "
+                                            "again (background)\n",
+                                            trayNow - island::CountCoveredIcons(trayIcons), uncovered.c_str());
+                        std::fflush(stdout);
+                        std::thread([learnInFlight]() {
+                            island::TrayIcons icons;
+                            icons.Refresh();
+                            const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+                            island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in "
+                                                "%d of them and was ALREADY watching %d more, %d "
+                                                "registration(s) captured, %d new entr(ies) -- %d of %d "
+                                                "icon(s) have a callback entry (in %lld ms)",
+                                                learned.appsTried, learned.appsReached,
+                                                learned.appsAlreadyWatched, learned.captured,
+                                                learned.newEntries, learned.covered, learned.icons,
+                                                learned.ms);
+                            learnInFlight->store(false);
+                        }).detach();
+                    }
                 }
                 frame.trayIcons = trayIcons.Count() > 0 ? &trayIcons.At(0) : nullptr;
                 frame.trayIconCount =
@@ -6257,9 +6319,10 @@ int RunTrayLearn() {
                         L"application and asking each to register again\n",
                         count, coveredBefore);
     const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-    island::LogAndPrint(L"tray learn: tried %d application(s), the module loaded in %d, %d registration(s) "
-                        L"captured, %d new entr(ies)\n",
-                        learned.appsTried, learned.appsReached, learned.captured, learned.newEntries);
+    island::LogAndPrint(L"tray learn: tried %d application(s), the module loaded in %d of them and was "
+                        L"ALREADY watching %d more, %d registration(s) captured, %d new entr(ies)\n",
+                        learned.appsTried, learned.appsReached, learned.appsAlreadyWatched,
+                        learned.captured, learned.newEntries);
     island::LogAndPrint(L"tray learn: %d of %d icon(s) now have a callback entry (before: %d), %lld ms\n",
                         learned.covered, learned.icons, coveredBefore, learned.ms);
     wchar_t home[MAX_PATH] = {};
