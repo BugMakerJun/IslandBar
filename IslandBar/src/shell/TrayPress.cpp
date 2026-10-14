@@ -545,10 +545,13 @@ void LogElementFacts(IUIAutomationElement* element, const wchar_t* prefix) {
 }
 
 // How many buttons of the shell's overflow flyout are inside `element`. Zero for the flyout's window when
-// it is closed -- and that window EXISTS while closed (measured: it is in the desktop's window list,
-// hidden, with the same rectangle it has when open), so "a window of that class is present" is not the
-// question. "Does it hold icons" is.
-int OverflowIconCount(IUIAutomation* automation, IUIAutomationElement* element) {
+// the panel is not really up -- and that is the question, not "does the window exist" (it does while the
+// panel is closed) and not "is it shown" (measured 2026-10-15: the shell leaves it shown in states where
+// nothing in it is laid out, and a press that trusted the window being visible skipped the chevron press,
+// clicked nothing and reported "no menu" four times in a row). "Does it hold icons" is the question, and it
+// is asked of the window's own element -- one handle lookup -- rather than of a walk of the desktop's
+// children, which is what made the old version of this cost a second per press.
+int PanelIconCount(IUIAutomation* automation, IUIAutomationElement* element) {
     if (!automation || !element) return 0;
     VARIANT id = {};
     id.vt = VT_BSTR;
@@ -568,46 +571,6 @@ int OverflowIconCount(IUIAutomation* automation, IUIAutomationElement* element) 
     }
     condition->Release();
     return count;
-}
-
-// The shell's overflow flyout: the top-level window it opens the hidden icons in, ready to be pressed in
-// (shown, and holding buttons). Null when there is nothing to press in yet.
-IUIAutomationElement* FindOverflowFlyout(IUIAutomation* automation) {
-    if (!automation) return nullptr;
-    IUIAutomationElement* desktop = nullptr;
-    if (FAILED(automation->GetRootElement(&desktop)) || !desktop) return nullptr;
-
-    VARIANT className = {};
-    className.vt = VT_BSTR;
-    className.bstrVal = SysAllocString(L"TopLevelWindowForOverflowXamlIsland");
-    IUIAutomationCondition* condition = nullptr;
-    IUIAutomationElement* flyout = nullptr;
-    if (SUCCEEDED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, className,
-                                                     &condition)) &&
-        condition) {
-        IUIAutomationElementArray* tops = nullptr;
-        if (SUCCEEDED(desktop->FindAll(TreeScope_Children, condition, &tops)) && tops) {
-            int count = 0;
-            tops->get_Length(&count);
-            for (int i = 0; i < count && !flyout; ++i) {
-                IUIAutomationElement* candidate = nullptr;
-                if (FAILED(tops->GetElement(i, &candidate)) || !candidate) continue;
-                UIA_HWND native = nullptr;
-                const bool shown = SUCCEEDED(candidate->get_CurrentNativeWindowHandle(&native)) &&
-                                   native && IsWindowVisible(reinterpret_cast<HWND>(native));
-                if (shown && OverflowIconCount(automation, candidate) > 0) {
-                    candidate->AddRef();
-                    flyout = candidate;
-                }
-                candidate->Release();
-            }
-            tops->Release();
-        }
-        condition->Release();
-    }
-    SysFreeString(className.bstrVal);
-    desktop->Release();
-    return flyout;
 }
 
 } // namespace
@@ -766,18 +729,6 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
         if (visibleRun_) return;   // the measurement mode: the shell's panel is left exactly as it is
         SetLayeredWindowAttributes(window, 0, 0, LWA_ALPHA);
     };
-    const auto hidePanel = [&](IUIAutomationElement* element) {
-        if (!element) return;
-        if (flyoutWindow_) {
-            stagePanelWindow(flyoutWindow_);
-            return;
-        }
-        UIA_HWND native = nullptr;
-        if (SUCCEEDED(element->get_CurrentNativeWindowHandle(&native)) && native) {
-            stagePanelWindow(reinterpret_cast<HWND>(native));
-        }
-    };
-
     taskbar_ = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (!taskbar_) {
         say(L"no taskbar");
@@ -835,35 +786,38 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     // THE FLYOUT FIRST, because the icons have no rectangles until the shell has laid them out -- until
     // then every query answers the chevron's own slot (see the header). It is a toggle, so it is only
     // pressed when it is not already showing.
-    IUIAutomationElement* flyout = FindOverflowFlyout(automation);
-    if (!flyout) {
+    //
+    // ASKED OF THE WINDOW, NOT OF THE DESKTOP'S AUTOMATION TREE. This used to be a UI Automation search --
+    // every top-level window of the desktop, filtered by class name, with each candidate's subtree counted
+    // to see whether it held icons -- and it was called every few milliseconds while the panel slid in.
+    // Measured on the user's own press (2026-10-15): 1.10 s between "tray press" and the next log line, all
+    // of it in here. The question itself is unchanged -- does the panel hold icons -- and it is still the
+    // right one; it is now asked of the window's OWN element (one handle lookup) instead of the desktop's
+    // children, which is where the second went.
+    HWND panelWindow = FindWindowExW(nullptr, nullptr, L"TopLevelWindowForOverflowXamlIsland", nullptr);
+    IUIAutomationElement* flyout = nullptr;
+    if (panelWindow) automation->ElementFromHandle(panelWindow, &flyout);
+    if (!flyout || PanelIconCount(automation, flyout) == 0) {
+        if (flyout) {
+            flyout->Release();
+            flyout = nullptr;
+        }
         InvokeElement(chevron);
         weOpenedFlyout_ = true;
-        // TWO QUESTIONS PER PASS, because they are answered at very different speeds:
-        //
-        //   * "does the panel's WINDOW exist yet" -- a class-name lookup, which sees it the instant the
-        //     shell creates it (measured with the class-name probe above: the window does not exist while
-        //     the panel is closed, so it is created when the chevron is pressed);
-        //   * "has UI AUTOMATION published it" -- which is where the icon rectangles come from, and which
-        //     lags the window by about a tenth of a second. Measured: with only the UIA path hiding the
-        //     panel, it was still photographed on screen for ~100 ms at 235 ms after the press began
-        //     (WindowFromPoint at that moment named `TopLevelWindowForOverflowXamlIsland`); the pixels are
-        //     painted before the element shows up.
-        //
-        // So the window is hidden the moment the first question says yes (every 1 ms), and re-hidden every
-        // time the second one does -- because the shell RE-PAINTS and re-shows the panel while it slides,
-        // which is what undid the first attempt at this, measured years of this file ago and written down
-        // then as "alpha 0 does nothing to this window". Applied repeatedly it holds; the settle below
-        // applies it once more when the shell has stopped touching the window at all.
-        for (int attempt = 0; attempt < 400 && !flyout; ++attempt) {
+        // The window is hidden the moment it appears (every 1 ms) and again after the settle, because the
+        // shell RE-PAINTS and re-shows it while it slides in -- which is what undid the first attempt at
+        // this, written down at the time as "alpha 0 does nothing to this window". Applied repeatedly it
+        // holds; see scripts/probe-tray-panel-child-windows.ps1.
+        for (int attempt = 0; attempt < 400; ++attempt) {
             Sleep(1);
-            HWND panelWindow =
-                FindWindowExW(nullptr, nullptr, L"TopLevelWindowForOverflowXamlIsland", nullptr);
-            if (panelWindow) stagePanelWindow(panelWindow);
-            if ((attempt % 5) == 0) {
-                flyout = FindOverflowFlyout(automation);
-                if (flyout) hidePanel(flyout);
-            }
+            panelWindow = FindWindowExW(nullptr, nullptr, L"TopLevelWindowForOverflowXamlIsland", nullptr);
+            if (!panelWindow) continue;
+            stagePanelWindow(panelWindow);
+            // ... AND IT IS UP WHEN IT HOLDS ICONS, not when it is merely shown.
+            if (FAILED(automation->ElementFromHandle(panelWindow, &flyout)) || !flyout) continue;
+            if (PanelIconCount(automation, flyout) > 0) break;
+            flyout->Release();
+            flyout = nullptr;
         }
     }
     if (!flyout) {
@@ -871,6 +825,7 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
         return false;
     }
     flyoutElement_ = flyout;
+    flyoutWindow_ = panelWindow;
 
     // THE PANEL IS MADE INVISIBLE, and the history of this is worth keeping because the conclusion drawn
     // from it the first time was wrong:
@@ -888,7 +843,6 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     //
     // The child window that paints the island (`Windows.UI.Composition.DesktopWindowContentBridge`, listed
     // by that probe) is not touched: the parent's alpha is what does it.
-    hidePanel(flyout);
     LogAndPrint("  tray stage: taskbar %p %ls, overflow %p (%ls)\n",
                 reinterpret_cast<void*>(taskbar_),
                 visibleRun_ ? L"left ON SCREEN (ISLANDBAR_TRAY_PRESS_VISIBLE)"
@@ -939,7 +893,7 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     if (flyoutWindow_) {
         // Once more, now that the shell has stopped touching it: this is the one that is guaranteed to
         // survive, and the ones during the slide only shorten the part a user could have seen.
-        hidePanel(flyout);
+        stagePanelWindow(flyoutWindow_);
         LogAndPrint("  tray stage: %ls (%p, %ls added)\n",
                     visibleRun_ ? L"the overflow panel is ON SCREEN for this run, untouched"
                                 : L"the overflow panel was made invisible after it settled",
