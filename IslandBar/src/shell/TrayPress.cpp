@@ -1385,6 +1385,25 @@ TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press, bool
     // route that moves the pointer, kept as the fallback for every application without an entry.
     if (press && SendTrayCallback(request, rightClick, &outcome)) return outcome;
 
+    // ... AND THE POINTER-MOVING ROUTE CAN BE SWITCHED OFF, which is what ISLANDBAR_TRAY_NO_CLICK=1 does.
+    //
+    // The user's position is that the real click is not the answer -- the jump is the one thing they will not
+    // have (2026-10-15: "把真实点击这个去掉不要 … 我就想要 MyDockFinder 一样的效果"). It is not deleted yet,
+    // and the reason is measured rather than cautious: only applications whose callback has been learned can
+    // be pressed without it, which today is one, so switching it off for good would leave every other
+    // application unpressed -- a state that looks like a broken button rather than like MyDockFinder. The way
+    // out is the shell-side route being probed now (scripts/probe-tray-in-explorer.ps1), which covers every
+    // application at once, including new ones; when that lands, this whole block goes. Until then this
+    // switch is how the no-click state is looked at deliberately.
+    if (press && SwitchOn(L"ISLANDBAR_TRAY_NO_CLICK")) {
+        LogAndPrint(L"  tray press: this application has no learned callback and the real click is switched "
+                    L"off (ISLANDBAR_TRAY_NO_CLICK), so nothing was pressed\n");
+        outcome.result = TrayPressResult::NotInShell;
+        outcome.route = L"nothing (the real click is switched off)";
+        outcome.pointerMoved = false;
+        return outcome;
+    }
+
     TrayStage stage;
     wchar_t note[160] = {};
     if (!stage.Begin(note, 160)) {
