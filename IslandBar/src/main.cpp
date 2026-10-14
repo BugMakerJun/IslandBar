@@ -3269,6 +3269,29 @@ float musicWavePhase = 0.0f;
                         island::LogAndPrint("  music: %s requested", name);
                         std::fflush(stdout);
                     }
+                } else if (window.State() == island::IslandState::NoticeStrip) {
+                    // A PRESS WHILE A CALL OR A MESSAGE IS ON THE ISLAND LEAVES IT ALONE.
+                    //
+                    // Asked for in these words: "当通知和通话的时候点击 就通话和通知的样子" -- while the strip
+                    // is up, a press on any of the bar's buttons (Start, the panel toggle, the tray button)
+                    // must not send the island back to the plain pill, and neither must a press that lands on
+                    // the strip's own body.
+                    //
+                    // It did. The log has the whole sequence: a press at (1420,27) was routed as
+                    // "meaning=dismiss", marked one item read, and the strip retracted 157 ms later -- then
+                    // came back 226 ms after that, because what had asked for it was still there. Both halves
+                    // of that dismissal had to go together, and the reason is one line in the store:
+                    // ActiveDisplay answers nullptr for an item that is `read`, so marking it read IS the
+                    // retraction. Marking read and retracting cannot be separated; the press therefore no
+                    // longer marks anything read.
+                    //
+                    // Nothing is lost by that: the unread count is not drawn anywhere (it is asserted in the
+                    // self-test and read nowhere else), so a message that is left unread has no visible
+                    // consequence. What ends the strip is unchanged and decided elsewhere: a message when its
+                    // display window runs out, a call when the call does -- which is what the note that used
+                    // to stand here said a call's lifetime is.
+                    island::LogAndPrint("  click: kept -- a notice is up, so the press changed nothing");
+                    std::fflush(stdout);
                 } else {
                     // A CLICK DISMISSES MESSAGES, NOT A CALL.
                     //
