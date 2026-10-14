@@ -10586,7 +10586,10 @@ state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
 
 ---
 
-## 待办：托盘卡片里的点击（2026-10-15，**未修**，交给下一个会话）
+## 托盘卡片里的点击（2026-10-15，**已修一版，等用户测**）
+
+> 2026-10-15 凌晨的第二段会话把这一段做掉了，做法与实测在文末的 **8.98**。这一段本身保留，
+> 因为它是那一版的起点：现象、日志证据、以及"哪些推断后来被推翻了"都记在这里。
 
 这一段是为了让下一个会话不必从头研究：现象、证据、已经谈出来的机制与计划都在这里。
 动手前先读 `AGENTS.md`（协作流程：先研究 → 给方案 → 等用户确认 → 实现 → 用户测试 → 才 push）。
@@ -10672,3 +10675,46 @@ state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
 - 今天已经推上去的 8 笔在 `3218b63`；`AGENTS.md` 与 `START-HERE.txt` 的流程说明也在其中。
 - 本机 **github.com 现在通了**（`git fetch` / `git push` 都成功）——`captures/push-via-api.ps1`
   那套 API 绕行不再必需，必要时才回退到它。
+
+### 8.98 **托盘卡片里的按压：改成真实点击，两个"坏掉的原因"都找到了** ✅（等用户测）
+
+用户按 8.97 之后的交接又试了一次：左键"打开"没反应、右键菜单跑到屏幕左上角、原生托盘会闪。这一轮把三件都测到底。
+
+#### 两个推翻上一轮读法的发现（都是判决性证据，不是推断）
+
+| 发现 | 证据 |
+|---|---|
+| **结果那一行被日志自己吞了**：打印按压结果的那一行用了**窄格式串**，而 `%ls` 传的是 shell 给图标的名字（本机是 ` 微信`）。窄 CRT 转不了非 ASCII，MSVC 的处理是**整行清空** | 整份日志里**没有任何一行** `-> pressed/refused`，而每次按压之后约 200 ms 都有一条**只有时间戳的空行**（如 `00:21:09.361`、`00:21:19.297`）。上一轮因此以为"Invoke 挂住了"——其实每次按压都跑完了 |
+| **右键菜单跑到左上角，是 `SetWindowPos` 把 shell 的面板搬到 (0,0)**：`TrayStage::Reset()` 里"放回原处"的那一句用了 `flyoutHome_`，而这个字段**全文件只出现这一句**，恒为 `{0,0}`（更早版本"把面板移出屏幕"的残骸） | 用户截图里屏幕左上角能看到面板的灰底 **+ 图标网格**，WeGame 菜单画在它上面；日志时间线 `the panel was shown again`(19.117) → 空行(19.297 = Reset 跑完) 与截图吻合 |
+
+#### 改了什么
+
+| 文件 | 改法 |
+|---|---|
+| `shell/TrayPress.cpp` | 删掉那句 `SetWindowPos` 与 `flyoutHome_`（面板原地不动；注入点击的坐标来自 `Shell_NotifyIconGetRect` 的真实屏幕矩形，菜单的位置也由 shell 按面板推导，面板一动两件事同时坏）；**左键从 UIA Invoke 改成真实点击**（`SetCursorPos` + 左/右键 down&up + 指针放回）；注入前**实测**落点（`WindowFromPoint`），如果是我们自己的窗口就临时给 `WS_EX_TRANSPARENT`、注入后还原；右键改成"显示面板 → 点击 → **等应用自己的窗口出现**（上限 600 ms）→ 才把面板隐形"；顺手删掉两段 0 调用的 RAII 死代码 |
+| `shell/TrayPress.h` | `TrayPressOutcome` 扩成一整套事实（走的哪条路、落点、面板显示/隐藏时刻、菜单什么时候出现/在哪、应用有没有回应）；删 `flyoutHome_`；**头注释记下"按压 = 真实点击"这条结论与它的一手依据** |
+| `main.cpp` | 打印结果的三行改成**宽格式串**（这才是那一轮真正让日志可信的一步）；`--tray-press` 这条命令行加上**自己收尾**（命令行没有看门狗，否则 shell 的任务栏会被留在"存在但不可见"） |
+
+**三个测量开关**（都只影响一次按压，不需要重新编译）：`ISLANDBAR_TRAY_PRESS_VISIBLE=1`（整套 press 在任务栏/面板真可见时跑）、`ISLANDBAR_TRAY_PRESS_NO_REVEAL=1`（面板一直保持隐形）、`ISLANDBAR_TRAY_PRESS_ROUTE=invoke`（左键退回 UIA Invoke）。
+
+#### 实测（`--tray-press N --fire [--right]`，从 `%USERPROFILE%\IslandBar` 跑，正常完整性）
+
+| 项 | 结果 |
+|---|---|
+| 左键（微信，cell 5） | `the application answered -- the foreground window is now its 'Qt51514QWindowIcon'` —— 微信主窗口真的被开出来了 |
+| 左键（WeGame，cell 6） | `said nothing`（1500 ms 内它自己的窗口一个都没出现）—— **WeGame 的托盘图标本身对左键不响应**，不是机制问题 |
+| 右键（WeGame，cell 6） | `something came up 78 ms after the click: its own 'TWINCONTROL' at 2144,109 250x280`；图标矩形是 `2374,89 40x40`、点击点是 `2394,109` → **菜单贴着被点的那个格子**（截图 `captures/menu-right-click-2.png`） |
+| 面板有没有留在屏上 | 截图 `captures/press-burst/f00.png`：能看到面板滑入的那一瞬（那一次是 3 帧、每帧 8 ms）；按压结束后再抓图（`captures/tray-after-surface.png`）屏上没有任何面板残留 |
+| 任务栏/面板的可视性 | 新脚本 `scripts/measure-tray-panel.ps1` 逐帧采样面板自己的矩形：`NO_REVEAL` 时**一帧都没有变化**（均值 42 不变）；有 reveal 时只有滑入那一段会亮（两次实测：25–40 ms / 约 112 ms，均值 103 对壁纸 42），`HidePanelAfterClick` 之后再补按 4 次 alpha 0 也压不掉（shell 滑入时自己重画）。**这条是本轮的下限**，见"剩下的" |
+
+#### 顺带查清的三件事（下一轮不用重查）
+
+- 应用自己的托盘菜单**不是** `#32768`、**不在 UIA 树里**（在菜单上屏时问整个桌面 `ControlType=Menu`：0 个）、**也不响应 `WindowFromPoint`**（它画着的时候问菜单正中间，答案是桌面的 `SysListView32`）。唯一的判据是**应用自己的窗口列表前后对比**（WeGame 的菜单是它自己进程的 `TWINCONTROL`）。
+- 判据必须**只认应用自己的窗口**：第一版还接受"别的进程新出现的顶层窗口"，结果把 shell 给图标弹的 **tooltip**（`Xaml_WindowedPopupClass 130x41`）报成了"应用回应了"。日志里一句假的"应用回应了"比一句"什么都没发生"更有害。
+- 本地跑不出真结果的原因：**`C:\PROJECT\Taskbar` 下的进程会被降到 LOW 完整性**，连"同完整性"的探针都会被 UIPI 丢掉——所以 `--tray-press` 这类测量必须在 `%USERPROFILE%\IslandBar` 下跑（自检与 smoke 不受影响）。
+
+#### 剩下的（如实说）
+
+- **面板滑入的那一段（25–112 ms，随运行不同）仍然会露一下**（shell 自己的动画在重画，alpha 0 按不干净）。它比原来小得多（原来是"面板被搬到左上角 + 一直留着"），但还没到"完全看不见"。下一轮可试的两条，都没有实测过：①滑入期间**连面板的画布子窗口一起按住**（`Windows.UI.Composition.DesktopWindowContentBridge`，8.79 明确决定没碰的那一层），②**开局就把面板开着但隐形、整段会话不关**（那样每次按压都没有滑入）。两条都有副作用，先测再定。
+- 左键对**某些应用**可能仍然"没反应"，因为那就是那个应用的托盘图标自己的行为（WeGame 就是）。真正的兜底是卡片菜单里的「打开」/「显示窗口」两项。
+- 自检 **0 失败**、`island_smoke` PASS、Debug 与 Release 都能编（唯一警告 `C4456` 在 `main.cpp:4710` 与 `Diagnostics.cpp:6251`，先于本次改动就存在）。盘上跑的已经是这一版（`island_bar.exe.bak-20261015-0040` 是上一版），**未推**。

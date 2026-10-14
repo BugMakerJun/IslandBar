@@ -31,6 +31,25 @@
 //  is the shell's, and the press is a UI Automation Invoke on the button that sits on that position --
 //  no names involved at all.
 //
+//  ... AND THE PRESS ITSELF IS NO LONGER A UI AUTOMATION INVOKE, which took a year's worth of rounds to
+//  establish and one wasted session to see clearly (2026-10-15). The rectangle is still the shell's and the
+//  button on it is still looked for -- that is how "there is really an icon here" is checked, and how the
+//  shell's own name for it gets into the log -- but the BUTTON IS PRESSED WITH A REAL CLICK: the pointer is
+//  moved onto it, the button goes down and up, and the pointer goes back where the user's hand was. Two
+//  measurements forced that: the shell's tray buttons do not reliably carry an Invoke pattern at all, and
+//  the application's response to a tray icon is driven by the shell forwarding MOUSE BEHAVIOUR, so an
+//  Invoke that returns S_OK can leave the application completely untouched -- which is exactly what the
+//  three presses of 2026-10-15 did, once the log was fixed enough to see them (see below). Every real-world
+//  tool that does this by program (AutoHotkey's tray scripts, TrayStatus, TranslucentTB) injects input for
+//  the same reason.
+//
+//  THE LOG LINE THAT REPORTED ALL OF THIS WAS ITSELF THE BUG FOR ONE ROUND. It was written with a NARROW
+//  format string and a `%ls` for the shell's name of the icon, and that name is " 微信" on this machine: the
+//  narrow CRT cannot convert a non-ASCII wide string to bytes, and MSVC's answer is to empty the WHOLE line
+//  while still writing the newline. Every press therefore reported itself as a blank line, which reads
+//  exactly like a press that never returned -- and the next session drew the natural but wrong conclusion
+//  that the Invoke had hung. The line is wide now, and the facts it carries live in `TrayPressOutcome`.
+//
 //  ... AND ONLY WHEN THE SHELL HAS LAID THE TRAY OUT, which is the trap in the paragraph above. An icon
 //  that lives in the overflow flyout has NO rectangle until that flyout has been opened: until then the
 //  shell answers 2416,0 24x32 -- the chevron's slot -- for EVERY icon, hiding its ignorance behind a
@@ -95,6 +114,28 @@ struct TrayPressOutcome {
     wchar_t shellName[128] = {};   // what the SHELL calls it, when a button was found on that rectangle
     long long lookupMs = 0;        // the rect query, which needs no taskbar at all
     long long pressMs = 0;         // showing the taskbar invisibly, opening the flyout, pressing
+
+    // ---- everything below is here because of ONE wasted round (2026-10-15). ------------------------
+    //
+    // The single line that was supposed to report all of the above was written with a NARROW format
+    // string and a `%ls` for the shell's name, and the shell's name on this machine is " 微信": the
+    // narrow CRT cannot convert that to bytes, so MSVC's answer is to empty the WHOLE line while still
+    // writing the newline. Every press reported itself as a blank line, which reads exactly like a press
+    // that never finished -- and the next session concluded that the Invoke had hung. The format string
+    // is wide now (see main.cpp) and the facts live in the outcome instead of in a printf, so that a
+    // future call site cannot lose them the same way.
+    const wchar_t* route = L"?";   // which press ran: "a real click" or "UI Automation's Invoke"
+    long long clickMs = 0;         // when the click left this process, from the start of the press
+    wchar_t target[160] = {};      // what was under the pointer: "class 'X' of pid N", and whose it is
+    bool targetIsOurs = false;     // ... and whether that window is this bar's own
+    bool madeClickThrough = false; // whether this bar had to be taken out of the hit test for the click
+    long long panelShownMs = 0;    // when the overflow panel was put back on screen for the click
+    long long panelHiddenMs = 0;   // ... and when it was taken off it again (0 = never, or not needed)
+    RECT menuRect = {};            // the application's menu, when one was seen (the right-click route)
+    wchar_t menuClass[160] = {};   // what came up, in words (class, rectangle, whose window it is)
+    long long menuWaitMs = -1;     // ms after the click it was seen; -1 = nothing appeared in the budget
+    bool appAnswered = false;      // the application did something observable within 200 ms of the click
+    wchar_t answer[192] = {};      // ... described: a new window, a new foreground window, or nothing
 };
 
 // Presses the icon `request` names. Safe to call from a worker thread that has called
@@ -106,7 +147,20 @@ struct TrayPressOutcome {
 //
 // `rightClick` asks for the application's own menu instead of its default action, which is what a right
 // click means in the shell's tray -- and it is the only route to a menu item like "退出": UI Automation
-// publishes no right-click pattern, so that half is a posted right button message (see TrayStage).
+// publishes no right-click pattern, so that half is a real click delivered at the icon (see TrayStage).
+//
+// THREE SWITCHES, all of them for measurements that would otherwise need a rebuild:
+//
+//   ISLANDBAR_TRAY_PRESS_VISIBLE=1    the whole press runs with the shell's taskbar and overflow panel
+//                                     actually on screen. Everything here exists to keep them off it, and
+//                                     that is also what hides the answer to "does this press work at all"
+//                                     behind "does it work while invisible": one switch, one experiment.
+//   ISLANDBAR_TRAY_PRESS_NO_REVEAL=1  never put the panel's alpha back for the click. If the press works
+//                                     this way the reveal was never needed and the last visible trace of
+//                                     the shell's icon grid can go.
+//   ISLANDBAR_TRAY_PRESS_ROUTE=invoke the left press goes back to UI Automation's Invoke -- the route the
+//                                     bar used before it learned to inject a click, kept as a switch so
+//                                     the two can be measured against each other without a rebuild.
 TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press, bool rightClick);
 
 // Whether a press is in flight right now.
@@ -140,6 +194,12 @@ bool TrayPressFinishCleanup();
 // for UI Automation, as measured), opens the overflow flyout (also made invisible the moment it appears,
 // on a 5 ms poll) and waits for the panel to stop moving. `IconRect` may only be asked AFTER that: see the
 // note at the top of this file about the chevron's slot.
+//
+// THE PANEL IS NEVER MOVED, and that is a correction rather than a description: this class used to put it
+// back where it found it at the end of every press, through a field that was never assigned -- so "where it
+// found it" was 0,0 and the shell's panel was teleported to the top-left corner of the screen on the way
+// out, taking the application's own menu (which the shell anchors to that panel) with it. Measured
+// 2026-10-15 from a user's screenshot and the log timestamps either side of the teleport.
 class TrayStage {
 public:
     TrayStage() = default;
@@ -156,14 +216,36 @@ public:
 
     RECT FlyoutRect() const { return flyoutRect_; }
 
+    // The panel back on screen for the length of one click, and off it again afterwards.
+    //
+    // The icon being pressed lives in that panel, and a click is routed by position: the panel is the
+    // window that has to receive it. It is invisible (alpha 0) for the rest of the press, and the two calls
+    // below are the only places that change that -- see the measurements in PressOnRect for what the shell
+    // does and does not tolerate.
+    void ShowPanelForClick();
+    void HidePanelAfterClick();
+    bool PanelStillShowing() const;
+
     // Presses the button that sits on `rect`, inside the flyout. With `press` false it is found and not
     // pressed (the dry run). `rightClick` asks for the application's own menu instead of its default
-    // action -- a POSTED right button message, because UI Automation has no pattern for one.
-    TrayPressResult PressOnRect(const RECT& rect, bool press, bool rightClick, wchar_t* shellName,
-                               size_t shellNameCapacity);
+    // action -- a real click, because UI Automation has no pattern for one. `outcome` is filled in with
+    // what happened, for the caller's log line. `request` is what the application is, which the press needs
+    // to tell "it opened a window" apart from "the click landed on nothing".
+    TrayPressResult PressOnRect(const TrayPressRequest& request, const RECT& rect, bool press,
+                                bool rightClick, wchar_t* shellName, size_t shellNameCapacity,
+                                TrayPressOutcome* outcome);
 
 private:
     void Reset();
+
+    // Milliseconds since Begin returned true, for the phase-by-phase log line of a press.
+    long long SinceBegin() const;
+
+    // One press delivered as a real click, both buttons. See the note above it in the .cpp: this is the
+    // sequence the panel reveal, the hit-test check, the delivery, the wait for an answer and the panel's
+    // removal all live in.
+    TrayPressResult ClickOnRect(const TrayPressRequest& request, const RECT& rect, bool rightClick,
+                                TrayPressOutcome* outcome);
 
     HWND taskbar_ = nullptr;
     bool wasVisible_ = false;
@@ -174,8 +256,6 @@ private:
     // put it back: its extended style, and whether this stage added the layered bit itself.
     LONG_PTR flyoutStyle_ = 0;
     bool flyoutLayered_ = false;
-    // Where the shell had the panel before this stage moved it out of sight, so it can be put back.
-    RECT flyoutHome_ = {};
     // IUIAutomation / IUIAutomationElement, kept as void* so this header does not have to drag in the
     // UI Automation and COM headers for every file that asks what a press result is.
     void* automation_ = nullptr;
@@ -190,6 +270,11 @@ private:
     // Whether the press was a right click, which is the one kind whose result (a menu) needs a moment
     // before the panel it came from is taken down. See Reset.
     bool rightClicked_ = false;
+    // Whether this press is being run with the shell's tray really on screen (ISLANDBAR_TRAY_PRESS_VISIBLE).
+    // Read once in Begin; nothing is hidden or revealed anywhere when it is set.
+    bool visibleRun_ = false;
+    // When Begin got as far as having the panel up, so every later log line can say "N ms in".
+    ULONGLONG begunAt_ = 0;
     RECT flyoutRect_ = {};
 };
 

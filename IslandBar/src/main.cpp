@@ -6020,24 +6020,47 @@ void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
     const island::TrayPressRequest request =
         MakeTrayPressRequest(icons.At(cell), icons.ExePathAt(cell));
     wchar_t flat[128] = {};
-    // `%s`, not `%ls`: LogAndPrint uses the wide format engine, and a NARROW argument given to `%ls` is an
-    // invalid conversion that prints an EMPTY LINE while still writing the newline -- so the log showed a
-    // blank line where a right click's "tray press: cell 5 'Weixin.exe' (right click)" should have been,
-    // and the only trace of the click was the press that followed it. The project has this noted in
-    // HANDOFF (6.7's neighbourhood); it has now been paid for once more.
-    island::LogAndPrint("  tray press: cell %d '%ls'%s\n", cell,
+    // WIDE, every part of it: the icon's name can be Chinese (" 微信"), and a narrow format string with a
+    // `%ls` for it empties the whole line (see Log.h -- the same trap that swallowed this press's result
+    // line for a whole round). The narrow spelling that used to be here also passed a `%s` for the
+    // "(right click)" suffix, which the wide engine cannot convert either.
+    island::LogAndPrint(L"  tray press: cell %d '%ls'%ls\n", cell,
                         FlatName(icons.At(cell).name, flat, 128),
-                        rightClick ? " (right click)" : "");
+                        rightClick ? L" (right click)" : L"");
     std::fflush(stdout);
     std::thread([request, rightClick]() {
         const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         const island::TrayPressOutcome outcome = island::PressTrayIcon(request, true, rightClick);
+        // THE WIDE OVERLOAD, and it is not a style choice: with the narrow one this line came out EMPTY
+        // whenever the shell's name for the icon held a non-ASCII character (" 微信"), because the narrow
+        // CRT cannot convert that to bytes and MSVC empties the whole line instead of failing loudly. Three
+        // presses were diagnosed as "the Invoke hung" on the strength of those blank lines. See Log.h.
         island::LogAndPrint(
-            "  tray press: '%ls' -> %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), lookup %lld "
-            "ms, press %lld ms\n",
-            request.name, island::TrayPressResultName(outcome.result), outcome.shellName,
+            L"  tray press: '%ls' -> %ls via %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), "
+            L"lookup %lld ms, press %lld ms\n",
+            request.name, island::TrayPressResultName(outcome.result), outcome.route, outcome.shellName,
             outcome.rect.left, outcome.rect.top, outcome.rect.right - outcome.rect.left,
             outcome.rect.bottom - outcome.rect.top, outcome.lookupMs, outcome.pressMs);
+        if (outcome.clickMs > 0) {
+            island::LogAndPrint(L"  tray press: the click left at %lld ms; it was aimed at %ls%s; the "
+                                L"panel was revealed at %lld ms and hidden at %lld ms\n",
+                                outcome.clickMs, outcome.target,
+                                outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
+                                outcome.panelShownMs, outcome.panelHiddenMs);
+        }
+        if (rightClick) {
+            if (outcome.menuWaitMs < 0) {
+                island::LogAndPrint(L"  tray press: no menu window was seen in 600 ms\n");
+            } else {
+                // The description already carries the class and the rectangle, so this line does not repeat
+                // them -- see the CLI's copy of this line, which used to print the same rectangle twice.
+                island::LogAndPrint(L"  tray press: the menu is up %lld ms after the click: %ls\n",
+                                    outcome.menuWaitMs, outcome.menuClass);
+            }
+        } else if (outcome.clickMs > 0) {
+            island::LogAndPrint(L"  tray press: the application %ls -- %ls\n",
+                                outcome.appAnswered ? L"answered" : L"said nothing", outcome.answer);
+        }
         std::fflush(stdout);
         if (SUCCEEDED(comHr)) CoUninitialize();
     }).detach();
@@ -6202,10 +6225,43 @@ int RunTrayPress(int index, bool fire, bool rightClick) {
     island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", outcome.rect.left,
                         outcome.rect.top, outcome.rect.right - outcome.rect.left,
                         outcome.rect.bottom - outcome.rect.top);
-    island::LogAndPrint(L"  -> %ls%ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
+    island::LogAndPrint(L"  -> %ls%ls via %ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
                         island::TrayPressResultName(outcome.result),
-                        rightClick ? L" [right click]" : L"", outcome.shellName, outcome.lookupMs,
-                        outcome.pressMs);
+                        rightClick ? L" [right click]" : L"", outcome.route, outcome.shellName,
+                        outcome.lookupMs, outcome.pressMs);
+    if (outcome.clickMs > 0) {
+        island::LogAndPrint(L"  the click left at %lld ms, aimed at %ls%s; the panel was revealed at "
+                            L"%lld ms and hidden at %lld ms\n",
+                            outcome.clickMs, outcome.target,
+                            outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
+                            outcome.panelShownMs, outcome.panelHiddenMs);
+    }
+    if (rightClick) {
+        if (outcome.menuWaitMs < 0) {
+            island::LogAndPrint(L"  no window of the application's came up in 600 ms, so no menu was seen\n");
+        } else {
+            island::LogAndPrint(L"  the menu is up %lld ms after the click: %ls (the icon's own rectangle "
+                                L"is %ld,%ld %ldx%ld)\n",
+                                outcome.menuWaitMs, outcome.menuClass, outcome.rect.left, outcome.rect.top,
+                                outcome.rect.right - outcome.rect.left,
+                                outcome.rect.bottom - outcome.rect.top);
+        }
+    } else if (outcome.clickMs > 0) {
+        island::LogAndPrint(L"  the application %ls -- %ls\n",
+                            outcome.appAnswered ? L"answered" : L"said nothing", outcome.answer);
+    }
+    // THE CLEANUP A RIGHT CLICK LEAVES BEHIND IS FINISHED HERE, because a command line has no frame loop to
+    // do it: in the bar, the frame loop's watchdog is what puts the shell's taskbar and its panel back, and
+    // a press that hands both over and then EXITS leaves the taskbar present-but-invisible -- which is what
+    // "there is no taskbar any more" looks like on the user's screen. Measured the hard way, 2026-10-15.
+    if (island::TrayPressCleanupPending()) {
+        for (int attempt = 0; attempt < 40 && island::TrayPressCleanupPending(); ++attempt) {
+            island::TrayPressFinishCleanup();
+            if (island::TrayPressCleanupPending()) Sleep(100);
+        }
+        island::LogAndPrint(L"  the shell's taskbar and panel were put back (this command line has no "
+                            L"watchdog of its own)\n");
+    }
     if (outcome.result == island::TrayPressResult::Pressed || outcome.result == island::TrayPressResult::Found) {
         return 0;
     }

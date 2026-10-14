@@ -12,6 +12,9 @@
 // fails to compile without this ("missing type specifier ... IRawElementProviderSimple"), which is what
 // the first two attempts at this file produced.
 #include <objbase.h>
+// The SafeArray calls below (`GetRuntimeId` hands back one of those), which oleauto.h declares: with
+// WIN32_LEAN_AND_MEAN it does not arrive with windows.h, and objbase.h does not pull it in either.
+#include <oleauto.h>
 // uiautomation.h first: the client header forward-declares interfaces that the core one defines, and on
 // its own it does not compile (measured -- C4430/C2146 for every interface in it).
 #include <uiautomation.h>
@@ -37,75 +40,46 @@ std::atomic<bool> g_pressInFlight{false};
 std::atomic<HWND> g_cleanupTaskbar{nullptr};
 std::atomic<LONG_PTR> g_cleanupStyle{0};
 
+// The same handover for the SHELL'S OVERFLOW PANEL, which a right click leaves invisible on purpose.
+//
+// The panel is left at alpha 0 because the application's menu is on the screen for as long as the user
+// keeps it there, and the panel's own surface is the icon grid: restoring its alpha at the end of the press
+// would paint that grid over the menu the user asked for. Its style and alpha are put back by the frame
+// loop once the SHELL has closed the panel -- see TrayPressFinishCleanup, which refuses to do it while the
+// panel is still up (measured: the shell closes the panel by hiding it when the menu goes away).
+std::atomic<HWND> g_cleanupPanel{nullptr};
+std::atomic<LONG_PTR> g_cleanupPanelStyle{0};
+std::atomic<bool> g_cleanupPanelUnlayer{false};
+
+// The three measurement switches. See TrayPress.h for what each of them is for; they are read once per
+// press so that a run cannot change its mind halfway through.
+struct PressSwitches {
+    bool visible = false;    // ISLANDBAR_TRAY_PRESS_VISIBLE: nothing is hidden or revealed at all
+    bool noReveal = false;   // ISLANDBAR_TRAY_PRESS_NO_REVEAL: the panel stays invisible for the click
+    bool invokeLeft = false; // ISLANDBAR_TRAY_PRESS_ROUTE=invoke: the left press is a UIA Invoke again
+};
+
+bool SwitchOn(const wchar_t* name) {
+    wchar_t value[32] = {};
+    const DWORD length = GetEnvironmentVariableW(name, value, 32);
+    return length > 0 && length < 32 && value[0] != L'0';
+}
+
+PressSwitches ReadPressSwitches() {
+    PressSwitches switches;
+    switches.visible = SwitchOn(L"ISLANDBAR_TRAY_PRESS_VISIBLE");
+    switches.noReveal = SwitchOn(L"ISLANDBAR_TRAY_PRESS_NO_REVEAL");
+    wchar_t route[32] = {};
+    const DWORD length = GetEnvironmentVariableW(L"ISLANDBAR_TRAY_PRESS_ROUTE", route, 32);
+    switches.invokeLeft = length > 0 && length < 32 && std::wcscmp(route, L"invoke") == 0;
+    return switches;
+}
+
 // Marks the press for the frame loop, and clears it whatever way the function returns.
 class PressInFlight {
 public:
     PressInFlight() { g_pressInFlight.store(true); }
     ~PressInFlight() { g_pressInFlight.store(false); }
-};
-
-// The taskbar, shown but painted with nothing, for as long as the press needs it to exist.
-//
-// RAII because every path out of the sequence has to put the desktop back: a return that forgot this
-// would leave the shell's taskbar visible over the bar, which is the one thing this whole project must
-// not do. The rule is the same one the probe scripts follow, and the layering is removed rather than
-// left in place: an extra extended style on somebody else's window is not ours to keep.
-class VisibleButInvisible {
-public:
-    explicit VisibleButInvisible(HWND taskbar) : taskbar_(taskbar) {
-        if (!taskbar_) return;
-        style_ = GetWindowLongPtrW(taskbar_, GWL_EXSTYLE);
-        wasVisible_ = IsWindowVisible(taskbar_) != FALSE;
-        if ((style_ & WS_EX_LAYERED) == 0) {
-            SetWindowLongPtrW(taskbar_, GWL_EXSTYLE, style_ | WS_EX_LAYERED);
-            addedLayered_ = true;
-        }
-        SetLayeredWindowAttributes(taskbar_, 0, 0, LWA_ALPHA);
-        // SW_SHOWNA: shown, not activated. Activating another process's window would take the focus
-        // away from whatever the user is typing in.
-        ShowWindow(taskbar_, SW_SHOWNA);
-    }
-
-    ~VisibleButInvisible() {
-        if (!taskbar_) return;
-        // Hidden again first: the bar owns that state, and it re-hides on its own timer anyway.
-        if (!wasVisible_) ShowWindow(taskbar_, SW_HIDE);
-        if (addedLayered_) SetWindowLongPtrW(taskbar_, GWL_EXSTYLE, style_);
-        SetLayeredWindowAttributes(taskbar_, 0, 255, LWA_ALPHA);
-    }
-
-private:
-    HWND taskbar_ = nullptr;
-    LONG_PTR style_ = 0;
-    bool addedLayered_ = false;
-    bool wasVisible_ = false;
-};
-
-// The same treatment for the overflow flyout, which is a window of the shell's in its own right: it is
-// what the icons are pressed in, and the user has no reason to watch it appear.
-class InvisibleWindow {
-public:
-    ~InvisibleWindow() {
-        if (!hwnd_) return;
-        if (addedLayered_) SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, style_);
-        SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
-    }
-
-    void Apply(HWND hwnd) {
-        if (!hwnd || hwnd == hwnd_) return;
-        hwnd_ = hwnd;
-        style_ = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
-        if ((style_ & WS_EX_LAYERED) == 0) {
-            SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, style_ | WS_EX_LAYERED);
-            addedLayered_ = true;
-        }
-        SetLayeredWindowAttributes(hwnd_, 0, 0, LWA_ALPHA);
-    }
-
-private:
-    HWND hwnd_ = nullptr;
-    LONG_PTR style_ = 0;
-    bool addedLayered_ = false;
 };
 
 long long MillisSince(const ULONGLONG start) { return static_cast<long long>(GetTickCount64() - start); }
@@ -300,6 +274,284 @@ bool InvokeElement(IUIAutomationElement* element) {
     return SUCCEEDED(hr);
 }
 
+// ---- the press itself, which is a REAL CLICK -----------------------------------------------------------
+//
+// The route changed on 2026-10-15, and this is the research behind the change (HANDOFF 8.79/8.80, and the
+// review thread's 15th to 17th rounds, which were asked with this project's own measurements):
+//
+//   * the buttons the shell publishes for its tray icons do not reliably carry an Invoke pattern at all,
+//     and where they do (`GetCurrentPatternAs` succeeding) the Invoke can answer S_OK while the
+//     application never hears about it -- the "tray" half of a tray application listens for the SHELL'S
+//     forwarded mouse behaviour, not for an automation call on a button;
+//   * every real-world tool that does this programmatically (AutoHotkey's tray scripts, TrayStatus,
+//     TranslucentTB) reproduces exactly that: find the icon's screen rectangle, put the POINTER on it, and
+//     send the button down and up;
+//   * our own bar is a TOPMOST window over the same band, and an alpha-0 layered window still takes part in
+//     hit testing -- alpha hides the pixels, not the window -- so what is under the point has to be
+//     MEASURED before the click, and the bar has to step out of the way if it turns out to be us.
+//
+// `mouse_event` and not `SendInput`: the right-click route was measured working with it (see the history in
+// PressOnRect), and the two go through the same kernel input path. The pointer genuinely moves, which is a
+// trade the user accepted in exchange for the press working at all -- it is put back straight afterwards.
+
+// What would receive a click at `point`, in words, and whether that window is this bar's own.
+void DescribeWindowAt(POINT point, wchar_t* out, size_t capacity, bool* isOurs) {
+    if (out && capacity > 0) out[0] = L'\0';
+    if (isOurs) *isOurs = false;
+    const HWND under = WindowFromPoint(point);
+    if (!under) {
+        if (out && capacity > 0) wcsncpy_s(out, capacity, L"nothing (no window is there)", _TRUNCATE);
+        return;
+    }
+    wchar_t cls[96] = {};
+    GetClassNameW(under, cls, 96);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(under, &pid);
+    const bool ours = pid == GetCurrentProcessId();
+    if (isOurs) *isOurs = ours;
+    if (out && capacity > 0) {
+        std::swprintf(out, capacity, L"class '%ls' of pid %lu%ls", cls, pid,
+                      ours ? L" -- THIS BAR" : L"");
+    }
+}
+
+// Takes this bar out of the hit test for as long as a click is being delivered, and only when the window
+// under the click really is this bar's.
+//
+// `WS_EX_TRANSPARENT` and not an emptied window region: the region is also what the bar's own hit testing
+// and its input contract are built on, and zeroing it for a moment would flicker the bar itself. The bit is
+// put back when this object dies, which is after the click has been delivered AND the answer waited for --
+// input is queued, so a bit removed immediately after `mouse_event` could be gone before the click is
+// routed.
+class ClickThroughGuard {
+public:
+    explicit ClickThroughGuard(HWND window) : window_(window) {
+        if (!window_) return;
+        style_ = GetWindowLongPtrW(window_, GWL_EXSTYLE);
+        if ((style_ & WS_EX_TRANSPARENT) != 0) {
+            window_ = nullptr;   // it was already click-through: nothing of ours to put back
+            return;
+        }
+        SetWindowLongPtrW(window_, GWL_EXSTYLE, style_ | WS_EX_TRANSPARENT);
+        applied_ = true;
+    }
+    ~ClickThroughGuard() {
+        if (applied_) SetWindowLongPtrW(window_, GWL_EXSTYLE, style_);
+    }
+    ClickThroughGuard(const ClickThroughGuard&) = delete;
+    ClickThroughGuard& operator=(const ClickThroughGuard&) = delete;
+
+    bool applied() const { return applied_; }
+
+private:
+    HWND window_ = nullptr;
+    LONG_PTR style_ = 0;
+    bool applied_ = false;
+};
+
+// What the press knows about the desktop before it clicks, and what it measures the click against.
+//
+// MEASURED, 2026-10-15, because the plan this replaced was built on a wrong assumption about what a tray
+// menu IS on this machine: right-clicking WeGame's icon brings up a window of WeGame's OWN process (class
+// `TWINCONTROL`, 250x280 at 2136,100 -- the click was at 2394,109, and the menu's top-right corner sits
+// ten pixels from it). It is NOT a `#32768` Win32 popup menu; it is NOT in the UI Automation tree (asked
+// the whole desktop for ControlType=Menu: zero, while the menu was painted on the screen); and it does not
+// answer `WindowFromPoint` either (asked at the middle of it while it was painted: the desktop's
+// `SysListView32`). So a search by class name, by automation, or by hit testing cannot see a tray menu
+// here -- the only thing that can is the APPLICATION'S OWN WINDOW LIST, asked twice.
+struct WindowWatch {
+    std::vector<DWORD> pids;          // the application's processes
+    std::vector<HWND> appWindows;     // every window of theirs, message-only ones included
+    std::vector<HWND> appVisible;     // ... and which of those were already on screen
+};
+
+WindowWatch TakeWindowWatch(const TrayPressRequest& request) {
+    WindowWatch watch;
+    watch.pids = PidsForImage(request.exePath);
+    watch.appWindows = WindowsOf(watch.pids);
+    for (HWND window : watch.appWindows) {
+        if (IsWindowVisible(window)) watch.appVisible.push_back(window);
+    }
+    return watch;
+}
+
+// One look: has anything of the application's come up since the snapshot? The window, its class and its
+// rectangle are filled in when it has, and `out` describes it in words for the log.
+//
+// ... AND ONLY THE APPLICATION'S OWN WINDOWS COUNT. A first version also accepted "any new top-level window
+// of another process, or one wearing the popup-menu class `#32768`" -- and that version was measured
+// reporting a shell TOOLTIP as the application's answer: a left press on WeGame's icon produced
+// `Xaml_WindowedPopupClass ... 130x41`, which is the icon's own tooltip, while WeGame itself did nothing.
+// A log line that says the application answered when it did not is worse than one that says nothing, so the
+// question is now asked of the application and of nobody else. If a future shell draws a tray menu on the
+// application's behalf, this will say "nothing came up" about a menu that IS up, and that is the known and
+// documented limit of the criterion.
+bool AnyWindowCameUp(const WindowWatch& watch, wchar_t* out, size_t capacity, HWND* handle, RECT* rectOut) {
+    const auto describe = [out, capacity](const wchar_t* cls, const RECT& rect, const wchar_t* whose) {
+        if (out && capacity > 0) {
+            std::swprintf(out, capacity, L"its own '%ls' at %ld,%ld %ldx%ld (%ls)", cls, rect.left,
+                          rect.top, rect.right - rect.left, rect.bottom - rect.top, whose);
+        }
+    };
+    for (HWND window : WindowsOf(watch.pids)) {
+        if (!IsWindowVisible(window)) continue;
+        if (std::find(watch.appVisible.begin(), watch.appVisible.end(), window) != watch.appVisible.end()) {
+            continue;
+        }
+        RECT rect = {};
+        if (!GetWindowRect(window, &rect)) continue;
+        if (rect.right <= rect.left || rect.bottom <= rect.top) continue;
+        wchar_t cls[96] = {};
+        GetClassNameW(window, cls, 96);
+        describe(cls, rect, L"a window of its own that was not on screen before");
+        if (handle) *handle = window;
+        if (rectOut) *rectOut = rect;
+        return true;
+    }
+    return false;
+}
+
+// Watches for `budgetMs` for something to come up, and reports how long it took (-1 when nothing did).
+long long WaitForSomethingToComeUp(const WindowWatch& watch, long long budgetMs, wchar_t* describeOut,
+                                   size_t describeCapacity, HWND* windowOut, RECT* rectOut) {
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        if (AnyWindowCameUp(watch, describeOut, describeCapacity, windowOut, rectOut)) {
+            return MillisSince(start);
+        }
+        if (MillisSince(start) >= budgetMs) return -1;
+        Sleep(30);
+    }
+}
+
+// Whether the window the menu was seen in is still on screen, which is the question that decides whether
+// taking the panel away cost the user their menu (see PressOnRect).
+bool WindowIsStillUp(HWND window) {
+    return window && IsWindow(window) && IsWindowVisible(window);
+}
+
+// Did the application do anything? The rule this exists for is the review's: a clean HRESULT is not an
+// answer -- "the click never arrived" and "the click arrived and was ignored" look identical from here, and
+// only the application's own windows can tell them apart.
+//
+// TWO QUESTIONS, both observable from outside any application and neither fakeable by a press that
+// "succeeded": a window of the application's that came up, or the foreground moving to one of the
+// application's windows. The budget is 1.5 s rather than the 200 ms the plan asked for, and the reason is
+// measured: WeGame is a launcher, and the first run of this watch said "nothing" 200 ms after a click that
+// a longer look would have seen -- the pointer is already back where the user left it by then, so the wait
+// costs nobody anything.
+bool WatchApplicationForAnswer(const WindowWatch& watch, HWND foregroundBefore, wchar_t* out,
+                               size_t capacity) {
+    const auto say = [out, capacity](const wchar_t* text) {
+        if (out && capacity > 0) wcsncpy_s(out, capacity, text, _TRUNCATE);
+    };
+    say(L"nothing of its own appeared");
+    if (watch.pids.empty()) {
+        say(L"none of its processes is running");
+        return false;
+    }
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        if (AnyWindowCameUp(watch, out, capacity, nullptr, nullptr)) return true;
+        const HWND foreground = GetForegroundWindow();
+        if (foreground && foreground != foregroundBefore) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(foreground, &pid);
+            if (std::find(watch.pids.begin(), watch.pids.end(), pid) != watch.pids.end()) {
+                wchar_t cls[96] = {};
+                GetClassNameW(foreground, cls, 96);
+                if (out && capacity > 0) {
+                    std::swprintf(out, capacity, L"the foreground window is now its '%ls'", cls);
+                }
+                return true;
+            }
+        }
+        if (MillisSince(start) >= 1500) {
+            say(L"nothing of its own appeared, and the foreground did not move to it, in 1500 ms");
+            return false;
+        }
+        Sleep(30);
+    }
+}
+
+// Every fact the automation tree has about the button the shell publishes on the press's rectangle.
+//
+// ASKED FOR BY NAME in the review (round 15/16), because the previous round could not tell "nothing was
+// pressed" from "something was pressed and ignored": the element's own identity, whether it is on screen
+// and enabled, and which patterns it answers -- with the raw HRESULT of each -- are what a future session
+// needs to see, and none of them are in the log otherwise.
+void LogElementFacts(IUIAutomationElement* element, const wchar_t* prefix) {
+    if (!element) return;
+    BSTR name = nullptr;
+    if (SUCCEEDED(element->get_CurrentName(&name)) && name) {
+        LogAndPrint(L"  %ls: the shell's button is named '%ls'\n", prefix, name);
+        SysFreeString(name);
+    } else {
+        LogAndPrint(L"  %ls: the shell's button has no name\n", prefix);
+    }
+    CONTROLTYPEID type = 0;
+    element->get_CurrentControlType(&type);
+    RECT rect = {};
+    element->get_CurrentBoundingRectangle(&rect);
+    BOOL offscreen = FALSE;
+    BOOL enabled = FALSE;
+    element->get_CurrentIsOffscreen(&offscreen);
+    element->get_CurrentIsEnabled(&enabled);
+    wchar_t runtimeId[128] = {};
+    SAFEARRAY* ids = nullptr;
+    if (SUCCEEDED(element->GetRuntimeId(&ids)) && ids) {
+        long lower = 0;
+        long upper = -1;
+        SafeArrayGetLBound(ids, 1, &lower);
+        SafeArrayGetUBound(ids, 1, &upper);
+        int written = 0;
+        for (long index = lower; index <= upper && written < 8; ++index) {
+            int value = 0;
+            if (FAILED(SafeArrayGetElement(ids, &index, &value))) break;
+            written += std::swprintf(runtimeId + std::wcslen(runtimeId), 128 - std::wcslen(runtimeId),
+                                     L"%d ", value);
+        }
+        SafeArrayDestroy(ids);
+    }
+    LogAndPrint(L"  %ls: control type %d, at %ld,%ld %ldx%ld, offscreen=%d enabled=%d, runtime id "
+                L"[%ls]\n",
+                prefix, static_cast<int>(type), rect.left, rect.top, rect.right - rect.left,
+                rect.bottom - rect.top, offscreen ? 1 : 0, enabled ? 1 : 0, runtimeId);
+    // WHICH PATTERNS IT ANSWERS, with the HRESULT of each one: `Invoke` alone was the mistake this project
+    // paid for -- the pattern that is missing is as informative as the one that is there.
+    struct PatternName {
+        const wchar_t* label;
+        PATTERNID id;
+    };
+    const PatternName patterns[] = {
+        {L"Invoke", UIA_InvokePatternId},
+        {L"Toggle", UIA_TogglePatternId},
+        {L"LegacyIAccessible", UIA_LegacyIAccessiblePatternId},
+        {L"SelectionItem", UIA_SelectionItemPatternId},
+        {L"ExpandCollapse", UIA_ExpandCollapsePatternId},
+        {L"Value", UIA_ValuePatternId},
+    };
+    wchar_t yes[160] = {};
+    wchar_t no[160] = {};
+    size_t yesAt = 0;
+    size_t noAt = 0;
+    for (const PatternName& pattern : patterns) {
+        IUnknown* answered = nullptr;
+        const HRESULT hr = element->GetCurrentPattern(pattern.id, &answered);
+        const bool available = SUCCEEDED(hr) && answered != nullptr;
+        if (answered) answered->Release();
+        wchar_t* target = available ? yes : no;
+        size_t* at = available ? &yesAt : &noAt;
+        const size_t room = sizeof(yes) / sizeof(wchar_t) - *at;
+        if (room <= 4) break;
+        const int written = std::swprintf(target + *at, room, L"%ls ", pattern.label);
+        if (written > 0) {
+            *at += static_cast<size_t>(written);
+        }
+    }
+    LogAndPrint(L"  %ls: patterns available [%ls], not available [%ls]\n", prefix, yes, no);
+}
+
 // How many buttons of the shell's overflow flyout are inside `element`. Zero for the flyout's window when
 // it is closed -- and that window EXISTS while closed (measured: it is in the desktop's window list,
 // hidden, with the same rectangle it has when open), so "a window of that class is present" is not the
@@ -370,15 +622,32 @@ IUIAutomationElement* FindOverflowFlyout(IUIAutomation* automation) {
 
 bool TrayPressInFlight() { return g_pressInFlight.load(); }
 
-bool TrayPressCleanupPending() { return g_cleanupTaskbar.load() != nullptr; }
+bool TrayPressCleanupPending() {
+    return g_cleanupTaskbar.load() != nullptr || g_cleanupPanel.load() != nullptr;
+}
 bool TrayPressFinishCleanup() {
     const HWND taskbar = g_cleanupTaskbar.exchange(nullptr);
-    if (!taskbar) return false;
-    const LONG_PTR style = g_cleanupStyle.load();
-    ShowWindow(taskbar, SW_HIDE);
-    SetWindowLongPtrW(taskbar, GWL_EXSTYLE, style);
-    SetLayeredWindowAttributes(taskbar, 0, 255, LWA_ALPHA);
-    return true;
+    if (taskbar) {
+        const LONG_PTR style = g_cleanupStyle.load();
+        ShowWindow(taskbar, SW_HIDE);
+        SetWindowLongPtrW(taskbar, GWL_EXSTYLE, style);
+        SetLayeredWindowAttributes(taskbar, 0, 255, LWA_ALPHA);
+    }
+    // THE PANEL ONLY GOES BACK ONCE THE SHELL HAS CLOSED IT. While the application's menu is up the panel
+    // must stay invisible -- its surface is the icon grid, and restoring the alpha would paint that grid
+    // over the menu -- so this part of the cleanup keeps asking, once per watchdog tick, until the shell
+    // hides the panel (measured: it hides it when the user dismisses the menu; it is not destroyed).
+    const HWND panel = g_cleanupPanel.load();
+    if (panel) {
+        if (!IsWindow(panel) || !IsWindowVisible(panel)) {
+            if (g_cleanupPanelUnlayer.load()) {
+                SetWindowLongPtrW(panel, GWL_EXSTYLE, g_cleanupPanelStyle.load());
+            }
+            SetLayeredWindowAttributes(panel, 0, 255, LWA_ALPHA);
+            g_cleanupPanel.store(nullptr);
+        }
+    }
+    return taskbar != nullptr;
 }
 
 TrayStage::~TrayStage() { Reset(); }
@@ -397,12 +666,23 @@ void TrayStage::Reset() {
     // panel closed. So after a right click the panel is left to the shell, which closes it when the user
     // picks an item or clicks away, and only the taskbar is put back here.
     if (weOpenedFlyout_ && chevron_ && !rightClicked_) {
-        // A moment for what the press opened to be up first -- longer for a menu, which the application
-        // creates just after the click is delivered and which is dismissed if the panel it was opened from
-        // disappears underneath it; a window does not care.
+        // A moment for what the press opened to be up first.
         Sleep(50);
-        InvokeElement(static_cast<IUIAutomationElement*>(chevron_));
-        Sleep(120);
+        // ... AND ONLY IF THE SHELL HAS NOT ALREADY CLOSED IT ITSELF. The chevron is a TOGGLE, and the
+        // shell closes the panel by itself when a tray icon in it is clicked -- so pressing the chevron
+        // without asking first re-OPENS the panel we came to close, which is a state the next hand-opened
+        // menu would pay for. Measured 2026-10-15: which of the two it is varies, so it is asked.
+        if (PanelStillShowing()) {
+            InvokeElement(static_cast<IUIAutomationElement*>(chevron_));
+            // THE VERDICT IS WAITED FOR, not read once: the shell animates the panel away, so a single
+            // look a tenth of a second later says "still showing" about a panel that is on its way out.
+            // Measured 2026-10-15: this line used to read "it is STILL showing" on every press.
+            for (int attempt = 0; attempt < 20 && PanelStillShowing(); ++attempt) Sleep(30);
+            LogAndPrint("  tray stage: the panel was still up, so the chevron was pressed to close it "
+                        "(%ls)\n", PanelStillShowing() ? L"it is STILL showing" : L"closed");
+        } else {
+            LogAndPrint("  tray stage: the shell had already closed the panel itself\n");
+        }
     }
     if (chevron_) static_cast<IUIAutomationElement*>(chevron_)->Release();
     if (flyoutElement_) static_cast<IUIAutomationElement*>(flyoutElement_)->Release();
@@ -415,16 +695,27 @@ void TrayStage::Reset() {
     flyoutElement_ = nullptr;
     automation_ = nullptr;
     if (flyoutWindow_) {
-        // Back where the shell had it, so the panel is where the shell thinks it is the next time somebody
-        // opens it by hand.
-        SetWindowPos(flyoutWindow_, nullptr, flyoutHome_.left, flyoutHome_.top, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        // The alpha goes back, in both kinds of press: after a LEFT press the panel is on its way out (the
-        // chevron was pressed just above), and after a RIGHT press it was already put back for the menu to
-        // live on (see PressOnRect) and the shell owns it from there.
-        SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
-        if (flyoutLayered_) {
-            SetWindowLongPtrW(flyoutWindow_, GWL_EXSTYLE, flyoutStyle_);
+        // THE PANEL IS NOT MOVED. It used to be "put back where the shell had it" through a field that was
+        // never assigned, so the shell's overflow panel ended up at 0,0 on every press -- and the
+        // application's own menu, which the shell anchors to that panel, went to the top-left corner of the
+        // screen with it, grid and all (the user's screenshot of 2026-10-15). Nothing here may move it: the
+        // icon rectangles a press is aimed with are screen coordinates inside it, and the menu's place is
+        // derived from it.
+        if (rightClicked_ && weOpenedFlyout_) {
+            // The menu is up on the panel, so the panel stays invisible until the shell closes it, and its
+            // style and alpha are handed to the frame loop -- see TrayPressFinishCleanup. Restoring them
+            // here would paint the icon grid over the menu the user just asked for.
+            g_cleanupPanelStyle.store(flyoutStyle_);
+            g_cleanupPanelUnlayer.store(flyoutLayered_);
+            g_cleanupPanel.store(flyoutWindow_);
+        } else {
+            // A left press: the panel was closed just above (or the shell closed it), so putting its alpha
+            // and its extended style back cannot be seen by anybody, and leaving an alpha of 0 on somebody
+            // else's window is not ours to keep.
+            SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
+            if (flyoutLayered_) {
+                SetWindowLongPtrW(flyoutWindow_, GWL_EXSTYLE, flyoutStyle_);
+            }
         }
         flyoutLayered_ = false;
         flyoutWindow_ = nullptr;
@@ -456,30 +747,36 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     };
     say(L"");
 
+    const PressSwitches switches = ReadPressSwitches();
+    visibleRun_ = switches.visible;
+
     // Makes the overflow panel invisible. Called for the window the instant its class name answers, and
     // again every time UI Automation sees the element while it slides, and once more after it has settled:
     // see the note where it is first used for why the repetition is the whole trick.
-    const auto hideWindow = [this](HWND window) {
+    // ... AND IT IS ALSO WHERE THE PANEL'S WINDOW IS REMEMBERED, which has to happen in every mode: Reset
+    // needs the handle and the style it had, whether or not this run ever changed the alpha.
+    const auto stagePanelWindow = [this](HWND window) {
         if (!window) return;
         if (window != flyoutWindow_) {
             flyoutWindow_ = window;
             flyoutStyle_ = GetWindowLongPtrW(window, GWL_EXSTYLE);
-            if ((flyoutStyle_ & WS_EX_LAYERED) == 0) {
+            if (!visibleRun_ && (flyoutStyle_ & WS_EX_LAYERED) == 0) {
                 SetWindowLongPtrW(window, GWL_EXSTYLE, flyoutStyle_ | WS_EX_LAYERED);
                 flyoutLayered_ = true;
             }
         }
+        if (visibleRun_) return;   // the measurement mode: the shell's panel is left exactly as it is
         SetLayeredWindowAttributes(window, 0, 0, LWA_ALPHA);
     };
     const auto hidePanel = [&](IUIAutomationElement* element) {
         if (!element) return;
         if (flyoutWindow_) {
-            hideWindow(flyoutWindow_);
+            stagePanelWindow(flyoutWindow_);
             return;
         }
         UIA_HWND native = nullptr;
         if (SUCCEEDED(element->get_CurrentNativeWindowHandle(&native)) && native) {
-            hideWindow(reinterpret_cast<HWND>(native));
+            stagePanelWindow(reinterpret_cast<HWND>(native));
         }
     };
 
@@ -493,11 +790,11 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     // exist, and the user must not see it. See the header for the measurement behind alpha 0.
     style_ = GetWindowLongPtrW(taskbar_, GWL_EXSTYLE);
     wasVisible_ = IsWindowVisible(taskbar_) != FALSE;
-    if ((style_ & WS_EX_LAYERED) == 0) {
+    if (!visibleRun_ && (style_ & WS_EX_LAYERED) == 0) {
         SetWindowLongPtrW(taskbar_, GWL_EXSTYLE, style_ | WS_EX_LAYERED);
         layered_ = true;
     }
-    SetLayeredWindowAttributes(taskbar_, 0, 0, LWA_ALPHA);
+    if (!visibleRun_) SetLayeredWindowAttributes(taskbar_, 0, 0, LWA_ALPHA);
     // SW_SHOWNA: shown, not activated. Activating another process's window would take the focus away from
     // whatever the user is typing in.
     ShowWindow(taskbar_, SW_SHOWNA);
@@ -564,7 +861,7 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
             Sleep(1);
             HWND panelWindow =
                 FindWindowExW(nullptr, nullptr, L"TopLevelWindowForOverflowXamlIsland", nullptr);
-            if (panelWindow) hideWindow(panelWindow);
+            if (panelWindow) stagePanelWindow(panelWindow);
             if ((attempt % 5) == 0) {
                 flyout = FindOverflowFlyout(automation);
                 if (flyout) hidePanel(flyout);
@@ -594,8 +891,11 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
     // The child window that paints the island (`Windows.UI.Composition.DesktopWindowContentBridge`, listed
     // by that probe) is not touched: the parent's alpha is what does it.
     hidePanel(flyout);
-    LogAndPrint("  tray stage: taskbar %p shown invisibly, overflow %p (%ls)\n",
-                reinterpret_cast<void*>(taskbar_), reinterpret_cast<void*>(flyoutWindow_),
+    LogAndPrint("  tray stage: taskbar %p %ls, overflow %p (%ls)\n",
+                reinterpret_cast<void*>(taskbar_),
+                visibleRun_ ? L"left ON SCREEN (ISLANDBAR_TRAY_PRESS_VISIBLE)"
+                            : L"shown invisibly",
+                reinterpret_cast<void*>(flyoutWindow_),
                 flyoutWindow_ ? L"found" : L"not found by UI Automation");
 
     // ... AND LET IT STOP MOVING. The panel slides into place, and a rectangle read while it is moving is
@@ -617,8 +917,10 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
         // not match the button that ends up there.
         if (stableReads < 3 || GetTickCount64() - flyoutSeen < 150) Sleep(25);
     }
-    // Already the panel's NEW place: it was moved off the screen before this loop started, and the icons
-    // move with their window.
+    // THE PANEL'S OWN PLACE, and it stays that way for the whole press: the icon rectangles below are
+    // screen coordinates inside it, and the application's menu -- which the shell anchors to this panel --
+    // is placed from it. (An earlier version moved the panel off the screen before this loop and wrote
+    // this comment about "its NEW place"; the move is gone and so is the reason for it.)
     flyoutRect_ = current;
 
     // ... AND NOW THE PANEL CAN BE MADE INVISIBLE -- after it has settled, which is the whole difference.
@@ -640,9 +942,13 @@ bool TrayStage::Begin(wchar_t* note, size_t noteCapacity) {
         // Once more, now that the shell has stopped touching it: this is the one that is guaranteed to
         // survive, and the ones during the slide only shorten the part a user could have seen.
         hidePanel(flyout);
-        LogAndPrint("  tray stage: the overflow panel was made invisible after it settled (%p, %ls added)\n",
+        LogAndPrint("  tray stage: %ls (%p, %ls added)\n",
+                    visibleRun_ ? L"the overflow panel is ON SCREEN for this run, untouched"
+                                : L"the overflow panel was made invisible after it settled",
                     reinterpret_cast<void*>(flyoutWindow_), flyoutLayered_ ? L"layered bit" : L"no");
     }
+    // From here on every log line of this press can say how far into it it happened.
+    begunAt_ = GetTickCount64();
     return true;
 }
 
@@ -699,76 +1005,214 @@ bool TrayStage::IconRect(const TrayPressRequest& request, RECT* out) const {
     return false;
 }
 
-TrayPressResult TrayStage::PressOnRect(const RECT& rect, bool press, bool rightClick, wchar_t* shellName,
-                                      size_t shellNameCapacity) {
+long long TrayStage::SinceBegin() const { return begunAt_ ? MillisSince(begunAt_) : 0; }
+
+void TrayStage::ShowPanelForClick() {
+    if (!flyoutWindow_ || visibleRun_) return;
+    SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
+    LogAndPrint("  tray press: the panel was put back on screen for the click (%lld ms in)\n",
+                SinceBegin());
+}
+
+void TrayStage::HidePanelAfterClick() {
+    if (!flyoutWindow_ || visibleRun_) return;
+    SetLayeredWindowAttributes(flyoutWindow_, 0, 0, LWA_ALPHA);
+    // ... AND AGAIN, A FEW TIMES, because the shell re-paints and re-shows this panel whenever it is
+    // animating it -- the same behaviour Begin fights while the panel slides in. Measured with
+    // scripts/measure-tray-panel.ps1 (which samples the panel's own pixels through a whole press): after
+    // this call the panel's area keeps reading the wallpaper (mean 42 of 255) for the rest of the press,
+    // and the only painted samples in a whole press are the 25-40 ms of the shell's own slide-in.
+    //
+    // SO THIS DOES NOT BUY THE SILENCE IT WAS ADDED FOR -- the slide-in is painted before anybody gets
+    // here. It is kept because the alternative was measured and is worse in the other direction: without
+    // it a press that leaves the panel up (a right click, whose menu the shell keeps) can have the shell
+    // re-show the icon grid after this function returns, and re-applying the alpha is the only lever this
+    // file has ever found on that window.
+    const HWND window = flyoutWindow_;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        Sleep(45);
+        SetLayeredWindowAttributes(window, 0, 0, LWA_ALPHA);
+    }
+    LogAndPrint("  tray press: the panel was taken off the screen again (%lld ms in)\n", SinceBegin());
+}
+
+bool TrayStage::PanelStillShowing() const {
+    return flyoutWindow_ != nullptr && IsWindowVisible(flyoutWindow_) != FALSE;
+}
+
+TrayPressResult TrayStage::PressOnRect(const TrayPressRequest& request, const RECT& rect, bool press,
+                                       bool rightClick, wchar_t* shellName, size_t shellNameCapacity,
+                                       TrayPressOutcome* outcome) {
     IUIAutomation* automation = static_cast<IUIAutomation*>(automation_);
     IUIAutomationElement* flyout = static_cast<IUIAutomationElement*>(flyoutElement_);
     if (!automation || !flyout) return TrayPressResult::NoElement;
 
+    // THE BUTTON ON THAT RECTANGLE IS STILL LOOKED FOR, and it is the only thing UI Automation is used for
+    // now: not for its Invoke (see the note at the top of the helpers above), but because "there is a
+    // button of the
+    // shell's exactly here" is what says the rectangle is real rather than the chevron's slot handed out to
+    // every icon, and because the shell's own name for the icon is the one fact about it that the registry
+    // copy does not have. A rectangle with nothing on it is reported rather than clicked at.
     IUIAutomationElement* button =
-        ElementOnRect(automation, flyout, rect, 4, !rightClick, shellName, shellNameCapacity, nullptr);
+        ElementOnRect(automation, flyout, rect, 4, false, shellName, shellNameCapacity, nullptr);
     if (!button) {
-        // The right-click path does not need an Invoke pattern, so the element is looked for without one
-        // and its absence is then the honest answer.
         return TrayPressResult::NoElement;
     }
+    if (press && outcome) LogElementFacts(button, L"tray press");
 
+    const PressSwitches switches = ReadPressSwitches();
     TrayPressResult result = TrayPressResult::Found;
     rightClicked_ = press && rightClick;
     if (press && !rightClick) {
-        result = InvokeElement(button) ? TrayPressResult::Pressed : TrayPressResult::Refused;
-    } else if (press) {
-        // THE APPLICATION'S OWN MENU -- the menu with 退出 in it -- and this is the one place the bar
-        // synthesises real input.
-        //
-        // Three routes were measured. UI Automation has no right-click pattern at all. A POSTED right
-        // button message leaves the application silent: the panel's icons are not driven from window
-        // messages, so nothing opens and nothing complains. What does work is a real right click AT THE
-        // ICON'S OWN POSITION, which is what a user's right click is -- so the pointer is moved there,
-        // clicked, and put straight back where it was found, and the only thing that stays on screen is the
-        // menu that was asked for.
-        //
-        // ... AND THE PANEL HAS TO COME BACK FOR IT. That menu is drawn INSIDE the panel's own surface --
-        // measured when this feature was built ("closing the panel dismisses the menu with it"), and
-        // measured again from the other side while the panel was being hidden for left presses: a poll for
-        // `#32768` (the class of a Win32 popup menu) across a whole right press found NOTHING, and no menu
-        // appeared until the panel's alpha was put back. The invisibility that makes a left press clean is
-        // therefore undone here on purpose: the user asked for this menu, and it comes with its surface.
-        if (flyoutWindow_) {
-            SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
-            LogAndPrint("  tray press: the panel was shown again for the menu that lives on it\n");
-            fflush(stdout);
-        }
-        POINT saved = {};
-        if (!GetCursorPos(&saved)) {
-            result = TrayPressResult::Refused;
+        if (switches.invokeLeft) {
+            // THE ROUTE THIS FILE USED TO TAKE, behind a switch so the two can be measured against each
+            // other without a rebuild. It is what the round-14 experiment ran: the element is found, the
+            // Invoke reports S_OK or not, and the application does whatever it does about it -- which on
+            // this machine was nothing at all, three presses in a row.
+            if (outcome) outcome->route = L"UI Automation's Invoke (ISLANDBAR_TRAY_PRESS_ROUTE=invoke)";
+            result = InvokeElement(button) ? TrayPressResult::Pressed : TrayPressResult::Refused;
+            if (outcome) outcome->clickMs = SinceBegin();
         } else {
-            const POINT centre = {(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
-            SetCursorPos(centre.x, centre.y);
-            // No click without the pointer actually being there, and no click without a moment for the
-            // move to land: a right click is routed by position, so a click that arrives before the move
-            // is a click on whatever the pointer used to be over.
-            Sleep(30);
-            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-            Sleep(30);
-            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-            // ... AND INVISIBLE AGAIN THE MOMENT THE CLICK IS DELIVERED. The panel only had to be real for
-            // the instant it took to route that click; the shell takes it down as soon as the application's
-            // menu is up (measured: the panel's window is gone by the time the menu is on screen), so from
-            // here it is either closing or closed -- and hiding it now keeps the icon grid off the screen
-            // for the part of that interval a user could otherwise watch.
-            if (flyoutWindow_) {
-                SetLayeredWindowAttributes(flyoutWindow_, 0, 0, LWA_ALPHA);
-            }
-            // Back at once: the menu belongs to the application and does not follow the pointer, so this
-            // does not close it -- and the user's hand is where they left it.
-            Sleep(60);
-            SetCursorPos(saved.x, saved.y);
-            result = TrayPressResult::Pressed;
+            result = ClickOnRect(request, rect, false, outcome);
         }
+    } else if (press) {
+        result = ClickOnRect(request, rect, true, outcome);
     }
     button->Release();
     return result;
+}
+
+// ONE PRESS, DELIVERED AS A REAL CLICK -- both buttons, since 2026-10-15.
+//
+// The sequence, in the order the plan of that round fixed it:
+//
+//   1. the panel is put back on screen (it is alpha 0 for the rest of the press) -- measured: with the
+//      panel invisible the application's menu does not appear at all, and a click has to be routed by
+//      position into the window the icon lives in;
+//   2. what is UNDER the point is measured before anything is clicked. This bar is TOPMOST and covers the
+//      same band as the shell's tray; an alpha-0 layered window is still hit-tested, so if the answer is
+//      "this bar" the bar steps out of the way for the length of the delivery (ClickThroughGuard);
+//   3. the pointer is moved to the icon's own centre, the button goes down and up -- a real click, which is
+//      what a tray application is listening for (see the note at the top of the helpers above);
+//   4. LEFT: the panel goes off the screen again at once, and the application is watched for 200 ms for a
+//      window of its own or a foreground change, because a clean return is not an answer;
+//      RIGHT: the panel is LEFT UP until the application's menu has actually appeared (measured: hiding it
+//      first is what the round-15 note blamed for the flash, and an ownerless menu is worse than a flash),
+//      and only then is it taken off the screen again;
+//   5. the pointer is put back where the user's hand was, since the menu belongs to the application and
+//      does not follow the pointer.
+TrayPressResult TrayStage::ClickOnRect(const TrayPressRequest& request, const RECT& rect, bool rightClick,
+                                       TrayPressOutcome* outcome) {
+    const PressSwitches switches = ReadPressSwitches();
+    POINT saved = {};
+    if (!GetCursorPos(&saved)) return TrayPressResult::Refused;
+    const POINT centre = {(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+
+    if (outcome) {
+        outcome->route = L"a real click";
+        outcome->panelShownMs = 0;
+    }
+    if (switches.noReveal) {
+        LogAndPrint("  tray press: the panel is being left invisible for the click "
+                    "(ISLANDBAR_TRAY_PRESS_NO_REVEAL)\n");
+    } else if (visibleRun_) {
+        LogAndPrint("  tray press: nothing was hidden in this run, so nothing has to be revealed "
+                    "(ISLANDBAR_TRAY_PRESS_VISIBLE)\n");
+    } else {
+        ShowPanelForClick();
+        if (outcome) outcome->panelShownMs = SinceBegin();
+    }
+
+    // Measured, not assumed: what would receive this click.
+    wchar_t target[160] = {};
+    bool ours = false;
+    DescribeWindowAt(centre, target, sizeof(target) / sizeof(wchar_t), &ours);
+    const HWND under = ours ? WindowFromPoint(centre) : nullptr;
+    LogAndPrint(L"  tray press: the click at %ld,%ld is aimed at %ls\n", centre.x, centre.y, target);
+    if (outcome) {
+        wcsncpy_s(outcome->target, sizeof(outcome->target) / sizeof(wchar_t), target, _TRUNCATE);
+        outcome->targetIsOurs = ours;
+    }
+    {
+        // The guard lives for the whole delivery AND the wait: input is queued, so a bit taken off straight
+        // after `mouse_event` could be gone before the click is routed.
+        ClickThroughGuard guard(under);
+        if (guard.applied()) {
+            wchar_t after[160] = {};
+            bool stillOurs = false;
+            DescribeWindowAt(centre, after, sizeof(after) / sizeof(wchar_t), &stillOurs);
+            LogAndPrint(L"  tray press: this bar was under the click, so it was made click-through; the "
+                        L"point now answers %ls%s\n",
+                        after, stillOurs ? L" -- the bit did NOT take effect" : L"");
+        }
+        if (outcome) outcome->madeClickThrough = guard.applied();
+
+        // The desktop as it was before the click: what "the menu appeared" and "the application answered"
+        // are both measured against. See WindowWatch for why this, and not a search for a menu window.
+        const WindowWatch watch = TakeWindowWatch(request);
+        const HWND foregroundBefore = GetForegroundWindow();
+
+        SetCursorPos(centre.x, centre.y);
+        // No click without the pointer actually being there, and no click without a moment for the move to
+        // land: the click is routed by position, so one that arrives before the move lands on whatever the
+        // pointer used to be over.
+        Sleep(30);
+        mouse_event(rightClick ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        Sleep(30);
+        mouse_event(rightClick ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        if (outcome) outcome->clickMs = SinceBegin();
+
+        if (rightClick) {
+            // THE MENU FIRST, THE PANEL AFTERWARDS. Six hundred milliseconds is the review's budget, and the
+            // measured ~245 ms for a menu to reach the screen says it is generous.
+            wchar_t menuClass[160] = {};
+            RECT menuRect = {};
+            HWND menuWindow = nullptr;
+            const long long waited = WaitForSomethingToComeUp(watch, 600, menuClass,
+                                                              sizeof(menuClass) / sizeof(wchar_t),
+                                                              &menuWindow, &menuRect);
+            if (outcome) {
+                outcome->menuWaitMs = waited;
+                wcsncpy_s(outcome->menuClass, sizeof(outcome->menuClass) / sizeof(wchar_t), menuClass,
+                          _TRUNCATE);
+                outcome->menuRect = menuRect;
+            }
+            if (waited < 0) {
+                LogAndPrint("  tray press: nothing of the application's came up within 600 ms of the "
+                            "click, so no menu was seen\n");
+            } else {
+                LogAndPrint(L"  tray press: something came up %lld ms after the click: %ls -- the icon's "
+                            L"own rectangle is %ld,%ld %ldx%ld and the click was at %ld,%ld\n",
+                            waited, menuClass, rect.left, rect.top, rect.right - rect.left,
+                            rect.bottom - rect.top, centre.x, centre.y);
+            }
+            HidePanelAfterClick();
+            if (outcome && !visibleRun_) outcome->panelHiddenMs = SinceBegin();
+            // ... AND IF THE MENU WENT WITH THE PANEL, PUT THE PANEL BACK. The earlier measurement of this
+            // route said the menu is drawn inside the panel's own surface; the later one said a menu of the
+            // shell's (`#32768`) stays on screen while the panel is invisible. Both cannot be true of the
+            // same window, so the question is asked instead of assumed -- and a menu that vanished would be
+            // worse than the flash this is trying to remove.
+            if (waited >= 0 && !WindowIsStillUp(menuWindow)) {
+                LogAndPrint("  tray press: the menu went away with the panel -- it is drawn inside it, so "
+                            "the panel stays on screen until the user is done with it\n");
+                ShowPanelForClick();
+                if (outcome) outcome->panelHiddenMs = 0;
+            }
+        } else {
+            HidePanelAfterClick();
+            if (outcome && !visibleRun_) outcome->panelHiddenMs = SinceBegin();
+        }
+        Sleep(60);
+        SetCursorPos(saved.x, saved.y);
+        // ... AND ONLY NOW, with the pointer back where the user's hand was, is the application asked
+        // whether it noticed. See WatchApplicationForAnswer for why the wait is not 200 ms.
+        if (!rightClick && outcome) {
+            outcome->appAnswered = WatchApplicationForAnswer(
+                watch, foregroundBefore, outcome->answer, sizeof(outcome->answer) / sizeof(wchar_t));
+        }
+    }
+    return TrayPressResult::Pressed;
 }
 
 int IndexOfRectNear(const RECT* rects, int count, const RECT& wanted, int tolerancePx) {
@@ -830,8 +1274,8 @@ TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool press, bool
     // not, and that is the same question asked with the better answer. An icon in the tray PROPER is not a
     // UI Automation button at all (the taskbar's own tree holds its six system buttons and nothing else),
     // so it comes back as "nothing sits on that rectangle" -- which is the truth about it.
-    outcome.result = stage.PressOnRect(outcome.rect, press, rightClick, outcome.shellName,
-                                       sizeof(outcome.shellName) / sizeof(wchar_t));
+    outcome.result = stage.PressOnRect(request, outcome.rect, press, rightClick, outcome.shellName,
+                                       sizeof(outcome.shellName) / sizeof(wchar_t), &outcome);
     outcome.pressMs = MillisSince(pressStart);
     return outcome;
 }
