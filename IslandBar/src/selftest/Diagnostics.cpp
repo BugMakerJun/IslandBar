@@ -52,6 +52,7 @@
 #include "render/TextRenderer.h"
 #include "shell/TrayIcons.h"
 #include "shell/TrayPress.h"
+#include "shell/TrayLearn.h"   // CountCoveredIcons: how much of the tray a press can reach (see the tray checks)
 
 namespace island {
 namespace {
@@ -7147,95 +7148,33 @@ void TestMusicCardLayout() {
                 Check(count > 0, L"the tray list has something in it to press", detail);
 
                 int withIdentity = 0;
-                int answered = 0;
-                int firstAnswered = -1;
-                RECT firstRect = {};
-                // THE STAGE, because a rectangle only means something once the shell has laid its tray
-                // out: an icon in the overflow flyout has none until that flyout has been opened, and
-                // until then every query answers the chevron's own slot (2416,0 24x32 -- measured for all
-                // sixteen). Without this the numbers below would be a plausible lie. It is opened
-                // invisibly and put back by the stage's destructor.
-                TrayStage stage;
-                wchar_t stageNote[160] = {};
-                const bool staged = stage.Begin(stageNote, 160);
                 for (int i = 0; i < count; ++i) {
                     const TrayIcon& icon = live.At(i);
                     if (icon.hasUid || icon.hasGuid) ++withIdentity;
-                    TrayPressRequest request = {};
-                    request.uid = icon.uid;
-                    request.hasUid = icon.hasUid;
-                    request.hasGuid = icon.hasGuid;
-                    request.guid = icon.guid;
-                    wcsncpy_s(request.exePath, 260, live.ExePathAt(i), _TRUNCATE);
-                    RECT rect = {};
-                    if (staged && stage.IconRect(request, &rect)) {
-                        ++answered;
-                        if (firstAnswered < 0) {
-                            firstAnswered = i;
-                            firstRect = rect;
-                        }
-                    }
                 }
-                std::swprintf(detail, 256,
-                              L"%d of %d carry a UID or a GUID; %d the shell reports a rectangle for",
-                              withIdentity, count, answered);
+                std::swprintf(detail, 256, L"%d of %d carry a UID or a GUID", withIdentity, count);
                 Check(withIdentity == count,
-                      L"every icon in the card carries the identity the shell needs to place it",
+                      L"every icon in the card carries the identity an application registers it with",
                       detail);
-                // WHERE the icons are can only be asked where the applications can be SEEN. A self-test
-                // started from the project tree inherits that directory's low integrity label, and its
-                // process snapshot then holds three processes instead of three hundred (measured: the log
-                // line for this very check said "3 of 3 carry a UID or a GUID; 0 the shell reports a
-                // rectangle for"). So the answer is asked for, printed, and only ASSERTED when the machine
-                // is visible to this process -- a check that quietly passes on a restricted snapshot would
-                // be worth less than this note.
-                //
-                // Deliberately not "all of them" either: an icon whose application is running but which the
-                // shell is not displaying has no rectangle, and that is a fact about the tray (four of the
-                // sixteen on this machine) rather than a failure.
-                if (live.ProcessesSeen() >= 50) {
-                    Check(answered > 0 && answered <= count,
-                          L"the shell places the icons it displays, and none of the ones it does not",
-                          detail);
-                } else {
-                    Info(L"the tray is not visible from this process",
-                         L"the process snapshot holds only a few processes (low integrity), so the shell "
-                         L"cannot be asked about these icons -- run the bar itself to see it answered");
-                }
 
-                // And the rectangle it gives is matched by POSITION, which is what replaces matching names
-                // (the shell calls WeChat's icon " 微信" while the bar calls it "Weixin.exe").
-                RECT candidates[4] = {};
-                candidates[0] = firstRect;
-                candidates[1] = firstRect;
-                candidates[2] = firstRect;
-                candidates[3] = firstRect;
-                candidates[1].left += 7;      // a different cell: seven pixels to the right
-                candidates[2].top += 40;      // a different row
-                candidates[3].left += 1;      // the same cell, one pixel out (the shell rounds)
+                // ... AND WHAT A PRESS NEEDS IS THE APPLICATION'S CALLBACK, not a position: the icons that
+                // have one are pressable, the rest open this bar's own menu (see TrayPress.h). Asserted
+                // loosely on purpose -- how many are learned depends on what is running and on what allows a
+                // module inside it, so the number is reported rather than demanded.
+                const int covered = CountCoveredIcons(live);
                 std::swprintf(detail, 256,
-                              L"looking for %ld,%ld %ldx%ld among four candidates",
-                              firstRect.left, firstRect.top, firstRect.right - firstRect.left,
-                              firstRect.bottom - firstRect.top);
-                Check(IndexOfRectNear(candidates, 4, firstRect, 2) == 0 ||
-                          IndexOfRectNear(candidates, 4, firstRect, 2) == 3,
-                      L"the rectangle the shell gives matches the element that sits on it", detail);
-                Check(IndexOfRectNear(candidates, 1, candidates[1], 2) == -1,
-                      L"... and a cell seven pixels away is not that cell", detail);
-                Check(IndexOfRectNear(candidates, 1, candidates[2], 2) == -1,
-                      L"... nor is the one a row below", detail);
-                Check(IndexOfRectNear(candidates, 1, candidates[3], 2) == 0,
-                      L"... while a pixel of rounding is the same cell", detail);
-                Check(IndexOfRectNear(nullptr, 0, firstRect, 2) == -1,
-                      L"and nothing found is answered as nothing, not as the first", detail);
+                              L"%d of %d icon(s) have a learned callback (cache: %ls)", covered, count,
+                              L"tray_callbacks.txt");
+                Check(covered >= 0 && covered <= count,
+                      L"the callback cache answers for the tray it describes and for nobody else", detail);
+                Info(L"tray presses go by learned callback", detail);
             }
             {
                 // Every result has a sentence, because these are what the log shows a user who asks why a
                 // press did not work. A case the switch forgot would print "?".
                 const TrayPressResult all[] = {
-                    TrayPressResult::Pressed,  TrayPressResult::NotInShell,
-                    TrayPressResult::NoWindow, TrayPressResult::NoElement,
-                    TrayPressResult::NoTaskbar, TrayPressResult::Refused,
+                    TrayPressResult::Pressed, TrayPressResult::NoEntry, TrayPressResult::NoWindow,
+                    TrayPressResult::Refused,
                 };
                 bool named = true;
                 for (TrayPressResult result : all) {

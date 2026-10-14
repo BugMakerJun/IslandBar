@@ -31,6 +31,17 @@
 namespace island {
 namespace {
 
+// A GUID as the registry and the cache file spell it: braces, upper-case hex. Hand-written rather than
+// StringFromGUID2, which lives in ole32 and would add a dependency to a file that needs one call of it.
+std::wstring GuidText(const GUID& guid) {
+    wchar_t text[64] = {};
+    _snwprintf_s(text, 64, _TRUNCATE, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                 static_cast<unsigned long>(guid.Data1), guid.Data2, guid.Data3, guid.Data4[0],
+                 guid.Data4[1], guid.Data4[2], guid.Data4[3], guid.Data4[4], guid.Data4[5], guid.Data4[6],
+                 guid.Data4[7]);
+    return text;
+}
+
 const wchar_t* kCacheFile = L"tray_callbacks.txt";
 const wchar_t* kReportFile = L"tray_learned.txt";
 const wchar_t* kHookModule = L"island_tray_hook.dll";
@@ -211,7 +222,33 @@ struct Learned {
     std::wstring windowClass;
     unsigned uid = 0;
     unsigned version = 0;
+    std::wstring guid;   // "{...}" for an application that named its icon with a GUID instead of a uid
 };
+
+// THE ONE GLOBAL HOOK, HELD FOR THE WHOLE SESSION -- MYDOCKFINDER'S OWN MECHANISM, MEASURED ON THIS MACHINE.
+//
+// What was here before: one thread hook per thread of each running tray application, installed for the length
+// of a learning pass and then removed. It covers the applications that were running at that moment, it needs
+// a fresh pass every time a new application appears, and it has to be told to try again with a TaskbarCreated
+// broadcast. It also -- measured, 2026-10-15, and written up in HANDOFF 8.109 -- is what left Explorer and
+// wallpaper64.exe with import slots pointing at an unloaded module.
+//
+// What MyDockFinder does (HANDOFF 8.103, measured from its own binaries): `Dockmod.exe` calls
+// `SetWindowsHookExA` and its `dockmod64.dll` is then mapped in the shell AND in a list of applications,
+// including ones started later. ONE hook, installed once, and the operating system does the delivery to every
+// GUI process that pumps messages -- which is exactly the coverage this project has been trying to assemble
+// application by application.
+//
+// So: installed once at startup from the bar's main thread, never removed while the bar lives, and the module
+// pins itself in each process it lands in (TrayHook.cpp), so an application keeps reporting every later
+// registration even after the bar exits.
+//
+// The handle is never freed on purpose: freeing it would be the very thing that used to leave dangling import
+// slots behind. When this process dies the system removes the hook, and the pinned modules stay mapped and
+// inert in the applications that already have them.
+HHOOK g_globalHook = nullptr;
+HMODULE g_hookModule = nullptr;
+HHOOK GlobalHook() { return g_globalHook; }
 
 // The lines already in the cache: what this run must not duplicate, and what it may have to correct (an
 // application that changed its callback message).
@@ -227,8 +264,34 @@ std::vector<std::wstring> ReadCacheLines() {
     return lines;
 }
 
-// Whether a cache line belongs to (exe, uid). The file's own format: exe|message|window class|uid|...
-bool LineIsFor(const std::wstring& line, const std::wstring& exe, unsigned uid) {
+// The GUID a cache line carries, as the eighth field, or empty. The file's format:
+//
+//     exe|message|window class|uid|both|version|recipe|{GUID}
+//
+// and the GUID is written only for an application that named its icon with one (see TrayHook.cpp): such an
+// icon's uid is 0, and 0 is not an identity -- several icons of one application share it.
+std::wstring LineGuid(const std::wstring& line) {
+    if (line.empty() || line[0] == L'#') return std::wstring();
+    // BY SHAPE, NOT BY POSITION: the GUID is written after whatever else the line carries, and an entry with
+    // no left-press recipe has it in the seventh field while one with a recipe has it in the eighth. Measured
+    // the hard way -- a fixed field number silently never matched, and a GUID icon looked unpressable while
+    // its entry sat in the file.
+    size_t start = 0;
+    for (;;) {
+        const size_t bar = line.find(L'|', start);
+        if (bar == std::wstring::npos) return std::wstring();
+        start = bar + 1;
+        size_t end = line.find_first_of(L"|\r\n", start);
+        if (end == std::wstring::npos) end = line.size();
+        if (end > start + 2 && line[start] == L'{' && line[end - 1] == L'}') {
+            return line.substr(start, end - start);
+        }
+    }
+}
+
+// Whether a cache line belongs to this icon: the executable, and then EITHER the uid OR the GUID.
+bool LineIsFor(const std::wstring& line, const std::wstring& exe, unsigned uid,
+               const std::wstring& guid = std::wstring()) {
     if (line.empty() || line[0] == L'#') return false;
     const size_t first = line.find(L'|');
     const size_t second = first == std::wstring::npos ? std::wstring::npos : line.find(L'|', first + 1);
@@ -238,6 +301,8 @@ bool LineIsFor(const std::wstring& line, const std::wstring& exe, unsigned uid) 
     std::wstring name = line.substr(0, first);
     std::transform(name.begin(), name.end(), name.begin(), ::towlower);
     if (name != exe) return false;
+    const std::wstring lineGuid = LineGuid(line);
+    if (!guid.empty() || !lineGuid.empty()) return lineGuid == guid;
     const std::wstring uidText = line.substr(third + 1, fourth - third - 1);
     return static_cast<unsigned>(wcstoul(uidText.c_str(), nullptr, 10)) == uid;
 }
@@ -284,6 +349,8 @@ void HarvestReport(TrayLearnResult* result) {
                 if (!FieldNumber(line, L"uid", &uid, false)) continue;
                 if (!FieldNumber(line, L"msg", &message, true)) continue;
                 if (!FieldNumber(line, L"version", &version, false)) version = 0;
+                wchar_t guid[64] = {};
+                if (Field(line, L"guid", guid, 64) && guid[0] == L'-') guid[0] = 0;
                 if (message == 0) continue;
                 const HWND window = reinterpret_cast<HWND>(wcstoull(hwndText, nullptr, 16));
                 if (!window || !IsWindow(window)) continue;
@@ -294,6 +361,7 @@ void HarvestReport(TrayLearnResult* result) {
                 item.windowClass = cls;
                 item.uid = uid;
                 item.version = version;
+                item.guid = guid;
                 ++result->captured;
                 learned.push_back(item);
             }
@@ -307,10 +375,23 @@ void HarvestReport(TrayLearnResult* result) {
         bool replaced = false;
         bool duplicate = false;
         for (std::wstring& line : lines) {
-            if (!LineIsFor(line, item.exe, item.uid)) continue;
+            // THE SAME ICON, AND THAT IS NOT THE SAME QUESTION AS "THE SAME LINE" since GUIDs were added.
+            //
+            // A line written before this build knows nothing about the GUID (field 8 did not exist), and the
+            // identity a press matches on is the GUID -- so matching the merge on the GUID alone would fail to
+            // find that line and append a second one for the same icon, once per pass. Measured: Explorer's
+            // Bluetooth icon ended up in the cache four times before this rule existed. The merge therefore
+            // matches by executable and uid, and by GUID when both sides have one.
+            const bool sameUid = LineIsFor(line, item.exe, item.uid);
+            const std::wstring lineGuid = LineGuid(line);
+            const bool sameGuid = !item.guid.empty() && !lineGuid.empty() && lineGuid == item.guid;
+            const bool legacy = !item.guid.empty() && lineGuid.empty() && sameUid;
+            if (!LineIsFor(line, item.exe, item.uid, item.guid) && !sameGuid && !legacy) continue;
+            if (!item.guid.empty() && !lineGuid.empty() && lineGuid != item.guid) continue;
+            if (item.guid.empty() && !lineGuid.empty()) continue;
             // A line that says `click` is a verdict from a press: this application ignores its own posted
             // callback. Learning must not talk the press path back into trying again every session.
-            if (wcsstr(line.c_str(), L"|click") != nullptr) {
+            if (wcsstr(line.c_str(), L"|none") != nullptr || wcsstr(line.c_str(), L"|click") != nullptr) {
                 duplicate = true;
                 break;
             }
@@ -319,8 +400,9 @@ void HarvestReport(TrayLearnResult* result) {
                 break;
             }
             wchar_t fresh[512] = {};
-            _snwprintf_s(fresh, 512, _TRUNCATE, L"%ls|0x%04X|%ls|%u|both|%u\n", item.exe.c_str(),
-                         item.message, item.windowClass.c_str(), item.uid, item.version);
+            _snwprintf_s(fresh, 512, _TRUNCATE, L"%ls|0x%04X|%ls|%u|both|%u%ls%ls\n", item.exe.c_str(),
+                         item.message, item.windowClass.c_str(), item.uid, item.version,
+                         item.guid.empty() ? L"" : L"|", item.guid.c_str());
             line = fresh;
             replaced = true;
             break;
@@ -328,8 +410,9 @@ void HarvestReport(TrayLearnResult* result) {
         if (duplicate) continue;
         if (!replaced) {
             wchar_t fresh[512] = {};
-            _snwprintf_s(fresh, 512, _TRUNCATE, L"%ls|0x%04X|%ls|%u|both|%u\n", item.exe.c_str(),
-                         item.message, item.windowClass.c_str(), item.uid, item.version);
+            _snwprintf_s(fresh, 512, _TRUNCATE, L"%ls|0x%04X|%ls|%u|both|%u%ls%ls\n", item.exe.c_str(),
+                         item.message, item.windowClass.c_str(), item.uid, item.version,
+                         item.guid.empty() ? L"" : L"|", item.guid.c_str());
             lines.push_back(fresh);
         }
         ++result->newEntries;
@@ -351,18 +434,16 @@ int CountCoveredIcons(const TrayIcons& icons) {
     const std::vector<std::wstring> lines = ReadCacheLines();
     int covered = 0;
     for (int i = 0; i < icons.Count(); ++i) {
-        // AN ICON REGISTERED BY GUID IS NOT COUNTED, and that is a correction rather than a detail: its
-        // `uid` is 0 because the registry entry carries no UID, so it used to match ITSELF against any cached
-        // line for the same executable whose uid happened to be 0 -- on this machine, Explorer's Bluetooth
-        // icon. The press path refuses such an icon anyway (the v4 callback layout needs a uid to put in
-        // lParam), so counting it here only inflated the one number this project uses to decide whether the
-        // automatic route is carrying its weight.
-        if (!icons.At(i).hasUid) continue;
         const std::wstring exe = BaseNameLower(icons.ExePathAt(i));
         if (exe.empty()) continue;
         const TrayIcon& icon = icons.At(i);
+        // AN ICON REGISTERED BY GUID IS MATCHED BY THAT GUID, and until the module started reporting it that
+        // icon could not be matched at all: its uid is 0, its entry's uid is 0, and the first version of this
+        // function counted it as covered on the strength of that shared zero -- which on this machine meant
+        // Explorer's Bluetooth icon answering for Explorer's network and volume icons.
+        const std::wstring guidText = icon.hasGuid ? GuidText(icon.guid) : std::wstring();
         for (const std::wstring& line : lines) {
-            if (LineIsFor(line, exe, icon.uid)) {
+            if (LineIsFor(line, exe, icon.uid, guidText)) {
                 ++covered;
                 break;
             }
@@ -371,75 +452,79 @@ int CountCoveredIcons(const TrayIcons& icons) {
     return covered;
 }
 
+bool InstallTrayHook() {
+    if (g_globalHook) return true;
+
+    // --- where this bar and the module are ------------------------------------------------
+    wchar_t self[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, self, MAX_PATH) == 0) return false;
+    std::wstring modulePath = self;
+    const size_t slash = modulePath.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return false;
+    modulePath = modulePath.substr(0, slash + 1) + kHookModule;
+    // The staged copy, not the built file: see StageHookModule for why the file that gets loaded may not be
+    // the file a later build replaces.
+    modulePath = StageHookModule(modulePath);
+
+    if (!g_hookModule) {
+        g_hookModule = LoadLibraryW(modulePath.c_str());
+        if (!g_hookModule) {
+            LogAndPrint(L"  tray hook: no %ls next to the bar (%lu) -- nothing can be learned\n", kHookModule,
+                        GetLastError());
+            return false;
+        }
+    }
+    // THE ENTRY POINT MUST COME FROM THAT MODULE. A procedure address belonging to another binary is refused
+    // for a cross-process hook, and refused silently: measured, the module loaded into the target and the
+    // procedure was then never called once (HANDOFF 8.107).
+    FARPROC procedure = GetProcAddress(g_hookModule, "IslandTrayHookProc");
+    if (!procedure) {
+        LogAndPrint(L"  tray hook: %ls does not export IslandTrayHookProc\n", kHookModule);
+        return false;
+    }
+
+    // dwThreadId = 0: the whole desktop, which is the point. The module then follows every GUI process,
+    // including ones started long after this line ran.
+    g_globalHook = SetWindowsHookExW(WH_GETMESSAGE, reinterpret_cast<HOOKPROC>(procedure), g_hookModule, 0);
+    if (!g_globalHook) {
+        LogAndPrint(L"  tray hook: the global hook was REFUSED (%lu) -- every press keeps whatever the cache "
+                    L"already says, and applications are learned one at a time or not at all\n",
+                    GetLastError());
+        return false;
+    }
+    LogAndPrint(L"  tray hook: one global WH_GETMESSAGE hook installed from %ls -- the module now follows "
+                L"every GUI process, the ones running now and the ones started later\n",
+                modulePath.c_str());
+    return true;
+}
+
 TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     TrayLearnResult result;
     result.icons = icons.Count();
     const ULONGLONG start = GetTickCount64();
 
-    // --- where this bar and the module are ------------------------------------------------
-    wchar_t self[MAX_PATH] = {};
-    if (GetModuleFileNameW(nullptr, self, MAX_PATH) == 0) return result;
-    std::wstring modulePath = self;
-    const size_t slash = modulePath.find_last_of(L'\\');
-    if (slash == std::wstring::npos) return result;
-    modulePath = modulePath.substr(0, slash + 1) + kHookModule;
-    // The staged copy, not the built file: see StageHookModule for why the file that gets loaded may not
-    // be the file a later build replaces.
-    modulePath = StageHookModule(modulePath);
-
-    HMODULE hook = LoadLibraryW(modulePath.c_str());
-    if (!hook) {
-        LogAndPrint(L"  tray learn: no %ls next to the bar (%lu) -- nothing to learn with\n", kHookModule,
-                    GetLastError());
-        return result;
-    }
-    // THE ENTRY POINT MUST COME FROM THAT MODULE. A procedure address belonging to another binary is refused
-    // for a cross-process thread hook, and refused silently: measured, the module loaded into the target and
-    // the procedure was then never called once (HANDOFF 8.107).
-    FARPROC procedure = GetProcAddress(hook, "IslandTrayHookProc");
-    if (!procedure) {
-        LogAndPrint(L"  tray learn: %ls does not export IslandTrayHookProc\n", kHookModule);
-        FreeLibrary(hook);
-        return result;
-    }
+    // The module and the one global hook: installed once, on the main thread, and held for the session (see
+    // the note at the top of this file). If it could not be installed there is nothing to learn from.
+    if (!InstallTrayHook()) return result;
 
     // --- the report starts empty, so everything in it belongs to this run -----------------
     const std::wstring report = HomePath(kReportFile);
     if (!report.empty()) DeleteFileW(report.c_str());
 
-    // --- one attempt per application, and remember which threads we hooked -----------------
-    std::vector<HHOOK> hooks;
+    // --- the applications of the card, for the report only ---------------------------------
+    //
+    // NO HOOK IS INSTALLED PER APPLICATION ANY MORE. The one global hook (see the top of this file) is what
+    // delivers the module now, to every GUI process that pumps a message -- the ones running today, the ones
+    // started in an hour, and the shell itself. What is collected here is the list of applications the card
+    // cares about, so the pass can say how many of them are already being watched.
     std::vector<DWORD> tried;
     for (int i = 0; i < icons.Count(); ++i) {
-        if (!icons.At(i).hasUid) continue;   // see CountCoveredIcons: nothing can be learned for these
         const std::wstring exe = BaseNameLower(icons.ExePathAt(i));
         if (exe.empty()) continue;
         const DWORD pid = HeaviestPid(PidsForImage(icons.ExePathAt(i)));
         if (pid == 0 || std::find(tried.begin(), tried.end(), pid) != tried.end()) continue;
         tried.push_back(pid);
         ++result.appsTried;
-
-        const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!process) continue;
-        std::vector<DWORD> threads;
-        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (snapshot != INVALID_HANDLE_VALUE) {
-            THREADENTRY32 entry = {};
-            entry.dwSize = sizeof(entry);
-            if (Thread32First(snapshot, &entry)) {
-                do {
-                    if (entry.th32OwnerProcessID == pid) threads.push_back(entry.th32ThreadID);
-                } while (Thread32Next(snapshot, &entry));
-            }
-            CloseHandle(snapshot);
-        }
-        CloseHandle(process);
-
-        for (DWORD thread : threads) {
-            HHOOK installed = SetWindowsHookExW(WH_GETMESSAGE, reinterpret_cast<HOOKPROC>(procedure), hook,
-                                                thread);
-            if (installed) hooks.push_back(installed);
-        }
     }
 
     // --- the signal that makes applications register again -------------------------------
@@ -456,15 +541,10 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     Sleep(1200);
     Sleep(1500);
 
-    for (HHOOK installed : hooks) UnhookWindowsHookEx(installed);
-    // ... AND THIS PROCESS LETS GO OF THE MODULE, WHICH DOES NOT UNLOAD IT ANYWHERE.
-    //
-    // Measured, and it is the whole point of the pin: the applications keep it mapped (they pinned it
-    // themselves -- see TrayHook.cpp), so the import slots this run redirected still point at live code and
-    // the detour keeps reporting every registration from now on. FreeLibrary here drops only OUR reference.
-    // Before the pin existed this same line, three seconds into the bar's life, was what left Explorer and
-    // wallpaper64.exe with pointers into freed memory.
-    FreeLibrary(hook);
+    // THE HOOK AND THE MODULE ARE NOT GIVEN BACK, and that is the change this pass exists for. Removing the
+    // hook was what used to leave Explorer and wallpaper64.exe with import slots pointing at an unloaded
+    // module (HANDOFF 8.109); keeping it means every application that starts later is covered without any
+    // further pass. The module stays mapped in this process too, which is what keeps the hook handle valid.
 
     // ... and "already watched" counts as reached: see ModuleAlreadyIn.
     for (DWORD pid : tried) {
@@ -490,9 +570,10 @@ std::wstring UncoveredApplications(const TrayIcons& icons) {
     for (int i = 0; i < icons.Count(); ++i) {
         const std::wstring exe = BaseNameLower(icons.ExePathAt(i));
         if (exe.empty()) continue;
+        const std::wstring guidText = icons.At(i).hasGuid ? GuidText(icons.At(i).guid) : std::wstring();
         bool covered = false;
         for (const std::wstring& line : lines) {
-            if (LineIsFor(line, exe, icons.At(i).uid)) {
+            if (LineIsFor(line, exe, icons.At(i).uid, guidText)) {
                 covered = true;
                 break;
             }

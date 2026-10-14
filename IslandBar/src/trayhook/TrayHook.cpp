@@ -50,11 +50,67 @@ volatile LONG g_state = 0;   // 0 = not tried yet
 volatile LONG g_hooked = 0;  // how many import slots were redirected
 void* g_realW = nullptr;
 void* g_realA = nullptr;
+void* g_realGetProcAddress = nullptr;
 
-// Declared here so the first-call check inside LogCall can name them: they are defined below, and that check
-// needs their addresses to ask the import tables "does anything point at us yet".
+// Declared first: everything below uses them, and the detour of GetProcAddress hands out their addresses.
 BOOL WINAPI DetourShellNotifyIconW(DWORD message, PNOTIFYICONDATAW data);
 BOOL WINAPI DetourShellNotifyIconA(DWORD message, PNOTIFYICONDATAA data);
+typedef FARPROC(WINAPI* GetProcAddress_t)(HMODULE, LPCSTR);
+FARPROC WINAPI DetourGetProcAddress(HMODULE module, LPCSTR name);
+
+// THE APPLICATION'S OWN WAY OF FINDING Shell_NotifyIcon, which the import walk cannot see.
+//
+// Measured on this machine (HANDOFF 8.107): WeChat's Qt tray resolves Shell_NotifyIcon at run time and calls
+// it through its own pointer -- its import tables hold NO slot for either spelling, so patching the import
+// table covers WeChat, QQ Music's launcher and the rest of the frameworks that do it this way: nothing to
+// patch. The application still has to ASK for the address, though, and that question goes through
+// `GetProcAddress` -- which IS an import, in every module that needs it.
+//
+// So the walk redirects those slots too, and this answers the application with our detour when the name it
+// asks for is one of the two. Everything else is forwarded unchanged, through a pointer captured before any
+// slot was touched, so this cannot recurse and cannot change any other behaviour of the process.
+bool IsShell32Handle(HMODULE module) {
+    if (!module) return false;
+    HMODULE shell = GetModuleHandleW(L"shell32.dll");
+    return shell && module == shell;
+}
+
+FARPROC WINAPI DetourGetProcAddress(HMODULE module, LPCSTR name) {
+    GetProcAddress_t real = reinterpret_cast<GetProcAddress_t>(g_realGetProcAddress);
+    if (!real) return nullptr;
+    if (name && IsShell32Handle(module)) {
+        // Two string comparisons on a short literal, in a function called very often: uppercase first
+        // character is enough to dismiss every other name in the process.
+        if (name[0] == 'S' || name[0] == 's') {
+            if (_stricmp(name, "Shell_NotifyIconW") == 0) {
+                return reinterpret_cast<FARPROC>(&DetourShellNotifyIconW);
+            }
+            if (_stricmp(name, "Shell_NotifyIconA") == 0) {
+                return reinterpret_cast<FARPROC>(&DetourShellNotifyIconA);
+            }
+        }
+    }
+    return real(module, name);
+}
+
+// Is this process the bar itself? The global hook reaches every process on the desktop, its own included, and
+// the bar must not patch its own import tables or report itself as a tray application.
+bool IsOurOwnProcess() {
+    wchar_t self[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, self, MAX_PATH) == 0) return false;
+    const wchar_t* leaf = wcsrchr(self, L'\\');
+    return leaf && _wcsicmp(leaf + 1, L"island_bar.exe") == 0;
+}
+
+// A GUID as the registry and the cache file spell it: braces, upper-case hex. Written by hand rather than
+// with StringFromGUID2 because that one lives in ole32, and this module deliberately links nothing but
+// user32 and shell32 -- it is loaded into every GUI process on the desktop.
+void GuidText(const GUID& guid, wchar_t* out, size_t count) {
+    _snwprintf_s(out, count, _TRUNCATE, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                 static_cast<unsigned long>(guid.Data1), guid.Data2, guid.Data3, guid.Data4[0],
+                 guid.Data4[1], guid.Data4[2], guid.Data4[3], guid.Data4[4], guid.Data4[5], guid.Data4[6],
+                 guid.Data4[7]);
+}
 
 void ReportPath(wchar_t* out, size_t count) {
     wchar_t home[MAX_PATH] = {};
@@ -173,6 +229,9 @@ struct PatchCount {
     // rather than redirected. See OwnerOfSlot: a copy of this module that was unloaded leaves exactly that,
     // and it is what crashed Explorer and wallpaper64.exe on this machine on 2026-10-15.
     int healed = 0;
+    // ... and the same three numbers for the GetProcAddress slots of this process.
+    int patchedGetProcAddress = 0;
+    int alreadyOursGetProcAddress = 0;
 };
 
 // The module a code address belongs to, and its file name.
@@ -270,21 +329,50 @@ bool SlotNames(IMAGE_THUNK_DATA* slot, IMAGE_THUNK_DATA* byName, BYTE* base, con
 // somebody else's imports at our function.
 const int kMaxRedirectsPerProcess = 8;
 
+// ... AND A SECOND CAP, for the GetProcAddress slots (see DetourGetProcAddress). Those are expected in the
+// dozens -- every module that resolves anything dynamically imports it -- so the limit only exists to stop a
+// walk that has gone wrong, and it is deliberately well above what a real process carries.
+const int kMaxGetProcAddressRedirects = 96;
+
 // One import slot by address: an ordinary import already holds the address being replaced.
 //
 // `patch` false means COUNT ONLY, which is how the watch checks below ask "what points at the detour right
 // now" without touching anything. The first version of that check passed a null target instead and got its
 // early return: it reported 0 while the detour was demonstrably being called.
 void PatchThunkArray(IMAGE_THUNK_DATA* iat, IMAGE_THUNK_DATA* byName, BYTE* base, void* targetW, void* detourW,
-                     void* targetA, void* detourA, PatchCount* count, bool patch, HMODULE ownModule) {
+                     void* targetA, void* detourA, void* targetG, void* detourG, PatchCount* count, bool patch,
+                     HMODULE ownModule) {
     if (!iat || !detourW || !detourA || !count) return;
     for (; iat->u1.Function; ++iat, byName = byName ? byName + 1 : nullptr) {
         void* current = reinterpret_cast<void*>(iat->u1.Function);
-        if (current == detourW || current == detourA) {
+        if (current == detourW || current == detourA || (detourG && current == detourG)) {
             ++count->alreadyOurs;
             continue;
         }
         if (!patch) continue;
+        // The application's own way of looking Shell_NotifyIcon up (see DetourGetProcAddress): patched by
+        // name as well, because a slot holding GetProcAddress is what a dynamic framework calls.
+        if (detourG && targetG &&
+            ((current == targetG) || SlotNames(iat, byName, base, "GetProcAddress"))) {
+            const SlotOwner owner = OwnerOfSlot(current, ownModule);
+            // THE SLOT IS NAMED GetProcAddress, and the only value it can legitimately hold is the system's
+            // own function -- which lives in kernelbase.dll (kernel32 forwards to it since Windows 7), a
+            // module MayTakeOver deliberately refuses. The name check is what makes allowing it safe here:
+            // this branch is only reached for a slot the import table itself calls GetProcAddress.
+            const wchar_t* ownerLeaf = nullptr;
+            ModuleOfAddress(current, &ownerLeaf);
+            const bool isSystem = ownerLeaf && (_wcsicmp(ownerLeaf, L"kernel32.dll") == 0 ||
+                                                _wcsicmp(ownerLeaf, L"kernelbase.dll") == 0);
+            if (!MayTakeOver(owner) && !isSystem) continue;
+            if (count->patchedGetProcAddress >= kMaxGetProcAddressRedirects) continue;
+            DWORD old = 0;
+            if (!VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) continue;
+            iat->u1.Function = reinterpret_cast<ULONG_PTR>(detourG);
+            DWORD ignored = 0;
+            VirtualProtect(&iat->u1.Function, sizeof(void*), old, &ignored);
+            ++count->patchedGetProcAddress;
+            continue;
+        }
         const bool wantsW = (current == targetW) || SlotNames(iat, byName, base, "Shell_NotifyIconW");
         const bool wantsA = (current == targetA) || SlotNames(iat, byName, base, "Shell_NotifyIconA");
         if (!wantsW && !wantsA) continue;
@@ -328,7 +416,7 @@ void PatchDelaySlot(IMAGE_THUNK_DATA* slot, IMAGE_THUNK_DATA* byName, const char
 // Every offset is checked against the module's SizeOfImage before it is followed: measured, an unchecked walk
 // of this kind killed the target process on its third module.
 void PatchModuleUnchecked(HMODULE module, size_t imageSize, void* targetW, void* detourW, void* targetA,
-                          void* detourA, PatchCount* count, bool patch) {
+                          void* detourA, void* targetG, void* detourG, PatchCount* count, bool patch) {
     if (!module || imageSize < sizeof(IMAGE_DOS_HEADER) || !count) return;
     BYTE* base = reinterpret_cast<BYTE*>(module);
     const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
@@ -349,7 +437,8 @@ void PatchModuleUnchecked(HMODULE module, size_t imageSize, void* targetW, void*
                 descriptor->OriginalFirstThunk ? reinterpret_cast<IMAGE_THUNK_DATA*>(
                                                      base + descriptor->OriginalFirstThunk)
                                                : nullptr;
-            PatchThunkArray(iat, byName, base, targetW, detourW, targetA, detourA, count, patch, module);
+            PatchThunkArray(iat, byName, base, targetW, detourW, targetA, detourA, targetG, detourG, count,
+                            patch, module);
         }
     }
 
@@ -371,7 +460,8 @@ void PatchModuleUnchecked(HMODULE module, size_t imageSize, void* targetW, void*
     }
 }
 
-PatchCount WalkProcessImports(void* targetW, void* detourW, void* targetA, void* detourA, bool patch) {
+PatchCount WalkProcessImports(void* targetW, void* detourW, void* targetA, void* detourA, void* targetG,
+                              void* detourG, bool patch) {
     PatchCount count;
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
     if (snapshot != INVALID_HANDLE_VALUE) {
@@ -380,7 +470,8 @@ PatchCount WalkProcessImports(void* targetW, void* detourW, void* targetA, void*
         if (Module32FirstW(snapshot, &entry)) {
             do {
                 __try {
-                    PatchModuleUnchecked(entry.hModule, entry.modBaseSize, targetW, detourW, targetA, detourA, &count, patch);
+                    PatchModuleUnchecked(entry.hModule, entry.modBaseSize, targetW, detourW, targetA, detourA,
+                                         targetG, detourG, &count, patch);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                     // A module whose headers do not walk cleanly is skipped: measured, an unguarded walk
                     // killed the target process on its third module.
@@ -422,7 +513,7 @@ void LogCall(const char* which, DWORD message, const void* data, void* returnAdd
     if (InterlockedCompareExchange(&firstCall, 1, 0) == 0) {
         const PatchCount now = WalkProcessImports(nullptr, reinterpret_cast<void*>(&DetourShellNotifyIconW),
                                                  nullptr, reinterpret_cast<void*>(&DetourShellNotifyIconA),
-                                                 false);
+                                                 nullptr, reinterpret_cast<void*>(&DetourGetProcAddress), false);
         ReportLine(L"watch check pid %lu: %d slot(s) point at the detour at the moment of the first call "
                    L"(install time said %ld)",
                    GetCurrentProcessId(), now.alreadyOurs, g_hooked);
@@ -454,6 +545,12 @@ void LogCall(const char* which, DWORD message, const void* data, void* returnAdd
     UINT version = 0;
     UINT flags = 0;
     wchar_t tip[128] = {};
+    // THE GUID, for the applications that name their icon with one instead of a uid -- which is the modern
+    // way and, on this machine, what ChatGPT, the shell's own network and volume icons and the security
+    // center all use. The press needs it because a uid of 0 is not an identity: several icons of one
+    // application share it, and a press that matched on it would deliver one icon's callback to another.
+    wchar_t guidText[64] = {};
+    GUID registration = {};
     if (strcmp(which, "W") == 0) {
         const NOTIFYICONDATAW* nid = reinterpret_cast<const NOTIFYICONDATAW*>(data);
         window = nid->hWnd;
@@ -461,6 +558,7 @@ void LogCall(const char* which, DWORD message, const void* data, void* returnAdd
         callback = nid->uCallbackMessage;
         version = nid->uVersion;
         flags = nid->uFlags;
+        registration = nid->guidItem;
         wcsncpy_s(tip, nid->szTip, _TRUNCATE);
     } else {
         const NOTIFYICONDATAA* nid = reinterpret_cast<const NOTIFYICONDATAA*>(data);
@@ -469,7 +567,14 @@ void LogCall(const char* which, DWORD message, const void* data, void* returnAdd
         callback = nid->uCallbackMessage;
         version = nid->uVersion;
         flags = nid->uFlags;
+        registration = nid->guidItem;
         MultiByteToWideChar(CP_ACP, 0, nid->szTip, -1, tip, 128);
+    }
+    {
+        GUID none = {};
+        if (memcmp(&registration, &none, sizeof(GUID)) != 0) {
+            GuidText(registration, guidText, 64);
+        }
     }
     // A tooltip may be a whole sentence with line breaks, and one call has to stay one line: the bar reads
     // this file line by line.
@@ -487,9 +592,9 @@ void LogCall(const char* which, DWORD message, const void* data, void* returnAdd
     // conclude the mechanism cannot work. Whatever the reading at install time says, this line is the count
     // in force at the moment of the call.
     ReportLine(L"call %hs %hs pid %lu exe %ls caller %ls hwnd %p uid %u msg 0x%04X version %u flags 0x%X "
-               L"tip \"%ls\" (slots %ld)",
+               L"guid %ls tip \"%ls\" (slots %ld)",
                which, MessageName(message), GetCurrentProcessId(), exe, caller, window, uid, callback,
-               version, flags, tip, g_hooked);
+               version, flags, guidText[0] ? guidText : L"-", tip, g_hooked);
 }
 
 typedef BOOL(WINAPI* ShellNotifyIconW_t)(DWORD, PNOTIFYICONDATAW);
@@ -553,6 +658,16 @@ void EnsureHooked() {
         return;
     }
 
+    // ... AND NOT IN THE BAR'S OWN PROCESS. The global hook (see TrayLearn.cpp) delivers this module to every
+    // GUI process on the desktop, its installer included; the bar must not repoint its own imports or appear
+    // in the report as one of the applications being watched.
+    if (IsOurOwnProcess()) {
+        InterlockedExchange(&g_state, 2);
+        ReportLine(L"hooked pid %lu exe %ls: this is the bar itself -- not patching its own imports",
+                   GetCurrentProcessId(), exe);
+        return;
+    }
+
     HMODULE shell = GetModuleHandleW(L"shell32.dll");
     if (!shell) shell = LoadLibraryW(L"shell32.dll");
     void* targetW = shell ? reinterpret_cast<void*>(GetProcAddress(shell, "Shell_NotifyIconW")) : nullptr;
@@ -560,17 +675,33 @@ void EnsureHooked() {
     g_realW = targetW;
     g_realA = targetA;
 
+    // The application's own look-up route as well (see DetourGetProcAddress). kernel32's GetProcAddress is
+    // taken BEFORE any slot is touched, so the detour can forward through it without ever re-entering itself.
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    void* targetG = kernel ? reinterpret_cast<void*>(GetProcAddress(kernel, "GetProcAddress")) : nullptr;
+    if (kernel && !targetG) {
+        // Forwarded exports live in kernelbase since Windows 7, and a GetProcAddress that cannot be captured
+        // would make the walk redirect slots at a null pointer: measured risk, not a theoretical one.
+        HMODULE base = GetModuleHandleW(L"kernelbase.dll");
+        if (base) targetG = reinterpret_cast<void*>(GetProcAddress(base, "GetProcAddress"));
+    }
+    g_realGetProcAddress = targetG;
+
     const PatchCount count =
         WalkProcessImports(targetW, reinterpret_cast<void*>(&DetourShellNotifyIconW), targetA,
-                           reinterpret_cast<void*>(&DetourShellNotifyIconA), true);
+                           reinterpret_cast<void*>(&DetourShellNotifyIconA), targetG,
+                           targetG ? reinterpret_cast<void*>(&DetourGetProcAddress) : nullptr, true);
     InterlockedExchange(&g_hooked, count.patched + count.alreadyOurs);
     ReportLine(L"hooked pid %lu exe %ls: %d slot(s) redirected (%d of them repaired a pointer into a module "
-               L"that is no longer loaded), %d already pointing here, this module is pinned; watching=%ls",
+               L"that is no longer loaded), %d already pointing here, %d GetProcAddress slot(s) redirected "
+               L"(the route a framework that resolves Shell_NotifyIcon by name uses), this module is pinned; "
+               L"watching=%ls",
                GetCurrentProcessId(), exe, count.patched, count.healed, count.alreadyOurs,
+               count.patchedGetProcAddress,
                (count.patched + count.alreadyOurs) ? L"yes"
-                                                   : L"no -- it does not import Shell_NotifyIcon, so its tray "
-                                                     L"code resolves the function by itself and this module "
-                                                     L"cannot see it");
+                                                   : L"not yet -- it does not import Shell_NotifyIcon; if it "
+                                                     L"asks for the address at run time the GetProcAddress "
+                                                     L"slots above are what will catch it");
 
     // TEMPORARY: two channels onto what the shell sends this application's tray window. Off unless the marker
     // file exists; see the note at the top of that block.

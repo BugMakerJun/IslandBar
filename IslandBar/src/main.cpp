@@ -430,6 +430,15 @@ bool ProcessImagePath(unsigned long pid, wchar_t* out, size_t capacity) {
 // image is not looked up again. File scope because the frame build reads them and the loader fills them, and
 // because a notification's icon outlives the message that brought it (the card is drawn while it retracts).
 std::vector<uint8_t> notificationIconPixels;
+
+// A CELL WHOSE LEFT PRESS HAD NOTHING TO SEND, waiting for the frame loop to answer it.
+//
+// The press runs on a worker thread (a delivery waits for the application, and the frame loop must not), and
+// the menu belongs to the window on the main thread -- so the worker leaves the cell number here and the next
+// frame opens this bar's own menu over it. That menu is the one a right click opens, and it is the deliberate
+// answer for a cell nothing is known about: the real click was deleted on 2026-10-15, and a button that does
+// nothing would be a worse lie than a menu that says what it can do.
+std::atomic<int> trayMenuRequestCell{-1};
 int notificationIconWidth = 0;
 int notificationIconHeight = 0;
 unsigned long long notificationIconRevision = 0;
@@ -956,23 +965,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // -1 rather than the count read above: the first refresh in the loop then reports the tray's size
     // once, at startup, which is the line to look for when the tray is empty.
     int lastTrayCount = -1;
-    // THE APPLICATIONS THAT STILL HAVE NO CALLBACK ENTRY AT THE LAST ATTEMPT, and the two things that keep
-    // that attempt from becoming a loop.
-    //
-    // The module is resident once it is inside an application (it pins itself -- see TrayHook.cpp), so its
-    // report keeps arriving all session and the tray-refresh tick harvests it for free. What a resident
-    // module cannot do is reach an application that was not running when the module was offered, so that
-    // case needs a new pass -- and only that case: the applications which refuse a module entirely (QQ
-    // Music's self-protection, an elevated one, an AppContainer) refuse it for the same reason every time,
-    // and retrying them every few seconds would cost three seconds of a worker thread forever. Hence the
-    // signature: a pass is offered again only when the SET of uncovered applications has changed.
-    std::wstring lastUncovered;
-    // Shared with the worker rather than a plain bool, and on the heap rather than on this frame: the worker
-    // is detached, and a detached thread that writes to a local of a function which has already returned is
-    // a crash waiting for the user to close the bar at the wrong moment.
-    std::shared_ptr<std::atomic<bool>> learnInFlight = std::make_shared<std::atomic<bool>>(false);
-    unsigned long long lastLearnAttempt = 0;
-
     island::IslandWindow window;
     if (!window.Create(monitor, /*show=*/true)) {
         island::LogAndPrint("FATAL: could not create the window (error %lu)\n", GetLastError());
@@ -1252,6 +1244,7 @@ unsigned long long lastMusicMeterMs = 0;
     // Read here once so the first frame has icons, and refreshed from the frame loop on a timer: the tray
     // changes when applications start and stop, which is a scale of seconds, not frames.
     island::TrayIcons trayIcons;
+
     const int trayAtStart = trayIcons.Refresh();
     island::LogAndPrint("  tray: %d icon(s) from the registry (%d entr(ies), %d process(es) seen)",
                         trayAtStart, trayIcons.Examined(), trayIcons.ProcessesSeen());
@@ -1270,6 +1263,11 @@ unsigned long long lastMusicMeterMs = 0;
     // broadcast makes applications re-add their icons, which is harmless but pointless to repeat once the
     // answers are in the file.
     {
+        // THE ONE GLOBAL HOOK FIRST, on this thread, before any learning pass: it is what makes the module
+        // follow every GUI process from now on, applications started later included (MyDockFinder's own
+        // mechanism -- see shell/TrayLearn.h). From here on the tray card can press an application the moment
+        // it registers, without a pass of its own.
+        island::InstallTrayHook();
         const int coveredNow = island::CountCoveredIcons(trayIcons);
         if (coveredNow >= trayAtStart) {
             island::LogAndPrint("  tray learn: %d of %d icon(s) already have a callback entry -- not asking "
@@ -1939,23 +1937,14 @@ float musicWavePhase = 0.0f;
                 // "the bar's cycle" was looking at two cycles that had already been and gone (HANDOFF 8.86).
                 taskbarCheckCountdown = 50;
                 frameWork |= kWorkTaskbarCheck;
-                // ... unless a tray press is showing it this instant: the press needs the shell's taskbar
-                // to exist for about a fifth of a second, and re-hiding it in the middle of that would
-                // make roughly one press in twenty-five do nothing at all. See TrayPressInFlight.
-                if (island::TrayPressCleanupPending()) {
-                    // A right click left the shell's panel (and its menu) up, and the shell re-shows its
-                    // taskbar while that menu is there -- so the taskbar was left invisible rather than
-                    // un-layered, and this is where it is finally put away. See TrayPressFinishCleanup.
-                    // ... AND THE SAME CALL RESTORES THE PANEL'S ALPHA, but only once the SHELL has closed
-                    // that panel: while it is still up the call leaves it invisible and stays pending, so
-                    // this runs again on the next tick. The two are separate questions, which is why the
-                    // taskbar is not the only thing asked about here any more.
-                    if (island::TrayPressFinishCleanup()) {
-                        island::LogAndPrint("  native taskbar: put away after a tray right click\n");
-                        std::fflush(stdout);
-                    }
-                }
-                if (!island::TrayPressInFlight() && taskbar.EnsureHidden()) {
+                // A TRAY PRESS NO LONGER INTERFERES WITH THIS. Until 2026-10-15 it did: a press borrowed the
+                // shell's taskbar for about a fifth of a second (and a right click left the shell's panel on
+                // screen, which the shell answered by re-showing its taskbar), so this tick had to ask
+                // whether a press was in flight and hand the cleanup back and forth. The press is a message
+                // to an application's own window now -- the shell's taskbar is never touched, never shown,
+                // never layered -- and TrayPressInFlight, TrayPressCleanupPending and TrayPressFinishCleanup
+                // are gone with the route that needed them.
+                if (taskbar.EnsureHidden()) {
                     island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
                 }
@@ -3400,6 +3389,33 @@ float musicWavePhase = 0.0f;
             //
             // Everywhere else on the bar a right click is still nothing: a control that quietly did
             // something different on the other button would be worse than one that does nothing.
+            //
+            // ... AND A LEFT PRESS THAT HAD NOTHING TO SEND OPENS THE SAME MENU, which is why the opening is
+            // one piece of code and not two: since the real click was deleted there is no fallback left for a
+            // cell whose callback has never been learned, and the honest answer is this menu (it holds 打开,
+            // 显示窗口, the application's own menu and 结束应用 -- see TrayMenuEntriesFor).
+            const auto openBarTrayMenu = [&](int cell) {
+                trayMenuCell = cell;
+                island::TrayMenuFacts facts;
+                TrayMenuFactsFor(trayIcons, taskWindows, trayMenuCell, &facts);
+                trayMenuActionCount = island::TrayMenuEntriesFor(facts, trayMenuActions,
+                                                                island::kMaxTrayMenuEntries);
+                window.OpenTrayMenu(trayMenuCell, trayMenuActionCount);
+                trayQuitArmed = false;   // a new menu starts unarmed
+                wchar_t flatMenuName[128] = {};
+                island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d)\n",
+                                    FlatName(trayIcons.At(trayMenuCell).name, flatMenuName, 128),
+                                    trayMenuActionCount, facts.hasWindow ? 1 : 0,
+                                    facts.hasExePath ? 1 : 0);
+                std::fflush(stdout);
+            };
+            // The worker's request, answered on the thread that owns the window (see trayMenuRequestCell).
+            const int menuRequestCell = trayMenuRequestCell.exchange(-1);
+            if (menuRequestCell >= 0 && menuRequestCell < trayIcons.Count()) {
+                island::LogAndPrint(L"  tray menu: nothing is known about cell %d yet, so the press opens "
+                                    L"this bar's own menu instead\n", menuRequestCell);
+                openBarTrayMenu(menuRequestCell);
+            }
             while (window.TakeRightClick()) {
                 POINT rightCursor = {};
                 GetCursorPos(&rightCursor);
@@ -3427,19 +3443,7 @@ float musicWavePhase = 0.0f;
                     // the pointer that asked for it. This menu is instant, lands where the pointer is, and
                     // is drawn in the card the user is already looking at; the application's own menu is the
                     // LAST entry of it, for the things only the application knows ("退出微信").
-                    trayMenuCell = window.TrayCellHovered();
-                    island::TrayMenuFacts facts;
-                    TrayMenuFactsFor(trayIcons, taskWindows, trayMenuCell, &facts);
-                    trayMenuActionCount = island::TrayMenuEntriesFor(facts, trayMenuActions,
-                                                                     island::kMaxTrayMenuEntries);
-                    window.OpenTrayMenu(trayMenuCell, trayMenuActionCount);
-                    trayQuitArmed = false;   // a new menu starts unarmed
-                    wchar_t flatMenuName[128] = {};
-                    island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d)\n",
-                                        FlatName(trayIcons.At(trayMenuCell).name, flatMenuName, 128),
-                                        trayMenuActionCount, facts.hasWindow ? 1 : 0,
-                                        facts.hasExePath ? 1 : 0);
-                    std::fflush(stdout);
+                    openBarTrayMenu(window.TrayCellHovered());
                 } else {
                     island::LogAndPrint("  right click: no tray cell under the pointer (%d,%d)\n",
                                         rightCursor.x, rightCursor.y);
@@ -4184,36 +4188,6 @@ float musicWavePhase = 0.0f;
                         std::fflush(stdout);
                     }
 
-                    // ... and a pass for applications this bar has not reached yet -- a NEW application only,
-                    // see the note on `lastUncovered` above.
-                    const std::wstring uncovered = island::UncoveredApplications(trayIcons);
-                    const bool worthTrying = !uncovered.empty() && uncovered != lastUncovered &&
-                                             !learnInFlight->load() &&
-                                             GetTickCount64() - lastLearnAttempt >= 15000;
-                    if (worthTrying) {
-                        lastUncovered = uncovered;
-                        lastLearnAttempt = GetTickCount64();
-                        learnInFlight->store(true);
-                        island::LogAndPrint("  tray learn: %d icon(s) still without a callback, and the set "
-                                            "of applications to try has changed (%ls) -- offering the module "
-                                            "again (background)\n",
-                                            trayNow - island::CountCoveredIcons(trayIcons), uncovered.c_str());
-                        std::fflush(stdout);
-                        std::thread([learnInFlight]() {
-                            island::TrayIcons icons;
-                            icons.Refresh();
-                            const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                            island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in "
-                                                "%d of them and was ALREADY watching %d more, %d "
-                                                "registration(s) captured, %d new entr(ies) -- %d of %d "
-                                                "icon(s) have a callback entry (in %lld ms)",
-                                                learned.appsTried, learned.appsReached,
-                                                learned.appsAlreadyWatched, learned.captured,
-                                                learned.newEntries, learned.covered, learned.icons,
-                                                learned.ms);
-                            learnInFlight->store(false);
-                        }).detach();
-                    }
                 }
                 frame.trayIcons = trayIcons.Count() > 0 ? &trayIcons.At(0) : nullptr;
                 frame.trayIconCount =
@@ -6125,44 +6099,26 @@ void StartTrayPress(const island::TrayIcons& icons, int cell, bool rightClick) {
                         FlatName(icons.At(cell).name, flat, 128),
                         rightClick ? L" (right click)" : L"");
     std::fflush(stdout);
-    std::thread([request, rightClick]() {
+    std::thread([request, rightClick, cell]() {
         const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        const island::TrayPressOutcome outcome = island::PressTrayIcon(request, true, rightClick);
+        const island::TrayPressOutcome outcome = island::PressTrayIcon(request, rightClick);
         // THE WIDE OVERLOAD, and it is not a style choice: with the narrow one this line came out EMPTY
         // whenever the shell's name for the icon held a non-ASCII character (" 微信"), because the narrow
         // CRT cannot convert that to bytes and MSVC empties the whole line instead of failing loudly. Three
         // presses were diagnosed as "the Invoke hung" on the strength of those blank lines. See Log.h.
-        island::LogAndPrint(
-            L"  tray press: '%ls' -> %ls via %ls (the shell calls it '%ls', rect %ld,%ld %ldx%ld), lookup "
-            L"%lld ms, press %lld ms\n",
-            request.name, island::TrayPressResultName(outcome.result), outcome.route, outcome.shellName,
-            outcome.rect.left, outcome.rect.top, outcome.rect.right - outcome.rect.left,
-            outcome.rect.bottom - outcome.rect.top, outcome.lookupMs, outcome.pressMs);
-        // THE POSTED ROUTE SAYS SO EXPLICITLY, because "the pointer never moved" is the whole point of it and
-        // there is nothing else in the log that would show it: this line is the one to look for.
-        if (!outcome.pointerMoved) {
-            island::LogAndPrint(L"  tray press: the pointer was NOT moved%s -- %ls\n",
-                                outcome.targetIsOurs ? L"" : L"", outcome.answer);
-        } else if (outcome.clickMs > 0) {
-            island::LogAndPrint(L"  tray press: the click left at %lld ms; it was aimed at %ls%s; the "
-                                L"panel was made hit-testable at %lld ms and transparent again at %lld "
-                                L"ms\n",
-                                outcome.clickMs, outcome.target,
-                                outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
-                                outcome.panelShownMs, outcome.panelHiddenMs);
+        island::LogAndPrint(L"  tray press: '%ls' -> %ls via %ls, press %lld ms\n", request.name,
+                            island::TrayPressResultName(outcome.result), outcome.route, outcome.ms);
+        // "THE POINTER NEVER MOVED" IS NOT A CLAIM ANY MORE, it is a property of the code: there is no
+        // SetCursorPos and no SendInput left in this program (see TrayPress.h). What is worth a line is what
+        // the application was seen to do, which is the only thing that says whether the press worked.
+        if (outcome.result == island::TrayPressResult::Pressed) {
+            island::LogAndPrint(L"  tray press: delivered to %ls -- %ls\n", outcome.target, outcome.answer);
         }
-        if (rightClick && outcome.pointerMoved) {
-            if (outcome.menuWaitMs < 0) {
-                island::LogAndPrint(L"  tray press: no menu window was seen in 600 ms\n");
-            } else {
-                // The description already carries the class and the rectangle, so this line does not repeat
-                // them -- see the CLI's copy of this line, which used to print the same rectangle twice.
-                island::LogAndPrint(L"  tray press: the menu is up %lld ms after the click: %ls\n",
-                                    outcome.menuWaitMs, outcome.menuClass);
-            }
-        } else if (outcome.clickMs > 0) {
-            island::LogAndPrint(L"  tray press: the application %ls -- %ls\n",
-                                outcome.appAnswered ? L"answered" : L"said nothing", outcome.answer);
+        // ... AND A CELL WITH NOTHING LEARNED OPENS THE BAR'S OWN MENU INSTEAD, which is the same thing a
+        // right click does there: the user asked for something to happen, and "nothing" is not an answer. The
+        // menu is handed to the frame loop because this runs on a worker thread (see the tray menu's state).
+        if (outcome.result == island::TrayPressResult::NoEntry) {
+            trayMenuRequestCell.store(cell);
         }
         std::fflush(stdout);
         if (SUCCEEDED(comHr)) CoUninitialize();
@@ -6246,62 +6202,34 @@ bool RunPowerAction(PowerAction action) {
     return false;
 }
 
-// Asks the shell where each of those icons is, which is the question a press depends on -- and the one
-// that says whether the card is drawing an icon the shell has at all.
+// Every icon of the card, and whether a press can reach it.
 //
-// Worth having as its own command: the answer separates three things that look identical on screen. An
-// icon the shell answers for can be pressed. An icon the shell does not answer for is registered but not
-// displayed, and no amount of pressing will find it. An icon whose rectangle is in the taskbar BAND
-// rather than below it is in the tray proper, which the shell does not publish for UI Automation.
+// THIS COMMAND USED TO ASK THE SHELL WHERE EACH ICON WAS, which was the question a press depended on while
+// the press was a real click on the shell's own button. Since 2026-10-15 a press is the application's own
+// callback message (see TrayPress.h), so the question became "is there anything to send" -- and the answer
+// separates the same three states in a way that needs no shell, no taskbar and no UI Automation: an icon with
+// a learned callback whose window exists is pressable; an icon that has been learned but whose application is
+// not running is not; an icon nothing has been learned about opens the bar's own menu instead.
 int RunTraySurface() {
     island::TrayIcons icons;
     const int count = icons.Refresh();
-    // THE STAGE FIRST. Asking the shell where an icon is only means something once its tray has been laid
-    // out, and an icon in the overflow flyout has no rectangle at all until that flyout has been opened:
-    // until then the shell answers the chevron's slot -- 2416,0 24x32 -- for every icon, which is a
-    // plausible-looking rectangle and a completely wrong one. Measured both ways in
-    // scripts/probe-tray-rect-after-flyout.ps1.
-    island::TrayStage stage;
-    wchar_t note[160] = {};
-    const bool staged = stage.Begin(note, 160);
-    const RECT flyout = stage.FlyoutRect();
-    island::LogAndPrint(L"tray surface: %d icon(s); the shell's tray %ls", count,
-                        staged ? L"is laid out (its overflow is open, invisibly)\n"
-                               : L"could not be laid out\n");
-    if (!staged) island::LogAndPrint(L"  (%ls)\n", note);
-    if (staged) {
-        island::LogAndPrint(L"  the overflow flyout is at %ld,%ld %ldx%ld\n", flyout.left, flyout.top,
-                            flyout.right - flyout.left, flyout.bottom - flyout.top);
-    }
+    island::LogAndPrint(L"tray reach: %d icon(s) on the card\n", count);
 
-    int answered = 0;
+    int reachable = 0;
     for (int i = 0; i < count; ++i) {
         const island::TrayIcon& icon = icons.At(i);
         const island::TrayPressRequest request = MakeTrayPressRequest(icon, icons.ExePathAt(i));
-        RECT rect = {};
-        const bool have = staged && stage.IconRect(request, &rect);
-        if (have) ++answered;
+        const bool reach = island::TrayPressReachable(request);
+        if (reach) ++reachable;
         wchar_t flat[128] = {};
-        wchar_t identity[64] = {};
-        std::swprintf(identity, 64, L"uid %u", icon.uid);
-        if (have) {
-            const bool inFlyout = rect.left >= flyout.left - 4 && rect.right <= flyout.right + 4 &&
-                                  rect.top >= flyout.top - 4 && rect.bottom <= flyout.bottom + 4;
-            island::LogAndPrint(L"  [%d] %ls (%ls) -- %ld,%ld %ldx%ld %ls\n", i,
-                                FlatName(icon.name, flat, 128),
-                                icon.hasGuid ? L"GUID" : identity, rect.left, rect.top,
-                                rect.right - rect.left, rect.bottom - rect.top,
-                                inFlyout ? L"(overflow)" : L"(tray proper: the shell publishes no button "
-                                                          L"there)");
-        } else {
-            island::LogAndPrint(L"  [%d] %ls (%ls) -- the shell has no rectangle for it\n", i,
-                                FlatName(icon.name, flat, 128),
-                                icon.hasGuid ? L"GUID" : identity);
-        }
+        std::swprintf(flat, 128, L"uid %u", icon.uid);
+        island::LogAndPrint(L"  [%d] %ls (%ls) -- %ls\n", i, FlatName(icon.name, flat, 128),
+                            icon.hasGuid ? L"GUID" : flat,
+                            reach ? L"its own callback is known and its window is there"
+                                  : L"nothing learned yet: a press opens this bar's own menu");
     }
-    island::LogAndPrint(L"  %d of %d answer (the rest are registered but not displayed)\n", answered,
-                        count);
-    return answered > 0 ? 0 : 1;
+    island::LogAndPrint(L"  %d of %d can be pressed without touching the pointer\n", reachable, count);
+    return reachable > 0 ? 0 : 1;
 }
 
 // Presses one icon from the command line, for the same reason: a click cannot be delivered from a script
@@ -6346,58 +6274,16 @@ int RunTrayPress(int index, bool fire, bool rightClick) {
                         icon.hasGuid ? L"registered by GUID" : L"registered by UID");
 
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    // Without --fire the whole route still runs -- the tray made invisible, the overflow flyout opened,
-    // the button found on the shell's rectangle -- and only the Invoke is left out.
-    const island::TrayPressOutcome outcome = island::PressTrayIcon(request, fire, rightClick);
+    // `fire` is accepted and ignored: it used to mean "do not actually press" for a route that opened the
+    // shell's panel to find the icon first, and there is nothing to find any more -- see TrayPress.h. Keeping
+    // the flag accepted means every instruction in HANDOFF and in the scripts that call it still runs.
+    (void)fire;
+    const island::TrayPressOutcome outcome = island::PressTrayIcon(request, rightClick);
     if (SUCCEEDED(comHr)) CoUninitialize();
-    if (outcome.pointerMoved) {
-        island::LogAndPrint(L"  the shell says the icon is at %ld,%ld %ldx%ld\n", outcome.rect.left,
-                            outcome.rect.top, outcome.rect.right - outcome.rect.left,
-                            outcome.rect.bottom - outcome.rect.top);
-    } else {
-        // The posted route never asks the shell anything, and saying "0,0 0x0" would read like a failure.
-        island::LogAndPrint(L"  no rectangle was needed: the application was told directly\n");
-    }
-    island::LogAndPrint(L"  -> %ls%ls via %ls (shell calls it '%ls'), lookup %lld ms, press %lld ms\n",
-                        island::TrayPressResultName(outcome.result),
-                        rightClick ? L" [right click]" : L"", outcome.route, outcome.shellName,
-                        outcome.lookupMs, outcome.pressMs);
-    if (!outcome.pointerMoved) {
-        island::LogAndPrint(L"  the pointer was NOT moved -- %ls\n", outcome.answer);
-    } else if (outcome.clickMs > 0) {
-        island::LogAndPrint(L"  the click left at %lld ms, aimed at %ls%s; the panel was made "
-                            L"hit-testable at %lld ms and transparent again at %lld ms\n",
-                            outcome.clickMs, outcome.target,
-                            outcome.madeClickThrough ? L" (this bar was made click-through first)" : L"",
-                            outcome.panelShownMs, outcome.panelHiddenMs);
-    }
-    if (rightClick && outcome.pointerMoved) {
-        if (outcome.menuWaitMs < 0) {
-            island::LogAndPrint(L"  no window of the application's came up in 600 ms, so no menu was seen\n");
-        } else {
-            island::LogAndPrint(L"  the menu is up %lld ms after the click: %ls (the icon's own rectangle "
-                                L"is %ld,%ld %ldx%ld)\n",
-                                outcome.menuWaitMs, outcome.menuClass, outcome.rect.left, outcome.rect.top,
-                                outcome.rect.right - outcome.rect.left,
-                                outcome.rect.bottom - outcome.rect.top);
-        }
-    } else if (outcome.clickMs > 0) {
-        island::LogAndPrint(L"  the application %ls -- %ls\n",
-                            outcome.appAnswered ? L"answered" : L"said nothing", outcome.answer);
-    }
-    // THE CLEANUP A RIGHT CLICK LEAVES BEHIND IS FINISHED HERE, because a command line has no frame loop to
-    // do it: in the bar, the frame loop's watchdog is what puts the shell's taskbar and its panel back, and
-    // a press that hands both over and then EXITS leaves the taskbar present-but-invisible -- which is what
-    // "there is no taskbar any more" looks like on the user's screen. Measured the hard way, 2026-10-15.
-    if (island::TrayPressCleanupPending()) {
-        for (int attempt = 0; attempt < 40 && island::TrayPressCleanupPending(); ++attempt) {
-            island::TrayPressFinishCleanup();
-            if (island::TrayPressCleanupPending()) Sleep(100);
-        }
-        island::LogAndPrint(L"  the shell's taskbar and panel were put back (this command line has no "
-                            L"watchdog of its own)\n");
-    }
-    if (outcome.result == island::TrayPressResult::Pressed || outcome.result == island::TrayPressResult::Found) {
+    island::LogAndPrint(L"  -> %ls%ls: %ls (press %lld ms)\n", island::TrayPressResultName(outcome.result),
+                        rightClick ? L" [right click]" : L"", outcome.route, outcome.ms);
+    island::LogAndPrint(L"  delivered to %ls -- %ls\n", outcome.target, outcome.answer);
+    if (outcome.result == island::TrayPressResult::Pressed) {
         return 0;
     }
     return 1;
@@ -7242,7 +7128,9 @@ int main(int argc, char** argv) {
             island::CloseLog();
             return dumpResult;
         }
-        if (std::strcmp(argv[i], "--tray-surface") == 0) {
+        // `--tray-surface` is the old name of this command, kept accepted because scripts and HANDOFF
+        // entries use it -- what it reports changed with the press (see RunTraySurface).
+        if (std::strcmp(argv[i], "--tray-surface") == 0 || std::strcmp(argv[i], "--tray-reach") == 0) {
             const int surfaceResult = RunTraySurface();
             island::CloseLog();
             return surfaceResult;
@@ -7254,9 +7142,9 @@ int main(int argc, char** argv) {
         }
         // --tray-press N: press the Nth icon of the card's list, exactly as a click on its cell does.
         // The card's own cells cannot be clicked from a script on this machine (see ISLANDBAR_CLICK_AT),
-        // so this is how the press is exercised without a hand on the mouse. `--tray-press N --fire`
-        // presses; without `--fire` it only reports what it would press, which is the half worth
-        // checking repeatedly.
+        // so this is how the press is exercised without a hand on the mouse. `--fire` is accepted and no
+        // longer means anything: it used to ask for a dry run of a route that had to open the shell's tray
+        // first, and that route is gone (see TrayPress.h).
         if (std::strcmp(argv[i], "--tray-press") == 0 && i + 1 < argc) {
             const int wanted = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
             const bool fire = (i + 1 < argc) && std::strcmp(argv[i + 1], "--fire") == 0;
@@ -7329,6 +7217,9 @@ int main(int argc, char** argv) {
             island::LogAndPrint("  --music-preview  cycle the three music states with sample data");
             island::LogAndPrint("  --lyrics-test <title> [artist]  fetch lyrics and report what came back");
             island::LogAndPrint("  --no-console     behave as if there were no console (diagnostic)");
+            island::LogAndPrint("  --tray-reach     list every tray icon and whether a press can reach it");
+            island::LogAndPrint("  --tray-learn     ask every running tray application to register again");
+            island::LogAndPrint("  --tray-press N [--right]  press the Nth icon exactly as its cell does");
             island::LogAndPrint("");
             island::LogAndPrint("Every run also writes a timestamped log, which is the reliable way to");
             island::LogAndPrint("see what happened -- the console has been known to swallow output:");

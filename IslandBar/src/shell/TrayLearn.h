@@ -52,6 +52,16 @@ struct TrayLearnResult {
     long long ms = 0;      // how long the whole thing took
 };
 
+// THE GLOBAL HOOK, INSTALLED ONCE AND HELD FOR THE SESSION -- MyDockFinder's own mechanism (HANDOFF 8.103:
+// its Dockmod.exe calls SetWindowsHookExA and dockmod64.dll then appears in the shell and in a list of
+// applications, including ones started later).
+//
+// Called from the main thread at startup, before any learning pass. On success the module follows every GUI
+// process on the desktop -- today's and tomorrow's -- and pins itself in each one it lands in, so a press has
+// something to send the moment an application registers. Every failure is reported in the log and is not
+// fatal: without the hook the presses use whatever the cache already holds.
+bool InstallTrayHook();
+
 // Learns what every running tray application's callback is, and writes the cache.
 //
 // `broadcast` sends TaskbarCreated first, which is what makes applications register again: without it, one

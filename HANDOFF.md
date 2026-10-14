@@ -11112,3 +11112,70 @@ island_bar.exe --tray-press 2 --fire --right  # 右键：应用自己的菜单�
 Get-Content tray_callbacks.txt | Select-String 'clash-verge'   # 第 7 个字段 = 试出来的配方
 Select-String -Path tray_learned.txt -Pattern 'hooked pid'     # "…repaired a pointer…" 与 "this module is pinned"
 ```
+
+### 8.110 **真实点击删掉了；托盘改成 MyDockFinder 的机制：一个全局钩子** ✅（已部署，等用户测）
+
+用户 2026-10-15 06:2x 的第二道指令：「真实点击还在去掉！！！然后按照 mydockfinder 实现方式给我实现！！！！」。上一节留下的"未覆盖的格子仍走真实点击"因此**整段删除**，覆盖率改用 MyDockFinder 自己的做法（HANDOFF 8.103 的实测：`Dockmod.exe` 调 `SetWindowsHookExA`，`dockmod64.dll` 于是出现在 shell 与一批应用里，**包括之后才启动的**）。
+
+#### 8.110.1 删掉的东西（净 −955 行，`TrayPress.cpp` 1812 → 857 行）
+
+| 删掉 | 它是什么 |
+|---|---|
+| `ClickOnRect` + `SetCursorPos`/`SendInput`/`mouse_event` | 真实点击：把指针搬到 shell 图标上、按下抬起、再搬回来 |
+| `TrayStage`（`Begin`/`IconRect`/`Reset`/`ShowPanelForClick`/`HidePanelAfterClick`/`PanelStillShowing`/`PressOnRect`） | 让 shell 任务栏"存在但不可见"、打开溢出面板、按完再收回去的状态机 |
+| `IUIAutomation*` 全套（`ElementOnRect`、`InvokeElement`、`LogElementFacts`、`PanelIconCount`、`FindChevron`）、`Shell_NotifyIconGetRect` | 按位置找 shell 按钮的整条 UIA 路线（连 `uiautomation.h`、`uiautomationcore.lib` 一起删） |
+| `ClickThroughGuard`、`TrayPressInFlight`、`TrayPressCleanupPending`、`TrayPressFinishCleanup`、`IndexOfRectNear`、`ISLANDBAR_TRAY_PRESS_VISIBLE`、`ISLANDBAR_TRAY_NO_CLICK` | 真实点击的配套：临时让本栏不参与命中、任务栏可见性的看门狗交接、按矩形匹配的比较函数、两个只为看旧路线而存在的开关 |
+
+**验证**：`rg 'SetCursorPos|SendInput|mouse_event|TrayStage|IUIAutomation' IslandBar/src/shell/TrayPress.*` 只剩头注释里的历史说明；托盘路径里一行搬指针的代码都没有了。自检里那几条测"矩形/句柄"的断言换成了"每一格的身份 + 有多少格有已学回调"。
+
+#### 8.110.2 新的机制：一个全局钩子（MyDockFinder 同款）
+
+`shell/TrayLearn.cpp::InstallTrayHook()`，在**主线程**启动时调用一次：
+
+```c
+g_globalHook = SetWindowsHookExW(WH_GETMESSAGE, IslandTrayHookProc, 载入的内容哈希分身, 0);
+```
+
+`dwThreadId = 0` 就是全部：操作系统把模块送进**每一个取消息的 GUI 进程**，包括以后才启动的，不需要"每个应用装一次"，也不需要每次重跑学习。钩子**永不卸载**（卸载就是 8.109 那次悬空的来源），模块在每个进程里 `PIN` 住自己。实测：一次启动后模块出现在 **15 个进程**里（ChatGPT、DeepSeek Harness、msedge、explorer、Razer、steam、NVIDIA Overlay、sihost、WidgetService…），其中 ChatGPT / Razer / NVIDIA 是旧的"逐应用装钩子"从来到不了的。bar 自己也被送到，模块按名字跳过（`IsOurOwnProcess`），既不改自己的导入表也不把自己写进报告。
+
+学习因此变成持续的：模块常驻 ⇒ 应用**以后每次注册**都会被写进报告，托盘刷新定时器（5 s）里的 `HarvestLearnedCallbacks()` 捡起来即可。启动那一行现在同时报"这次新装进几个"和"本来就在看着几个"（`the module loaded in 0 of them and was ALREADY watching 4 more`）。
+
+#### 8.110.3 `GetProcAddress` 重定向：给运行时自己取地址的应用
+
+微信那种 Qt 应用导入表里**没有** `Shell_NotifyIcon` 槽位，但它必须调用 `GetProcAddress` 去问——那是导入。于是同一个遍历把**按名字匹配到的 `GetProcAddress` 槽位**也改指到我们的 detour，问到 `Shell_NotifyIconW/A` 就返回我们的函数，其余原样转发（转发用的指针在改任何槽位之前就抓好了，不可能递归）。实测每个进程 **45–96 格**被接管（上限 96）。
+
+第一次跑出来是 0 格，原因是：`GetProcAddress` 属于 `kernelbase.dll`，而 8.109 定的接管规则只允许 shell32 / 我们 / 桩 / 悬空。修法是"只在这一分支里额外允许 kernel32/kernelbase"——**前提是槽位名字必须是 `GetProcAddress`**，这一点由名字匹配保证。
+
+#### 8.110.4 GUID 注册的图标现在也能按（这是现代应用的常态）
+
+注册表里 ChatGPT、Explorer 的网络/音量/蓝牙、安全中心这些条目**只有 `IconGuid`、没有 `UID`**；而 `uid 0` 不是身份（Explorer 好几个图标都是 0）。所以：
+
+- 模块在 `Shell_NotifyIcon` 的 detour 里把 `guidItem` 一并记下（自己写 `{...}` 格式化函数，不给模块加 ole32 依赖）；
+- 缓存行第 8 个字段是 GUID（**按形状识别，不按位置**——没配方时它落在第 7 个字段，按位置解析的版本让一个 GUID 图标"看不见自己的条目"）；
+- 按下时**有 GUID 就以 GUID 匹配**，没有才回退到 uid（否则 Explorer 的网络图标会被喂蓝牙图标的回调）。
+
+实测：`--tray-press 10`（Explorer 蓝牙，GUID 注册）→ `pressed: its own callback (593 ms)`，并且应用自己的菜单 `#32768 at 0,0 208x218` 真的弹出来了，**指针一动不动**。
+
+#### 8.110.5 学不到的格子：打开卡片自己的菜单，而不是"按了没反应"
+
+真实点击没了，未覆盖的格子就必须有个明确的行为。现在：worker 线程把格子号放进 `trayMenuRequestCell`，下一帧由**拥有窗口的主线程**打开与右键同一个菜单（`openBarTrayMenu`，`打开`/`显示窗口`/应用自己的菜单/`结束应用`）。日志：`tray menu: nothing is known about cell N yet, so the press opens this bar's own menu instead`。
+
+#### 8.110.6 本机实测（都在 `%USERPROFILE%\IslandBar`、正常权限）
+
+| 动作 | 结果 |
+|---|---|
+| clash-verge 左键 | `pressed: its own callback (63 ms)` —— 窗口到前台，指针不动 |
+| clash-verge 右键 | `pressed: its own callback`，指针不动 |
+| Explorer 蓝牙（GUID）左键 | `pressed: its own callback (593 ms)` —— 蓝牙菜单弹出，指针不动 |
+| Steam 左键 | `nothing is known about this icon yet: its callback is known to be ignored`（实测它就是不应答左键，缓存写 `none`） |
+| ChatGPT 左键 | `nothing learned for this icon yet`（它不导入也不动态取 `Shell_NotifyIcon`，学不到）→ 卡片自己的菜单 |
+| 自检 / smoke | **PASS** / **PASS**；06:30 之后没有 `island_tray_hook*` 崩溃事件；模块常驻 15 个进程 |
+
+**当前覆盖率：11 格里 3 格可点**（clash-verge、Explorer 蓝牙、以及同样机制下学到的 steam/微信/Wallpaper Engine，只要它们在跑）。学不到的是**根本不碰 `Shell_NotifyIcon`** 的那几类（ChatGPT、Razer、NVIDIA、安全中心）——全局钩子把模块送进去了，但没有注册可看。
+
+#### 8.110.7 遗留（如实说）
+
+- **`click` 这个词的判决是旧的**：那是在"左键 = Post"的年代写下的，而左键现在是**同步的两条鼠标消息**（8.109），所以旧判决一律清成 `both` 重测；新的判决词是 `none`，而且**只作用于左键**（很多应用左键不应答、右键出菜单）。
+- 安装器 `IslandBarSetup.exe` 目前**只带 `island_bar.exe`**，没带 `island_tray_hook.dll`——全新安装会没有托盘学习。要补（`setup/CMakeLists.txt` + `payload.rc.in` + `Setup.cpp` 各一小段）。
+- 模块现在进的是**每个 GUI 进程**（含 msedge、WidgetService 这类与托盘无关的）。这是 MyDockFinder 的做法，也是用户接受的那条路（"更新坏了再改"），但杀软/反作弊的敏感度比"逐应用装钩子"高，值得记一笔。
+- 学习仍然依赖应用**调用 `Shell_NotifyIcon`**。真要让 ChatGPT/Razer 那类也能按，唯一已知的替代是从 shell 的**投递**里学（`WH_CALLWNDPROC` 看 shell 发给应用的 SENT 消息，正是本轮量出 v3 拼法的那条通道），但它需要先有一次真实点击——与"不要真实点击"冲突，所以没做。观察通道（标记文件 `tray_watch.txt`）仍在 `TrayHook.cpp` 里，下次要量随时可用。
