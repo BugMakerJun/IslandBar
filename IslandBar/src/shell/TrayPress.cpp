@@ -1106,7 +1106,10 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     GetClassNameW(window, cls, 128);
     DWORD pid = 0;
     GetWindowThreadProcessId(window, &pid);
-    std::swprintf(target, 160, L"class '%ls' of pid %lu (posted, not clicked)", cls, pid);
+    // "given its own callback", not "posted": since 8.109 a left press is two SENT messages and the right one
+    // is posted, and a log line that names the wrong mechanism is the kind of thing this project has paid for
+    // more than once.
+    std::swprintf(target, 160, L"class '%ls' of pid %lu (given its own callback, not a click)", cls, pid);
 
     // THE SPELLING THAT WORKED IS REMEMBERED, so the next press of this cell is one delivery instead of two.
     if (answered && !rightClick && attemptCount > 1 && answeredWith >= 0) {
@@ -1131,7 +1134,7 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
         if (!inFront) {
             wchar_t brought[128] = {};
             const bool forward = BringApplicationForward(watch, brought, 128);
-            LogAndPrint(L"  tray press: posted 0x%04X to %ls, and the application is not in front "
+            LogAndPrint(L"  tray press: gave 0x%04X to %ls, and the application is not in front "
                         L"(foreground permission %ls) -- %ls\n",
                         entry->message, target, foregroundGranted ? L"was granted" : L"could not be granted",
                         forward ? brought : L"it could not be brought forward");
@@ -1147,7 +1150,7 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     // and this press falls back, which is what makes the difference between "one slow click" and "a button
     // that does nothing".
     if (!answered) {
-        LogAndPrint(L"  tray press: posted 0x%04X to %ls and the application did nothing with it in 1.5 s "
+        LogAndPrint(L"  tray press: gave 0x%04X to %ls and the application did nothing with it in 1.5 s "
                     L"(%ls) -- pressing the real way instead, and the cache now says so\n",
                     entry->message, target, outcome ? outcome->answer : L"no answer");
         MarkCallbackAsRealClick(request);
@@ -1155,13 +1158,13 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     }
 
     if (outcome) {
-        outcome->route = L"a posted callback";
+        outcome->route = L"its own callback";
         outcome->pointerMoved = false;
         outcome->result = TrayPressResult::Pressed;
         outcome->appAnswered = answered;
         wcsncpy_s(outcome->target, sizeof(outcome->target) / sizeof(wchar_t), target, _TRUNCATE);
     }
-    LogAndPrint(L"  tray press: posted 0x%04X to %ls, the pointer was NOT moved (anchor %ld,%ld) -- the "
+    LogAndPrint(L"  tray press: gave 0x%04X to %ls, the pointer was NOT moved (anchor %ld,%ld) -- the "
                 L"application %ls\n",
                 entry->message, target, anchor.x, anchor.y,
                 answered ? L"answered" : L"has not been seen to answer yet, and nothing else was done about "
