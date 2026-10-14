@@ -1552,9 +1552,10 @@ float musicWavePhase = 0.0f;
         unsigned long long lastFramesPresented = renderer.FramesPresented();
         unsigned long long frameWaits = 0;
         unsigned long long lastFrameWaits = 0;
-        // The hovered tray cell as of the previous frame, so a CHANGE can be told from a pointer that is
-        // merely still (see cardSurfaceMoving).
-        int lastTrayHoverForSurface = -1;
+        // When the card last had a reason to be drawn with the cheap material: while it animates, or while
+        // the pointer is on it. A TIMESTAMP rather than a flag, because the material must not change on the
+        // frames in between (see cardSurfaceMoving -- a per-frame flag is what made the card flicker).
+        unsigned long long lastCardMotionMs = 0;
     int lastReportedButtons = -1;
     island::IslandState lastReportedState = island::IslandState::Collapsed;
         unsigned long long lastRegionApplications = 0;
@@ -4131,9 +4132,18 @@ float musicWavePhase = 0.0f;
                 // A cell CHANGE is the test rather than "the pointer is over the card", because the cost is
                 // paid per redraw: the pointer moving WITHIN one cell does not redraw anything, and using the
                 // hovered cell keeps the full material on screen for as long as the pointer is still.
-                const bool trayHoverMoved = frame.trayHoveredIndex != lastTrayHoverForSurface;
-                lastTrayHoverForSurface = frame.trayHoveredIndex;
-                frame.cardSurfaceMoving = animating || trayHoverMoved;
+                //
+                // STICKY, NOT PER-FRAME, and that distinction is the whole of a report that came back the
+                // same evening: "鼠标在上面移动卡片会闪". Toggling the material on the frame the hovered cell
+                // changed and off again on the frame it did not meant a moving pointer produced
+                // shadow-frames and no-shadow-frames alternately -- the card visibly flickered between two
+                // materials. The state now lasts as long as the pointer is on the card (and for a further
+                // 200 ms, so it does not change in the gaps between cells), and the full material returns
+                // once, after the interaction is over.
+                const bool overTrayCell = frame.trayHoveredIndex >= 0;
+                const unsigned long long nowMs = GetTickCount64();
+                if (animating || overTrayCell) lastCardMotionMs = nowMs;
+                frame.cardSurfaceMoving = (nowMs - lastCardMotionMs) < 200;
                 frame.trayButtonHovered = window.TrayButtonHovered();
                 // ... and the tray's own menu, when one is up: its rows come from the window (it owns the
                 // card and answers the hover test), its labels from here (user-facing text is not the
