@@ -971,7 +971,8 @@ void Renderer::RenderFrame(const FrameState& frame) {
                     if (frame.trayPageOpen) {
                         text_->DrawTrayPage(d2dContext_, panelCard, frame.trayPageTitle,
                                             frame.trayIcons, frame.trayIconCount, frame.trayRevision,
-                                            frame.cardOpacity, frame.trayHoveredIndex);
+                                            frame.cardOpacity, frame.trayHoveredIndex,
+                                            frame.cardSurfaceMoving);
                     } else if (frame.soundPageOpen) {
                         text_->DrawSoundPage(d2dContext_, panelCard, frame.soundPage,
                                              frame.cardOpacity);

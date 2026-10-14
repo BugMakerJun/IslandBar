@@ -1552,6 +1552,9 @@ float musicWavePhase = 0.0f;
         unsigned long long lastFramesPresented = renderer.FramesPresented();
         unsigned long long frameWaits = 0;
         unsigned long long lastFrameWaits = 0;
+        // The hovered tray cell as of the previous frame, so a CHANGE can be told from a pointer that is
+        // merely still (see cardSurfaceMoving).
+        int lastTrayHoverForSurface = -1;
     int lastReportedButtons = -1;
     island::IslandState lastReportedState = island::IslandState::Collapsed;
         unsigned long long lastRegionApplications = 0;
@@ -4120,6 +4123,17 @@ float musicWavePhase = 0.0f;
                                                               : island::kMaxTrayIcons;
                 frame.trayRevision = trayIcons.Revision();
                 frame.trayHoveredIndex = window.TrayCellHovered();
+                // ... AND WHETHER THE CARD'S SURFACE IS MOVING, which decides how much of the material is
+                // drawn this frame: the shadow and the grain are skipped while the card animates or while a
+                // moving pointer keeps changing which cell is hovered, and come back on the first frame that
+                // neither is true (see FrameState::cardSurfaceMoving and FillCardSurface).
+                //
+                // A cell CHANGE is the test rather than "the pointer is over the card", because the cost is
+                // paid per redraw: the pointer moving WITHIN one cell does not redraw anything, and using the
+                // hovered cell keeps the full material on screen for as long as the pointer is still.
+                const bool trayHoverMoved = frame.trayHoveredIndex != lastTrayHoverForSurface;
+                lastTrayHoverForSurface = frame.trayHoveredIndex;
+                frame.cardSurfaceMoving = animating || trayHoverMoved;
                 frame.trayButtonHovered = window.TrayButtonHovered();
                 // ... and the tray's own menu, when one is up: its rows come from the window (it owns the
                 // card and answers the hover test), its labels from here (user-facing text is not the

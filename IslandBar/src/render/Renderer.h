@@ -154,6 +154,15 @@ struct FrameState {
     // the whole of both the opening and the closing animation.
     bool outerCardUp = false;
 
+    // True while a card is being animated or is answering a moving pointer.
+    //
+    // The card's surface is then drawn WITHOUT its shadow and without its grain: those are the two parts
+    // nobody can see while it moves and the two that cost the most (a 22 DIP blur and a tiled noise fill).
+    // Everything that makes the surface the surface -- fill, hairline edge, lighting -- is kept, so a moving
+    // card and a settled one are the same material. Set from the frame loop; the full material comes back on
+    // the first frame that is not moving.
+    bool cardSurfaceMoving = false;
+
     // Whether a FULL-SCREEN APPLICATION is in front of the bar: the bar is not part of the picture then,
     // except for the island itself.
     //

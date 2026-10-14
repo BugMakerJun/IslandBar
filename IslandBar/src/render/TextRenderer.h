@@ -177,7 +177,7 @@ public:
     // on it. `hoveredIndex` is a cell of the grid (see TrayPageFor).
     void DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& card, const wchar_t* title,
                       const TrayIcon* icons, int count, unsigned long long revision, float opacity,
-                      int hoveredIndex);
+                      int hoveredIndex, bool moving = false);
 
     // The tray's own context menu: a small raised surface with one row per entry, the row under the
     // pointer washed white. Geometry comes from `TrayMenuFor` (CardLayout.h) -- the box and the rows are

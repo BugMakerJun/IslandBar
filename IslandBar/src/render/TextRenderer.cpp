@@ -905,13 +905,15 @@ namespace {
 // Every card's material, in one place (defined with the system panel's drawing code further down).
 // Declared here because the tray page -- which used to fill its own surface, and therefore looked flat
 // beside a panel that had a lit one -- is drawn above the definition.
-void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity);
+void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity,
+                     bool moving = false);
 
 } // namespace
 
 void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& card,
                                 const wchar_t* title, const TrayIcon* icons, int count,
-                                unsigned long long revision, float opacity, int hoveredIndex) {
+                                unsigned long long revision, float opacity, int hoveredIndex,
+                                bool moving) {
     if (!context || opacity <= 0.01f) return;
 
     // THE CARD'S OWN SURFACE, from the one function that draws it (FillCardSurface): the same fill, the same
@@ -921,7 +923,7 @@ void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& 
     // the same colour. It matched the OTHERS' colour and nothing else -- no edge, no lighting, no shadow --
     // which is exactly the "看着不协调" it was reported as: the panel beside it had a lit surface and this one
     // was flat. One function draws every card's material, and this was the card that did not call it.
-    FillCardSurface(context, card, opacity);
+    FillCardSurface(context, card, opacity, moving);
 
     const TrayPageLayout layout = TrayPageFor(card, count);
 
@@ -1336,7 +1338,10 @@ namespace {
 // drawn above it and the card's own surface is part of drawing it (see the call in DrawNotification).
 // A declaration outside that namespace would have been a second, different function -- which the compiler
 // said in as many words: "ambiguous call".
-void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity);
+// The second forward declaration of the same function, in a later unnamed-namespace block; the default
+// argument lives on the first one (line 908) because a default may be given only once per parameter.
+void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity,
+                     bool moving);
 
 // One line of text with the alignment overridden for this call only. Declared for the same reason as
 // FillCardSurface above: it is defined far below and the media card's no-cover placeholder needs it.
@@ -2876,7 +2881,8 @@ wchar_t DeviceGlyphFor(int formFactor) {
 //
 // A hairline in the same colour covers the antialiased fringe, for the reason the island itself has one:
 // a rounded fill alone leaves a pale seam along the curve.
-void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity) {
+void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity,
+                     bool moving) {
     if (!context) return;
     const float radius = std::max(0.0f, box.radiusX);
     const D2D1_ROUNDED_RECT rounded = {
@@ -2889,7 +2895,21 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
     const island::Theme& theme = island::CurrentTheme();
     // The shadow under the card, then the surface, then the grain over it -- the same three steps the pill
     // is drawn in, from the same two functions, so a card and the bar cannot end up as different materials.
-    island::DrawSoftShadow(context, rounded, theme.shadow, 22.0f);
+    // THE SHADOW AND THE GRAIN ARE SKIPPED WHILE THE CARD IS MOVING.
+    //
+    // Both are the least perceptible parts of the material in motion and the most expensive to draw: the
+    // shadow is a 22 DIP blur and the grain is a tiled noise fill, and neither can be seen for the length of
+    // an animation or under a moving pointer. What is KEPT is everything that makes the surface the surface
+    // -- the fill, the hairline edge and the lighting -- so a moving card and a settled one cannot look like
+    // two different materials.
+    //
+    // Reported as "这个托盘卡片里卡卡的": with a card up the loop redraws the whole card on every mouse
+    // message AND on every frame of the opening animation, and each of those frames paid for the blur. The
+    // full material is drawn again on the first frame that is not moving (see FrameState::cardSurfaceMoving),
+    // so the settled look is unchanged.
+    if (!moving) {
+        island::DrawSoftShadow(context, rounded, theme.shadow, 22.0f);
+    }
     const D2D1_COLOR_F fillColour = D2D1::ColorF(theme.cardFill.r, theme.cardFill.g, theme.cardFill.b,
                                                 theme.cardFill.a * opacity);
     const D2D1_COLOR_F edgeColour = island::ThemeInk(theme.cardEdge * opacity);
@@ -2909,7 +2929,9 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
     // THE SAME LIGHTING THE PILL GETS, from the same function: a card's surface and the bar's are the same
     // material at different sizes, and this is where that stops being a claim in a comment.
     island::DrawSurfaceLighting(context, rounded, theme, opacity);
-    island::DrawGrain(context, rounded, theme.grain * opacity);
+    if (!moving) {
+        island::DrawGrain(context, rounded, theme.grain * opacity);
+    }
 }
 
 // One line of text, with the format's own alignment overridden for the call and put back afterwards.
