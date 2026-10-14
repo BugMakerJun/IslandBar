@@ -10743,6 +10743,16 @@ state: expanded (pointer inside=1, resting=music-strip)      ← 卡片打开了
 顺带说明探针那条：**先跑了现成的 `probe-tray-panel-child-windows.ps1`**（没有新写脚本），它量到的是一个已经知道的事实——面板**停稳之后** alpha 0 就能把它藏住（mean 43.98 对 102.65），
 真正漏光是**滑入那一段**。所以第二步不是去按子窗口（评审也劝过：别去维护子窗口列表），而是把"露出来"这件事本身降到最小：alpha 1。
 
+#### 收尾时又抓到一个（同一天补的，属于 8.99 的一部分）
+
+部署完那张屏幕截图里，右上角**又出现了面板与图标网格**——查下来是一个一直在的状态机漏洞，不是新引入的：
+
+> `Reset()` 里"把面板的 alpha 还原成 255"这一步原来只在**右键**时交给看门狗，左键一律当场还原。可是"面板还在不在屏幕上"和"按的是哪个键"是两件事：**只要 shell 还把面板留在屏上**（它上面挂着上一次右键的菜单，或者上一次按压留下的状态），左键这一路就会把 alpha 还原成 255 → 网格被画出来并留在那里。我这次是在"先右键出菜单、再左键"的序列里撞上的。
+
+改法（把两个分支并成一个问题，代码反而更少）：`Reset()` 里**只问一次** `panelStillUp = PanelStillShowing()`（问在 chevron 那次收尾之后，因为那次按压才是通常改变答案的动作），面板的 alpha 与任务栏的 layered 位**都**按这个答案交给看门狗或当场还原；`rightClicked_` 与 `weOpenedFlyout_` 不再参与这个判断。多了一行日志：`tray stage: the shell still has the panel up, so its alpha and the taskbar's are left to the bar's watchdog`。
+
+复现与验收（同一台机器，CLI）：右键 WeGame（菜单起来）→ **在菜单还开着时**左键微信 → 日志里点击的落点被如实记成 `aimed at class 'TWINCONTROL' of pid 7008`（也就是那条菜单本身，不是图标），面板窗口两段按压之后都是 `panel window gone`，屏幕上没有网格；此外 5 次 `measure-tray-panel.ps1` 仍是 **0 个可见采样点**，微信左键仍 `the application answered`、WeGame 右键菜单仍是 `47 ms … 'TWINCONTROL' at 2144,109 250x280`。
+
 #### 剩下的（如实说）
 
 - 指针仍会跳到图标上再跳回来（这是真实输入路线的固有代价，用户已接受）；

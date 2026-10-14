@@ -686,6 +686,14 @@ void TrayStage::Reset() {
     chevron_ = nullptr;
     flyoutElement_ = nullptr;
     automation_ = nullptr;
+    // ONE QUESTION, ASKED ONCE, DECIDES WHAT MAY BE PUT BACK HERE -- and it is asked now, after the chevron
+    // has had its chance to close the panel, because the chevron press is the thing that usually changes
+    // the answer. While the shell still has the panel up (its menu is on it, or a previous press left one
+    // there) it also re-shows its own taskbar, so BOTH the panel's alpha and the taskbar's style have to be
+    // handed to the frame loop rather than put back here. Measured 2026-10-15 from a user's screen: a left
+    // press that ran while an earlier right-click menu was still up restored the alpha, and the shell's icon
+    // grid was painted under that menu and left there.
+    const bool panelStillUp = PanelStillShowing();
     if (flyoutWindow_) {
         // THE PANEL IS NOT MOVED. It used to be "put back where the shell had it" through a field that was
         // never assigned, so the shell's overflow panel ended up at 0,0 on every press -- and the
@@ -693,17 +701,17 @@ void TrayStage::Reset() {
         // screen with it, grid and all (the user's screenshot of 2026-10-15). Nothing here may move it: the
         // icon rectangles a press is aimed with are screen coordinates inside it, and the menu's place is
         // derived from it.
-        if (rightClicked_ && weOpenedFlyout_) {
-            // The menu is up on the panel, so the panel stays invisible until the shell closes it, and its
-            // style and alpha are handed to the frame loop -- see TrayPressFinishCleanup. Restoring them
-            // here would paint the icon grid over the menu the user just asked for.
+        if (panelStillUp) {
+            // THE SHELL STILL HAS IT UP, so the style and alpha are handed to the frame loop, which puts them
+            // back once the shell has closed the panel -- see TrayPressFinishCleanup.
+            LogAndPrint("  tray stage: the shell still has the panel up, so its alpha and the taskbar's are "
+                        "left to the bar's watchdog\n");
             g_cleanupPanelStyle.store(flyoutStyle_);
             g_cleanupPanelUnlayer.store(flyoutLayered_);
             g_cleanupPanel.store(flyoutWindow_);
         } else {
-            // A left press: the panel was closed just above (or the shell closed it), so putting its alpha
-            // and its extended style back cannot be seen by anybody, and leaving an alpha of 0 on somebody
-            // else's window is not ours to keep.
+            // The panel is closed: putting its alpha and its extended style back cannot be seen by anybody,
+            // and leaving an alpha of 0 on somebody else's window is not ours to keep.
             SetLayeredWindowAttributes(flyoutWindow_, 0, 255, LWA_ALPHA);
             if (flyoutLayered_) {
                 SetWindowLongPtrW(flyoutWindow_, GWL_EXSTYLE, flyoutStyle_);
@@ -714,12 +722,11 @@ void TrayStage::Reset() {
     }
     if (taskbar_) {
         if (!wasVisible_) ShowWindow(taskbar_, SW_HIDE);
-        if (rightClicked_ && weOpenedFlyout_) {
-            // LEFT ALPHA-0 UNTIL THE BAR'S WATCHDOG RUNS, and the reason is measured: while the shell's
-            // panel and its menu are up, the SHELL re-shows its own taskbar -- and removing the layering
-            // here put it on the user's screen, opaque, for the seconds until the bar hid it again. So the
-            // style is handed over instead of restored (TrayPressFinishCleanup), and a re-show in the
-            // meantime is invisible.
+        if (panelStillUp) {
+            // LEFT ALPHA-0 UNTIL THE BAR'S WATCHDOG RUNS, for the same reason as the panel above: the shell
+            // re-shows its own taskbar while its panel is up, and removing the layering here put it on the
+            // user's screen, opaque, for the seconds until the bar hid it again. The style is handed over
+            // instead of restored (TrayPressFinishCleanup), and a re-show in the meantime is invisible.
             g_cleanupStyle.store(style_);
             g_cleanupTaskbar.store(taskbar_);
         } else {
