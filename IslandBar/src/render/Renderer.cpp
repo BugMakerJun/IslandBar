@@ -645,6 +645,33 @@ void Renderer::RenderFrame(const FrameState& frame) {
             // The priority is the one this whole block is documented as having -- a call, then a message,
             // then the lyric, then the time -- and it now holds whatever the card is doing.
             const bool announcing = frame.callUp || (frame.noticeLine && frame.noticeLine[0] != '\0');
+
+            // WHICH OF THE FOUR THINGS THE BAR SAYS, ONCE PER CHANGE, IN THE LOG.
+            //
+            // The bar has one line and four possible sources for it, and from a screenshot the four are
+            // indistinguishable from a mistake in choosing between them -- "the island says the wrong thing"
+            // has cost a round of reading this file every time it has been reported. So the choice is
+            // written down: which source, the two states it was made from, whether a card is up, and the box
+            // the line went into.
+            {
+                const char* source = announcing
+                                         ? (frame.callUp ? "call" : "message")
+                                         : (frame.state == IslandState::NoticeStrip
+                                                ? "clock-in-strip"
+                                                : (frame.restingState == IslandState::MusicStrip ? "lyric"
+                                                                                                 : "date"));
+                static const char* lastSource = nullptr;
+                static bool lastIntoPill = false;
+                if (source != lastSource || intoPill != lastIntoPill) {
+                    lastSource = source;
+                    lastIntoPill = intoPill;
+                    LogLine(L"  strip says: %hs (state %ls, resting %ls, cardUp %d, intoPill %d, "
+                            L"box %.0f..%.0f)",
+                            source, StateName(frame.state), StateName(frame.restingState),
+                            frame.outerCardUp ? 1 : 0, intoPill ? 1 : 0, box.rect.left, box.rect.right);
+                }
+            }
+
             if (announcing) {
                 // WHERE: the strip while the strip is the bar's own shape, and the PILL once a card is up.
                 // The same rule the lyric below follows with `lineBox`, and for the same reason -- once a
