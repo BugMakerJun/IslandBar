@@ -44,6 +44,7 @@
 #include <security.h>   // GetUserNameExW, for the name in that card's footer
 #include <sddl.h>       // ConvertSidToStringSidW, to find the account picture
 #include "core/Motion.h"
+#include "core/ProcessMetrics.h"   // the memory line: what this process holds, and whether it grows
 #include "media/MusicSession.h"
 #include "platform/NativeTaskbar.h"
 #include "media/Lyrics.h"
@@ -1519,6 +1520,24 @@ float musicWavePhase = 0.0f;
         float lastSoundScroll = 0.0f;
         unsigned long long lastSoundRevision = 0;
         unsigned long long lastIntervalReport = GetTickCount64();
+        // --- the memory line's own state -------------------------------------------------------
+        //
+        // The bar is meant to sit on the desktop for days, so "it uses little memory" is a claim about
+        // a 24-hour curve rather than about one reading. The curve is built from a line every five
+        // minutes plus one shortly after an operation that is suspected of growing the process: a card
+        // closing, a track change, a tray refresh. The steady line answers "does it grow at all"; the
+        // event line answers "which operation grows it". ProcessMetrics.h carries the rule for reading
+        // the two together -- bytes rising with a count is a cache, bytes rising alone is a leak.
+        constexpr unsigned long long kMemorySampleMs = 5ull * 60ull * 1000ull;
+        unsigned long long lastMemorySample = GetTickCount64();
+        // One line two seconds after startup, before the five-minute cadence has had a chance to run:
+        // it records the baseline the curve is measured against, and it makes the line's presence
+        // checkable within seconds of a deploy instead of after five minutes of waiting.
+        unsigned long long memorySamplePendingAt = GetTickCount64() + 2000;
+        bool firstMemorySample = true;
+        unsigned long long lastMemoryMusicRevision = music.Revision();
+        int lastMemoryTrayIcons = trayIcons.Count();
+        bool lastMemoryCardUp = false;
     int lastReportedButtons = -1;
     island::IslandState lastReportedState = island::IslandState::Collapsed;
         unsigned long long lastRegionApplications = 0;
@@ -5318,6 +5337,62 @@ float musicWavePhase = 0.0f;
                                     work[0] ? work : "none logged",
                                     (lastWork & kWorkDraw) ? "" : " (no draw: the loop was waiting)");
             }
+            // --- the memory line --------------------------------------------------------------------
+            //
+            // Emitted on a five-minute cadence and again shortly after a suspected grower. See the note
+            // in ProcessMetrics.h: the counts ride on the same line as the bytes on purpose, because
+            // "a cache filled up" and "something is leaking" are told apart by whether they rise together.
+            {
+                const unsigned long long nowTicks = GetTickCount64();
+                const unsigned long long musicRevision = music.Revision();
+                const int trayCount = trayIcons.Count();
+                // The same expression the frame's own `outerCardUp` is built from (`frame` is declared in
+                // the inner block that draws, and is not visible here). Kept as one expression rather
+                // than two spellings of the same idea wherever it can be helped: this one only decides
+                // when to take a sample, so a disagreement would cost a sample rather than a drawing.
+                const bool cardUp = window.State() == island::IslandState::Expanded ||
+                                    window.FromState() == island::IslandState::Expanded;
+
+                if (musicRevision != lastMemoryMusicRevision) {
+                    lastMemoryMusicRevision = musicRevision;
+                    memorySamplePendingAt = nowTicks + 3000;   // once the new cover and lyric sheet land
+                }
+                if (trayCount != lastMemoryTrayIcons) {
+                    lastMemoryTrayIcons = trayCount;
+                    memorySamplePendingAt = nowTicks + 3000;   // once the icons are decoded
+                }
+                if (lastMemoryCardUp && !cardUp) {
+                    // Delayed rather than immediate: a card's bitmaps and text layouts are released as it
+                    // closes, and what the sample is for is what is STILL held after that.
+                    memorySamplePendingAt = nowTicks + 30000;
+                }
+                lastMemoryCardUp = cardUp;
+
+                const bool steady = (nowTicks - lastMemorySample) >= kMemorySampleMs;
+                const bool afterEvent = memorySamplePendingAt != 0 && nowTicks >= memorySamplePendingAt;
+                if (steady || afterEvent) {
+                    island::ProcessMemorySample sample;
+                    island::SampleProcessMemory(&sample);
+                    sample.vramValid = renderer.VideoMemory(&sample.vramLocalBytes,
+                                                            &sample.vramNonLocalBytes);
+
+                    island::ProcessCacheCounts counts;
+                    counts.coverBytes    = nowPlaying.artworkSize;
+                    counts.lyricLines    = currentLyrics ? currentLyrics->count : 0;
+                    counts.trayIcons     = trayCount;
+                    counts.taskButtons   = taskWindows.Count();
+                    counts.notifications = notifications.Count();
+                    renderer.CacheCounts(&counts.bitmaps, &counts.windowIcons);
+
+                    const char* reason = firstMemorySample ? "start"
+                                                          : (steady ? "5min" : "after-event");
+                    island::LogProcessMemory(reason, sample, counts);
+                    firstMemorySample = false;
+                    lastMemorySample = nowTicks;
+                    memorySamplePendingAt = 0;
+                }
+            }
+
             if (GetTickCount64() - lastIntervalReport >= 4000) {
                 lastIntervalReport = GetTickCount64();
                 wchar_t intervalSummary[256] = {};

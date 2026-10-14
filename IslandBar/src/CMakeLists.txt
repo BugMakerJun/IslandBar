@@ -25,6 +25,7 @@ add_executable(island_bar
     core/Log.cpp
     core/MiniJson.cpp
     core/Motion.cpp
+    core/ProcessMetrics.cpp
 
     # --- media: what is playing, and what it looks like --------------
     media/AudioVolume.cpp

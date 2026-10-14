@@ -131,6 +131,12 @@ bool Renderer::CreateSwapChain(UINT widthPx, UINT heightPx) {
     SafeRelease(&dxgiDevice);
     if (FAILED(hr) || !adapter) return false;
 
+    // The adapter is kept, not merely used to reach the factory: the memory line asks it how much the
+    // driver has charged this process on the GPU. A failure here is not fatal -- an adapter that cannot
+    // answer simply leaves the line's VRAM fields at "n/a".
+    SafeRelease(&dxgiAdapter3_);
+    adapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&dxgiAdapter3_));
+
     IDXGIFactory2* factory = nullptr;
     hr = adapter->GetParent(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&factory));
     SafeRelease(&adapter);
@@ -1064,6 +1070,42 @@ if (compDevice_) {
 }
 }
 
+bool Renderer::VideoMemory(unsigned long long* localBytes, unsigned long long* nonLocalBytes) {
+    if (localBytes) *localBytes = 0;
+    if (nonLocalBytes) *nonLocalBytes = 0;
+    if (!dxgiAdapter3_) return false;
+
+    const UINT node = 0;   // one GPU node: this bar never spans an adapter
+    DXGI_QUERY_VIDEO_MEMORY_INFO local = {};
+    if (FAILED(dxgiAdapter3_->QueryVideoMemoryInfo(node, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
+        return false;
+    }
+
+    // The non-local segment is optional: a driver may legitimately answer nothing for it, and a
+    // failure there must not throw away the local figure, which is the one that matters.
+    DXGI_QUERY_VIDEO_MEMORY_INFO nonLocal = {};
+    const bool haveNonLocal =
+        SUCCEEDED(dxgiAdapter3_->QueryVideoMemoryInfo(node, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
+                                                      &nonLocal));
+
+    if (localBytes) *localBytes = static_cast<unsigned long long>(local.CurrentUsage);
+    if (nonLocalBytes) *nonLocalBytes = haveNonLocal
+                                            ? static_cast<unsigned long long>(nonLocal.CurrentUsage)
+                                            : 0ull;
+    return true;
+}
+
+void Renderer::CacheCounts(int* bitmaps, int* windowIcons) const {
+    if (bitmaps) {
+        int count = 0;
+        for (int i = 0; i < static_cast<int>(BitmapSlot::Count); ++i) {
+            if (bitmapCache_[i].bitmap) ++count;
+        }
+        *bitmaps = count;
+    }
+    if (windowIcons) *windowIcons = windowIconCount_;
+}
+
 ID2D1Bitmap1* Renderer::IconForWindow(HWND window) {
     if (!window || !d2dContext_) return nullptr;
 
@@ -1607,6 +1649,7 @@ void Renderer::Shutdown() {
     SafeRelease(&d2dContext_);
     SafeRelease(&d2dDevice_);
     SafeRelease(&d2dFactory_);
+    SafeRelease(&dxgiAdapter3_);
     SafeRelease(&swapChain_);
     SafeRelease(&d3dContext_);
     SafeRelease(&d3dDevice_);

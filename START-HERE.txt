@@ -188,6 +188,12 @@ THREE RULES THAT COST REAL TIME TO LEARN
    redirects to it). `gh` is installed at C:\Users\<you>\gh-cli\bin\gh.exe,
    authenticated as BugMakerJun (scopes gist/repo/workflow).
 
+   NEW (2026-10-14): the full change workflow now lives in AGENTS.md at the
+   repository root, and it is read automatically at the start of every session:
+   research the change with the review partner FIRST, hand the user a plan, WAIT for
+   their confirmation, implement and deploy, WAIT for their test, and only then push.
+   Read AGENTS.md before starting any work.
+
 
 TWO MORE THAT WILL BITE WHEN YOU DELETE OR DRAW
 -----------------------------------------------

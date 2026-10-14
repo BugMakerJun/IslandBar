@@ -599,6 +599,17 @@ public:
     // Which spacing was applied to glyphs and shapes, for reporting.
     UINT Dpi() const { return dpi_; }
 
+    // How much memory the driver has charged this process on the GPU, and whether the adapter could
+    // be asked at all. LOCAL is the GPU's own segment (VRAM on a discrete card, the same system memory
+    // on an integrated one); NON_LOCAL is what the driver reserved outside it. Reported by the memory
+    // line, because a GPU allocation with no ceiling shows up here and nowhere else.
+    bool VideoMemory(unsigned long long* localBytes, unsigned long long* nonLocalBytes);
+
+    // How many decoded images and window icons the renderer is holding. This is the number that
+    // separates "a cache filled up" from "something is leaking" on the memory line: Direct2D cannot be
+    // asked how many bitmaps exist, but this program can count the ones it made.
+    void CacheCounts(int* bitmaps, int* windowIcons) const;
+
 private:
     bool CreateDeviceResources();
     bool CreateSwapChain(UINT widthPx, UINT heightPx);
@@ -622,6 +633,9 @@ private:
     ID3D11Device*            d3dDevice_   = nullptr;
     ID3D11DeviceContext*     d3dContext_  = nullptr;
     IDXGISwapChain1*         swapChain_   = nullptr;
+    // Kept for the memory line only: DXGI 1.4's adapter is the one that can report how much the driver
+    // has charged this process, and nothing else in the bar needs an interface newer than 1.2.
+    IDXGIAdapter3*           dxgiAdapter3_ = nullptr;
     ID2D1Factory3*           d2dFactory_  = nullptr;
     ID2D1Device2*            d2dDevice_   = nullptr;
     ID2D1DeviceContext2*     d2dContext_  = nullptr;
