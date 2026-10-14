@@ -43,6 +43,12 @@ struct ProcessMemorySample {
     unsigned long long vramNonLocalBytes = 0;
     unsigned long handles                = 0;   // kernel handles this process holds
     unsigned long threads                = 0;   // threads this process holds, including other people's
+    // GDI and USER objects. The cheapest way to see a leak that lives in the window manager rather
+    // than in the heap: those two are a FIXED per-process budget, so a bar that leaks one object per
+    // redraw dies at ten thousand rather than when memory runs out -- and it dies as a drawing failure
+    // everywhere at once, which reads as a hundred unrelated bugs.
+    unsigned long gdiObjects             = 0;
+    unsigned long userObjects            = 0;
     bool vramValid                       = false;
 };
 

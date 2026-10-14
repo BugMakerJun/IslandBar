@@ -1472,8 +1472,13 @@ int rowSlotCount = 0;
         // Frame pacing. The compositor clock drives this when available, so an
         // idle desktop costs nothing; otherwise MsgWaitForMultipleObjects blocks
         // on input, which is also event-driven rather than a spin.
-        const bool clockDriven = renderer.WaitForCompositorClock(1);
-        island::LogAndPrint("  frame pacing: %s\n", clockDriven ? "compositor clock" : "message wait");
+    const bool clockDriven = renderer.WaitForCompositorClock(1);
+    // Which wait the loop will use, named once here and repeated on every throttle line below. The
+    // order is the order of preference: the swap chain's own frame-latency object, then the compositor
+    // clock, then a short message wait.
+    const char* pacingPath = renderer.PacingIsWaitable() ? "waitable"
+                                                        : (clockDriven ? "compositor" : "timer");
+    island::LogAndPrint("  frame pacing: %s\n", pacingPath);
         std::fflush(stdout);
 
         LARGE_INTEGER frequency = {};
@@ -1538,6 +1543,15 @@ float musicWavePhase = 0.0f;
         unsigned long long lastMemoryMusicRevision = music.Revision();
         int lastMemoryTrayIcons = trayIcons.Count();
         bool lastMemoryCardUp = false;
+        // --- the throttle line's own state -------------------------------------------------------
+        //
+        // Frames presented and waits taken, both reported per second. The pair is the difference
+        // between "the loop paced itself on the compositor" and "the loop spun and presented whenever
+        // it happened to wake": a frame count near the monitor's refresh rate WITH a wait count near it
+        // is the healthy shape, and a frame count far above it is the defect this change is about.
+        unsigned long long lastFramesPresented = renderer.FramesPresented();
+        unsigned long long frameWaits = 0;
+        unsigned long long lastFrameWaits = 0;
     int lastReportedButtons = -1;
     island::IslandState lastReportedState = island::IslandState::Collapsed;
         unsigned long long lastRegionApplications = 0;
@@ -5415,6 +5429,14 @@ float musicWavePhase = 0.0f;
                                         applied, applied - lastRegionApplications);
                     lastRegionApplications = applied;
                 }
+                {
+                    const unsigned long long frames = renderer.FramesPresented();
+                    island::LogAndPrint("  throttle: path=%s frames=%llu/s waits=%llu/s maxLatency=1",
+                                        pacingPath, frames - lastFramesPresented,
+                                        frameWaits - lastFrameWaits);
+                    lastFramesPresented = frames;
+                    lastFrameWaits = frameWaits;
+                }
                 std::fflush(stdout);
                 liveStats.Reset();
                 whyAnimating = whyClock = whyNotification = whyMusic = 0;
@@ -5429,12 +5451,22 @@ float musicWavePhase = 0.0f;
             // spinning: the clock only needs a wake-up once a second, so a 100 ms
             // cap is plenty and costs nothing on an idle desktop.
             if (window.IsAnimating()) {
-                if (clockDriven) {
+                // Preferred order, and the reason for it: the swap chain's frame-latency waitable
+                // object is the compositor's own "the next frame may go now" signal, so a wait on it
+                // ends when there is a frame to draw instead of after a guess. The compositor clock
+                // comes second (it is the same idea through a different door), and a short message wait
+                // last. The 8 ms cap is a safety net for a signalled-but-unused object, not the pacing.
+                const HANDLE frameWait = renderer.FrameLatencyWaitable();
+                if (frameWait) {
+                    ::MsgWaitForMultipleObjectsEx(1, &frameWait, 8, QS_ALLINPUT,
+                                                  MWMO_INPUTAVAILABLE);
+                } else if (clockDriven) {
                     renderer.WaitForCompositorClock(8);
                 } else {
                     ::MsgWaitForMultipleObjectsEx(0, nullptr, 4, QS_ALLINPUT,
                                                   MWMO_INPUTAVAILABLE);
                 }
+                frameWaits += 1;
             } else {
                 ::MsgWaitForMultipleObjectsEx(0, nullptr, 100, QS_ALLINPUT,
                                               MWMO_INPUTAVAILABLE);

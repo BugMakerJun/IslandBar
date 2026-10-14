@@ -605,6 +605,21 @@ public:
     // line, because a GPU allocation with no ceiling shows up here and nowhere else.
     bool VideoMemory(unsigned long long* localBytes, unsigned long long* nonLocalBytes);
 
+    // --- pacing -----------------------------------------------------------------------------------
+    //
+    // The swap chain's own frame-latency waitable object is the signal the frame loop should block
+    // on: it is the compositor saying "the next frame may go now", so a wait on it ends when there is
+    // something to wait for. Without it the loop can only guess, which is what a fixed 4 ms timer is.
+    // Null when the swap chain was built without DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT or
+    // the runtime refused the object; the loop then falls back to the compositor clock, then to a timer.
+    HANDLE FrameLatencyWaitable() const { return frameLatencyWaitable_; }
+    bool PacingIsWaitable() const { return frameLatencyWaitable_ != nullptr; }
+    bool HasCompositorClock() const { return waitForClock_ != nullptr; }
+
+    // Frames handed to the compositor. Reported per second by the throttle line: a count far above the
+    // monitor's refresh rate is the sign that the pacing is not pacing anything.
+    unsigned long long FramesPresented() const { return framesPresented_; }
+
     // How many decoded images and window icons the renderer is holding. This is the number that
     // separates "a cache filled up" from "something is leaking" on the memory line: Direct2D cannot be
     // asked how many bitmaps exist, but this program can count the ones it made.
@@ -633,9 +648,17 @@ private:
     ID3D11Device*            d3dDevice_   = nullptr;
     ID3D11DeviceContext*     d3dContext_  = nullptr;
     IDXGISwapChain1*         swapChain_   = nullptr;
+    // The same swap chain as IDXGISwapChain2, which is where the frame-latency limit and its waitable
+    // object live. Kept as its own pointer because a failed QueryInterface must leave the older
+    // interface usable -- the bar draws perfectly well without a waitable object.
+    IDXGISwapChain2*         swapChain2_  = nullptr;
     // Kept for the memory line only: DXGI 1.4's adapter is the one that can report how much the driver
     // has charged this process, and nothing else in the bar needs an interface newer than 1.2.
     IDXGIAdapter3*           dxgiAdapter3_ = nullptr;
+    // Owned by this class: the swap chain hands it over and expects CloseHandle (the swap chain must
+    // outlive it, which Shutdown's ordering guarantees).
+    HANDLE                   frameLatencyWaitable_ = nullptr;
+    unsigned long long       framesPresented_ = 0;
     ID2D1Factory3*           d2dFactory_  = nullptr;
     ID2D1Device2*            d2dDevice_   = nullptr;
     ID2D1DeviceContext2*     d2dContext_  = nullptr;

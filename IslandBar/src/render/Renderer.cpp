@@ -156,13 +156,28 @@ bool Renderer::CreateSwapChain(UINT widthPx, UINT heightPx) {
     desc.BufferCount        = 2;
     desc.Scaling            = DXGI_SCALING_STRETCH;
     desc.SwapEffect         = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    // The waitable object is the pacing the frame loop uses; the flag has to be here, in the
+    // description, because it cannot be added to a live swap chain afterwards.
+    desc.Flags              = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     // Premultiplied alpha is what makes the area outside the pill genuinely
     // transparent instead of a black rectangle.
     desc.AlphaMode          = DXGI_ALPHA_MODE_PREMULTIPLIED;
 
     hr = factory->CreateSwapChainForComposition(d3dDevice_, &desc, nullptr, &swapChain_);
     SafeRelease(&factory);
-    return SUCCEEDED(hr) && swapChain_ != nullptr;
+    if (FAILED(hr) || !swapChain_) return false;
+
+    // One frame in flight, and the object that says when. Both halves matter: the limit without the
+    // wait is a queue nobody waits for, and the wait without the limit is a signal that fires while two
+    // frames are already queued -- which is the state the loop was in when it presented with sync
+    // interval 1 and waited twice per frame.
+    if (SUCCEEDED(swapChain_->QueryInterface(__uuidof(IDXGISwapChain2),
+                                             reinterpret_cast<void**>(&swapChain2_))) && swapChain2_) {
+        swapChain2_->SetMaximumFrameLatency(1);
+        frameLatencyWaitable_ = swapChain2_->GetFrameLatencyWaitableObject();
+    }
+
+    return true;
 }
 
 void Renderer::ReleaseTarget() {
@@ -1062,8 +1077,19 @@ ReleaseWindowIcons();
 d2dContext_->SetTarget(nullptr);
 SafeRelease(&d2dTarget_);
 
-// Present with no sync interval: the compositor clock already paces us.
-swapChain_->Present(1, 0);
+// Present with NO sync interval -- interval 0, and that is now what the argument says.
+//
+// This line read Present(1, 0) with this same comment above it for as long as it has existed: the
+// parameter and the sentence disagreed, and the effect was to wait twice for every frame -- once in the
+// loop (on the compositor clock, or on a 4 ms timer) and once here, on vsync. Two waits where one is
+// intended is at least a frame of latency, and on this machine it showed up as the ~100 ms tails in the
+// loop's own interval report and as "slow frame" lines whose work was "none logged".
+//
+// The wait is now the swap chain's frame-latency waitable object, which the loop blocks on before
+// drawing (see IslandWindow/main.cpp). Presenting without waiting again is what makes that the ONLY
+// throttle, which is the property the throttle line in the log is there to demonstrate.
+swapChain_->Present(0, 0);
+framesPresented_ += 1;
 
 if (compDevice_) {
     compDevice_->Commit();
@@ -1649,6 +1675,13 @@ void Renderer::Shutdown() {
     SafeRelease(&d2dContext_);
     SafeRelease(&d2dDevice_);
     SafeRelease(&d2dFactory_);
+    if (frameLatencyWaitable_) {
+        // The swap chain owns the object's lifetime; this only releases our handle to it, and it goes
+        // before the swap chain does.
+        CloseHandle(frameLatencyWaitable_);
+        frameLatencyWaitable_ = nullptr;
+    }
+    SafeRelease(&swapChain2_);
     SafeRelease(&dxgiAdapter3_);
     SafeRelease(&swapChain_);
     SafeRelease(&d3dContext_);
