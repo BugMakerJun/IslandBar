@@ -35,7 +35,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $obj = Join-Path $outDir 'probe-tray-lab.obj'
 Write-Host "[lab] compiling $source"
 & cl.exe /nologo /W4 /EHsc /O2 /utf-8 /Fo:$obj /Fe:$outExe $source `
-    /link user32.lib shell32.lib gdi32.lib
+    /link user32.lib shell32.lib gdi32.lib advapi32.lib ole32.lib oleaut32.lib uiautomationcore.lib
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with $LASTEXITCODE" }
 
 Write-Host "[lab] built: $outExe"

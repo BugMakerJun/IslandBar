@@ -12004,3 +12004,47 @@ preview: resting on a task icon shows a live thumbnail
 * 托盘**只能待在 shell 放它的地方**（本机右上角）：E3b/E4 已经把"搬走"这条路证伪。
 * **全屏应用时托盘跟着退场**（`SetSuppressed`）—— 与栏自己的"全屏就退场"一致，但没有在真游戏里实测过。
 * 没有碰"自己当 shell"那条路（E1 已证明没有便宜的替代）；也没有动 `--probe-taskbar` 的报告。
+
+---
+
+## 8.135 **用户不要原生托盘 → 自绘托盘的三块地基全部验证完毕** ✅
+
+用户看完 8.134 的部署说：「**但是我不想要原生的**」。于是默认改回"隐藏任务栏"（`--native-tray` 变成显式开关），并把"自绘托盘"缺的三块一一验证。
+
+### 8.135.1 显示：托盘在屏幕上不可见时，UIA 还看不看得见（`--uia`，E5）
+
+三种状态各问一次 UIA：
+
+| 任务栏状态 | 树里的托盘根 | 按钮 | 托盘那 6 格 |
+|---|---|---|---|
+| 正常可见 | 找得到 | 16 | `SystemTray.AccentButton`，`offscreen=0`、**`invoke=1`**、坐标 2416..2560 |
+| **裁成 1 DIP（屏幕上一个像素都没有）** | **同样找得到** | **16** | **`offscreen=0`、`invoke=1`、坐标一致** |
+| `SW_HIDE` 藏起来 | **"THE TRAY IS NOT IN THE TREE AT ALL"** | — | — |
+
+**结论**：任务栏只要"活着"（哪怕裁到只剩 1 像素、屏幕上看不见），托盘图标就**全部可枚举、可 `Invoke`**。这是自绘托盘的地基：**我们画，shell 替我们点，不需要它露出来闪一下**（上一版 F3 正是为此把任务栏露出来几百毫秒）。
+
+### 8.135.2 身份与图标：ITrayNotify 能拿到，但不投递，而且本来就没有回调号（`--traycom` / `--traynotify`，E6/E7）
+
+| 步骤 | 结果 |
+|---|---|
+| 找到类 | `HKLM\SOFTWARE\Classes\CLSID\{25dead04-1eac-4911-9e3a-ad0a4ab560fd}` = `CLSID_TrayNotify`，`AppID {a2b77517-…}` = "TrayNotify"，`RunAs = Interactive User`；**没有 InprocServer32/LocalServer32，没有 TypeLib**，`HKLM\...\Interface` 下也没有按名字注册的 TrayNotify 接口 |
+| 类激活 | `CoCreateInstance(CLSID_TrayNotify)` → **0x00000000（成功）**，从**普通权限**进程就能拿到 |
+| 接口身份（不靠猜） | 把 `HKLM\SOFTWARE\Classes\Interface` 下 **1724 个注册 IID 逐个 QI**（1.7 秒），对象只接受 4 个：`IUnknown`、`IMarshal`、`IInspectable`、**`{D133CE13-3537-48BA-93A7-AFCD5D2053B4}`**。ChatGPT 独立查到这正是 **`ITrayNotifyWin8`** 的 IID —— 两个来源对上 |
+| 对象的自我描述 | `IInspectable` 三个调用全 S_OK，但 **`GetIids` 返回 0 个接口、`GetRuntimeClassName` 回空** —— 对象不自描述，只能靠上面的扫描 |
+| 布局核对 | 实测 `NOTIFYITEM`：`size=56`，偏移 `exe=0 tip=8 icon=16 hwnd=24 pref=32 uid=36 guid=40` —— 与 ChatGPT 给的 x64 ABI 一字不差 |
+| 注册回调 | `QueryInterface(ITrayNotifyWin8)` → **S_OK**；`RegisterCallback` → **S_OK**；`UnregisterCallback` → S_OK |
+| **投递** | **22 秒里 0 个事件**，尽管期间故意让客户端 `NIM_ADD/MODIFY/DELETE` 三次；**换成任务栏可见的状态再测一次，仍然 0 个事件** |
+
+**两条结论**：① **`NOTIFYITEM` 里没有 `uCallbackMessage`**（字段只有 exe/tip/hIcon/hWnd/pref/uid/guid）——**即使它投递，也给不了应用自己的右键菜单**；② 在这台 Win11 26220 上，它注册成功但**不投递**（可能是它只报告"托盘设置偏好"的变化，而不是每次注册；这一点没继续烧时间，因为第一条已经决定它不能解决右键）。
+
+### 8.135.3 于是"自绘托盘"的最终形态确定了
+
+| 要素 | 用什么 | 状态 |
+|---|---|---|
+| 哪些图标真的在托盘里 | **UIA 树**（真相，正好解决注册表里 NVIDIA 那种"有记录但不在托盘"的问题） | ✅ 实测 |
+| 图标长什么样 | 注册表 `NotifyIconSettings` 的 `IconSnapshot` PNG（按名字/exe 对上；对不上的用占位符） | 旧路，8.101 实测过 |
+| **左键** | **UIA `Invoke()`** —— shell 执行那一格自己的左键行为，提权/AppContainer 一样有效，指针不动 | ✅ 实测（`invoke=1`） |
+| 原生托盘怎么处理 | 任务栏"活着"但**裁到 1 DIP**（屏幕上看不见），UIA 就一直可用 | ✅ 实测 |
+| **右键** | **只能是我们自己的菜单**（应用自己的菜单需要回调号，而回调号只有注入才能拿到） | 设计上确定；老 `TrayMenu` 那套（打开/显示窗口/打开文件位置/关闭窗口/结束应用）在 git 里可取回 |
+
+**没做的事**：没有继续烧时间在 ITrayNotify 上（它的字段已经排除了右键）；没有改产品代码；`--native-tray` 保留为显式开关（用户不要它当默认）。

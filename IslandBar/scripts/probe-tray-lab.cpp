@@ -8,6 +8,9 @@
 //      probe-tray-lab.exe --reparent           can the shell's tray window be re-parented?
 //      probe-tray-lab.exe --move-tray <secs>   re-parent it into a visible window of OURS, hold, put back
 //      probe-tray-lab.exe --park <x> <y> <s>   crop to the tray, then PARK the whole taskbar so the tray sits at x,y
+//      probe-tray-lab.exe --uia [invoke <name>] what does UI Automation see of the tray right now?
+//      probe-tray-lab.exe --traycom [watch <secs>]  does CLSID_TrayNotify exist, and what interfaces does it answer to?
+//      probe-tray-lab.exe --traynotify <secs>  register a callback with the shell's own tray and watch it
 //
 //  WHY THESE THREE. The tray is not an API: it is a WINDOW inside the shell's process, and
 //  Shell_NotifyIcon is shell32 handing a registration to it (measured 2026-10-15: a synchronous
@@ -38,12 +41,16 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <objbase.h>
+#include <uiautomation.h>
+#include <winstring.h>
 
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <string>
 
 namespace {
 
@@ -275,8 +282,14 @@ int RunCrop(const char* what) {
     ShowWindow(taskbar, SW_SHOWNA);
     Sleep(200);
 
-    HRGN region = CreateRectRgn(trayRect.left - whole.left, trayRect.top - whole.top,
-                                trayRect.right - whole.left, trayRect.bottom - whole.top);
+    // `sliver` keeps one DIP of the tray: the taskbar is still "visible" as far as Windows is concerned,
+    // and nothing of it is on screen. That is the state a tray of our own would want to leave it in.
+    const bool sliver = std::strcmp(what, "sliver") == 0;
+    HRGN region = sliver
+                      ? CreateRectRgn(trayRect.left - whole.left, trayRect.top - whole.top,
+                                      trayRect.left - whole.left + 1, trayRect.top - whole.top + 1)
+                      : CreateRectRgn(trayRect.left - whole.left, trayRect.top - whole.top,
+                                      trayRect.right - whole.left, trayRect.bottom - whole.top);
     if (!region) {
         Log(L"CROP: CreateRectRgn failed (%lu)", GetLastError());
         return 1;
@@ -497,6 +510,451 @@ int RunPark(int trayX, int trayY, int seconds) {
     return 0;
 }
 
+// --- E5, WHAT UIA STILL SEES WHEN THE NATIVE TRAY IS NOT ON SCREEN -------------
+//
+//  This is the question a tray of OUR OWN turns on. Drawing our own icons needs to know which icons the
+//  shell is really showing (the registry lies -- it lists NVIDIA icons that are not in the tray at all),
+//  and pressing one needs a route that works. UI Automation answers both, but only while the tray is
+//  "alive": measured 2026-10-15, with the taskbar hidden Shell_TrayWnd is not in the tree at all.
+//
+//  So the states below are the experiment: hidden / clipped to a sliver / normal. If the tree and the
+//  Invoke both survive CLIPPED, then a tray can be drawn by us with no native pixels anywhere on screen.
+namespace {
+
+template <typename T>
+struct ComPtr {
+    T* value = nullptr;
+    ~ComPtr() { if (value) value->Release(); }
+    T** Put() { if (value) { value->Release(); value = nullptr; } return &value; }
+    T* Get() const { return value; }
+    T* operator->() const { return value; }
+    explicit operator bool() const { return value != nullptr; }
+};
+
+std::wstring ElementText(IUIAutomationElement* element, PROPERTYID id) {
+    if (!element) return {};
+    VARIANT value = {};
+    if (FAILED(element->GetCurrentPropertyValue(id, &value))) return {};
+    std::wstring text;
+    if (value.vt == VT_BSTR && value.bstrVal) {
+        text.assign(value.bstrVal, SysStringLen(value.bstrVal));
+    }
+    VariantClear(&value);
+    return text;
+}
+
+int RunUia(const wchar_t* invokeName) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) {
+        Log(L"UIA: CoInitializeEx failed 0x%08lX", static_cast<unsigned long>(com));
+        return 1;
+    }
+    ComPtr<IUIAutomation> automation;
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(automation.Put()))) ||
+        !automation) {
+        Log(L"UIA: could not create the automation client");
+        return 1;
+    }
+
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    Log(L"UIA: taskbar %p visible=%d", reinterpret_cast<void*>(taskbar),
+        taskbar && IsWindowVisible(taskbar) ? 1 : 0);
+
+    // The taskbar first, then the tray window: this is the order the retired shell/TrayUia.cpp used, and
+    // it is kept because it was measured -- on this build the buttons hang off the taskbar.
+    ComPtr<IUIAutomationElement> root;
+    ComPtr<IUIAutomationElement> desktop;
+    if (FAILED(automation->GetRootElement(desktop.Put())) || !desktop) {
+        Log(L"UIA: no desktop element");
+        return 1;
+    }
+    for (const wchar_t* className : {L"Shell_TrayWnd", L"SystemTray_Main"}) {
+        ComPtr<IUIAutomationCondition> byClass;
+        VARIANT value = {};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(className);
+        if (FAILED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value, byClass.Put()))) {
+            continue;
+        }
+        for (TreeScope scope : {TreeScope_Children, TreeScope_Descendants}) {
+            if (SUCCEEDED(desktop->FindFirst(scope, byClass.Get(), root.Put())) && root) {
+                Log(L"UIA: root for '%ls' found (scope %d)", className, static_cast<int>(scope));
+                break;
+            }
+        }
+        if (root) break;
+    }
+    if (!root) {
+        Log(L"UIA: THE TRAY IS NOT IN THE TREE AT ALL in this state");
+        return 0;
+    }
+
+    // Every button under it, with the three things that decide whether a tray of ours could use them:
+    // its name (identity), whether automation says it is OFF SCREEN, and whether it offers Invoke.
+    VARIANT buttonType = {};
+    buttonType.vt = VT_I4;
+    buttonType.lVal = UIA_ButtonControlTypeId;
+    ComPtr<IUIAutomationCondition> buttons;
+    if (FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, buttonType, buttons.Put()))) {
+        Log(L"UIA: could not build the button condition");
+        return 1;
+    }
+    ComPtr<IUIAutomationElementArray> all;
+    if (FAILED(root->FindAll(TreeScope_Descendants, buttons.Get(), all.Put())) || !all) {
+        Log(L"UIA: no buttons under the tray root");
+        return 0;
+    }
+    int count = 0;
+    all->get_Length(&count);
+    Log(L"UIA: %d button(s) under the tray root", count);
+    IUIAutomationElement* chosen = nullptr;
+    for (int i = 0; i < count; ++i) {
+        ComPtr<IUIAutomationElement> element;
+        if (FAILED(all->GetElement(i, element.Put())) || !element) continue;
+        const std::wstring name = ElementText(element.Get(), UIA_NamePropertyId);
+        const std::wstring cls = ElementText(element.Get(), UIA_ClassNamePropertyId);
+        BOOL offscreen = FALSE;
+        element->get_CurrentIsOffscreen(&offscreen);
+        RECT box = {};
+        element->get_CurrentBoundingRectangle(&box);
+        ComPtr<IUIAutomationInvokePattern> invoke;
+        const bool hasInvoke = SUCCEEDED(element->GetCurrentPatternAs(
+            UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern),
+            reinterpret_cast<void**>(invoke.Put()))) && invoke;
+        Log(L"UIA:   [%d] '%.60ls' class='%ls' offscreen=%d rect=%ld,%ld %ldx%ld invoke=%d", i,
+            name.c_str(), cls.c_str(), offscreen ? 1 : 0, box.left, box.top, box.right - box.left,
+            box.bottom - box.top, hasInvoke ? 1 : 0);
+        if (invokeName && !chosen && !name.empty() && name.find(invokeName) != std::wstring::npos) {
+            element.Get()->AddRef();
+            chosen = element.Get();
+        }
+    }
+
+    if (invokeName) {
+        if (!chosen) {
+            Log(L"UIA: nothing matched '%ls' -- not invoking", invokeName);
+        } else {
+            ComPtr<IUIAutomationInvokePattern> pattern;
+            const bool got = SUCCEEDED(chosen->GetCurrentPatternAs(
+                UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern),
+                reinterpret_cast<void**>(pattern.Put()))) && pattern;
+            const HRESULT invoked = got ? pattern->Invoke() : E_FAIL;
+            Log(L"UIA: Invoke('%ls') -> pattern=%d hr=0x%08lX", invokeName, got ? 1 : 0,
+                static_cast<unsigned long>(invoked));
+            chosen->Release();
+        }
+    }
+    CoUninitialize();
+    return 0;
+}
+
+} // namespace
+
+// --- E6, CLSID_TrayNotify: is the shell's own tray interface reachable from here? ----------------
+//
+//  WHAT THIS IS FOR. A tray of our own can be drawn (the UIA tree gives the icons and the shell presses
+//  them -- measured), but UIA publishes no context-menu pattern, so a RIGHT click has nowhere to go
+//  unless we know each application's callback message. The shell's own notification-area interface
+//  (ITrayNotify, undocumented) hands registrations to a callback and is the only route to those message
+//  numbers that does not involve injecting anything. This mode asks whether it is reachable at all.
+//
+//  HOW THE IID IS FOUND WITHOUT KNOWING IT. The class is registered by name (measured: CLSID_TrayNotify
+//  {25dead04-1eac-4911-9e3a-ad0a4ab560fd}, AppID "TrayNotify", RunAs Interactive User) but its interfaces
+//  are not, and it has no type library. So: activate it, ask for the interfaces this project does know
+//  (IDispatch, IUnknown), and if neither names the interface, QI every IID registered under
+//  HKLM\SOFTWARE\Classes\Interface -- several thousand, each one a cheap lookup -- and report the ones the
+//  object accepts. QI on an unknown IID is a query, not a call: it cannot run any of the object's code
+//  beyond the lookup itself.
+namespace {
+
+int RunTrayCom(int watchSeconds) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) {
+        Log(L"TRAYCOM: CoInitializeEx failed 0x%08lX", static_cast<unsigned long>(com));
+        return 1;
+    }
+    const CLSID clsid = {0x25dead04, 0x1eac, 0x4911,
+                         {0x9e, 0x3a, 0xad, 0x0a, 0x4a, 0xb5, 0x60, 0xfd}};
+
+    ComPtr<IUnknown> object;
+    const HRESULT created = CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_IUnknown,
+                                             reinterpret_cast<void**>(object.Put()));
+    Log(L"TRAYCOM: CoCreateInstance(CLSID_TrayNotify) -> 0x%08lX %ls", static_cast<unsigned long>(created),
+        SUCCEEDED(created) ? L"(the object is reachable)" : L"(not reachable from here)");
+
+    if (SUCCEEDED(created) && object) {
+        // A type library would name the interface and give its IID, which is the whole question.
+        ComPtr<IDispatch> dispatch;
+        const HRESULT dispHr = object->QueryInterface(IID_IDispatch,
+                                                      reinterpret_cast<void**>(dispatch.Put()));
+        Log(L"TRAYCOM:   QueryInterface(IDispatch) -> 0x%08lX", static_cast<unsigned long>(dispHr));
+        if (SUCCEEDED(dispHr) && dispatch) {
+            ComPtr<ITypeInfo> info;
+            const HRESULT infoHr = dispatch->GetTypeInfo(0, LOCALE_SYSTEM_DEFAULT, info.Put());
+            Log(L"TRAYCOM:   GetTypeInfo(0) -> 0x%08lX", static_cast<unsigned long>(infoHr));
+            if (SUCCEEDED(infoHr) && info) {
+                TYPEATTR* attributes = nullptr;
+                if (SUCCEEDED(info->GetTypeAttr(&attributes)) && attributes) {
+                    wchar_t iid[64] = {};
+                    StringFromGUID2(attributes->guid, iid, 64);
+                    BSTR typeName = nullptr;
+                    BSTR documentation = nullptr;
+                    info->GetDocumentation(MEMBERID_NIL, &typeName, &documentation, nullptr, nullptr);
+                    Log(L"TRAYCOM:   type info: name='%ls' iid=%ls kind=%d functions=%d",
+                        typeName ? typeName : L"?", iid, static_cast<int>(attributes->typekind),
+                        attributes->cFuncs);
+                    if (typeName) SysFreeString(typeName);
+                    if (documentation) SysFreeString(documentation);
+                    info->ReleaseTypeAttr(attributes);
+                }
+            }
+        }
+
+        // IINSPECTABLE IS THE OBJECT TELLING US WHAT IT IS. It answers to it (measured), and that interface
+        // is metadata: GetIids lists the interface IIDs from the object's own side -- which is the question
+        // a "QI everything in the registry" sweep can only guess at -- and GetRuntimeClassName names the
+        // class. Both are read-only queries; neither can change the shell's behaviour.
+        const IID iidInspectable = {0xAF86E2E0, 0xB12D, 0x4c6a,
+                                    {0x9C, 0x5A, 0xD7, 0xAA, 0x65, 0x10, 0x1E, 0x90}};
+        struct IInspectableLike : public IUnknown {
+            virtual HRESULT STDMETHODCALLTYPE GetIids(ULONG* count, IID** iids) = 0;
+            virtual HRESULT STDMETHODCALLTYPE GetRuntimeClassName(HSTRING* name) = 0;
+            virtual HRESULT STDMETHODCALLTYPE GetTrustLevel(LONG* level) = 0;
+        };
+        ComPtr<IInspectableLike> inspectable;
+        const HRESULT inspectHr = object->QueryInterface(iidInspectable,
+                                                        reinterpret_cast<void**>(inspectable.Put()));
+        Log(L"TRAYCOM:   QueryInterface(IInspectable) -> 0x%08lX", static_cast<unsigned long>(inspectHr));
+        if (SUCCEEDED(inspectHr) && inspectable) {
+            LONG trust = 0;
+            const HRESULT trustHr = inspectable->GetTrustLevel(&trust);
+            Log(L"TRAYCOM:   GetTrustLevel -> 0x%08lX (%ld)", static_cast<unsigned long>(trustHr), trust);
+            HSTRING className = nullptr;
+            const HRESULT nameHr = inspectable->GetRuntimeClassName(&className);
+            Log(L"TRAYCOM:   GetRuntimeClassName -> 0x%08lX", static_cast<unsigned long>(nameHr));
+            if (SUCCEEDED(nameHr) && className) {
+                // Resolved at run time: the HSTRING helpers live in combase.dll and this build has no
+                // import library for them, and a probe has no business adding a link dependency for two
+                // read-only calls it can do without.
+                const HMODULE combase = LoadLibraryW(L"combase.dll");
+                using RawFn = const wchar_t*(WINAPI*)(HSTRING, UINT32*);
+                using FreeFn = HRESULT(WINAPI*)(HSTRING);
+                const auto rawBuffer = combase ? reinterpret_cast<RawFn>(
+                                                     GetProcAddress(combase, "WindowsGetStringRawBuffer"))
+                                               : nullptr;
+                const auto freeString = combase ? reinterpret_cast<FreeFn>(
+                                                      GetProcAddress(combase, "WindowsDeleteString"))
+                                                : nullptr;
+                if (rawBuffer) {
+                    UINT32 length = 0;
+                    const wchar_t* raw = rawBuffer(className, &length);
+                    Log(L"TRAYCOM:   runtime class name = '%ls'", raw ? raw : L"?");
+                } else {
+                    Log(L"TRAYCOM:   got a runtime class name but cannot read it (no combase helper)");
+                }
+                if (freeString) freeString(className);
+            }
+            ULONG iidCount = 0;
+            IID* iids = nullptr;
+            const HRESULT iidsHr = inspectable->GetIids(&iidCount, &iids);
+            Log(L"TRAYCOM:   GetIids -> 0x%08lX (%lu interface(s))", static_cast<unsigned long>(iidsHr),
+                iidCount);
+            if (SUCCEEDED(iidsHr) && iids) {
+                Log(L"TRAYCOM:   GetIids says the object implements %lu interface(s):", iidCount);
+                for (ULONG i = 0; i < iidCount; ++i) {
+                    wchar_t text[64] = {};
+                    StringFromGUID2(iids[i], text, 64);
+                    Log(L"TRAYCOM:     %ls", text);
+                }
+                CoTaskMemFree(iids);
+            }
+        }
+
+        // ... AND IF NOTHING NAMED IT, ASK THE OBJECT ITSELF. Every IID Windows knows by name is under
+        // HKLM\SOFTWARE\Classes\Interface; the ones this object accepts are the answer.
+        HKEY root = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\Interface", 0, KEY_READ, &root) ==
+            ERROR_SUCCESS) {
+            DWORD index = 0;
+            wchar_t name[64] = {};
+            DWORD nameLength = 64;
+            int accepted = 0;
+            LARGE_INTEGER start = {};
+            QueryPerformanceCounter(&start);
+            while (RegEnumKeyExW(root, index++, name, &nameLength, nullptr, nullptr, nullptr, nullptr) ==
+                   ERROR_SUCCESS) {
+                nameLength = 64;
+                CLSID candidate = {};
+                if (FAILED(CLSIDFromString(name, &candidate))) continue;
+                ComPtr<IUnknown> probe;
+                if (SUCCEEDED(object->QueryInterface(candidate,
+                                                     reinterpret_cast<void**>(probe.Put()))) &&
+                    probe) {
+                    ++accepted;
+                    Log(L"TRAYCOM:   ACCEPTS %ls", name);
+                }
+            }
+            LARGE_INTEGER end = {};
+            QueryPerformanceCounter(&end);
+            LARGE_INTEGER frequency = {};
+            QueryPerformanceFrequency(&frequency);
+            const double ms = 1000.0 * static_cast<double>(end.QuadPart - start.QuadPart) /
+                              static_cast<double>(frequency.QuadPart);
+            Log(L"TRAYCOM: %d IID(s) accepted out of the registry's list (%.0f ms)", accepted, ms);
+            RegCloseKey(root);
+        } else {
+            Log(L"TRAYCOM: could not enumerate HKLM\\SOFTWARE\\Classes\\Interface");
+        }
+    }
+
+    if (watchSeconds > 0) {
+        Log(L"TRAYCOM: holding the apartment for %d s -- nothing is registered or changed", watchSeconds);
+        Sleep(static_cast<DWORD>(watchSeconds) * 1000);
+    }
+    CoUninitialize();
+    return 0;
+}
+
+} // namespace
+
+} // namespace
+
+// --- E7, the shell's own tray callback (ITrayNotifyWin8) -------------------------------------
+//
+//  WHAT IT IS FOR. A tray drawn by us can press an icon through UI Automation (measured: the shell
+//  performs the icon's own left click), but UIA publishes no context-menu pattern, so the only honest
+//  right-click is a menu of our own. This interface was the last hope of something better: it is the
+//  channel the SHELL uses to tell listeners that an icon was added, changed or removed.
+//
+//  WHAT IT TURNS OUT TO BE. It is reachable (measured: CLSID_TrayNotify activates from this
+//  medium-integrity process, and the only non-standard IID the object accepts is
+//  {D133CE13-3537-48BA-93A7-AFCD5D2053B4}, which is ITrayNotifyWin8). Its NOTIFYITEM carries pszExeName,
+//  pszTip, hIcon, hWnd, dwPreference, uID and guidItem -- and NO callback message number, so it can
+//  never hand us an application's own context menu. What it CAN give is the truth about which icons are
+//  registered, in real time, with a real icon handle rather than the registry's stale PNG snapshot.
+//
+//  The two interfaces are declared exactly as the Win8+ ABI has them: a vtable that is one parameter out
+//  is a call into the wrong function, and the shell is the one being called.
+namespace {
+
+struct NotifyItem {
+    PWSTR exeName;
+    PWSTR tip;
+    HICON icon;
+    HWND window;
+    DWORD preference;
+    UINT uid;
+    GUID guid;
+};
+
+struct INotificationCallback : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE Notify(ULONG event, NotifyItem* item) = 0;
+};
+
+struct ITrayNotifyWin8 : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE RegisterCallback(INotificationCallback* callback, ULONG* cookie) = 0;
+    virtual HRESULT STDMETHODCALLTYPE UnregisterCallback(ULONG* cookie) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetPreference(const NotifyItem* item) = 0;
+    virtual HRESULT STDMETHODCALLTYPE EnableAutoTray(BOOL enabled) = 0;
+    virtual HRESULT STDMETHODCALLTYPE DoAction(BOOL enabled) = 0;
+};
+
+const IID kIidNotificationCallback = {
+    0xD782CCBA, 0xAFB0, 0x43F1, {0x94, 0xDB, 0xFD, 0xA3, 0x77, 0x9E, 0xAC, 0xCB}};
+const IID kIidTrayNotifyWin8 = {
+    0xD133CE13, 0x3537, 0x48BA, {0x93, 0xA7, 0xAF, 0xCD, 0x5D, 0x20, 0x53, 0xB4}};
+
+class TrayCallback : public INotificationCallback {
+public:
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs_; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (iid == IID_IUnknown || iid == kIidNotificationCallback) {
+            *out = static_cast<INotificationCallback*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    HRESULT STDMETHODCALLTYPE Notify(ULONG event, NotifyItem* item) override {
+        ++events;
+        if (item && logged < 40) {
+            ++logged;
+            wchar_t guid[64] = {};
+            StringFromGUID2(item->guid, guid, 64);
+            Log(L"TRAYNOTIFY: event=%lu exe='%ls' tip='%ls' hIcon=%p hWnd=%p pref=%lu uid=%u guid=%ls",
+                event, item->exeName ? item->exeName : L"", item->tip ? item->tip : L"",
+                reinterpret_cast<void*>(item->icon), reinterpret_cast<void*>(item->window),
+                item->preference, item->uid, guid);
+        }
+        return S_OK;
+    }
+
+    int events = 0;
+    int logged = 0;
+
+private:
+    ULONG refs_ = 1;
+};
+
+int RunTrayNotify(int seconds) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) {
+        Log(L"TRAYNOTIFY: CoInitializeEx failed");
+        return 1;
+    }
+    // The ABI, checked rather than assumed: one wrong offset and the shell writes into the wrong field.
+    Log(L"TRAYNOTIFY: NOTIFYITEM size=%zu offsets exe=%zu tip=%zu icon=%zu hwnd=%zu pref=%zu uid=%zu guid=%zu",
+        sizeof(NotifyItem), offsetof(NotifyItem, exeName), offsetof(NotifyItem, tip),
+        offsetof(NotifyItem, icon), offsetof(NotifyItem, window), offsetof(NotifyItem, preference),
+        offsetof(NotifyItem, uid), offsetof(NotifyItem, guid));
+
+    const CLSID clsid = {0x25dead04, 0x1eac, 0x4911,
+                         {0x9e, 0x3a, 0xad, 0x0a, 0x4a, 0xb5, 0x60, 0xfd}};
+    ComPtr<IUnknown> object;
+    const HRESULT created = CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_IUnknown,
+                                             reinterpret_cast<void**>(object.Put()));
+    if (FAILED(created) || !object) {
+        Log(L"TRAYNOTIFY: cannot activate CLSID_TrayNotify (0x%08lX)",
+            static_cast<unsigned long>(created));
+        return 1;
+    }
+    ComPtr<ITrayNotifyWin8> trays;
+    const HRESULT qi = object->QueryInterface(kIidTrayNotifyWin8,
+                                              reinterpret_cast<void**>(trays.Put()));
+    Log(L"TRAYNOTIFY: QueryInterface(ITrayNotifyWin8) -> 0x%08lX", static_cast<unsigned long>(qi));
+    if (FAILED(qi) || !trays) return 1;
+
+    TrayCallback callback;
+    ULONG cookie = 0;
+    const HRESULT registered = trays->RegisterCallback(&callback, &cookie);
+    Log(L"TRAYNOTIFY: RegisterCallback -> 0x%08lX (cookie %lu)", static_cast<unsigned long>(registered),
+        cookie);
+    if (FAILED(registered)) {
+        Log(L"TRAYNOTIFY: refused -- nothing was changed on the shell's side");
+        return 1;
+    }
+    Log(L"TRAYNOTIFY: watching for %d s -- start or stop a tray application now", seconds);
+    const ULONGLONG until = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+    MSG msg = {};
+    while (GetTickCount64() < until) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(20);
+    }
+    Log(L"TRAYNOTIFY: %d event(s) arrived", callback.events);
+    const HRESULT unregistered = trays->UnregisterCallback(&cookie);
+    Log(L"TRAYNOTIFY: UnregisterCallback -> 0x%08lX", static_cast<unsigned long>(unregistered));
+    CoUninitialize();
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -527,6 +985,22 @@ int main(int argc, char** argv) {
         const int y = std::atoi(argv[3]);
         const int seconds = (argc > 4) ? std::atoi(argv[4]) : 12;
         return RunPark(x, y, seconds > 0 ? seconds : 12);
+    }
+    if (std::strcmp(argv[1], "--uia") == 0) {
+        if (argc > 3 && std::strcmp(argv[2], "invoke") == 0) {
+            wchar_t wanted[128] = {};
+            MultiByteToWideChar(CP_UTF8, 0, argv[3], -1, wanted, 128);
+            return RunUia(wanted);
+        }
+        return RunUia(nullptr);
+    }
+    if (std::strcmp(argv[1], "--traycom") == 0) {
+        const int seconds = (argc > 3 && std::strcmp(argv[2], "watch") == 0) ? std::atoi(argv[3]) : 0;
+        return RunTrayCom(seconds);
+    }
+    if (std::strcmp(argv[1], "--traynotify") == 0) {
+        const int seconds = (argc > 2) ? std::atoi(argv[2]) : 20;
+        return RunTrayNotify(seconds > 0 ? seconds : 20);
     }
     Log(L"unknown command");
     return 2;

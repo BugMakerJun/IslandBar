@@ -5137,7 +5137,7 @@ int main(int argc, char** argv) {
     bool demo = false;
     bool keepTaskbar = false;
     bool hideTaskbar = false;
-    bool nativeTray = true;   // see the log line and NativeTaskbar.h: the real tray stays on screen
+    bool nativeTray = false;  // --native-tray keeps the shell's own tray on screen (see NativeTaskbar.h)
     bool claimAppBar = false;
     bool keepStrip = false;
     bool windowList = false;
@@ -5160,6 +5160,10 @@ int main(int argc, char** argv) {
         // native taskbar outright and have nothing where the tray used to be.
         if (std::strcmp(argv[i], "--hide-taskbar") == 0) hideTaskbar = true;
         if (std::strcmp(argv[i], "--no-native-tray") == 0) nativeTray = false;
+        // ... and the switch that turns it ON. It is not the default: the user does not want the shell's
+        // own tray strip on screen -- it looks like the Windows taskbar and carries the shell's clock --
+        // so keeping it is opt-in (2026-10-15, HANDOFF 8.135).
+        if (std::strcmp(argv[i], "--native-tray") == 0) nativeTray = true;
         if (std::strcmp(argv[i], "--appbar") == 0) claimAppBar = true;
         // Keeps the shell's strip reserved: a maximized window then stops below the band, exactly as it
         // did before the work area was ever released. Here for the case where the release misbehaves on a
