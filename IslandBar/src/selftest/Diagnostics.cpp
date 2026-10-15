@@ -30,6 +30,7 @@
 #include "domain/MiniJson.h"
 #include "domain/CardLayout.h"
 #include "domain/StatePolicy.h"
+#include "domain/TrayEncoding.h"   // the only place a tray click is encoded (see its header)
 #include "media/Lyrics.h"
 #include "app/AppBar.h"
 #include "domain/TaskStripLayout.h"
@@ -7852,6 +7853,49 @@ int RunSelfTest() {
         Check(taskbar.Suppressed(), L"... and the suppression that a full-screen app asks for");
         taskbar.SetSuppressed(false);
         Check(!taskbar.Suppressed(), L"... and lets the suppression go again");
+    }
+
+    // THE ONE PLACE THAT ENCODES A TRAY CLICK (2026-10-16). The version-4 numbers are the bytes the shell
+    // ITSELF was caught sending to a version-4 application on a real right click (HANDOFF 8.142: pointer
+    // 2394,69 -> wParam 0x0045095A; uid 1000 -> HIWORD(lParam) 0x03E8). They are asserted rather than
+    // described because getting this backwards crashed WeChat twice and got read as a "modal menu loop".
+    Section(L"tray click encoding");
+    {
+        const unsigned version4 = 4;
+        const int x = 2394;
+        const int y = 69;
+        const unsigned uid = 1000;
+
+        const island::TrayClickPlan right = island::PlanTrayClick(version4, uid, true, x, y);
+        Check(right.version4, L"a uVersion 4 record takes the version-4 protocol");
+        Check(right.first.wParam == 0x0045095Au, L"v4 right click: wParam is the pointer position");
+        Check(right.first.lParam == 0x03E8007Bu, L"v4 right click: lParam is (WM_CONTEXTMENU, uid)");
+        Check(island::TrayLow(right.first.wParam) == 2394 && island::TrayHigh(right.first.wParam) == 69,
+              L"v4: the receiver can read x and y back out of wParam");
+        Check(island::TrayLow(right.first.lParam) == island::kTrayMouseContextMenu &&
+                  island::TrayHigh(right.first.lParam) == uid,
+              L"v4: the receiver can read the event and the uid back out of lParam");
+        Check(!right.hasSecond, L"a v4 click is ONE message, not a down/up pair");
+
+        const island::TrayClickPlan select = island::PlanTrayClick(version4, uid, false, x, y);
+        Check(island::TrayLow(select.first.lParam) == island::kTraySelect,
+              L"v4 left click asks for NIN_SELECT");
+
+        const island::TrayClickPlan classicRight = island::PlanTrayClick(0, uid, true, x, y);
+        Check(!classicRight.version4 && classicRight.first.wParam == uid,
+              L"v0 right click: the uid goes in wParam");
+        Check(classicRight.first.lParam == island::kTrayMouseRightDown && classicRight.hasSecond &&
+                  classicRight.second.lParam == island::kTrayMouseRightUp,
+              L"v0 right click: down and then up, both in lParam");
+
+        const island::TrayClickPlan classicLeft = island::PlanTrayClick(3, uid, false, x, y);
+        Check(classicLeft.first.lParam == island::kTrayMouseLeftDown &&
+                  classicLeft.second.lParam == island::kTrayMouseLeftUp,
+              L"v3 left click: the same pair, with the left button");
+
+        Check(island::PlanTrayClick(version4, uid, true, x, y).first.wParam !=
+                  island::PlanTrayClick(0, uid, true, x, y).first.wParam,
+              L"the two protocols must never produce the same first message");
     }
 
     {

@@ -27,6 +27,7 @@
 #include "core/ProcessMetrics.h"
 #include "domain/StatePolicy.h"
 #include "domain/TaskStripLayout.h"
+#include "domain/TrayEncoding.h"
 
 #if defined(_WINDOWS_) || defined(_INC_WINDOWS)
 #error "The pure-logic headers in core/ must not include <windows.h>. Move whatever needs a Win32 type into a platform/ header (see core/Geometry.h for the one that was moved out)."
