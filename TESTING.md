@@ -1,6 +1,6 @@
 # IslandBar 手工自测清单
 
-> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 954 项）覆盖几何、解析、像素，
+> 用途：**只有你能做的验证**。自检（`island_bar.exe --self-test`，现在 908 项全过）覆盖几何、解析、像素，
 > 但"鼠标点下去到底发生什么"必须在真人手里过一遍。
 > **已脱敏**：命令里的 `$env:USERPROFILE` 就是你的用户目录（本文档按 PowerShell 写，所以用这个变量而不是 `%USERPROFILE%`）。
 >
@@ -78,7 +78,7 @@ wechat: call ended (notification 1 retired)      <- 通话结束时
 ---
 ## 1d. 微信消息（第三条通道：靠"提示音"）
 
-微信 4.x 在 PC 上不接系统通知、不弹窗口、也不改标题 —— 唯一的提示是**托盘图标**，而托盘在"替换任务栏"模式下不在屏幕上。
+微信 4.x 在 PC 上不接系统通知、不弹窗口、也不改标题 —— 唯一的提示是**托盘图标**，而托盘在"替换任务栏"模式下**屏幕上没有任何入口**（2026-10-15 起连 IslandBar 自己也不再画它）。
 所以这条通道用**声音**：微信安静时**没有音频会话**（实测 sessions 0），来消息响一声时会话就会出现。
 
 **做**：正常收一条微信消息（手机发给"文件传输助手"最方便）。
@@ -169,8 +169,7 @@ start button: island x [1170, 1390] -> ... opacity 1.00
 | 换一首**没有封面**的歌，把鼠标移到岛上开卡片（2026-10-12 HANDOFF 8.33 起） | 卡片是一块**深色卡面**，字和进度条都在卡面里，**不该**是"字直接飘在壁纸上" | 想确认那首歌到底有没有封面：跑 `.\IslandBar\build\Debug\tools\gsmtcprobe\Debug\gsmtc_probe.exe`，看 `Thumbnail: present/none` —— `none` 就是这首歌没发布封面，栏只能给它一块自己的底面 |
 | 连续切两首歌，第二首**封面晚到**（2026-10-12 HANDOFF 8.42 起） | 第二首的封面必须**真的换成它自己的**；日志全对但画面不换，就是缓存键重复那类缺陷 | 日志正常不足以判定（`dropped`/`arrived late`/`decoded` 都会齐）；判定要看**画面**。核按钮：自检里 `a new cover with a repeated revision is not the old bitmap`（读数 `A cached 1, B cached 1, A still cached 0`）|
 | 切歌时盯住卡片左边那块（2026-10-12 HANDOFF 8.41 起） | 新歌**没有封面时**显示 **♪ 占位符**（绝不能还是上一首的专辑图）；播放器随后发出封面就自动换上 | 日志：换歌那行下面应是 `music: cover NONE` + `music: cover dropped (the new track has none yet)`；若封面稍后到达会再出现 `music: cover arrived late (N bytes)` |
-| 看**灵动岛右边**那个**三个点**的圆钮（2026-10-12 HANDOFF 8.56 + 8.57 起） | 布局应该是 `[⌄][⊞] 岛 [•••] [应用图标…]` —— 三点圆钮**紧贴灵动岛右侧**（不是贴屏幕右缘），应用图标行从它右边开始。**点它 → 弹出卡片**，标题「托盘」，里面是**正在运行**且注册过托盘图标的程序（微信、QQ音乐、Steam、Clash…）的图标网格（每行 5 个）；再点按钮或点栏外收回去。**卡片里的图标目前点了没动作**（见下）。鼠标划过按钮/格子有白色高亮 | 日志：`tray: 16 icon(s) from the registry (27 entr(ies), 402 process(es) seen)`（启动）、`tray: N icon(s) (N of M registered applications are running)`（增减时）、点按钮时 `tray: card open` / `card closed`。**单独核对**：`island_bar.exe --tray-dump`（**要复制到项目目录外再跑**：项目树里的 exe 是低完整性，进程快照只能看到低完整性的进程，只会匹配到 3 个而不是 16 个）。想在没有托盘图标时排查：`HKCU\Control Panel\NotifyIconSettings` 里有几条、对应 exe 是否在跑。想不看点击就拍到卡片：`ISLANDBAR_TRAY_PAGE=1` |
-| **在托盘卡片里右键一个图标**（2026-10-14 HANDOFF 8.80 起） | **立刻**弹出**栏自己的**菜单（不开系统托盘、不等 300–600 ms）：`打开` / `显示窗口` / `打开文件位置` / `关闭窗口` / `结束应用` / `应用自己的菜单…`（没有窗口的应用会少"显示窗口"和"关闭窗口"两行）。`关闭窗口` 是"请它关窗"（收进托盘的应用就只是收进托盘，日志 `tray menu: asked … to close N window(s)`）；`结束应用` 是**真的结束掉**（`tray menu: ended N process(es) of …`），**要按两次** —— 第一次那行会变成「再点一次：结束应用」。菜单挂在那一格的右下角、**始终在卡片里**；指针划过某行有白色高亮；点某行执行；**点别处就关掉，且那一次点击被吃掉**（不吞就会顺手按到菜单底下的图标） | `tray menu: opened for '<应用名>' (N entries: window=1 path=1)`；点某行后 `tray menu: <那一行的名字>`；若那行是 `应用自己的菜单…`，接着会出现 `tray press: … (right click)` → `native taskbar: put away after a tray right click` |
+| ~~看**灵动岛右边**那个**三个点**的圆钮~~（**已移除** 2026-10-15） | **这枚按钮不存在了**：托盘卡片、它的右键菜单、按压、学习、explorer 内模块整体退役，见 `docs/TRAY-RESEARCH-RETIRED.md`。布局现在是 `[⌄][⊞] 岛 [应用图标…]`。**代价**：这条栏默认仍然隐藏原生任务栏，所以系统托盘（微信、Steam、NVIDIA、网络、音量、时钟）**屏幕上没有任何入口** —— 要那几格就 `--keep-taskbar` 跑。日志里**不该再出现** `tray:` / `tray learn:` / `tray menu:` / `tray press:` 任何一行；出现即回退 | 没有日志行，看画面：岛右侧**没有**三点的圆钮，应用图标行**紧贴岛右侧**（以前它被托盘按钮推后 26 DIP）。命令行也不再接受 `--tray-dump` / `--tray-surface` / `--tray-learn` / `--tray-press` |
 | **开一个全屏游戏**（2026-10-12 HANDOFF 8.54 + 8.55 起） | 平时顶部**什么都不该有**：没有胶囊、没有日期时间行、没有图标行、没有 Start/系统键（修之前这些会画在游戏上）。鼠标划到屏幕顶部也**不该弹出音乐卡片**。**来一通电话或一条通知时，只出现"岛"那一条**（纸条/通话条 + 里面的话），**左右两侧依旧干净** —— 那行日期时间和两边的按钮图标都不该冒出来；几秒后纸条自己收回去。**全屏时点岛**应该还能把消息消掉 | 日志：`fullscreen: an application has the screen -- the bar stands down` → 退出全屏 `fullscreen: over -- the bar is back`；全屏时来通知应有 `state: notice-strip`。**判定要点**：① 普通**最大化**窗口**不会**触发退场（它覆盖的是工作区、不是整屏）—— 若最大化窗口也让栏消失，就是 `WindowCoversMonitor` 判错了；② 全屏+通知时若左右两侧也冒出来，就是 `frame.fullscreenApp` 没传进渲染器（自检里对应 `island band=26.53, first icon=0.00, Start button=0.00`） |
 | 鼠标**停在**某个应用图标上（2026-10-12 HANDOFF 8.51 + 8.52 + 8.53 起） | 停约 **350 ms** 后，图标下面弹出一张**圆角卡片**：顶部一行是**那个窗口自己的图标 + 标题**（太长会省略号），下面是**实时画面**。**所有卡片同一个尺寸**（276×198 DIP，9 个图标都一样大、离栏距离也一样），窗口的比例只体现在画面里：画面在槽内等比缩放并居中，**窄窗口左右留卡面、宽窗口上下留卡面**（不会变形、也不会撑大卡片）。**已经在显示时，顺着图标横移会立刻换成隔壁那个**（不等第二次 350 ms）；鼠标离开图标行就消失。**扫过一排图标时不该每个都闪一下**（只有停住才出）。卡片（音乐卡/面板）开着时不显示。预览本身**点不进去**（穿透） | 日志：`preview: hwnd … -> card x,y WxH, picture WxH (compositor says AxB), shown=1, hr=0x00000000`。**三条判定**：① `card` **必须恒为 276x198**（不是=new 大小不一致）；② `picture` 的宽高比要等于 `compositor says` 的宽高比（例如 `247x160` vs `1282x829`：1.544 vs 1.546）= 没压扁；③ `shown=0` 或 `compositor says 0x0` = 这个窗口画不出来（提权窗口/跨桌面）。想单独验证配方：`.\IslandBar\build\Debug\tools\thumbprobe\Debug\thumb_probe.exe`（复制到项目树外再跑）—— 它会显示两个自己的窗口，**绿色**出现即说明这台机器的 DWM 缩略图可用 |
 | 放一个**全屏应用**（浏览器按 F11）（2026-10-12 HANDOFF 8.50 起） | 顶部条带被一条满宽深色条填掉，**高度等于你任务栏的厚度**（改任务栏大小/用别的机器都跟着变，不再是写死 32）；退出全屏恢复胶囊 | 日志：`fullscreen: over, back to the pill`；`--appbar` 时还有 `appbar: ABM_SETPOS asking for 0,0 2560x42` → `registered -- work area was …, now …`，退出时 `appbar: released (work area restored)` |
@@ -353,7 +352,7 @@ Windows 的模糊背板在这套窗口上按整个窗口矩形生效（不是按
 ```
 看到这行却还有空白，就手动还原再最大化一次（Win+↓ 再 Win+↑）。
 
-**如果某个窗口最大化后栏"退场"了**（只剩岛，图标行/托盘都不见）：那是把这条 32 px 宽的
+**如果某个窗口最大化后栏"退场"了**（只剩岛，图标行也不见）：那是把这条 32 px 宽的
 窗口当成了全屏应用。目前已知会这样的是**画不出边框**的那种窗口（见 FEATURES §二十六 的边界）。
 日志里对应 `fullscreen: an application has the screen` —— 把是哪个应用告诉我就行。
 

@@ -294,7 +294,7 @@ src/                      the bar -- one directory per module
     SystemStatus            WLAN, Bluetooth, volume, power, input method
     SystemToggles           switching radios and night light, and reading the result back
     Weather                 the reading on the status line
-    TrayIcons, TrayPress    the tray, and pressing its icons
+                            (the tray that used to live here was removed on 2026-10-15)
   services/                 the channels that bring things in
     Notification*           the model, the named pipe, the sender's icon
     ToastStore              Windows' own toast database

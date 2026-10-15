@@ -374,11 +374,6 @@ void TextRenderer::Shutdown() {
     SafeRelease(&dateFormat_);
     SafeRelease(&timeFormat_);
     SafeRelease(&factory_);
-    for (TrayIconSlot& slot : trayIconSlots_) {
-        SafeRelease(&slot.bitmap);
-        slot.revision = 0;
-        slot.index = -1;
-    }
     haveTime_ = false;
     timeText_[0] = L'\0';
     dateText_[0] = L'\0';
@@ -805,241 +800,15 @@ float TextRenderer::MeasureStatusLine(const wchar_t* weekday, const wchar_t* day
     return StatusRunWidth(pieces, count);
 }
 
-// The decoded bitmap for one tray icon, cached until the list's revision changes.
-//
-// One helper for the button's card and the old inline row alike: the decode is the expensive part (a PNG
-// per icon), and there is exactly one place that knows how to do it.
-ID2D1Bitmap1* TextRenderer::TrayIconBitmap(ID2D1DeviceContext2* context, int index, const TrayIcon& icon,
-                                           unsigned long long revision) {
-    if (!context || index < 0 || index >= kMaxTrayIcons) return nullptr;
-    if (!icon.png || icon.pngSize == 0) return nullptr;
-
-    TrayIconSlot& slot = trayIconSlots_[index];
-    if (slot.bitmap && slot.revision == revision && slot.index == index) return slot.bitmap;
-
-    ID2D1Bitmap1* bitmap = nullptr;
-    DecodedImage decoded;
-    if (DecodeImage(icon.png, icon.pngSize, &decoded) && decoded.pixels) {
-        const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
-            D2D1_BITMAP_OPTIONS_NONE,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f,
-            96.0f);
-        const UINT32 stride = static_cast<UINT32>(decoded.width) * 4;
-        context->CreateBitmap(
-            D2D1::SizeU(static_cast<UINT32>(decoded.width), static_cast<UINT32>(decoded.height)),
-            decoded.pixels, stride, &properties, &bitmap);
-    }
-    SafeRelease(&slot.bitmap);
-    slot.bitmap = bitmap;
-    slot.revision = revision;
-    slot.index = index;
-
-    if (!bitmap) {
-        // Reported once: a picture that will not decode and a picture drawn where the region clips it look
-        // identical on screen, and only one of them is this branch.
-        static bool reported = false;
-        if (!reported) {
-            reported = true;
-            LogLine(L"  tray: icon %d has a %zu byte PNG that produced no bitmap", index,
-                    icon.pngSize);
-        }
-    }
-    return bitmap;
-}
-
-void TextRenderer::DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box, float wash,
-                                  bool open, const D2D1_COLOR_F& fill, float opacity) {
-    if (!context || box.right <= box.left || opacity <= 0.01f) return;
-
-    // The same background the deck's buttons carry, in the island's own colour, so the bar's two ends read
-    // as one object -- and the same wash on hover, so "under the pointer" looks the same everywhere.
-    const float radius = (box.bottom - box.top) * 0.5f;
-    const D2D1_ROUNDED_RECT rounded = {
-        D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
-    if (fill.a > 0.001f) {
-        ID2D1SolidColorBrush* background = nullptr;
-        if (SUCCEEDED(context->CreateSolidColorBrush(fill, &background)) && background) {
-            context->FillRoundedRectangle(&rounded, background);
-            context->DrawRoundedRectangle(&rounded, background, 1.0f);
-            background->Release();
-        }
-    }
-    // The amount comes up over a tenth of a second (FrameState::trayButtonWash); `open` is a state and so
-    // is worth a full wash at once, at a slightly stronger strength.
-    const float strength = open ? 0.22f : 0.16f * wash;
-    if (strength > 0.01f && opacity > 0.01f) {
-        ID2D1SolidColorBrush* washBrush = nullptr;
-        if (SUCCEEDED(context->CreateSolidColorBrush(
-                D2D1::ColorF(1.0f, 1.0f, 1.0f, strength * opacity), &washBrush)) &&
-            washBrush) {
-            context->FillRoundedRectangle(&rounded, washBrush);
-            washBrush->Release();
-        }
-    }
-
-    // THREE DOTS, not the chevron the system button carries. Two identical marks at the two ends of one bar
-    // would read as the same control, and this one means "there is more than fits", which is what the dots
-    // say. Drawn as geometry, for the reason the Start button's mark is: no glyph to get wrong and nothing
-    // to fail to load.
-    ID2D1SolidColorBrush* ink = nullptr;
-    const float brightness = open ? 1.0f : 0.90f;
-    if (FAILED(context->CreateSolidColorBrush(
-            D2D1::ColorF(brightness, brightness, brightness, 0.94f * opacity), &ink)) ||
-        !ink) {
-        return;
-    }
-    const float cx = (box.left + box.right) * 0.5f;
-    const float cy = (box.top + box.bottom) * 0.5f;
-    // The dots grow with the button: it is a 30 DIP square now, the same as an application icon, and the
-    // three marks were sized for a 22 DIP one -- on the bar they read as a control that had been scaled
-    // down rather than as one of the row's beads.
-    for (int i = -1; i <= 1; ++i) {
-        const float x = cx + static_cast<float>(i) * 7.5f;
-        context->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), 2.6f, 2.6f), ink);
-    }
-    ink->Release();
-}
-
 namespace {
 
 // Every card's material, in one place (defined with the system panel's drawing code further down).
-// Declared here because the tray page -- which used to fill its own surface, and therefore looked flat
-// beside a panel that had a lit one -- is drawn above the definition.
+// Declared here because the drawings that need it are laid out above the definition.
 void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float opacity,
                      bool moving = false);
 
 } // namespace
 
-void TextRenderer::DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& card,
-                                const wchar_t* title, const TrayIcon* icons, int count,
-                                unsigned long long revision, float opacity, int hoveredIndex,
-                                bool moving) {
-    if (!context || opacity <= 0.01f) return;
-
-    // THE CARD'S OWN SURFACE, from the one function that draws it (FillCardSurface): the same fill, the same
-    // edge, the same surface lighting, the same grain and the same shadow as the panel and the media card.
-    //
-    // This page used to fill its own rounded rectangle with the theme's card colour and a fringe stroke of
-    // the same colour. It matched the OTHERS' colour and nothing else -- no edge, no lighting, no shadow --
-    // which is exactly the "看着不协调" it was reported as: the panel beside it had a lit surface and this one
-    // was flat. One function draws every card's material, and this was the card that did not call it.
-    FillCardSurface(context, card, opacity, moving);
-
-    const TrayPageLayout layout = TrayPageFor(card, count);
-
-    if (title && title[0] != L'\0' && appRowFormat_) {
-        // The title in the THEME's ink, like every other word on the card: it was a hard-coded near-white,
-        // which is the one colour that shows up as a grey patch in a theme with a coloured ink.
-        if (ID2D1SolidColorBrush* ink = BrushFor(context, island::ThemeInk(0.88f * opacity))) {
-            context->DrawTextW(title, static_cast<UINT32>(std::wcslen(title)), appRowFormat_,
-                               D2D1::RectF(layout.title.left, layout.title.top, layout.title.right,
-                                           layout.title.bottom),
-                               ink);
-        }
-    }
-
-    if (count == 0) return;   // the heading alone, over an empty page
-
-    for (int i = 0; i < layout.count; ++i) {
-        const RectF& cell = layout.cells[i];
-
-        // THE CELL IS DARKER THAN THE CARD, not lighter, and the reason is the pictures that go in it.
-        //
-        // The shell snapshots these icons onto a near-black background, so a LIGHTER tile shows every one of
-        // them as a black square sitting inside it -- which is what "看着不协调" was, past the empty card.
-        // A dark tile makes the pictures' own backgrounds disappear into it, and the hairline plus the hover
-        // wash are what still say "this is a control". (The panel's own tiles stay light: nothing is drawn
-        // inside them but a glyph we choose.)
-        const float radius = 10.0f;
-        const D2D1_ROUNDED_RECT tile = {
-            D2D1::RectF(cell.left, cell.top, cell.right, cell.bottom), radius, radius};
-        if (ID2D1SolidColorBrush* tileFill =
-                BrushFor(context, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.28f * opacity))) {
-            context->FillRoundedRectangle(&tile, tileFill);
-        }
-        if (ID2D1SolidColorBrush* tileEdge = BrushFor(context, island::ThemeInk(0.13f * opacity))) {
-            context->DrawRoundedRectangle(&tile, tileEdge, 1.0f);
-        }
-        if (i == hoveredIndex) {
-            ID2D1SolidColorBrush* wash = nullptr;
-            if ((wash = BrushFor(context, island::ThemeInk(0.16f * opacity))) != nullptr) {
-                context->FillRoundedRectangle(&tile, wash);
-            }
-        }
-
-        ID2D1Bitmap1* bitmap = TrayIconBitmap(context, i, icons[i], revision);
-        if (!bitmap) continue;
-        // THE PICTURE IS HALF THE CELL, so it grows with it (see TrayPageFor's growth step): a 24 DIP icon
-        // centred in a 68 DIP cell reads as lost, and the same 24 in a 48 DIP cell is what the page was
-        // designed around. Clamped at the top because the registry's snapshots are 32 DIP.
-        const float cellDip = cell.right - cell.left;
-        float side = cellDip * 0.5f;
-        if (side < 22.0f) side = 22.0f;
-        if (side > 34.0f) side = 34.0f;
-        const float centreX = (cell.left + cell.right) * 0.5f;
-        const float centreY = (cell.top + cell.bottom) * 0.5f;
-        const D2D1_RECT_F target = D2D1::RectF(centreX - side * 0.5f, centreY - side * 0.5f,
-                                               centreX + side * 0.5f, centreY + side * 0.5f);
-        context->DrawBitmap(bitmap, &target, opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
-    }
-}
-
-void TextRenderer::DrawTrayMenu(ID2D1DeviceContext2* context, const island::RectF* rows, int count,
-                                const wchar_t* const* labels, int hoveredRow, float opacity) {
-    if (!context || !rows || !labels || count <= 0 || opacity <= 0.01f) return;
-    Refresh();
-
-    // The surface: a raised rectangle that sits ON the card, so it reads as something in front rather than
-    // as a hole in it. The card's own surface is 0.05/0.05/0.07; this is lighter and outlined.
-    const float pad = kTrayMenuPadDip;
-    const D2D1_ROUNDED_RECT box = {
-        D2D1::RectF(rows[0].left - pad, rows[0].top - pad, rows[0].right + pad,
-                    rows[count - 1].bottom + pad),
-        10.0f, 10.0f};
-    ID2D1SolidColorBrush* fill = nullptr;
-    if (SUCCEEDED(context->CreateSolidColorBrush(
-            D2D1::ColorF(0.13f, 0.13f, 0.16f, 0.99f * opacity), &fill)) &&
-        fill) {
-        context->FillRoundedRectangle(&box, fill);
-        fill->Release();
-    }
-    ID2D1SolidColorBrush* edge = nullptr;
-    if (SUCCEEDED(context->CreateSolidColorBrush(
-            D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f * opacity), &edge)) &&
-        edge) {
-        context->DrawRoundedRectangle(&box, edge, 1.0f);
-        edge->Release();
-    }
-
-    for (int i = 0; i < count; ++i) {
-        const RectF& row = rows[i];
-        const D2D1_ROUNDED_RECT rowBox = {
-            D2D1::RectF(row.left, row.top, row.right, row.bottom), 6.0f, 6.0f};
-        if (i == hoveredRow) {
-            ID2D1SolidColorBrush* wash = nullptr;
-            if (SUCCEEDED(context->CreateSolidColorBrush(
-                    D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.16f * opacity), &wash)) &&
-                wash) {
-                context->FillRoundedRectangle(&rowBox, wash);
-                wash->Release();
-            }
-        }
-        const wchar_t* label = labels[i] ? labels[i] : L"";
-        if (label[0] == L'\0') continue;
-        ID2D1SolidColorBrush* ink = nullptr;
-        if (SUCCEEDED(context->CreateSolidColorBrush(
-                D2D1::ColorF(0.90f, 0.91f, 0.95f, 0.94f * opacity), &ink)) &&
-            ink) {
-            if (appRowFormat_) {
-                // Left-aligned inside the row, vertically centred by the format's own paragraph alignment.
-                context->DrawTextW(label, static_cast<UINT32>(std::wcslen(label)), appRowFormat_,
-                                   D2D1::RectF(row.left + 8.0f, row.top, row.right - 8.0f, row.bottom),
-                                   ink);
-            }
-            ink->Release();
-        }
-    }
-}
 
 void TextRenderer::DrawStatusLine(ID2D1DeviceContext2* context, const RoundedBox& box,
                                   float opacity, const wchar_t* sky, const wchar_t* temperature,
@@ -2888,7 +2657,7 @@ void FillCardSurface(ID2D1DeviceContext2* context, const RoundedBox& box, float 
     const D2D1_ROUNDED_RECT rounded = {
         D2D1::RectF(box.rect.left, box.rect.top, box.rect.right, box.rect.bottom), radius,
         std::max(0.0f, box.radiusY)};
-    // ONE PLACE FOR EVERY CARD'S MATERIAL, which is why a theme re-colours the panel, the tray page,
+    // ONE PLACE FOR EVERY CARD'S MATERIAL, which is why a theme re-colours the panel,
     // the 声音输出 page, the music card and a notification all at once and cannot leave two of them
     // disagreeing. The edge is the theme's ink at the theme's own edge strength: a hairline that
     // catches the light rather than a second fill colour, which is the plan's "细微边缘反射".
@@ -3640,7 +3409,7 @@ void TextRenderer::DrawStartButton(ID2D1DeviceContext2* context, const RoundedBo
     // ... AND IT COMES UP OVER ABOUT A TENTH OF A SECOND, not in one frame: the amount is the frame
     // loop's spring (FrameState::startWash). A wash that switches on reads as a hard edge, which is the
     // opposite of what a hover should feel like.
-    // The wash, with the same two cases the tray button has: the pointer's own amount, or a full one when
+    // The wash, with the same two cases every button has: the pointer's own amount, or a full one when
     // this is the control whose card is up.
     const float strength = open ? 1.0f : wash;
     if (strength > 0.01f) {

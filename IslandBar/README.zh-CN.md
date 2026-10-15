@@ -290,7 +290,7 @@ src/                      栏本体 —— 一个目录一个模块
     SystemStatus            WLAN、蓝牙、音量、电源、输入法
     SystemToggles           切换无线电和夜间模式，并回读结果
     Weather                 状态行上的天气读数
-    TrayIcons, TrayPress    托盘，以及按下它的图标
+                            （这里的托盘 2026-10-15 已整体移除）
   services/                 把东西送进来的通道
     Notification*           模型、命名管道、发件人图标
     ToastStore              Windows 自己的通知数据库

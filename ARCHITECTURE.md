@@ -6,16 +6,16 @@
 
 ## 1. 这东西是什么
 
-Windows 11 上替代系统任务栏的一条横条（"岛"）：自己画 pill 与卡片，接管托盘、媒体、通知、开始菜单、任务条，并把原生任务栏藏起来。C++20 + Win32 + D3D11 + Direct2D + DirectComposition，单 exe、静态 CRT、无运行时依赖，私有内存 75-95MB。
+Windows 11 上替代系统任务栏的一条横条（"岛"）：自己画 pill 与卡片，接管媒体、通知、开始菜单、任务条，并把原生任务栏藏起来。C++20 + Win32 + D3D11 + Direct2D + DirectComposition，单 exe、静态 CRT、无运行时依赖，私有内存 75-95MB。
 
-二进制只有两个：`island_bar.exe`（主程序，干所有活）和 `island_tray_hook.dll`（装进 explorer 的托盘观察模块）。
+二进制只有一个：`island_bar.exe`。（2026-10-15 之前还有一个 `island_tray_hook.dll`，装进 explorer 读托盘注册；**托盘功能已按要求整体移除**，这个模块和它的载荷、命令、探针一起走了。见第 7 节。）
 
 ## 2. 目录与职责
 
 ```
 src/
   main.cpp          入口。解析命令行 → 要么跑一条命令，要么跑这条岛
-  cli/              那些"代替岛运行"的命令（--tray-* / --toast-dump / --window-list / --icon-dump …）
+  cli/              那些"代替岛运行"的命令（--toast-dump / --window-list / --icon-dump / --music-preview …）
   domain/           纯逻辑，独立静态库目标 island_domain：几何、布局、动画、状态策略、JSON 读取。
                     这一层不许包含 <windows.h>，也不许链接任何库（见第 3 节）
   core/             所有模块共用的基础设施：日志、进程指标
@@ -23,11 +23,10 @@ src/
                     BarState.h（bar 自己的状态；正在一片一片从 RunBar 里搬进来，见第 7 节）
   render/           D2D/DComp 渲染：Renderer、TextRenderer、玻璃材质
   media/            GSMTC 会话、歌词、音量、声音输出、图片解码
-  shell/            与 shell 打交道：托盘（TrayIcons/TrayPress/TrayLearn）、开始菜单、天气、系统开关、原生任务栏
+  shell/            与 shell 打交道：开始菜单、天气、系统开关、原生任务栏
   platform/         平台能力：显示器、窗口列表、缩略图、Win32 薄封装
   services/         Toast 通知读取与通知管道
   selftest/         诊断与 900+ 条断言（--self-test）
-  trayhook/         island_tray_hook.dll 的全部代码（独立目标，只导出 IslandTrayHookProc）
 tools/              独立探针可执行文件（geo_probe / thumb_probe / jsonprobe / island_smoke）
 setup/              安装器（payload 以 RCDATA 内嵌）
 scripts/            build.ps1 / capture-*.ps1 / snapshot.ps1
@@ -57,7 +56,7 @@ island_bar.exe（main.cpp：组装 + 消息泵）
 | pill 的形状、边距、命中区域 | `core/Geometry.h`（唯一一份圆角矩形判定）、`core/CardLayout.h` | 渲染与命中测试用同一个函数，改一处两边一起变 |
 | 展开/收起的动画手感 | `core/Motion.h`（spring，可中断、继承速度） | `core/StatePolicy.h` 决定状态迁移 |
 | 卡片里某个控件的位置 | `core/CardLayout.h` | `selftest/Diagnostics.cpp` 里通常已有对它的断言 |
-| 托盘格子的行为 | `shell/TrayPress.cpp`（按压）、`shell/TrayLearn.cpp`（学习）、`trayhook/TrayHook.cpp`（模块侧） | 缓存格式 `%USERPROFILE%\IslandBar\tray_callbacks.txt` |
+| （托盘已移除） | 无 —— 托盘卡片、按压、学习、explorer 内模块在 2026-10-15 整体退役 | 实测记录留在 `docs/TRAY-RESEARCH-RETIRED.md`，探针在 `scripts/retired/tray/` |
 | 媒体卡片 | `media/MusicSession.cpp`、`media/Lyrics.cpp`、`render/` | 延迟初始化：没音乐时不该起线程 |
 | 通知纸条 | `services/`（Toast 读取）加 `app/IslandWindow` 的 NoticeStrip 状态 | |
 | 与 Win32 对话的细节 | `platform/` | 不要在 `core/` 里加 `<windows.h>` |
@@ -70,7 +69,7 @@ island_bar.exe（main.cpp：组装 + 消息泵）
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.ps1" -Config Release
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.ps1" -Config Debug
 
-# 自检（900+ 断言，不开窗口，退出码 0 == 全过）
+# 自检（900+ 断言；会开窗口，退出码 0 == 全过）
 .\IslandBar\build\Release\src\Release\island_bar.exe --self-test
 
 # 冒烟（编译、链接、运行时）
@@ -82,7 +81,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 1. **exe 要从项目树外运行**。镜像在 `C:\PROJECT\Taskbar` 下的进程会被降成 LOW 完整性，UIPI 会静默丢弃所有发往 Explorer 的消息；GUI 二进制在受限沙箱里起不来（0xC0000142）。正式部署位置是 `%USERPROFILE%\IslandBar`。
 2. **有单实例互斥锁**（`IslandBar.SingleInstance`），不能并行跑第二个副本做对照。要对照就先优雅关掉正在运行的那个（它会恢复原生任务栏），测完再启动。
 3. **只有 PowerShell 5.1**，所有 `.ps1` 必须是纯 ASCII。
-4. **注入到别人进程里的模块必须自己 PIN 住**（`GET_MODULE_HANDLE_EX_FLAG_PIN`），否则那个进程退出时导入表里会留下悬空指针——这件事已经崩过 Explorer 6 次。
+4. **注入到别人进程里的模块必须自己 PIN 住**（`GET_MODULE_HANDLE_EX_FLAG_PIN`），否则那个进程退出时导入表里会留下悬空指针——这件事已经崩过 Explorer 6 次。**现在没有这样的模块了**（托盘 2026-10-15 退役后 IslandBar 是单进程），所以这条只在重新引入注入时适用。
 
 ## 6. 一次改动要走完的流程
 
@@ -95,9 +94,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 
 ## 7. 已知的架构债（写在明处，不是等人发现）
 
-- **模块边界还没有被构建系统强制**：`core/` 有了编译期护栏，但 `shell/`、`render/`、`media/` 之间仍是同一个目标里的翻译单元，互相 include 的门槛很低。下一步是把 `core/` 抽成独立静态库目标，再逐层往上锁。
-- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（6.0k / 8.6k 行）。已经搬出去的三块：托盘的行为去了 `shell/TrayMenu.*`（234 行）、代替岛运行的那些命令去了 `cli/Cli.cpp`（约 1,000 行）、`RunBar` 里**第一组跨帧状态**去了 `app/BarState.h`（托盘卡片、它的菜单、重读托盘与学习的时钟，10 个字段）。
-  `main.cpp` 剩下的主体仍是 `RunBar`——约 5,000 行的帧循环，装着窗口、渲染、媒体、通知、天气、系统面板和托盘卡片的全部驱动逻辑。**状态迁移是"一组一组来"的**：每组搬完都全量重建两套配置 + 自检 + 冒烟 + 部署，这样出错一定归因到刚搬的那组（整块机械替换的风险是"静默用了外层状态"，编译器抓不住）。顺序：面板与声音页那组 → 通知与媒体那组 → 对象组（window / renderer / text / 会话）。等这些搬完，`RunBar` 才谈得上按相位切成函数。
-- **模块与主程序之间靠文件轮询**：`trayhook` 写 `tray_learned.txt`，bar 每 5 秒读一次；模块也没有 ABI 版本契约（现在靠内容哈希命名来避免文件锁）。正式做法应是共享内存或管道加版本号，把文件降级为可回放语料。
-- **安装器还没带 `island_tray_hook.dll`**：托盘学习是正式功能，所以全新安装缺这个 DLL 就是功能缺口。
-- **托盘按压没有自动化回归**：只能靠 CLI 探针（`--tray-surface` / `--tray-learn` / `--tray-press N`）加人工验证。
+- **只有 `core/` 的边界被构建系统强制**：`island_domain` 是独立静态库，`domain/` 里不许出现 `<windows.h>`（编译期护栏）。`shell/`、`render/`、`media/`、`platform/` 之间仍是同一个目标里的翻译单元，互相 include 的门槛很低——下一步是按依赖方向再切静态库目标，逐层往上锁。
+- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（5.5k / 8.1k 行）。已经搬出去的三块：托盘的行为去了 `shell/TrayMenu.*`（234 行，**随托盘一起删了**）、代替岛运行的那些命令去了 `cli/Cli.cpp`（约 950 行）、`RunBar` 里跨帧状态去了 `app/BarState.h`。
+  `main.cpp` 剩下的主体仍是 `RunBar`——约 5,000 行的帧循环，装着窗口、渲染、媒体、通知、天气和系统面板的全部驱动逻辑。**状态迁移是"一组一组来"的**：每组搬完都全量重建两套配置 + 自检 + 冒烟 + 部署，这样出错一定归因到刚搬的那组（整块机械替换的风险是"静默用了外层状态"，编译器抓不住）。顺序：面板与声音页那组 → 通知与媒体那组 → 对象组（window / renderer / text / 会话）。等这些搬完，`RunBar` 才谈得上按相位切成函数。
+- **2026-10-15 已还的债**（留着这几行是为了说明它们不再是问题）：`core/` 已抽成 `island_domain` 独立静态库；模块↔主程序的通道已经从"文件轮询"换成共享内存环 + ABI 版本号（随托盘删除）；安装器已经能带第二份载荷（随托盘删除，回到单载荷）。
+- **托盘那条链路整体退役了**：卡片、按压（回调消息 / UIA）、学习、explorer 内模块、4 条 CLI 命令、18 个探针都不在树里了。实测记录见 `docs/TRAY-RESEARCH-RETIRED.md`。**它的代价要记住**：这条 bar 默认仍然隐藏原生任务栏，所以系统托盘里的东西（微信、Steam、NVIDIA、网络、音量、时钟）现在**屏幕上没有任何入口**，除非用 `--keep-taskbar` 跑。

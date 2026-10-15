@@ -14,7 +14,7 @@
 //  So one line carries both halves:
 //
 //      mem[reason]: private=..MB ws=..MB vram=local/nonlocalMB handles=..
-//                   threads=.. cover=..B lyrics=.. tray=.. winicons=..
+//                   threads=.. cover=..B lyrics=.. winicons=..
 //                   bitmaps=.. notify=.. tasks=..
 //
 //  READING IT. Private bytes rising while every count after it stays flat is a
@@ -56,7 +56,6 @@ struct ProcessMemorySample {
 struct ProcessCacheCounts {
     unsigned long long coverBytes = 0;   // the current album cover as the media reader holds it
     int lyricLines                = 0;   // parsed lyric lines for the current track
-    int trayIcons                 = 0;   // tray icons mirrored from the shell
     int windowIcons               = 0;   // window-button icons the renderer has cached
     int bitmaps                   = 0;   // decoded images the renderer has cached
     int notifications             = 0;   // notifications in the store
@@ -70,7 +69,7 @@ void SampleProcessMemory(ProcessMemorySample* out);
 
 // One line, at a fixed shape, so two runs can be diffed and a day can be plotted.
 //
-// `reason` is short and pure ASCII: "5min", "card-closed", "track", "tray-refresh". It is what turns
+// `reason` is short and pure ASCII: "5min", "card-closed", "track", "after-event". It is what turns
 // a wall of samples into "this line came 30 seconds after a card closed".
 void LogProcessMemory(const char* reason, const ProcessMemorySample& sample,
                       const ProcessCacheCounts& counts);

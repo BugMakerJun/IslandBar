@@ -17,9 +17,6 @@
 #pragma once
 
 #include "domain/Geometry.h"
-// The tray page's grid is bounded by the same limit the tray itself has (kMaxTrayIcons), so the two cannot
-// disagree about how many icons exist.
-#include "domain/TaskStripLayout.h"
 
 namespace island {
 
@@ -74,290 +71,6 @@ enum class CardOwner {
     Notification,  // a message that arrived
     Music,         // what is playing, shown once no message is in the way
 };
-
-// --- the tray page: the applications' tray icons, inside the panel's own card ------------------
-//
-// A PAGE of the panel rather than a fourth card, for the same reason the 声音输出 page is one: it is the
-// same card in the same place with the same open/close animation, and only its contents change -- which is
-// what the shell's own flyouts do too, and it means no new card geometry, no new policy rule and no new
-// transition. See Renderer::RenderFrame's panel branch.
-//
-// A WRAPPING GRID, because the number of icons is whatever the user has running: three to a row in the
-// system panel's own tile size would hold six, and the machine this was built on has sixteen.
-inline constexpr int   kTrayPageColumns      = 5;
-inline constexpr float kTrayPageCellDip      = 48.0f;   // the cell a 16 DIP picture sits in
-inline constexpr float kTrayPageCellGapDip   = 6.0f;
-// The grid FITS itself to the card (see TrayPageFor), and these are its two limits: it may use more columns
-// than kTrayPageColumns when that is what makes the rows fit, and a cell may not shrink past the point where
-// the 24 DIP picture inside it is still a target a finger can find.
-inline constexpr int   kTrayPageMaxColumns   = 8;
-inline constexpr float kTrayPageMinCellDip   = 38.0f;
-// The ceiling for a cell that has room to grow (see the growth step in TrayPageFor): an icon page shares
-// the card's space like the panel's tiles do, up to here. It is also the size at which the picture inside
-// stops growing -- see the icon side in DrawTrayPage, which is half the cell.
-inline constexpr float kTrayPageMaxCellDip   = 68.0f;
-
-struct TrayPageLayout {
-    RectF title;          // the page's own line, at the top
-    RectF cells[kMaxTrayIcons];
-    int   count = 0;
-    int   columns = 0;
-};
-
-// Where the page's contents go, inside the card the renderer was given. Pure, so the hit test and the
-// drawing cannot disagree about which cell an icon is in.
-inline TrayPageLayout TrayPageFor(const RoundedBox& card, int iconCount) {
-    TrayPageLayout layout;
-    if (iconCount < 0) iconCount = 0;
-    if (iconCount > kMaxTrayIcons) iconCount = kMaxTrayIcons;
-    layout.count = iconCount;
-    if (iconCount == 0) return layout;
-
-    const float cardWidth = card.rect.right - card.rect.left;
-    const float titleHeight = 34.0f;
-    // 16 DIP, the music card's own padding, written here as a literal because that constant is declared
-    // further down this file and a page's heading is not worth reordering the file for.
-    layout.title.left = card.rect.left + 16.0f;
-    layout.title.right = card.rect.right - 16.0f;
-    layout.title.top = card.rect.top + 6.0f;
-    layout.title.bottom = layout.title.top + titleHeight - 8.0f;
-
-    // THE GRID FITS THE CARD, however many icons there are.
-    //
-    // It did not, and the limit was invisible: five columns times two rows held ten, this machine has
-    // sixteen, and the page drew the first ten and silently dropped the rest -- reported as "托盘卡片里没有
-    // 显示全啊" over a photograph of five-by-two with empty space beneath it. The cap that dropped them
-    // (kMaxTrayIcons used to be 10) was written for the ROW this page replaced, and nothing here checked
-    // that the grid it computed was inside the card it was drawn in. The self-test did not catch it because
-    // its counts were 1, 3, 6 and 10 -- exactly the numbers that fit. (Same lesson as HANDOFF 8.71: an
-    // assertion whose parameters are the lucky ones measures the luck.)
-    //
-    // So the column count and the cell size are DERIVED, from the card: as many columns as the width takes,
-    // up to kTrayPageMaxColumns, and the cell that makes those rows fit the height, never below
-    // kTrayPageMinCellDip -- and if the cell would go below it, one more column (one fewer row) and try
-    // again. Everything below is measured from the card, so this cannot disagree with `TrayPageCellAt`
-    // (which calls this function) and cannot overflow however many icons the registry holds.
-    const float cardHeight = card.rect.bottom - card.rect.top;
-    const float availableWidth = cardWidth - 32.0f;              // 16 DIP either side
-    const float availableHeight = cardHeight - titleHeight - 18.0f;
-
-    int columns = kTrayPageColumns < iconCount ? kTrayPageColumns : iconCount;
-    float cell = kTrayPageCellDip;
-    if (iconCount > 1) {
-        // FULL SIZE FIRST. A grid whose cells are still 48 DIP beats one that fits in fewer columns by
-        // shrinking them: sixteen icons came out as 5/5/5/1 with 45 DIP cells, which reads as a row that
-        // lost its icons, while six columns holds the same sixteen in THREE rows at full size. So the
-        // search takes the first column count that keeps a full-size cell, and only then the first that
-        // merely clears kTrayPageMinCellDip -- and if neither does, the widest grid this page allows.
-        int bestColumns = 0;
-        float bestCell = 0.0f;
-        for (int candidate = kTrayPageColumns; candidate <= kTrayPageMaxColumns; ++candidate) {
-            const int rows = (iconCount + candidate - 1) / candidate;
-            const float byWidth = (availableWidth - (candidate - 1) * kTrayPageCellGapDip) / candidate;
-            const float byHeight = (availableHeight - (rows - 1) * kTrayPageCellGapDip) / rows;
-            float candidateCell = kTrayPageCellDip;
-            if (byWidth < candidateCell) candidateCell = byWidth;
-            if (byHeight < candidateCell) candidateCell = byHeight;
-
-            const bool fullSize = candidateCell >= kTrayPageCellDip - 0.01f;
-            const bool pressable = candidateCell >= kTrayPageMinCellDip - 0.01f;
-            if (fullSize) {
-                bestColumns = candidate;
-                bestCell = kTrayPageCellDip;
-                break;
-            }
-            if (!bestColumns && pressable) {
-                bestColumns = candidate;
-                bestCell = candidateCell;
-            }
-            if (candidate == kTrayPageMaxColumns && !bestColumns) {
-                bestColumns = candidate;
-                bestCell = candidateCell;
-            }
-        }
-        if (bestColumns > 0) {
-            columns = bestColumns < iconCount ? bestColumns : iconCount;
-            cell = bestCell;
-        }
-    }
-    if (cell < 1.0f) cell = 1.0f;
-
-    layout.columns = columns;
-
-    const int rows = (iconCount + columns - 1) / columns;
-    // ... AND THEN EACH CELL GROWS INTO THE ROOM, capped, the way the panel's tiles share the space that is
-    // left. Without this a three-row page of sixteen icons is 152 DIP of tiles inside a 280 DIP card: the
-    // grid is centred and correct and the CARD looks half empty, which is what "看着不协调" was about. The
-    // cap is what keeps a page of five icons from turning into five postage stamps.
-    {
-        const float byWidth = (availableWidth - (columns - 1) * kTrayPageCellGapDip) / columns;
-        const float byHeight = (availableHeight - (rows - 1) * kTrayPageCellGapDip) / rows;
-        float grown = byWidth < byHeight ? byWidth : byHeight;
-        if (grown > kTrayPageMaxCellDip) grown = kTrayPageMaxCellDip;
-        if (grown > cell) cell = grown;
-    }
-    const float gridWidth = columns * cell + (columns - 1) * kTrayPageCellGapDip;
-    const float gridHeight = rows * cell + (rows - 1) * kTrayPageCellGapDip;
-    // Centred BOTH ways: a page of four icons is not pinned to the left while a page of five fills the card,
-    // and a page that only needs one row sits in the middle of the room rather than under the heading.
-    const float left = card.rect.left + (cardWidth - gridWidth) * 0.5f;
-    const float top = card.rect.top + titleHeight + 8.0f + (availableHeight - gridHeight) * 0.5f;
-
-    for (int i = 0; i < iconCount; ++i) {
-        const int column = i % columns;
-        const int row = i / columns;
-        RectF placed;
-        placed.left = left + column * (cell + kTrayPageCellGapDip);
-        placed.top = top + row * (cell + kTrayPageCellGapDip);
-        placed.right = placed.left + cell;
-        placed.bottom = placed.top + cell;
-        layout.cells[i] = placed;
-    }
-    return layout;
-}
-
-// Which cell a card-local DIP point is on, or -1.
-inline int TrayPageCellAt(const RoundedBox& card, int iconCount, float x, float y) {
-    const TrayPageLayout layout = TrayPageFor(card, iconCount);
-    for (int i = 0; i < layout.count; ++i) {
-        const RectF& cell = layout.cells[i];
-        if (x >= cell.left && x <= cell.right && y >= cell.top && y <= cell.bottom) return i;
-    }
-    return -1;
-}
-
-// --- the tray's own context menu (2026-10-14, HANDOFF 8.80) ---------------------------
-//
-// WHY THIS EXISTS. A right click on a tray cell used to ask the SHELL for the application's menu: show the
-// taskbar invisibly, open the overflow panel, move the pointer onto the icon, click, put the pointer back.
-// That works (and is the only way to the items only the application knows -- "退出微信"), but it costs
-// three to six hundred milliseconds and the menu appears at the icon's own screen position, which is the
-// top-right corner rather than under the pointer. This menu is the bar's own: instant, under the pointer,
-// drawn in the surface the bar already owns. The application's menu is still reachable, from the last
-// entry, which is what turns the two into one usable thing instead of two half-answers.
-inline constexpr float kTrayMenuWidthDip   = 176.0f;
-inline constexpr float kTrayMenuRowDip     = 30.0f;
-inline constexpr float kTrayMenuPadDip     = 6.0f;
-inline constexpr int   kMaxTrayMenuEntries = 6;
-
-enum class TrayMenuAction : int {
-    Open,             // the icon's own default action -- exactly what a left click on it does
-    ActivateWindow,   // bring a window of that application to the front
-    OpenLocation,     // the folder the executable lives in, with the file selected
-    CloseWindow,      // ask the application to close its window (WM_CLOSE: graceful, it may prompt)
-    QuitApplication,  // END the application's processes -- the forceful one, behind a second press
-    ApplicationMenu,  // the application's own menu, through the shell (slow, and at the icon's corner)
-};
-
-// The label a user reads. Wide, because two of the four are Chinese and the renderer wants wide strings.
-inline const wchar_t* TrayMenuLabel(TrayMenuAction action) {
-    switch (action) {
-        case TrayMenuAction::Open:            return L"打开";
-        case TrayMenuAction::ActivateWindow:  return L"显示窗口";
-        case TrayMenuAction::OpenLocation:    return L"打开文件位置";
-        case TrayMenuAction::CloseWindow:     return L"关闭窗口";
-        case TrayMenuAction::QuitApplication: return L"结束应用";
-        case TrayMenuAction::ApplicationMenu: return L"应用自己的菜单…";
-    }
-    return L"";
-}
-
-// The same label for an entry that is ARMED -- waiting for the press that carries it out.
-//
-// Only one entry has a second state, and it is the one that cannot be taken back: 结束应用 ends the
-// application's processes, so it gives the application no chance to save. The first press says so in
-// words ("再点一次"), which is the same arrangement the Start card's power list uses for sign-out,
-// restart and shutdown.
-inline const wchar_t* TrayMenuArmedLabel(TrayMenuAction action) {
-    if (action == TrayMenuAction::QuitApplication) return L"再点一次：结束应用";
-    return TrayMenuLabel(action);
-}
-
-// What the icon can actually do, so that the menu never offers a row that does nothing.
-struct TrayMenuFacts {
-    bool hasWindow = false;    // the application has a window to bring forward
-    bool hasExePath = false;   // the registry recorded where its executable lives
-    // ... AND WHETHER ITS TRAY CALLBACK IS KNOWN. The two rows that are "the icon's own action" cannot do
-    // anything without it: 打开 sends the application its own left-click callback (TrayPress) and 应用自己的
-    // 菜单… sends it the right-click one, and an application whose callback has never been learned is simply
-    // not sendable to. Measured by the user on 2026-10-15: pressing 应用自己的菜单… on one of those cells
-    // "did nothing", because all it could do was re-open the same menu -- a row that does nothing is worse
-    // than a row that is absent, and this struct is what the rule is stated in.
-    bool hasCallback = false;
-};
-
-// Which entries the menu shows, in order, for one icon -- PURE, so the rule is pinned by the self-test
-// rather than by looking at the screen. The application's menu is always last: it is the slow one, and it
-// is the one that leaves the bar.
-inline int TrayMenuEntriesFor(const TrayMenuFacts& facts, TrayMenuAction* out, int capacity) {
-    if (!out || capacity <= 0) return 0;
-    int count = 0;
-    const auto add = [&](TrayMenuAction action) {
-        if (count < capacity) out[count++] = action;
-    };
-    if (facts.hasCallback) add(TrayMenuAction::Open);
-    if (facts.hasWindow) add(TrayMenuAction::ActivateWindow);
-    if (facts.hasExePath) add(TrayMenuAction::OpenLocation);
-    if (facts.hasWindow) add(TrayMenuAction::CloseWindow);
-    add(TrayMenuAction::QuitApplication);
-    if (facts.hasCallback) add(TrayMenuAction::ApplicationMenu);
-    return count;
-}
-
-struct TrayMenuLayout {
-    RectF box;
-    RectF rows[kMaxTrayMenuEntries];
-    int   count = 0;
-};
-
-// Where the menu goes for a pointer at a card-local DIP point: just below and to the right of it, flipped
-// up or to the left when that would leave the card, and never outside the card at all -- the card is what
-// the window's input region covers, so a menu beyond it would be drawn where clicks cannot land.
-//
-// Called ONCE, when the menu opens, and the box is kept: a menu whose position is recomputed from the
-// pointer every frame walks away from the pointer that is on it.
-inline TrayMenuLayout TrayMenuFor(const RoundedBox& card, float x, float y, int entryCount) {
-    TrayMenuLayout layout;
-    if (entryCount < 0) entryCount = 0;
-    if (entryCount > kMaxTrayMenuEntries) entryCount = kMaxTrayMenuEntries;
-    layout.count = entryCount;
-    if (entryCount == 0) return layout;
-
-    const float height = entryCount * kTrayMenuRowDip + kTrayMenuPadDip * 2.0f;
-    float left = x + 6.0f;
-    float top = y + 6.0f;
-    if (left + kTrayMenuWidthDip > card.rect.right - 4.0f) left = x - 6.0f - kTrayMenuWidthDip;
-    if (top + height > card.rect.bottom - 4.0f) top = y - 6.0f - height;
-    // The last word: inside the card, whatever the flips decided.
-    if (left < card.rect.left + 4.0f) left = card.rect.left + 4.0f;
-    if (left + kTrayMenuWidthDip > card.rect.right - 4.0f) {
-        left = card.rect.right - 4.0f - kTrayMenuWidthDip;
-    }
-    if (top < card.rect.top + 4.0f) top = card.rect.top + 4.0f;
-    if (top + height > card.rect.bottom - 4.0f) top = card.rect.bottom - 4.0f - height;
-
-    layout.box.left = left;
-    layout.box.right = left + kTrayMenuWidthDip;
-    layout.box.top = top;
-    layout.box.bottom = top + height;
-    for (int i = 0; i < entryCount; ++i) {
-        layout.rows[i].left = layout.box.left + kTrayMenuPadDip;
-        layout.rows[i].right = layout.box.right - kTrayMenuPadDip;
-        layout.rows[i].top = layout.box.top + kTrayMenuPadDip + i * kTrayMenuRowDip;
-        layout.rows[i].bottom = layout.rows[i].top + kTrayMenuRowDip;
-    }
-    return layout;
-}
-
-// Which row a card-local DIP point is on, or -1. Against the box the menu was OPENED with, not a fresh
-// one: see TrayMenuFor.
-inline int TrayMenuRowAt(const TrayMenuLayout& layout, float x, float y) {
-    for (int i = 0; i < layout.count; ++i) {
-        const RectF& row = layout.rows[i];
-        if (x >= row.left && x <= row.right && y >= row.top && y <= row.bottom) return i;
-    }
-    return -1;
-}
 
 inline CardContentLayout CardContentFor(const RoundedBox& cardBox) {
     const float height = cardBox.rect.bottom - cardBox.rect.top;
@@ -586,14 +299,13 @@ inline float CardLeftFor(float anchorLeftDip, float cardWidthDip, float windowWi
 //
 // `held` is the previous answer, so the caller feeds this back to itself exactly as it does with
 // NextCardOwner. Every row of that table is asserted in Diagnostics.
-// `Start` is the fourth level: the user's own Start card (see StartPageFor).
-enum class PanelLevel { Tiles, Sound, Tray, Start };
+// `Start` is the third level: the user's own Start card (see StartPageFor).
+enum class PanelLevel { Tiles, Sound, Start };
 
-inline PanelLevel NextPanelLevel(PanelLevel held, bool cardUp, bool panelWanted, bool trayWanted,
-                                 bool soundWanted, bool startWanted) {
+inline PanelLevel NextPanelLevel(PanelLevel held, bool cardUp, bool panelWanted, bool soundWanted,
+                                 bool startWanted) {
     if (!cardUp) return PanelLevel::Tiles;
     if (!panelWanted) return held;   // put away: the card keeps its level while it leaves the screen
-    if (trayWanted) return PanelLevel::Tray;
     if (soundWanted) return PanelLevel::Sound;
     if (startWanted) return PanelLevel::Start;
     return PanelLevel::Tiles;
@@ -601,11 +313,10 @@ inline PanelLevel NextPanelLevel(PanelLevel held, bool cardUp, bool panelWanted,
 
 // WHETHER A CONTROL MAY ANSWER THE POINTER.
 //
-// All four levels are one card in one rectangle, so each of them has controls where another has EMPTY
-// SPACE -- and empty space that answers is how dragging across the tray page's lower band moved the
-// volume, because the panel's slider lies exactly there. Only the level that is SHOWING may answer, for
-// every kind of control: the tiles and their slider, the 声音输出 rows, the tray page's cells, the Start
-// card's tiles.
+// All three levels are one card in one rectangle, so each of them has controls where another has EMPTY
+// SPACE -- and empty space that answers is how dragging across one page's lower band moved the volume,
+// because the panel's slider lies exactly there. Only the level that is SHOWING may answer, for every
+// kind of control: the tiles and their slider, the 声音输出 rows, the Start card's tiles.
 //
 // A function rather than a comparison at each site, because the four questions are asked in five places
 // (the press, the click chain, the right click, the wheel) and the fifth one is exactly what gets missed.
@@ -613,9 +324,9 @@ inline bool LevelAnswersInput(PanelLevel showing, PanelLevel controls) { return 
 
 // WHICH CONTROL SHOWS THAT IT IS OPEN.
 //
-// One card, four levels, and three controls that can open one of them -- so "which button looks pressed"
-// is a question about the LEVEL, not about whether a card is up at all. Asked as three questions here, and
-// the self-test asserts that exactly one of them is true for every level: the user's report was the
+// One card, three levels, and two controls that can open one of them -- so "which button looks pressed"
+// is a question about the LEVEL, not about whether a card is up at all. Asked as two questions here, and
+// the self-test asserts that at most one of them is true for every level: the user's report was the
 // symptom of them not being asked separately ("点击 ⊞ 系统按钮也跟着变") -- the system button's chevron
 // pointed up whenever ANY card was up, because the frame told it `systemPanelOpen`, which the bar sets for
 // every level so that the card exists at all.
@@ -625,8 +336,6 @@ inline bool LevelAnswersInput(PanelLevel showing, PanelLevel controls) { return 
 inline bool SystemButtonShowsOpen(PanelLevel level) {
     return level == PanelLevel::Tiles || level == PanelLevel::Sound;
 }
-
-inline bool TrayButtonShowsOpen(PanelLevel level) { return level == PanelLevel::Tray; }
 
 inline bool StartButtonShowsOpen(PanelLevel level) { return level == PanelLevel::Start; }
 
@@ -639,7 +348,6 @@ inline bool StartButtonShowsOpen(PanelLevel level) { return level == PanelLevel:
 // well, so a control stays lit while the card it opened is still leaving the screen.
 struct ControlLit {
     bool system = false;
-    bool tray = false;
     bool start = false;
 };
 
@@ -647,7 +355,6 @@ inline ControlLit ControlLitFor(PanelLevel level, bool cardUp) {
     ControlLit lit;
     if (!cardUp) return lit;
     lit.system = SystemButtonShowsOpen(level);
-    lit.tray = TrayButtonShowsOpen(level);
     lit.start = StartButtonShowsOpen(level);
     return lit;
 }

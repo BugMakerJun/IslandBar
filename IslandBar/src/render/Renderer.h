@@ -347,40 +347,6 @@ struct FrameState {
     // knows where the pointer is.
     int taskHoveredIndex = -1;
 
-    // THE SYSTEM TRAY: the applications' own tray icons, at the right-hand end of the bar.
-    //
-    // The list is owned by the frame loop (it reads the registry on a timer) and borrowed here; the count
-    // is what the loop was told fits, and `trayRevision` is the list's own so the decoded bitmaps in the
-    // text layer survive from frame to frame. See TrayIcons.h for where the icons come from and
-    // TaskStripLayout.h for why the group is anchored to the monitor rather than to the row beside it.
-    const TrayIcon* trayIcons = nullptr;
-    int             trayIconCount = 0;
-    unsigned long long trayRevision = 0;
-    // Which cell of the card's grid the pointer is on, and whether the button at the right-hand end is
-    // under it. Both are the window's answers, taken from the geometry in TrayPageFor/TrayButtonFor.
-    int             trayHoveredIndex = -1;
-    bool            trayButtonHovered = false;
-    // How far the wash under it has come up, 0 to 1. The BOOL above says whether the pointer is there;
-    // this is the same answer with a spring on it, because a 16% white wash that appears in one frame is
-    // the one thing on the bar that reacts instantly -- and "reacts instantly" reads as "hard", not as
-    // "responsive". Same arrangement for the Start button and the system panel's toggle below.
-    float           trayButtonWash = 0.0f;
-    // Whether the card is showing the tray page rather than the panel's tiles. The same card, the same
-    // place, the same animation -- only the contents change (see TrayPageFor).
-    bool            trayPageOpen = false;
-    // The page's own heading. Supplied by the caller, because this class holds no user-facing strings of its
-    // own (see SoundPageText, which is here for the same reason). Empty means no heading.
-    const wchar_t*  trayPageTitle = nullptr;
-
-    // THE TRAY'S OWN CONTEXT MENU (CardLayout.h): the bar's answer to a right click on a cell, instead of
-    // the shell's panel and the application's menu at the far corner. Opened data, like everything else
-    // here -- where its rows are, which one is under the pointer, and what each one says.
-    bool            trayMenuOpen = false;
-    RectF           trayMenuRows[kMaxTrayMenuEntries] = {};
-    int             trayMenuRowCount = 0;
-    int             trayMenuHovered = -1;
-    const wchar_t*  trayMenuLabels[kMaxTrayMenuEntries] = {};
-
     // --- the Start card -------------------------------------------------------------------------------
     //
     // The same card, one level further: the user's own pins, the shell's full list behind the picker, and
@@ -401,8 +367,8 @@ struct FrameState {
     // of policy rules and a second transition, all for a shape that is already drawn.
     bool systemButtonHovered = false;
     float systemButtonWash = 0.0f;
-    // Whether that button -- and the Start button, and the tray button -- should LOOK open. One of them at
-    // most, decided by the level the card is showing (see SystemButtonShowsOpen and the two beside it),
+    // Whether that button -- or the Start button -- should LOOK open. One of them at most, decided by the
+    // level the card is showing (see SystemButtonShowsOpen and the one beside it),
     // which is NOT the same question as "is a card up": `systemPanelOpen` is true for every level, so the
     // system button's chevron used to point up whichever control had opened the card.
     bool systemButtonOpen = false;

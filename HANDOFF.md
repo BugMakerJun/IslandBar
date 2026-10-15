@@ -11845,3 +11845,64 @@ preview: resting on a task icon shows a live thumbnail
 **按得动的格子从 5/12 变成 7/12**（4 走回调、3 走 UIA）；每一格死因都能在日志里找到一行。另新增一条数据来源：`RecordedShellTipFor()` 会从报告文件里按 (exe, uid/guid) 取出 shell 自己报过的 tip，作为 UIA 匹配的第二候选——安全中心那一格就是靠它才对上名字的（卡片上那一格叫 `SecurityHealthSystray.exe`）。
 
 两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS。
+
+---
+
+## 8.132 **托盘整体退役（按用户要求删除全部托盘功能）** ✅
+
+### 8.132.1 用户的原话与定下的范围
+
+> 「你先把托盘的全部功能去掉删除」→ 一轮方案 + 外部评审后 → 「删除托盘相关的代码，继续隐藏原生任务栏」。
+
+所以这一次**不是重构，是功能退役**：托盘卡片、按压（回调消息与 UIA 两条路）、学习、explorer 内模块、
+4 条 CLI 命令、托盘断言、安装器的第二份载荷，全部删除；**原生任务栏的隐藏与恢复照旧**（那是另一个功能）。
+
+### 8.132.2 走了哪一步研究（AGENTS.md 第 1 步）
+
+把范围与实测数字发给 ChatGPT（第 35 轮）与 Gemini（第 36 轮），两边都要求明确表态。结论一致：
+**范围同意**；两条修正被采纳——
+
+| 评审的反对点 | 采纳方式 |
+|---|---|
+| 不要把 `TrayRegistration.h` 的实测成果和死代码一起销毁（两边都提） | 先把它头部那段布局记录搬进 `docs/TRAY-RESEARCH-RETIRED.md`，再删代码 |
+| 不要因为看到 `Shell_TrayWnd` / `TrayNotifyWnd` 就一起删——那是"隐藏原生任务栏"（ChatGPT 专门警告） | 写进"不碰的清单"：`platform/NativeTaskbar.*`、`Monitor.cpp`、`WindowList.cpp`、`--keep-taskbar` 全部保留 |
+| 一个退役提交，但提交前分阶段改、每段都编过（ChatGPT）／反对"先停用再删"（Gemini） | 一致：一次提交，中间多次编译与全量自检，最后一起提交 |
+| 托盘的可见性代价不能由 AI 默认决定（两边） | 已作为方案里的唯一取舍问题交回用户；用户选择"继续隐藏原生任务栏"（即接受托盘图标不可见） |
+
+### 8.132.3 删掉的东西（文件级）
+
+| 类别 | 内容 |
+|---|---|
+| 专用模块（4,486 行） | `shell/TrayIcons.*` 375、`shell/TrayLearn.*` 983、`shell/TrayPress.*` 1,177、`shell/TrayUia.*` 363、`shell/TrayMenu.*` 347、`trayhook/` 957（含 CMakeLists）、`platform/TrayRing.h` 172、`domain/TrayRegistration.h` 112 |
+| 引用点 | `main.cpp` 209 行（`--tray-*` 解析、5 秒刷新、学习 worker、按压缩合、启动学习、内存采样里的托盘计数）、`cli/Cli.*` 4 条命令、`domain/CardLayout.h` 287 行（托盘页 + 托盘菜单 + `PanelLevel::Tray`）、`domain/TaskStripLayout.h` 80 行（托盘按钮 + `RowAnchorWithTray` + `CardHang::TrayButton`）、`app/BarState.h` 41 行、`app/BarSystems.h`、`app/IslandWindow.*`、`render/Renderer.*`、`render/TextRenderer.*`、`selftest/Diagnostics.cpp` 约 540 行 |
+| 构建与安装 | `src/CMakeLists.txt` 的 5 个源文件 + `add_subdirectory(trayhook)`；`setup/` 的第二份 RCDATA（1002）、DLL 安装与卸载分支、摘要里的 tray 行、卸载项体积里那一项 |
+| 工具 | 29 个 `probe-tray-*`（含已编译的 dll/obj/exe）+ `measure-tray-panel.ps1` → `scripts/retired/tray/`；`reviews/tray-copydata-dump.txt` 保留（归档证据） |
+| 文档 | `ARCHITECTURE.md`（§1 二进制、§2 目录、§4 落点、§7 债务）、`README.md`/`README.zh-CN.md` 的源码树、`TESTING.md` 那两行托盘自测、`FEATURES.md` 顶部加退役说明、`ROADMAP.md` 现状与已办项；历史原文一律保留 |
+
+### 8.132.4 保留下来的东西（明确写下，免得下次误删）
+
+* **原生任务栏的隐藏与恢复**：`platform/NativeTaskbar.*`（`Shell_TrayWnd` / `TrayNotifyWnd` / `Shell_SecondaryTrayWnd` / `ABM_SETSTATE`）、`platform/Monitor.cpp`、`platform/WindowList.cpp` 里的 `Shell_TrayWnd` 过滤、`--keep-taskbar`、异常退出时的恢复。
+* **右键**：`IslandWindow::TakeRightClick()` 留着——Start 卡片上"右键把图钉取下来"用它。
+* **WeChat 的托盘图标窗口类**（`Qt51514WxTrayIconMessageWindowClass`）：那是外部应用自己的窗口类名，用来把它的窗口和通知区分开，与本次删除无关。
+* **通知的命名管道**（`services/NotificationPipe`）：与托盘无关。
+* Windows 自己的 `HKCU\Control Panel\NotifyIconSettings`：只读，不清理（那是系统的数据）。
+
+### 8.132.5 验收（全部实测）
+
+| 项 | 结果 |
+|---|---|
+| 两套配置全量重建（`/WX` 生效） | **0 告警 0 错误**（Release、Debug 各一次） |
+| `--self-test` | **PASS，908 项通过，0 失败**（删除前 954 项；掉的是托盘那部分断言） |
+| `island_smoke` | **PASS** |
+| 全库复查 `rg` | 删掉的符号在 `src/` 里 0 处（`Shell_TrayWnd` 这类**系统 API 名**是刻意保留的，见 8.132.4） |
+| 产物 | 不再有 `island_tray_hook.dll` 这个目标；安装器回到单载荷 |
+| 观感 | 岛右侧少一个 30 DIP 的三点圆钮；应用图标行回到紧贴岛右侧；卡片少一层（托盘页） |
+
+### 8.132.6 这一轮踩到的两个坑（都是机械改写留下的）
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| `TextRenderer.cpp` 里出现"`TextRenderer` 不是类"这种莫名其妙的错误 | 我按行删除托盘绘图时，把**匿名命名空间的开括号**一起删了，于是后面那个 `} // namespace` 提前关掉了 `island` 命名空间 | 在 `FillCardSurface` 声明前补回 `namespace {`（块内语义与原文件一致） |
+| 自检一条断言失败：`the system button is not lit by the Start card` | 我改写那条断言时把 `PanelLevel::Tray` 直接换成了 `PanelLevel::Sound`，而**声音页本来就是"系统按钮亮"的一层** | 改成明确写出两个控件的亮灭规则（Tiles/Sound 亮系统键，Start 亮 Start 键） |
+
+**教训**：删代码块用行范围是快的，但块的**括号边界**要在删之前读一遍；改写断言时要把断言**本身**重新想一遍，不能只做名字替换。

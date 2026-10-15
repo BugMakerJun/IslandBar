@@ -23,12 +23,11 @@
 #include <cwctype>      // towlower: comparing an executable's name with a window's process image
 #include <tlhelp32.h>   // CreateToolhelp32Snapshot: ending every process of one image
 #include <memory>       // make_unique: the sound page's worker object
-#include <atomic>       // the flag the tray-learning worker shares with the frame loop
 #include <vector>
 
 #include "app/AppBar.h"
 #include "app/BarState.h"
-#include "app/BarSystems.h"    // the window, the renderer, and one object per channel     // the bar's own state: slice 1 is the tray card and its menu
+#include "app/BarSystems.h"    // the window, the renderer, and one object per channel
 #include "shell/StartMenu.h"
 #include "domain/TaskStripLayout.h"
 #include "platform/WindowList.h"
@@ -58,10 +57,6 @@
 #include "services/NotificationPipe.h"
 #include "app/PlayerWindow.h"
 #include "services/ToastStore.h"
-#include "shell/TrayIcons.h"
-#include "shell/TrayLearn.h"
-#include "shell/TrayMenu.h"            // what a tray cell does: the press, and the menu the bar draws for it
-#include "shell/TrayPress.h"
 #include "platform/DisplayBrightness.h"   // the brightness row: DDC/CI, the only interface this machine has
 #include "shell/SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
 #include "render/Theme.h"               // the material: colours and edges, switchable, plus themes\*.txt
@@ -94,9 +89,9 @@ namespace {
 enum class PowerAction { Lock = 0, Sleep = 1, SignOut = 2, Restart = 3, ShutDown = 4 };
 
 // WHAT THE ENTRY IS CALLED, and whether it can lose work. They were declared here and defined 5,800 lines
-// further down with the tray commands until 2026-10-15, when the move of those commands took the definitions
-// with it by accident -- the compiler caught that at link time, which is the reason the definitions live next
-// to their declarations now instead of at the other end of the file.
+// further down, where the command-line handlers used to be, until 2026-10-15: the move of those handlers out
+// to cli/Cli.cpp took the definitions with it by accident -- the compiler caught that at link time, which is
+// why the definitions live next to their declarations now instead of at the other end of the file.
 const wchar_t* PowerActionName(PowerAction action) {
     switch (action) {
         case PowerAction::Lock: return L"锁定";
@@ -672,7 +667,7 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // ISLANDBAR_NO_FULLSCREEN=1 makes the bar ignore a full-screen application in front.
     //
     // A DIAGNOSTIC, and one this project kept needing: while a game has the screen the bar stands down by
-    // design, so there is no way to photograph the bar itself -- its tray, its row, its status line -- on a
+    // design, so there is no way to photograph the bar itself -- its row, its status line -- on a
     // machine where a game is running. That is exactly the machine this bar is developed on. Read once, at
     // startup.
     wchar_t noFullscreenSetting[8] = {};
@@ -680,18 +675,9 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
         GetEnvironmentVariableW(L"ISLANDBAR_NO_FULLSCREEN", noFullscreenSetting, 8) > 0 &&
         noFullscreenSetting[0] == L'1';
 
-    // How often the system tray is re-read. The registry plus a process snapshot, a few milliseconds; the
-    // thing it describes -- which applications have a tray icon -- changes on the scale of starting and
-    // stopping applications.
-    constexpr unsigned long long kTrayRefreshMs = 5000;
-
-    // THE BAR'S OWN STATE, SLICE 1: the tray card, its menu, and the clocks that re-read the tray and
-    // learn what it holds. See app/BarState.h for why it is a struct now and what moves in next.
-    //
-    // bar.lastShellPid is seeded HERE rather than in the struct, because the shell that exists at startup is
-    // what the first tick must compare against.
+    // THE BAR'S OWN STATE, one named group at a time. See app/BarState.h for what is in it and what moves
+    // in next.
     island::BarState bar;
-    bar.lastShellPid = island::TrayShellProcessId();
     // The system panel can be forced open at startup by a diagnostic; that is the only piece of the state
     // above whose initial value comes from a parameter instead of a constant (see app/BarState.h).
     bar.systemPanelOpen = forcedSystemPanel;
@@ -1021,62 +1007,6 @@ unsigned long long lastMusicMeterMs = 0;
                             : "  preview: DISABLED (the preview window could not be created)");
     std::fflush(stdout);
 
-    // --- the system tray ------------------------------------------------------
-    //
-    // Read from the registry rather than from the shell's tray: the classic route through
-    // Shell_TrayWnd/ToolbarWindow32 does not exist on Windows 11, and UI Automation only answers while
-    // the taskbar is visible -- which this bar hides. See TrayIcons.h.
-    //
-    // Read here once so the first frame has icons, and refreshed from the frame loop on a timer: the tray
-    // changes when applications start and stop, which is a scale of seconds, not frames.
-
-    const int trayAtStart = systems.trayIcons.Refresh();
-    island::LogAndPrint("  tray: %d icon(s) from the registry (%d entr(ies), %d process(es) seen)",
-                        trayAtStart, systems.trayIcons.Examined(), systems.trayIcons.ProcessesSeen());
-    std::fflush(stdout);
-
-    // --- learning every tray callback, on a worker, once a session --------------------------------
-    //
-    // A press is invisible only when it is the application's OWN callback message posted to its own tray
-    // window, and that message number used to be learned by hand, one application at a time, with an
-    // administrator prompt and a third-party program in the room. It is learned here instead: a small module
-    // is offered to every running tray application, every application is asked to register its icon again
-    // (the standard TaskbarCreated broadcast), and what comes back is written into the cache the press path
-    // reads (see shell/TrayLearn.h -- including what this cannot reach).
-    //
-    // ON A WORKER because it takes about three seconds, and SKIPPED when every icon is already known: the
-    // broadcast makes applications re-add their icons, which is harmless but pointless to repeat once the
-    // answers are in the file.
-    {
-        // THE MODULE GOES IN FIRST, on this thread, before any learning pass: it is offered to the one
-        // process that receives tray registrations (see shell/TrayLearn.h), and from then on the card can
-        // press an application the moment it registers -- no per-application pass, and no pass at all when a
-        // new application starts.
-        island::InstallTrayHook();
-        const int coveredNow = island::CountCoveredIcons(systems.trayIcons);
-        if (coveredNow >= trayAtStart) {
-            island::LogAndPrint("  tray learn: %d of %d icon(s) already have a callback entry -- not asking "
-                                "again", coveredNow, trayAtStart);
-        } else {
-            island::LogAndPrint("  tray learn: %d of %d icon(s) known; asking the applications to register "
-                                "again (background)", coveredNow, trayAtStart);
-            std::thread([]() {
-                island::TrayIcons icons;
-                icons.Refresh();
-                const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was %s, %d "
-                                    "registration(s) captured, %d new entr(ies) -- %d of %d icon(s) have a "
-                                    "callback entry (in %lld ms)",
-                                    learned.appsTried,
-                                    learned.appsAlreadyWatched > 0 ? "already carrying the module"
-                                                                   : "given the module",
-                                    learned.captured, learned.newEntries, learned.covered, learned.icons,
-                                    learned.ms);
-            }).detach();
-        }
-        std::fflush(stdout);
-    }
-
     // --- the Start card's own state -------------------------------------------------------------------
     //
     // The shell's application list is read on a WORKER: measured, 121 items cost about 600 ms, and the
@@ -1087,8 +1017,7 @@ unsigned long long lastMusicMeterMs = 0;
     // name are read once: they are the two things in the card's footer and they change about as often as
     // the user changes his picture.
     // The pins are read on a worker, and it is handed the object BY REFERENCE under its own name: a capture
-    // list takes names, not member accesses (see the same trap in the tray learning pass), and naming it
-    // `apps` also says what the thread is for.
+    // list takes names, not member accesses, and naming it `apps` also says what the thread is for.
     std::thread([&apps = systems.startApps]() {
         const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         apps.RefreshList();
@@ -1257,7 +1186,7 @@ float musicWavePhase = 0.0f;
         // The bar is meant to sit on the desktop for days, so "it uses little memory" is a claim about
         // a 24-hour curve rather than about one reading. The curve is built from a line every five
         // minutes plus one shortly after an operation that is suspected of growing the process: a card
-        // closing, a bar.track change, a tray refresh. The steady line answers "does it grow at all"; the
+        // closing, a bar.track change, a media session arriving. The steady line answers "does it grow at all"; the
         // event line answers "which operation grows it". ProcessMetrics.h carries the rule for reading
         // the two together -- bytes rising with a count is a cache, bytes rising alone is a leak.
         constexpr unsigned long long kMemorySampleMs = 5ull * 60ull * 1000ull;
@@ -1268,7 +1197,6 @@ float musicWavePhase = 0.0f;
         unsigned long long memorySamplePendingAt = GetTickCount64() + 2000;
         bool firstMemorySample = true;
         unsigned long long lastMemoryMusicRevision = systems.music.Revision();
-        int lastMemoryTrayIcons = systems.trayIcons.Count();
         bool lastMemoryCardUp = false;
         // --- the throttle line's own state -------------------------------------------------------
         //
@@ -1360,15 +1288,6 @@ float musicWavePhase = 0.0f;
                 bar.soundPageOpen = wcstol(setting, nullptr, 10) != 0;
                 bar.systemPanelOpen = true;
                 island::LogAndPrint("  diagnostic: the sound page is opened at startup\n");
-                std::fflush(stdout);
-            }
-            // ... and the tray's page, for the same reason: it is behind a click on a control whose clicks
-            // cannot be synthesised from a script on this machine (see ISLANDBAR_CLICK_AT), so without this
-            // there is no way to photograph it.
-            if (GetEnvironmentVariableW(L"ISLANDBAR_TRAY_PAGE", setting, 32) > 0) {
-                bar.trayPageOpen = wcstol(setting, nullptr, 10) != 0;
-                bar.systemPanelOpen = bar.trayPageOpen;
-                island::LogAndPrint("  diagnostic: the tray page is opened at startup\n");
                 std::fflush(stdout);
             }
             // ... and the Start card's own page, for the same reason: the card is behind a click on a
@@ -1546,7 +1465,6 @@ float musicWavePhase = 0.0f;
         // pass's. The names travel in the log line rather than in a debugger, because the interesting
         // hitches are one or two per twenty seconds and only happen on the machine being used.
         constexpr unsigned long long kWorkStatusSample = 1ull << 0;
-        constexpr unsigned long long kWorkTrayRefresh = 1ull << 1;
         constexpr unsigned long long kWorkToastPoll = 1ull << 2;
         constexpr unsigned long long kWorkWeChatScan = 1ull << 3;
         constexpr unsigned long long kWorkWeChatSound = 1ull << 4;
@@ -1571,13 +1489,6 @@ float musicWavePhase = 0.0f;
                 // "the bar's cycle" was looking at two cycles that had already been and gone (HANDOFF 8.86).
                 taskbarCheckCountdown = 50;
                 frameWork |= kWorkTaskbarCheck;
-                // A TRAY PRESS NO LONGER INTERFERES WITH THIS. Until 2026-10-15 it did: a press borrowed the
-                // shell's taskbar for about a fifth of a second (and a right click left the shell's panel on
-                // screen, which the shell answered by re-showing its taskbar), so this tick had to ask
-                // whether a press was in flight and hand the cleanup back and forth. The press is a message
-                // to an application's own window now -- the shell's taskbar is never touched, never shown,
-                // never layered -- and TrayPressInFlight, TrayPressCleanupPending and TrayPressFinishCleanup
-                // are gone with the route that needed them.
                 if (systems.taskbar.EnsureHidden()) {
                     island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
@@ -2049,14 +1960,6 @@ float musicWavePhase = 0.0f;
                 // ... and the Start card, which is the fourth level of the same card and has to go with it
                 // for the same reason (see the note above about every level being cleared).
                 bar.startPageOpen = false;
-                // ... AND the tray's page, which is the third level of the same card. It used to be left
-                // set, which was harmless while the level was read from the request and is not now: a card
-                // put away by a click outside must take every level with it, exactly as a click on the
-                // system button does (see the click handler).
-                bar.trayPageOpen = false;
-                // ... and the tray's own menu, which is a thing in front of that page rather than a level
-                // of it, so it cannot outlive the card it was opened over.
-                systems.window.CloseTrayMenu();
                 bar.panelSliderDrag = false;
                 bar.mixerSliderDragRow = -1;
                 bar.mixerSliderDragPid = 0;
@@ -2218,8 +2121,8 @@ float musicWavePhase = 0.0f;
                 while (systems.window.TakePress(&pressed)) {
                     if (!bar.systemPanelOpen) continue;
                     // The level that is SHOWING decides which control the press lands on, exactly as the click
-                    // chain below does -- see the note at `panelHit`. Without it the mixer's rows answered
-                    // while the tray page was up, because the two share the card.
+                    // chain below does -- see the note at `panelHit`. Without it one level's controls answered
+                    // while another level was up, because they share the card.
                     if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
                         const island::SoundPageHit hit = systems.window.SoundPageHitAtScreen(pressed);
                         if (hit.target == island::SoundPageTarget::MixerSlider) {
@@ -2293,51 +2196,6 @@ float musicWavePhase = 0.0f;
                     continue;
                 }
 
-                // THE TRAY'S OWN MENU, while it is up: a click on one of its rows runs that row, and a
-                // click anywhere else puts the menu away and does nothing else. The click that dismisses a
-                // menu is CONSUMED -- that is what every context menu does, and the alternative (dismiss and
-                // then act on whatever was underneath) presses a tray icon the user was only trying to get
-                // out from under the menu.
-                if (systems.window.TrayMenuIsOpen()) {
-                    const int row = systems.window.TrayMenuRowHovered();
-                    // ARMED, NOT DONE. 结束应用 is the one entry that cannot be taken back -- it ends the
-                    // application's processes and gives it no chance to save -- so the first press only says
-                    // what the second will do (the row's own label changes; see TrayMenuArmedLabel) and the
-                    // menu stays open, so the second press is the same gesture in the same place. The Start
-                    // card's power list is arranged the same way, for the same reason.
-                    if (row >= 0 && row < bar.trayMenuActionCount &&
-                        bar.trayMenuActions[row] == island::TrayMenuAction::QuitApplication &&
-                        !bar.trayQuitArmed) {
-                        bar.trayQuitArmed = true;
-                        // WIDE, because this line is Chinese: the narrow overload widens its argument a byte
-                        // at a time, which is how `结束应用` came out as `ç»æåºç¨` in the log while the
-                        // lines around it read correctly (the same defect HANDOFF 8.72/8.73 records).
-                        island::LogAndPrint(
-                            L"  tray menu: 结束应用 armed -- the same row again carries it out\n");
-                        std::fflush(stdout);
-                        continue;
-                    }
-                    systems.window.CloseTrayMenu();
-                    bar.trayQuitArmed = false;
-                    if (row >= 0 && row < bar.trayMenuActionCount) {
-                        const island::TrayMenuAction action = bar.trayMenuActions[row];
-                        island::LogAndPrint(L"  tray menu: %ls\n", island::TrayMenuLabel(action));
-                        std::fflush(stdout);
-                        island::RunTrayMenuAction(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, action);
-                        if (action == island::TrayMenuAction::Open ||
-                            action == island::TrayMenuAction::CloseWindow ||
-                            action == island::TrayMenuAction::ApplicationMenu) {
-                            // The card goes with the press, which is what the shell does with its own
-                            // flyout: the application's window or menu is what the user is waiting for.
-                            dismissPanel();
-                        }
-                    } else {
-                        island::LogAndPrint("  tray menu: closed (the click was not on a row)\n");
-                        std::fflush(stdout);
-                    }
-                    continue;
-                }
-
                 // What the panel's own controls are under the click, asked ONCE.
                 //
                 // The chain below asks this same question for every kind of target it knows, and each of
@@ -2348,11 +2206,12 @@ float musicWavePhase = 0.0f;
                         ? systems.window.SystemPanelHitAtScreen(cursor)
                         : island::SystemPanelHit{};
 
-                // ... AND ONLY WHILE THE TILES ARE THE LEVEL THAT IS SHOWING. All four levels share one card
+                // ... AND ONLY WHILE THE TILES ARE THE LEVEL THAT IS SHOWING. All the levels share one card
                 // and one rectangle, so each of them has controls where another has empty space: the panel's
-                // volume slider lies exactly across the tray page's lower band, and dragging there moved the
-                // volume -- reported with a photograph of that band ("在托盘卡片红框的地方拖动 声音也会跟着
-                // 变"). Gating the question here gates every branch below that asks `panelHit`, which is why
+                // volume slider lies exactly across the lower band of whichever page is up, and dragging
+                // there moved the volume -- reported with a photograph of that band ("在托盘卡片红框的地方
+                // 拖动 声音也会跟着变"). Gating the question here gates every branch below that asks
+                // `panelHit`, which is why
                 // the answer is computed once, at the top, rather than re-asked per branch.
 
                 // What the click was shown to mean, before anything acts on it: which level is up, what the
@@ -2395,28 +2254,9 @@ float musicWavePhase = 0.0f;
                     bar.startPageState = 0;
                     bar.startPickerScroll = 0;
                     bar.startPowerConfirm = -1;
-                    bar.trayPageOpen = false;
                     bar.soundPageOpen = false;
                     island::LogAndPrint("  start click: the bar's own card %ls\n",
                                         bar.startPageOpen ? L"open" : L"closed");
-                    std::fflush(stdout);
-                } else if (systems.trayIcons.Count() > 0 && systems.window.TrayButtonAtScreen(cursor)) {
-                    // THE TRAY BUTTON, at the other end of the bar from the system button, and a toggle
-                    // for the same reason: pressing it again puts away what it opened.
-                    //
-                    // It opens the SAME CARD as the system panel, one level down (see TrayPageFor), so the
-                    // two share a card, a position and an animation -- and the two flags have to be kept in
-                    // step: opening one closes the other, or the card would be asked to be two pages at
-                    // once.
-                    const bool opening = !bar.trayPageOpen;
-                    bar.trayPageOpen = opening;
-                    bar.systemPanelOpen = opening;
-                    bar.systemPanelPage = 0;
-                    bar.soundPageOpen = false;
-                    bar.panelSliderDrag = false;
-                    bar.mixerSliderDragRow = -1;
-                    bar.mixerSliderDragPid = 0;
-                    island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
                     std::fflush(stdout);
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Start) &&
                            systems.window.StartHitHovered().target !=
@@ -2497,32 +2337,12 @@ float musicWavePhase = 0.0f;
                             break;
                     }
                     std::fflush(stdout);
-                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
-                           systems.window.TrayCellHovered() >= 0) {
-                    // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
-                    // thing about the tray this bar cannot do itself -- the menu or the window that
-                    // follows belongs to the application, and the shell is the one that knows how to ask
-                    // for it. See TrayPress for the route, and for why it is by POSITION rather than by
-                    // matching names.
-                    //
-                    // On a WORKER THREAD, because showing the shell's tray, opening its overflow and
-                    // pressing through UI Automation takes a few hundred milliseconds, and the bar draws
-                    // at the compositor's rate on this thread.
-                    const int cell = systems.window.TrayCellHovered();
-                    if (cell < systems.trayIcons.Count()) {
-                        island::StartTrayPress(systems.trayIcons, cell, false);
-                    }
-                    // The card goes with the press, which is what the shell does with its own flyout: the
-                    // application's window or menu is what the user is waiting for.
-                    dismissPanel();
                 } else if (systems.window.SystemButtonAtScreen(cursor)) {
                     // The system panel is a TOGGLE, like the shell's own flyout: pressing the control
                     // again closes what it opened. Without that the only way out would be to click
                     // somewhere unrelated, which is not a way out a user can guess.
                     bar.systemPanelOpen = !bar.systemPanelOpen;
                     bar.systemPanelPage = 0;   // always opens on the first page, like the shell's flyout
-                    // ... and the tray's page is a level of the same card, so it goes with it.
-                    bar.trayPageOpen = false;
                     // The page is a LEVEL of the panel, so closing the panel closes it too -- and a drag
                     // left half-done is ended, or the next press anywhere would go on dragging a slider
                     // that is no longer on screen.
@@ -2991,7 +2811,7 @@ float musicWavePhase = 0.0f;
                     // A PRESS WHILE A CALL OR A MESSAGE IS ON THE ISLAND LEAVES IT ALONE.
                     //
                     // Asked for in these words: "当通知和通话的时候点击 就通话和通知的样子" -- while the strip
-                    // is up, a press on any of the bar's buttons (Start, the panel toggle, the tray button)
+                    // is up, a press on any of the bar's buttons (Start, the panel toggle)
                     // must not send the island back to the plain pill, and neither must a press that lands on
                     // the strip's own body.
                     //
@@ -3034,45 +2854,12 @@ float musicWavePhase = 0.0f;
                 }
             }
 
-            // --- a RIGHT click, which so far means one thing -------------------------------------------
+            // --- a RIGHT click: take the thing under the pointer away --------------------------------
             //
-            // A cell of the tray page: right-clicking one of the shell's tray icons opens the
-            // APPLICATION'S OWN MENU -- the menu with 退出 in it -- and there is no other way to reach it
-            // from here. UI Automation publishes no right-click pattern, so the press is a posted right
-            // button message to the shell's own panel (see TrayPress). The request is the same one the left
-            // click builds; only the message differs, which is why both go through island::StartTrayPress.
-            //
-            // Everywhere else on the bar a right click is still nothing: a control that quietly did
-            // something different on the other button would be worse than one that does nothing.
-            //
-            // ... AND A LEFT PRESS THAT HAD NOTHING TO SEND OPENS THE SAME MENU, which is why the opening is
-            // one piece of code and not two: since the real click was deleted there is no fallback left for a
-            // cell whose callback has never been learned, and the honest answer is this menu. What it holds
-            // depends on the cell: the two rows that ARE the icon's own action (打开, 应用自己的菜单…) need a
-            // learned callback and are left out without one, because a row that does nothing is worse than a
-            // row that is not there (requested by the user on 2026-10-15, see TrayMenuEntriesFor).
-            const auto openBarTrayMenu = [&](int cell) {
-                bar.trayMenuCell = cell;
-                island::TrayMenuFacts facts;
-                island::TrayMenuFactsFor(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, &facts);
-                bar.trayMenuActionCount = island::TrayMenuEntriesFor(facts, bar.trayMenuActions,
-                                                                island::kMaxTrayMenuEntries);
-                systems.window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
-                bar.trayQuitArmed = false;   // a new menu starts unarmed
-                wchar_t flatMenuName[128] = {};
-                island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d callback=%d)\n",
-                                    island::FlatName(systems.trayIcons.At(bar.trayMenuCell).name, flatMenuName, 128),
-                                    bar.trayMenuActionCount, facts.hasWindow ? 1 : 0,
-                                    facts.hasExePath ? 1 : 0, facts.hasCallback ? 1 : 0);
-                std::fflush(stdout);
-            };
-            // The worker's request, answered on the thread that owns the window (see island::trayMenuRequestCell).
-            const int menuRequestCell = island::trayMenuRequestCell.exchange(-1);
-            if (menuRequestCell >= 0 && menuRequestCell < systems.trayIcons.Count()) {
-                island::LogAndPrint(L"  tray menu: nothing is known about cell %d yet, so the press opens "
-                                    L"this bar's own menu instead\n", menuRequestCell);
-                openBarTrayMenu(menuRequestCell);
-            }
+            // One meaning, and it is the Start card's: a pinned tile, right-clicked, comes off the card
+            // again (see below). Everywhere else on the bar a right click is nothing -- a control that
+            // quietly did something different on the other button would be worse than one that does
+            // nothing.
             while (systems.window.TakeRightClick()) {
                 POINT rightCursor = {};
                 GetCursorPos(&rightCursor);
@@ -3088,21 +2875,8 @@ float musicWavePhase = 0.0f;
                         systems.startApps.Unpin(startHit.index);
                         bar.startPowerConfirm = -1;
                     }
-                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
-                           systems.window.TrayCellHovered() >= 0 &&
-                           systems.window.TrayCellHovered() < systems.trayIcons.Count()) {
-                    // THE BAR'S OWN MENU, not the shell's (HANDOFF 8.80).
-                    //
-                    // Right-clicking a cell used to ask the shell for the application's menu: show the
-                    // taskbar invisibly, open the overflow panel, move the pointer onto the icon, click, put
-                    // the pointer back -- three to six hundred milliseconds, the shell's panel briefly on
-                    // screen (until 8.79), and the menu at the far corner of the screen rather than under
-                    // the pointer that asked for it. This menu is instant, lands where the pointer is, and
-                    // is drawn in the card the user is already looking at; the application's own menu is the
-                    // LAST entry of it, for the things only the application knows ("退出微信").
-                    openBarTrayMenu(systems.window.TrayCellHovered());
                 } else {
-                    island::LogAndPrint("  right click: no tray cell under the pointer (%d,%d)\n",
+                    island::LogAndPrint("  right click: nothing to take away at (%d,%d)\n",
                                         rightCursor.x, rightCursor.y);
                     std::fflush(stdout);
                 }
@@ -3808,133 +3582,35 @@ float musicWavePhase = 0.0f;
                 // `outerCardUp` is: a field set after the thing that reads it is a field one frame stale
                 // (see the note below, and the four times this project has paid for that lesson).
                 bar.panelLevel = island::NextPanelLevel(bar.panelLevel, frame.outerCardUp, bar.systemPanelOpen,
-                                                    bar.trayPageOpen, bar.soundPageOpen, bar.startPageOpen);
-                const bool trayPageShown = bar.panelLevel == island::PanelLevel::Tray;
+                                                    bar.soundPageOpen, bar.startPageOpen);
                 const bool soundPageShown = bar.panelLevel == island::PanelLevel::Sound;
                 const bool startPageShown = bar.panelLevel == island::PanelLevel::Start;
                 // ... and whether the bar is in the picture at all: with a full-screen application in front
                 // only the island is drawn (see FrameState::fullscreenApp).
                 frame.fullscreenApp = bar.fullscreenAppInFront;
 
-                // --- the tray, on its own cadence --------------------------------------------
-                //
-                // Refreshed here and not at the top of the loop so the count the frame draws, the count the
-                // row's sizing spent room on and the count the window hit-tests are all the same number.
-                if (GetTickCount64() - bar.lastTrayRefresh >= kTrayRefreshMs) {
-                    bar.lastTrayRefresh = GetTickCount64();
-                    frameWork |= kWorkTrayRefresh;
-                    const int trayNow = systems.trayIcons.Refresh();
-                    if (trayNow != bar.lastTrayCount) {
-                        bar.lastTrayCount = trayNow;
-                        island::LogAndPrint("  tray: %d icon(s) (%d of %d registered applications are "
-                                            "running)",
-                                            trayNow, systems.trayIcons.RunningApps(), systems.trayIcons.Examined());
-                        std::fflush(stdout);
-                    }
-
-                    // Whatever the resident module has written since the last tick. No injection, no
-                    // broadcast, no waiting: an application that has already been reached keeps reporting
-                    // every registration for the rest of the session, and this is where those become
-                    // pressable (see shell/TrayLearn.h).
-                    const int harvested = island::HarvestLearnedCallbacks();
-                    if (harvested > 0) {
-                        island::LogAndPrint("  tray learn: %d registration(s) arrived from applications "
-                                            "already reached by the module -- %d of %d icon(s) have a "
-                                            "callback entry now",
-                                            harvested, island::CountCoveredIcons(systems.trayIcons), trayNow);
-                        std::fflush(stdout);
-                    }
-
-                    // ... AND ONE MORE PASS ONLY WHEN THE SHELL ITSELF HAS TO BE TAUGHT AGAIN.
-                    //
-                    // The module lives in the process that receives tray registrations (the owner of
-                    // Shell_TrayWnd), and it is pinned there for the life of that process. So the one event
-                    // that costs the tray its learning is Explorer being replaced: a new process has none of
-                    // the module, and every registration after that goes unread. This watches for exactly
-                    // that, and for nothing else -- an application starting later needs no pass at all, which
-                    // is the whole point of reading registrations where they arrive (shell/TrayLearn.h).
-                    const DWORD shellNow = island::TrayShellProcessId();
-                    if (shellNow != 0 && shellNow != bar.lastShellPid && !bar.learnInFlight->load() &&
-                        GetTickCount64() - bar.lastLearnAttempt >= 15000) {
-                        bar.lastShellPid = shellNow;
-                        bar.lastLearnAttempt = GetTickCount64();
-                        bar.learnInFlight->store(true);
-                        island::LogAndPrint("  tray learn: the shell is a new process (pid %lu) -- offering "
-                                            "the module to it again (background)\n",
-                                            static_cast<unsigned long>(shellNow));
-                        std::fflush(stdout);
-                        // The flag is captured INTO A LOCAL NAME: a capture list takes names, not members, and
-                        // the worker outlives this scope -- it is detached, which is exactly why the flag is a
-                        // shared_ptr on the heap (see app/BarState.h).
-                        const std::shared_ptr<std::atomic<bool>> learnFlight = bar.learnInFlight;
-                        std::thread([learnFlight]() {
-                            island::TrayIcons icons;
-                            icons.Refresh();
-                            const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                            island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was "
-                                                "%s, %d registration(s) captured, %d new entr(ies) -- %d of "
-                                                "%d icon(s) have a callback entry (in %lld ms)",
-                                                learned.appsTried,
-                                                learned.appsAlreadyWatched > 0 ? "already carrying the module"
-                                                                               : "given the module",
-                                                learned.captured, learned.newEntries, learned.covered,
-                                                learned.icons, learned.ms);
-                            learnFlight->store(false);
-                        }).detach();
-                    }
-                }
-                frame.trayIcons = systems.trayIcons.Count() > 0 ? &systems.trayIcons.At(0) : nullptr;
-                frame.trayIconCount =
-                    systems.trayIcons.Count() < island::kMaxTrayIcons ? systems.trayIcons.Count()
-                                                              : island::kMaxTrayIcons;
-                frame.trayRevision = systems.trayIcons.Revision();
-                frame.trayHoveredIndex = systems.window.TrayCellHovered();
                 // ... AND WHETHER THE CARD'S SURFACE IS MOVING, which decides how much of the material is
                 // drawn this frame: the shadow and the grain are skipped while the card animates or while a
-                // moving pointer keeps changing which cell is hovered, and come back on the first frame that
-                // neither is true (see FrameState::cardSurfaceMoving and FillCardSurface).
+                // moving pointer keeps the bar busy, and come back on the first frame that neither is true
+                // (see FrameState::cardSurfaceMoving and FillCardSurface).
                 //
-                // A cell CHANGE is the test rather than "the pointer is over the card", because the cost is
-                // paid per redraw: the pointer moving WITHIN one cell does not redraw anything, and using the
-                // hovered cell keeps the full material on screen for as long as the pointer is still.
-                //
-                // STICKY, NOT PER-FRAME, and that distinction is the whole of a report that came back the
-                // same evening: "鼠标在上面移动卡片会闪". Toggling the material on the frame the hovered cell
+                // STICKY, NOT PER-FRAME, and that distinction is the whole of a report that came back one
+                // evening: "鼠标在上面移动卡片会闪". Toggling the material on the frame the hovered control
                 // changed and off again on the frame it did not meant a moving pointer produced
                 // shadow-frames and no-shadow-frames alternately -- the card visibly flickered between two
-                // materials. The state now lasts as long as the pointer is on the card (and for a further
-                // 200 ms, so it does not change in the gaps between cells), and the full material returns
-                // once, after the interaction is over.
-                const bool overTrayCell = frame.trayHoveredIndex >= 0;
+                // materials. The state now lasts for 200 ms after the last movement, so the full material
+                // returns once, after the interaction is over.
                 const unsigned long long nowMs = GetTickCount64();
-                if (animating || overTrayCell) lastCardMotionMs = nowMs;
+                if (animating) lastCardMotionMs = nowMs;
                 frame.cardSurfaceMoving = (nowMs - lastCardMotionMs) < 200;
-                frame.trayButtonHovered = systems.window.TrayButtonHovered();
-                // ... and the tray's own menu, when one is up: its rows come from the window (it owns the
-                // card and answers the hover test), its labels from here (user-facing text is not the
-                // renderer's to invent -- the same split as the page's title above).
-                frame.trayMenuOpen = systems.window.TrayMenuIsOpen();
-                frame.trayMenuHovered = systems.window.TrayMenuRowHovered();
-                if (frame.trayMenuOpen) {
-                    const island::TrayMenuLayout& menu = systems.window.TrayMenu();
-                    const int rows = menu.count < bar.trayMenuActionCount ? menu.count : bar.trayMenuActionCount;
-                    frame.trayMenuRowCount = rows;
-                    for (int i = 0; i < rows; ++i) {
-                        frame.trayMenuRows[i] = menu.rows[i];
-                        frame.trayMenuLabels[i] =
-                            bar.trayQuitArmed ? island::TrayMenuArmedLabel(bar.trayMenuActions[i])
-                                          : island::TrayMenuLabel(bar.trayMenuActions[i]);
-                    }
-                }
-                // ... and the three washes, each a spring toward "the pointer is on it" (see
+                // ... and the two washes, each a spring toward "the pointer is on it" (see
                 // FrameState::startWash for why a wash cannot be a switch). Stepped here, before the
                 // frame is drawn, and reported in the frame as AMOUNTS rather than as the booleans.
                 {
-                    const bool want[3] = {systems.window.StartHovered() || forcedStartHover,
-                                          systems.window.SystemButtonHovered(),
-                                          systems.window.TrayButtonHovered()};
+                    const bool want[2] = {systems.window.StartHovered() || forcedStartHover,
+                                          systems.window.SystemButtonHovered()};
                     bar.controlWashAnimating = false;
-                    for (int i = 0; i < 3; ++i) {
+                    for (int i = 0; i < 2; ++i) {
                         if (island::ControlWashStep(&bar.controlWash[i], &bar.controlWashVelocity[i],
                                                     want[i] ? 1.0f : 0.0f, dt)) {
                             bar.controlWashAnimating = true;
@@ -3942,19 +3618,11 @@ float musicWavePhase = 0.0f;
                     }
                     frame.startWash = bar.controlWash[0];
                     frame.systemButtonWash = bar.controlWash[1];
-                    frame.trayButtonWash = bar.controlWash[2];
                 }
-                // The level the card is SHOWING, not the page that was asked for: the two differ for the
-                // whole of the exit, and drawing the request is what put the tiles under a shrinking tray
-                // page. See NextPanelLevel.
-                frame.trayPageOpen = trayPageShown;
-                frame.trayPageTitle = trayPageShown ? L"\u6258\u76d8" : nullptr;   // 托盘
-                systems.window.SetTrayIconCount(frame.trayIconCount);
-
                 frame.systemPanelOpen = bar.systemPanelOpen;
                 // ... and WHICH CONTROL SHOULD LOOK OPEN, which is a question about the level and not about
                 // whether a card is up: every level sets `bar.systemPanelOpen` (that is what makes the card
-                // exist), so asking that flag lit the SYSTEM button's chevron for the tray page, for the
+                // exist), so asking that flag lit the SYSTEM button's chevron for the 声音输出 page, for the
                 // Start card and for everything else. Reported as "点击 ⊞ 系统按钮也跟着变".
                 {
                     const island::ControlLit lit =
@@ -3966,8 +3634,8 @@ float musicWavePhase = 0.0f;
                 // --- the Start card, told to the frame and to the window --------------------------
                 //
                 // One place fills this in, so the drawing and the hit tests cannot be given different
-                // answers -- the arrangement the tray page already uses. The window is told the counts and
-                // the page rather than the lists: it owns no application list, and the hit tests are pure
+                // answers. The window is told the counts and the page rather than the lists: it owns no
+                // application list, and the hit tests are pure
                 // functions of the same geometry the drawing uses.
                 frame.startPageOpen = startPageShown;
                 {
@@ -4108,9 +3776,9 @@ float musicWavePhase = 0.0f;
                 const bool cardUp = frame.outerCardUp;
                 if (cardUp) {
                     // The SHOWN level builds the content, not the request: the 声音输出 page has to keep its
-                    // rows while it leaves the screen, exactly as the tray page keeps its grid, or the exit
-                    // plays on an empty card (which is the other half of the defect above -- reported once
-                    // already, as the panel "appearing and disappearing").
+                    // rows while it leaves the screen, exactly as the Start card keeps its tiles, or the
+                    // exit plays on an empty card (which is the other half of the defect above -- reported
+                    // once already, as the panel "appearing and disappearing").
                     if (soundPageShown) {
                         // --- the panel's second level: the 声音输出 page ---
                         //
@@ -4229,9 +3897,8 @@ float musicWavePhase = 0.0f;
                         systems.window.CloseSoundPage();
                     }
 
-                    // The card is CENTRED on the button that opened it -- the system button for the
-                    // panel, the tray button for the tray page (see DeckCardAnchorCentre, and the latch
-                    // just above this block).
+                    // The card is CENTRED on the button that opened it -- the system button for the panel
+                    // (see DeckCardAnchorCentre, and the latch just above this block).
                     //
                     // Chosen by the user after being shown the numbers: centring the card on the button
                     // puts its right half under the ISLAND, and the alternative -- keeping the card
@@ -4252,13 +3919,11 @@ float musicWavePhase = 0.0f;
                     // card's own width is animating.
                     const island::RoundedBox anchorIsland = systems.window.LayoutIslandFor();
                     // The centre of the control that opened the card: the system button for the panel, the
-                    // tray button for the tray page, the START button for the Start card. See
-                    // DeckCardAnchorCentre -- and its note about how the Start card came to be drawn under
-                    // the system button, 200 DIP from the control that opened it, until the card was
-                    // photographed.
-                    const island::CardHang hang = trayPageShown  ? island::CardHang::TrayButton
-                                                  : startPageShown ? island::CardHang::StartButton
-                                                                   : island::CardHang::SystemButton;
+                    // START button for the Start card. See DeckCardAnchorCentre -- and its note about how
+                    // the Start card came to be drawn under the system button, 200 DIP from the control
+                    // that opened it, until the card was photographed.
+                    const island::CardHang hang = startPageShown ? island::CardHang::StartButton
+                                                                 : island::CardHang::SystemButton;
                     const float buttonCentre = island::DeckCardAnchorCentre(anchorIsland, hang);
                     // WHICH THING THE CARD HANGS FROM DEPENDS ON WHICH CARD IT IS.
                     //
@@ -4331,25 +3996,7 @@ float musicWavePhase = 0.0f;
                 const float monitorWidthDip =
                     static_cast<float>(systems.window.Monitor().screen.right -
                                        systems.window.Monitor().screen.left) / systems.window.Scale();
-                // ... AND THE TRAY BUTTON'S ROOM IS SPENT FIRST, WHEN THERE IS ONE.
-                //
-                // The button stands between the island and the row, so the application row is what has to
-                // give way: the row is sized for the room that is left once the button has taken its
-                // 26 DIP. Without this the two overlap on a machine with many windows open -- and an
-                // overlap of two live controls is not a cosmetic problem, it is two things claiming the
-                // same pixels and the same clicks.
-                //
-                // ... AND ONLY WHEN THERE IS ONE, which is what the button's own geometry says
-                // (RowAnchorWithTray): with no tray icons running the row is drawn from the island
-                // itself, so reserving room for a button that is not on screen is an icon the user
-                // does not get. This read the count into `trayShown` and then subtracted the room
-                // regardless -- the compiler had been pointing at the unused variable for a while.
-                const int trayShown =
-                    systems.trayIcons.Count() < island::kMaxTrayIcons ? systems.trayIcons.Count()
-                                                              : island::kMaxTrayIcons;
-                const float rowWidthDip =
-                    trayShown > 0 ? monitorWidthDip - island::TrayButtonReservedDip()
-                                  : monitorWidthDip;
+                const float rowWidthDip = monitorWidthDip;
                 int listed = island::TaskIconsThatFit(rowWidthDip, systems.taskWindows.Count());
 
                 // EACH ICON'S ARRIVAL, and the row as the UNION of what is listed and what is leaving.
@@ -4596,15 +4243,10 @@ float musicWavePhase = 0.0f;
                     if ((rested || follow) && !frame.outerCardUp && IsWindow(wanted)) {
                         const RECT monitorPx = systems.window.Monitor().screen;
                         const float scale = systems.window.Scale();
-                        // THE ROW THE PREVIEW HANGS OFF IS THE ROW THAT IS DRAWN, tray button and all.
-                        //
-                        // The application icons are painted from a box the tray button has moved along
-                        // (see RowAnchorWithTray), and the preview is placed under "the icon the
-                        // pointer is on". Measuring the button from the un-shifted box put the card
-                        // one button to the LEFT of the icon it belongs to -- the same off-by-one
-                        // button that made the FIRST icon open the SECOND, seen from the drawing side.
-                        const island::RoundedBox islandBox = island::RowAnchorWithTray(
-                            systems.window.LayoutIslandFor(), frame.trayIconCount > 0);
+                        // THE ROW THE PREVIEW HANGS OFF IS THE ROW THAT IS DRAWN: the preview is placed
+                        // under "the icon the pointer is on", measured from the same box the icons are
+                        // painted from (see RowAnchorBox).
+                        const island::RoundedBox islandBox = systems.window.LayoutIslandFor();
                         const island::RectF button = island::TaskIconButtonAtAmounts(
                             islandBox, hoveredIcon, drawn, bar.taskHoverAmount);
                         RECT iconPx = {};
@@ -5182,7 +4824,6 @@ float musicWavePhase = 0.0f;
                     strcat_s(work, sizeof(work), name);
                 };
                 if (lastWork & kWorkStatusSample) add("status-sample");
-                if (lastWork & kWorkTrayRefresh) add("tray-refresh");
                 if (lastWork & kWorkToastPoll) add("toast-poll");
                 if (lastWork & kWorkWeChatScan) add("wechat-scan");
                 if (lastWork & kWorkWeChatSound) add("wechat-sound");
@@ -5201,7 +4842,6 @@ float musicWavePhase = 0.0f;
             {
                 const unsigned long long nowTicks = GetTickCount64();
                 const unsigned long long musicRevision = systems.music.Revision();
-                const int trayCount = systems.trayIcons.Count();
                 // The same expression the frame's own `outerCardUp` is built from (`frame` is declared in
                 // the inner block that draws, and is not visible here). Kept as one expression rather
                 // than two spellings of the same idea wherever it can be helped: this one only decides
@@ -5212,10 +4852,6 @@ float musicWavePhase = 0.0f;
                 if (musicRevision != lastMemoryMusicRevision) {
                     lastMemoryMusicRevision = musicRevision;
                     memorySamplePendingAt = nowTicks + 3000;   // once the new cover and lyric sheet land
-                }
-                if (trayCount != lastMemoryTrayIcons) {
-                    lastMemoryTrayIcons = trayCount;
-                    memorySamplePendingAt = nowTicks + 3000;   // once the icons are decoded
                 }
                 if (lastMemoryCardUp && !cardUp) {
                     // Delayed rather than immediate: a card's bitmaps and text layouts are released as it
@@ -5235,7 +4871,6 @@ float musicWavePhase = 0.0f;
                     island::ProcessCacheCounts counts;
                     counts.coverBytes    = nowPlaying.artworkSize;
                     counts.lyricLines    = currentLyrics ? currentLyrics->count : 0;
-                    counts.trayIcons     = trayCount;
                     counts.taskButtons   = systems.taskWindows.Count();
                     counts.notifications = systems.notifications.Count();
                     systems.renderer.CacheCounts(&counts.bitmaps, &counts.windowIcons);
@@ -5591,36 +5226,6 @@ int main(int argc, char** argv) {
             island::CloseLog();
             return dumpResult;
         }
-        if (std::strcmp(argv[i], "--tray-dump") == 0) {
-            const int dumpResult = island::RunTrayDump();
-            island::CloseLog();
-            return dumpResult;
-        }
-        // `--tray-surface` is the old name of this command, kept accepted because scripts and HANDOFF
-        // entries use it -- what it reports changed with the press (see island::RunTraySurface).
-        if (std::strcmp(argv[i], "--tray-surface") == 0 || std::strcmp(argv[i], "--tray-reach") == 0) {
-            const int surfaceResult = island::RunTraySurface();
-            island::CloseLog();
-            return surfaceResult;
-        }
-        if (std::strcmp(argv[i], "--tray-learn") == 0) {
-            const int learnResult = island::RunTrayLearn();
-            island::CloseLog();
-            return learnResult;
-        }
-        // --tray-press N: press the Nth icon of the card's list, exactly as a click on its cell does.
-        // The card's own cells cannot be clicked from a script on this machine (see ISLANDBAR_CLICK_AT),
-        // so this is how the press is exercised without a hand on the mouse. `--fire` is accepted and no
-        // longer means anything: it used to ask for a dry run of a route that had to open the shell's tray
-        // first, and that route is gone (see TrayPress.h).
-        if (std::strcmp(argv[i], "--tray-press") == 0 && i + 1 < argc) {
-            const int wanted = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
-            const bool fire = (i + 1 < argc) && std::strcmp(argv[i + 1], "--fire") == 0;
-            const bool right = (i + 2 < argc) && std::strcmp(argv[i + 2], "--right") == 0;
-            const int pressResult = island::RunTrayPress(wanted, fire, right);
-            island::CloseLog();
-            return pressResult;
-        }
         if (std::strcmp(argv[i], "--icon-dump") == 0) {
             const char* appId = (i + 1 < argc) ? argv[i + 1] : "";
             // Shell icon extraction goes through the shell's COM objects, so an apartment is
@@ -5685,9 +5290,6 @@ int main(int argc, char** argv) {
             island::LogAndPrint("  --music-preview  cycle the three music states with sample data");
             island::LogAndPrint("  --lyrics-test <title> [artist]  fetch lyrics and report what came back");
             island::LogAndPrint("  --no-console     behave as if there were no console (diagnostic)");
-            island::LogAndPrint("  --tray-reach     list every tray icon and whether a press can reach it");
-            island::LogAndPrint("  --tray-learn     ask every running tray application to register again");
-            island::LogAndPrint("  --tray-press N [--right]  press the Nth icon exactly as its cell does");
             island::LogAndPrint("");
             island::LogAndPrint("Every run also writes a timestamped log, which is the reliable way to");
             island::LogAndPrint("see what happened -- the console has been known to swallow output:");

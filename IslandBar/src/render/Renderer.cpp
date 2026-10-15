@@ -306,28 +306,13 @@ void Renderer::DrawDecks(const RoundedBox& island, const FrameState& frame) {
     const float cardLeftDip = frame.outerCardUp ? frame.cardLeftDip : 0.0f;
     const float cardWidthDip = frame.outerCardUp ? kExpandedWidthDip : 0.0f;
 
-    // THE ROW STARTS AFTER THE TRAY BUTTON, which stands immediately to the right of the island. Told to
-    // the row as one moved edge rather than as a parameter through every one of its functions -- see
-    // RowAnchorWithTray.
-    const RoundedBox rowIsland = RowAnchorWithTray(island, frame.trayIconCount > 0);
+    // THE ROW STARTS at the island's own right edge (see RowAnchorBox), so the drawing and the hit test
+    // measure from one box.
+    const RoundedBox rowIsland = island;
     text_->DrawTaskIcons(d2dContext_, rowIsland, taskButtons_, frame.taskButtonCount,
                          frame.taskHoveredIndex, frame.contentOpacity, rowAmounts,
                          frame.taskButtonCount, cardLeftDip, cardWidthDip,
                          frame.taskButtonAppearValid ? frame.taskButtonAppear : nullptr);
-
-    // THE TRAY BUTTON, at the far right of the bar: one control for every tray icon, with the icons behind
-    // it in the card (see DrawTrayButton). After the application icons, so the two read as "what I have
-    // open" then "what is running quietly", which is the order the shell's own taskbar has.
-    //
-    // Not gated on `fullscreenApp` here: that is handled where the whole deck is skipped (the caller),
-    // because while a game has the screen the tray is not the bar either.
-    if (frame.trayIconCount > 0) {
-        // No fill either, for the reason the deck's buttons have none: it stands on the same surface (see
-        // BarClusterFor). Its own hover wash and the three dots are what is drawn.
-        text_->DrawTrayButton(d2dContext_, TrayButtonFor(island), frame.trayButtonWash,
-                              frame.trayPageOpen,
-                              D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), frame.contentOpacity);
-    }
 
     // What the row was actually asked to draw, and where it put it.
     //
@@ -498,17 +483,16 @@ void Renderer::RenderFrame(const FrameState& frame) {
         // pass two floats to it by mistake.
         // ... AND THE ISLAND IS PART OF ONE SURFACE WITH THE CONTROLS AROUND IT, NOT A BEAD AMONG BEADS.
         //
-        // The system button, the Start button, the island and the tray button are drawn as one rounded
-        // surface -- see BarClusterFor for why those four and not the icon row -- and the controls are then
-        // drawn ON it: their marks, their hover washes, the island's own line. That is why the fills handed
-        // to those three buttons further down are transparent now, and why this fill covers their boxes.
+        // The system button, the Start button and the island are drawn as one rounded surface -- see
+        // BarClusterFor for why those three and not the icon row -- and the controls are then drawn ON it:
+        // their marks, their hover washes, the island's own line. That is why the fills handed to those
+        // three buttons further down are transparent now, and why this fill covers their boxes.
         //
         // Gated on the same condition as the decks themselves (content visible, no full-screen application
         // in front), because the surface exists FOR them: with the decks skipped the case would be a wider
         // pill with nothing in it at either end.
         const bool decksDrawn = frame.contentOpacity > 0.01f && !frame.fullscreenApp;
-        const RoundedBox& shape =
-            decksDrawn ? island::BarClusterFor(pillBox, frame.trayIconCount > 0) : pillBox;
+        const RoundedBox& shape = decksDrawn ? island::BarClusterFor(pillBox) : pillBox;
 
         D2D1_ROUNDED_RECT rounded = {};
         rounded.rect.left    = shape.rect.left;
@@ -637,7 +621,7 @@ void Renderer::RenderFrame(const FrameState& frame) {
             // Keyed on WHAT IS BEING ANNOUNCED rather than on the state, which is the same correction the
             // music branch below already carries and for the same reason: `state` is the TARGET, so it is
             // Expanded for the whole of a card. This branch used to test `state == NoticeStrip`, so opening
-            // the Start card (or the panel, or the tray page) while a call was running dropped the call out
+            // the Start card (or the panel) while a call was running dropped the call out
             // of the strip and let the lyric take it -- the island looked like the ordinary playing bar for
             // as long as the card was up. Reported with two photographs of one call: the call strip before
             // the press, and the lyric in its place with the card open.
@@ -966,14 +950,9 @@ void Renderer::RenderFrame(const FrameState& frame) {
                 // frame of its own growth, which is the reflow 7.77 chased in the panel.
                 if (frame.cardOwner == CardOwner::SystemPanel) {
                     // The panel has THREE levels, and which one is showing is the frame's business: the
-                    // tiles, the 声音输出 page the output-device button opens, or the tray page the tray
-                    // button at the other end of the bar opens. Same card, same place, same animation.
-                    if (frame.trayPageOpen) {
-                        text_->DrawTrayPage(d2dContext_, panelCard, frame.trayPageTitle,
-                                            frame.trayIcons, frame.trayIconCount, frame.trayRevision,
-                                            frame.cardOpacity, frame.trayHoveredIndex,
-                                            frame.cardSurfaceMoving);
-                    } else if (frame.soundPageOpen) {
+                    // tiles, the 声音输出 page the output-device button opens, or the Start card. Same
+                    // card, same place, same animation.
+                    if (frame.soundPageOpen) {
                         text_->DrawSoundPage(d2dContext_, panelCard, frame.soundPage,
                                              frame.cardOpacity);
                     } else if (frame.startPageOpen) {
@@ -983,15 +962,6 @@ void Renderer::RenderFrame(const FrameState& frame) {
                     } else {
                         text_->DrawSystemPanel(d2dContext_, panelCard, frame.systemPanel,
                                                frame.cardOpacity);
-                    }
-
-                    // ... and the tray's own context menu OVER whatever level is showing: it is opened by a
-                    // right click on a cell, and the page underneath it stays exactly where it was -- the
-                    // menu is a thing in front, not a level of its own (see TrayMenuFor).
-                    if (frame.trayMenuOpen) {
-                        text_->DrawTrayMenu(d2dContext_, frame.trayMenuRows, frame.trayMenuRowCount,
-                                            frame.trayMenuLabels, frame.trayMenuHovered,
-                                            frame.cardOpacity);
                     }
                 } else if (frame.cardOwner == CardOwner::Notification && frame.notification) {
                     text_->DrawNotification(d2dContext_, panelCard,

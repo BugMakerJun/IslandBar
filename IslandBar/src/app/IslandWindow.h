@@ -131,9 +131,9 @@ public:
     // the question that decides whether the fault is in the window procedure or in the routing.
     bool TakeClick();
 
-    // The same for a RIGHT click, which only the tray page's cells use so far: right-clicking one of the
-    // shell's tray icons is how its application's own menu is opened -- the menu with 退出 in it -- and
-    // there is no UI Automation pattern for a right click, so it has to arrive as one. See TrayPress.
+    // The same for a RIGHT click, which means "take this away" wherever it lands: a pinned tile comes off
+    // the Start card with it. Everywhere else it is nothing -- a control that quietly did something
+    // different on the other button would be worse than one that does nothing.
     bool TakeRightClick();
 
     // Takes a left-button PRESS, reported with where it landed. A press and a click are different events:
@@ -173,7 +173,6 @@ public:
     static bool ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                     POINT screenPoint, IslandState state, int iconCount = 0,
                                     float cardLeftDip = 0.0f, bool fullscreenApp = false,
-                                    int trayIconCount = 0,
                                     const RoundedBox& currentShape = RoundedBox{},
                                     bool noticeStripUp = false);
 
@@ -187,41 +186,12 @@ public:
     // answered here, so it has to be told the same thing the renderer was.
     void SetFullscreenApp(bool fullscreenApp);
 
-    // The tray: how many icons the CARD holds, whether the pointer is on its button, and which cell of the
-    // card's grid the pointer is on. The count comes from a list the window does not own, which is why it
-    // is told rather than found out -- the same arrangement as the application icon count.
-    void SetTrayIconCount(int count);
-    int  TrayIconCount() const { return trayIconCount_; }
-    bool TrayButtonHovered() const { return trayButtonHovered_; }
-    // Whether a screen point is on the tray button. The frame loop's click handler asks this, because the
-    // button is a control and the click has to land on the same rectangle that is drawn.
-    bool TrayButtonAtScreen(POINT screenPoint) const;
-    // The tray icon (a cell of the card's grid) under the pointer, or -1. Chosen here because this is the
-    // only place that knows where the pointer is; the geometry comes from TrayPageFor, so the hit test and
-    // the drawing agree.
-    int  TrayCellHovered() const { return trayCellHovered_; }
-
-    // The tray's own context menu, when one is up (see TrayMenuFor in CardLayout.h): the rows it was
-    // opened with, in card-local DIP, told to the window by the frame loop -- the same arrangement as the
-    // tray's own count, and for the same reason (the window knows where the pointer is, the loop knows
-    // what was drawn).
-    //
-    // OPENED BY THE WINDOW, not handed a layout: this is the only place that owns the card's geometry --
-    // the same geometry its own hover test runs against, so the menu cannot be drawn somewhere other than
-    // where its rows are hit-tested. It hangs off the bottom-right corner of the cell that was right
-    // clicked, clamped into the card (see TrayMenuFor).
-    void OpenTrayMenu(int cell, int entryCount);
-    void CloseTrayMenu() { trayMenuOpen_ = false; trayMenuRowHovered_ = -1; }
-    bool TrayMenuIsOpen() const { return trayMenuOpen_; }
-    const island::TrayMenuLayout& TrayMenu() const { return trayMenuLayout_; }
-    int  TrayMenuRowHovered() const { return trayMenuRowHovered_; }
-
     // --- the Start card -------------------------------------------------------------------------------
     //
     // What the pointer is on while the Start card is the level that is up. The page, the two counts and
-    // the picker's scroll offset are TOLD to the window, the way the tray's count is: the window owns no
-    // application list, but it is the only place that knows where the pointer is -- and a hit test against
-    // geometry the drawing did not use is the defect this project has paid for more often than any other.
+    // the picker's scroll offset are TOLD to the window: the window owns no application list, but it is the
+    // only place that knows where the pointer is -- and a hit test against geometry the drawing did not use
+    // is the defect this project has paid for more often than any other.
     enum class StartHitTarget { None, Pin, PickerRow, PowerRow, PowerButton, EmptyGrid };
     struct StartHit {
         StartHitTarget target = StartHitTarget::None;
@@ -393,8 +363,7 @@ public:
                                const IslandAnchor& anchor,
                                const RoundedBox& current = RoundedBox{},
                                float cardLeftDip = 0.0f, int taskIconCount = -1,
-                               float statusStripWidthDip = 0.0f, int trayIconCount = 0,
-                               bool noticeStripUp = false);
+                               float statusStripWidthDip = 0.0f, bool noticeStripUp = false);
 
     // The anchor the current box geometry is derived from.
     IslandAnchor CurrentAnchor() const;
@@ -582,17 +551,9 @@ private:
     // Whether a full-screen application is in front, as measured by the frame loop. Held here because the
     // hit test is answered here: while it is set, only the island is the bar. See SetFullscreenApp.
     bool fullscreenApp_ = false;
-    // The tray, for the same reason: how many icons are on the bar, and which one the pointer is on.
-    int trayIconCount_ = 0;
-    bool trayButtonHovered_ = false;
-    int trayCellHovered_ = -1;
-    // The tray's own menu: whether it is up, the rows it was opened with, and the row under the pointer.
-    bool trayMenuOpen_ = false;
-    island::TrayMenuLayout trayMenuLayout_ = {};
-    int trayMenuRowHovered_ = -1;
     // The Start card, told the same way: whether it is the level that is up, which page of it, and the two
     // counts and the scroll offset the hit tests are measured against. The lists themselves stay in the
-    // frame loop -- this window owns no application list, exactly as it owns no tray icon list.
+    // frame loop -- this window owns no application list.
     bool startPageOpen_ = false;
     int  startPage_ = 0;
     int  startPinCount_ = 0;

@@ -1,19 +1,15 @@
 // =====================================================================
 //  Cli.cpp -- THE COMMANDS THAT RUN INSTEAD OF THE BAR
 //
-//  These twelve commands lived in main.cpp until 2026-10-15, mixed in with the frame loop, the assembly of
-//  every subsystem, and the tray rules. They are not part of the bar: each one is a question the workflow
-//  asks a build ("what does the shell's record hold", "is there anything to send to that icon", "did the
-//  media session arrive"), and each one prints through core/Log.h and answers with an exit code.
+//  These commands lived in main.cpp until 2026-10-15, mixed in with the frame loop and the assembly of every
+//  subsystem. They are not part of the bar: each one is a question the workflow asks a build ("can the toast
+//  database be read", "does this application's icon decode"), and each one prints through core/Log.h and
+//  answers with an exit code.
 //
-//  THEY TOUCH EVERYTHING, ON PURPOSE. A command that asks about the tray still stands up a window and a
-//  renderer to answer, because that is what "run the bar and ask it one question" means -- the alternative
-//  would be a second implementation of the bar that could disagree with the real one. What they must not do
-//  is grow into a second program: the argument parsing stays in main.cpp, which knows the flags.
-//
-//  THE ONES THE WORKFLOW DEPENDS ON are --tray-dump, --tray-surface, --tray-learn and --tray-press: they are
-//  the contract a script can hold this program to (see ARCHITECTURE.md), and they are named in HANDOFF as the
-//  way every tray measurement was taken.
+//  THEY TOUCH EVERYTHING, ON PURPOSE. A command that asks about the toast database still stands up a window
+//  and a renderer to answer, because that is what "run the bar and ask it one question" means -- the
+//  alternative would be a second implementation of the bar that could disagree with the real one. What they
+//  must not do is grow into a second program: the argument parsing stays in main.cpp, which knows the flags.
 //
 //  Nothing here is new code: it is the same text, moved, with island:: added at the call sites.
 // =====================================================================
@@ -46,10 +42,6 @@
 #include "services/NotificationIcon.h"
 #include "services/NotificationPipe.h"
 #include "services/ToastStore.h"
-#include "shell/TrayIcons.h"
-#include "shell/TrayLearn.h"
-#include "shell/TrayMenu.h"
-#include "shell/TrayPress.h"
 
 namespace island {
 
@@ -236,114 +228,6 @@ int RunToastDump(int limit) {
     }
     reader.Stop();
     return rows > 0 ? 0 : 1;
-}
-
-// Prints the tray icons the bar would draw, and where each one comes from.
-//
-// A command line for the same reason --toast-dump is one: "there is no tray" and "the bar could not read
-// the tray" look identical on screen, and they are different problems. The registry key and the PNG
-// magic are printed so the answer can be checked against regedit by hand.
-int RunTrayDump() {
-    island::TrayIcons icons;
-    const int count = icons.Refresh();
-    island::LogAndPrint(L"tray dump: %d icon(s) with a running application, from %ls\n", count,
-                        island::TrayIcons::SettingsKeyPath());
-    island::LogAndPrint(L"  (looked at %d entr(ies) in the key, %d process(es) in the snapshot, %d of "
-                        L"those matched a running application)\n",
-                        icons.Examined(), icons.ProcessesSeen(), icons.RunningApps());
-    for (int i = 0; i < count; ++i) {
-        const island::TrayIcon& icon = icons.At(i);
-        island::LogAndPrint(L"  [%d] %ls -- %zu byte PNG, promoted=%d, %ls\n", i, icon.name,
-                            icon.pngSize, icon.promoted ? 1 : 0, icons.ExePathAt(i));
-    }
-    return count > 0 ? 0 : 1;
-}
-
-
-// THIS COMMAND USED TO ASK THE SHELL WHERE EACH ICON WAS, which was the question a press depended on while
-// the press was a real click on the shell's own button. Since 2026-10-15 a press is the application's own
-// callback message (see TrayPress.h), so the question became "is there anything to send" -- and the answer
-// separates the same three states in a way that needs no shell, no taskbar and no UI Automation: an icon with
-// a learned callback whose window exists is pressable; an icon that has been learned but whose application is
-// not running is not; an icon nothing has been learned about opens the bar's own menu instead.
-int RunTraySurface() {
-    island::TrayIcons icons;
-    const int count = icons.Refresh();
-    island::LogAndPrint(L"tray reach: %d icon(s) on the card\n", count);
-
-    int reachable = 0;
-    for (int i = 0; i < count; ++i) {
-        const island::TrayIcon& icon = icons.At(i);
-        const island::TrayPressRequest request = island::MakeTrayPressRequest(icon, icons.ExePathAt(i));
-        const bool reach = island::TrayPressReachable(request);
-        if (reach) ++reachable;
-        wchar_t flat[128] = {};
-        std::swprintf(flat, 128, L"uid %u", icon.uid);
-        island::LogAndPrint(L"  [%d] %ls (%ls) -- %ls\n", i, island::FlatName(icon.name, flat, 128),
-                            icon.hasGuid ? L"GUID" : flat,
-                            reach ? L"its own callback is known and its window is there"
-                                  : L"nothing learned yet: a press opens this bar's own menu");
-    }
-    island::LogAndPrint(L"  %d of %d can be pressed without touching the pointer\n", reachable, count);
-    return reachable > 0 ? 0 : 1;
-}
-
-// Presses one icon from the command line, for the same reason: a click cannot be delivered from a script
-// here. Everything the live click does is done, including the walk through the shell's tray, so what this
-// prints is what a click produces -- the difference being `--fire`, without which the button is found and
-// reported but not pressed.
-// Learns the tray callbacks of everything running, and prints what it got. Its own command because the
-// learning is otherwise a background step of a live session, and a question about it should not need a
-// running bar to be answered.
-int RunTrayLearn() {
-    island::TrayIcons icons;
-    const int count = icons.Refresh();
-    const int coveredBefore = island::CountCoveredIcons(icons);
-    island::LogAndPrint(L"tray learn: %d icon(s) on the card, %d of them known; offering the module to every "
-                        L"application and asking each to register again\n",
-                        count, coveredBefore);
-    const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-    island::LogAndPrint(L"tray learn: the shell (%d process(es) offered) was %ls, %d registration(s) "
-                        L"captured, %d new entr(ies)\n",
-                        learned.appsTried,
-                        learned.appsAlreadyWatched > 0 ? L"already carrying the module" : L"given the module",
-                        learned.captured, learned.newEntries);
-    island::LogAndPrint(L"tray learn: %d of %d icon(s) now have a callback entry (before: %d), %lld ms\n",
-                        learned.covered, learned.icons, coveredBefore, learned.ms);
-    wchar_t home[MAX_PATH] = {};
-    GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
-    island::LogAndPrint(L"tray learn: the cache is %ls\\IslandBar\\tray_callbacks.txt and the raw capture is "
-                        L"%ls\\IslandBar\\tray_learned.txt\n",
-                        home, home);
-    return learned.covered > coveredBefore ? 0 : 1;
-}
-
-int RunTrayPress(int index, bool fire, bool rightClick) {
-    island::TrayIcons icons;
-    const int count = icons.Refresh();
-    if (index < 0 || index >= count) {
-        island::LogAndPrint(L"tray press: [%d] is not one of the %d icon(s) on the card\n", index, count);
-        return 1;
-    }
-    const island::TrayIcon& icon = icons.At(index);
-    const island::TrayPressRequest request = island::MakeTrayPressRequest(icon, icons.ExePathAt(index));
-    island::LogAndPrint(L"tray press: [%d] '%ls' (%ls)\n", index, icon.name,
-                        icon.hasGuid ? L"registered by GUID" : L"registered by UID");
-
-    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    // `fire` is accepted and ignored: it used to mean "do not actually press" for a route that opened the
-    // shell's panel to find the icon first, and there is nothing to find any more -- see TrayPress.h. Keeping
-    // the flag accepted means every instruction in HANDOFF and in the scripts that call it still runs.
-    (void)fire;
-    const island::TrayPressOutcome outcome = island::PressTrayIcon(request, rightClick);
-    if (SUCCEEDED(comHr)) CoUninitialize();
-    island::LogAndPrint(L"  -> %ls%ls: %ls (press %lld ms)\n", island::TrayPressResultName(outcome.result),
-                        rightClick ? L" [right click]" : L"", outcome.route, outcome.ms);
-    island::LogAndPrint(L"  delivered to %ls -- %ls\n", outcome.target, outcome.answer);
-    if (outcome.result == island::TrayPressResult::Pressed) {
-        return 0;
-    }
-    return 1;
 }
 
 // Sets the system output volume to a percentage and reports what the device says afterwards.

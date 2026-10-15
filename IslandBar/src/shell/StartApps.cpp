@@ -416,8 +416,7 @@ const uint8_t* StartApps::PinIconPng(int index, size_t* sizeOut) const {
 
 void StartApps::ResolveIconAsync(const wchar_t* target) {
     if (!target || !*target) return;
-    // A copy, because the vector this would otherwise read from is rewritten by the next LoadPins -- the
-    // same reason TrayPress copies what it needs out of the tray list.
+    // A copy, because the vector this would otherwise read from is rewritten by the next LoadPins.
     std::wstring wanted = target;
     std::thread([this, wanted]() {
         std::vector<uint8_t> png;

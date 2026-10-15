@@ -20,7 +20,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
-#include <cstdlib>   // strtoul: unpacking the hex of a captured registration in the tray checks
+#include <cstdlib>
 #include <vector>
 #include <cwchar>
 #include <string>
@@ -28,8 +28,6 @@
 #include "domain/Geometry.h"
 #include "core/Log.h"
 #include "domain/MiniJson.h"
-#include "domain/TrayRegistration.h"
-#include "platform/TrayRing.h"     // the channel the module publishes registrations on
 #include "domain/CardLayout.h"
 #include "domain/StatePolicy.h"
 #include "media/Lyrics.h"
@@ -54,9 +52,6 @@
 #include "domain/Motion.h"
 #include "render/Renderer.h"
 #include "render/TextRenderer.h"
-#include "shell/TrayIcons.h"
-#include "shell/TrayPress.h"
-#include "shell/TrayLearn.h"   // CountCoveredIcons: how much of the tray a press can reach (see the tray checks)
 
 namespace island {
 namespace {
@@ -343,21 +338,18 @@ void TestClickThrough(IslandWindow& window, const MonitorGeometry& monitor) {
         Check(window.PointerOverControl(toScreen(slotCentre, (row.top + row.bottom) * 0.5f)),
               L"an application icon is a control", cursorDetail);
 
-        // ... AND THE ICON UNDER THE POINTER IS STILL THE ICON THAT IS DRAWN THERE once the TRAY
-        // BUTTON stands between the island and the row.
+        // ... AND THE ICON UNDER THE POINTER IS THE ICON THAT IS DRAWN THERE.
         //
-        // The row is DRAWN from a box the tray button has moved along (see RowAnchorWithTray), so the
+        // The row is DRAWN from a box (see RowAnchorBox), and the
         // window's own hit test -- IconAtScreen, which is what a click is routed through -- has to be
-        // measured from that same box. It was not, and the report was exact: "鼠标移上去 第二个图片展开
-        // 了", pointing at the FIRST icon opened the SECOND, because the hit test still believed the
+        // measured from that same box. It was not once, and the report was exact: "鼠标移上去 第二个图片
+        // 展开了", pointing at the FIRST icon opened the SECOND, because the hit test still believed the
         // row began one button to the left of where it is painted.
         //
         // Asserted from each icon's own DRAWN box, through the window's answer, so a future change
         // that moves one of the two apart is a failing check rather than something only a user sees.
         {
-            window.SetTrayIconCount(3);
-            const RoundedBox islandForRow = window.LayoutIslandFor();
-            const RoundedBox drawnRow = RowAnchorWithTray(islandForRow, true);
+            const RoundedBox drawnRow = window.LayoutIslandFor();
             const int buttons = window.RowButtonCount();
             int mismatches = 0;
             int firstMismatch = -1;
@@ -370,20 +362,11 @@ void TestClickThrough(IslandWindow& window, const MonitorGeometry& monitor) {
                     if (firstMismatch < 0) firstMismatch = i;
                 }
             }
-            wchar_t trayRowDetail[224];
-            std::swprintf(trayRowDetail, 224,
+            wchar_t rowDetail[224];
+            std::swprintf(rowDetail, 224,
                           L"drawn row starts at %.0f, %d buttons, %d mismatch(es), first %d",
                           drawnRow.rect.right + kTaskIconPadDip, buttons, mismatches, firstMismatch);
-            Check(mismatches == 0,
-                  L"the icon under the pointer is the icon drawn there, with the tray button up",
-                  trayRowDetail);
-
-            // ... and the tray button itself is still a control, which is what the same box moves for.
-            Check(window.PointerOverControl(centreOf(TrayButtonFor(islandForRow))),
-                  L"the tray button beside the island is a control", trayRowDetail);
-
-            // Put the window back as it was found: the count is an input to every hit test below.
-            window.SetTrayIconCount(0);
+            Check(mismatches == 0, L"the icon under the pointer is the icon drawn there", rowDetail);
         }
 
         // ... and the deck's gap, which is a control only where a button is: the two buttons do not fill the
@@ -861,7 +844,7 @@ void TestRenderer(IslandWindow& window) {
             // The audio/video call window: 376x648, hidden in practice.
             Check(!LooksLikeWeChatToast(L"Qt51514QWindowIcon", L"微信音视频通话 ", true, 376, 648),
                   L"the call window is not a notification");
-            // The tray icon's message window: full screen sized, and hidden.
+            // The messaging application's own tray-icon window: full screen sized, and hidden.
             Check(!LooksLikeWeChatToast(L"Qt51514WxTrayIconMessageWindowClass", L"WxTrayIconMessageWindow",
                                         false, 1920, 1035),
                   L"the tray icon's window is not a notification");
@@ -5314,25 +5297,23 @@ void TestMusicCardLayout() {
                           static_cast<LONG>((cardLeftDip + kExpandedWidthDip) * scale),
                   L"the input region with the panel open covers the card's full width", dt);
 
-            // THE SAME QUESTION FOR THE CARD AT THE OTHER END OF THE BAR, which is the case the check
+            // THE SAME QUESTION FOR A CARD THAT HANGS WELL PAST THE ICON ROW, which is the case the check
             // above cannot see: its `cardLeftDip` is near the island's left, where the icon row reaches
             // past the card's right edge anyway, so the region covered the card by accident.
             //
-            // The tray button is at the right end of the bar, its card is the same 520 DIP wide, and the
-            // row is measured from the tray button onwards -- so with a single application window open the
-            // row ends 82 DIP short of the card. Measured on screen with the tray page open: region
-            // 670..1568 against a card of 1130..1650, and the card was clipped to a square right edge.
+            // With a single application window open the row ends 82 DIP short of a card at the far end of
+            // the bar. Measured on screen with such a card open: region 670..1568 against a card of
+            // 1130..1650, and the card was clipped to a square right edge.
             {
-                const float trayCardLeftDip = 1130.0f;
-                const RECT trayRegion = IslandWindow::InputRegionFor(
-                    mon, IslandState::Expanded, regionAnchor, settledExpanded, trayCardLeftDip, 1);
+                const float farCardLeftDip = 1130.0f;
+                const RECT farRegion = IslandWindow::InputRegionFor(
+                    mon, IslandState::Expanded, regionAnchor, settledExpanded, farCardLeftDip, 1);
                 std::swprintf(dt, 192,
-                              L"tray card x %.0f..%.0f, region right %ld, one window open",
-                              trayCardLeftDip, trayCardLeftDip + kExpandedWidthDip,
-                              trayRegion.right);
-                Check(trayRegion.right >=
-                          static_cast<LONG>((trayCardLeftDip + kExpandedWidthDip) * scale),
-                      L"the region covers the card that hangs at the tray end of the bar too", dt);
+                              L"far card x %.0f..%.0f, region right %ld, one window open",
+                              farCardLeftDip, farCardLeftDip + kExpandedWidthDip, farRegion.right);
+                Check(farRegion.right >=
+                          static_cast<LONG>((farCardLeftDip + kExpandedWidthDip) * scale),
+                      L"the region covers a card that hangs well past the icon row", dt);
             }
 
             // And it must NOT move while the card opens.
@@ -5790,7 +5771,7 @@ void TestMusicCardLayout() {
                       L"it is what a game, or a player that dropped its frame, reports");
 
                 // The two questions must disagree on the released state, or the bar would stand down --
-                // island only, no deck, no tray -- on every ordinary maximized window, which is the
+                // island only, no deck -- on every ordinary maximized window, which is the
                 // state the user is in whenever a browser is maximized.
                 Check(WindowCoversMonitor(maximizedAfterRelease, monitor) &&
                       WindowCoversMonitor(borderlessFullScreen, monitor) &&
@@ -6241,17 +6222,14 @@ void TestMusicCardLayout() {
                 const RoundedBox noticeStrip = BoxForState(IslandState::NoticeStrip, stripAnchor);
 
                 constexpr int kIcons = 8;
-                constexpr int kTrayIcons = 15;
                 const RECT region = IslandWindow::InputRegionFor(
-                    stripMonitor, IslandState::NoticeStrip, stripAnchor, noticeStrip, 0.0f, kIcons,
-                    0.0f, kTrayIcons);
+                    stripMonitor, IslandState::NoticeStrip, stripAnchor, noticeStrip, 0.0f, kIcons, 0.0f);
 
                 // The row exactly as the renderer lays it out with a strip up: from the strip's own edge,
-                // pushed one button along by the tray button.
-                const RoundedBox rowWithTray =
-                    RowAnchorWithTray(RowAnchorBox(noticeStrip, restingPill), kTrayIcons > 0);
+                // which is what the notice strip moves.
+                const RoundedBox rowIsland = RowAnchorBox(noticeStrip, restingPill);
                 const float rowRightDip =
-                    TaskIconButtonAt(rowWithTray, kIcons - 1, kIcons, kIcons - 1, 1.0f).right;
+                    TaskIconButtonAt(rowIsland, kIcons - 1, kIcons, kIcons - 1, 1.0f).right;
 
                 // `stripRowDetail`, not `stripDetail`: the latter is declared earlier in this same check and
                 // hiding it was a warning (C4456) that only showed up when this file was rebuilt.
@@ -6277,11 +6255,11 @@ void TestMusicCardLayout() {
                               startOnStrip.left, startOnStrip.right, startOnPill.left, startOnPill.right);
                 Check(IslandWindow::ShouldAcceptPointer(stripMonitor, windowRect, onStart,
                                                         IslandState::NoticeStrip, kIcons, 0.0f, false,
-                                                        kTrayIcons, noticeStrip),
+                                                        noticeStrip),
                       L"the Start button is the bar's where the notice strip draws it", stripDetail);
                 Check(!IslandWindow::ShouldAcceptPointer(stripMonitor, windowRect, onStart,
                                                          IslandState::NoticeStrip, kIcons, 0.0f, false,
-                                                         kTrayIcons, restingPill),
+                                                         restingPill),
                       L"... and it is not the bar's where the resting pill would put it", stripDetail);
             }
         }
@@ -6533,317 +6511,60 @@ void TestMusicCardLayout() {
             if (source) DestroyWindow(source);
         }
 
-        // The system tray: the applications' own tray icons, at the right-hand end of the bar.
-        //
-        // WHY IT IS ANCHORED TO THE MONITOR and not to the row beside it: the row grows and shrinks with
-        // the windows that are open, so a tray hung off its right edge would slide sideways every time a
-        // window opened. The properties below are all statements about that decision -- the group does not
-        // move, and it is the ROW that has to give way.
+        // WHERE A CARD STANDS: centred under the button that opened it, and which level it shows while it is
+        // leaving the screen. Both are properties of the CARD rather than of any one page, which is why they
+        // are asserted here and not with the page they were first noticed on.
         {
-            const float trayMonitor = 2560.0f;
-            const RoundedBox trayIsland =
-                IslandBoxFor(trayMonitor, kCollapsedWidthDip, kCollapsedHeightDip);
+            const float testMonitor = 2560.0f;
+            const RoundedBox testIsland =
+                IslandBoxFor(testMonitor, kCollapsedWidthDip, kCollapsedHeightDip);
 
-            wchar_t trayDetail[256];
-                    // Its own buffer rather than trayDetail, which the layout checks below keep using: two
-                    // checks writing the same detail would make a failure point at the wrong one.
-                    wchar_t trayWireDetail[256] = {};
-            {
-                // THE BUTTON, at the monitor's right margin: one control, in the same place whatever the
-                // application row is doing (see TrayButtonFor).
-                const RectF button = TrayButtonFor(trayIsland);
-                std::swprintf(trayDetail, 256,
-                              L"button x [%.0f, %.0f] y [%.0f, %.0f], island right %.0f", button.left,
-                              button.right, button.top, button.bottom, trayIsland.rect.right);
-                Check(Nearly(button.left, trayIsland.rect.right + kTaskIconPadDip, 0.01f),
-                      L"the tray button stands one pad to the right of the island", trayDetail);
-                Check(button.right > trayIsland.rect.right,
-                      L"the tray button is on the island's right-hand side", trayDetail);
-                Check(button.right < trayMonitor, L"the tray button is on the screen", trayDetail);
-                Check(Nearly((button.top + button.bottom) * 0.5f,
-                             (trayIsland.rect.top + trayIsland.rect.bottom) * 0.5f, 0.01f),
-                      L"the tray button is on the island's own line", trayDetail);
-            }
-
-            // WHAT THE BUTTON MOVES, AND WHAT IT MUST NOT.
+            wchar_t cardDetail[256];
+            // WHERE EACH CARD STANDS: under the button that opened it, and not under another one.
             //
-            // The row is told where it starts by moving ONE edge of the box it is measured from (see
-            // RowAnchorWithTray): everything the row does -- its left edge, every button, every hit test --
-            // follows from that box's right edge, and nothing else about the box may change. The island's
-            // left edge, top and bottom belong to the deck and the pill: a version of this that moved them
-            // would take the Start button and the status line along with the tray.
+            // The panel and the Start card are one card with one owner (NextCardOwner sees only "a card is
+            // asked for"), so the position can only come from the LEVEL that is showing. Every wrong answer
+            // this project has had was of that shape: the Start card drawn under the system button, 200 DIP
+            // from the control that opened it, and the 声音输出 page's rows answering where another level's
+            // controls are. Asserted as what a user would notice -- the answer names the button that was
+            // pressed -- which is also what makes "the two answers differ" a check rather than a coincidence.
             {
-                const RoundedBox moved = RowAnchorWithTray(trayIsland, true);
-                const float reserved = TrayButtonReservedDip();
-                std::swprintf(trayDetail, 256,
-                              L"island right %.0f -> anchor right %.0f (reserved %.0f), anchor left %.0f",
-                              trayIsland.rect.right, moved.rect.right, reserved, moved.rect.left);
-                Check(Nearly(moved.rect.right, trayIsland.rect.right + reserved, 0.01f),
-                      L"the tray button moves the row's anchor by exactly its own width", trayDetail);
-                Check(Nearly(moved.rect.left, trayIsland.rect.left, 0.01f) &&
-                          Nearly(moved.rect.top, trayIsland.rect.top, 0.01f) &&
-                          Nearly(moved.rect.bottom, trayIsland.rect.bottom, 0.01f),
-                      L"... and moves nothing else, so the deck and the pill stay put", trayDetail);
-                const RoundedBox untrayed = RowAnchorWithTray(trayIsland, false);
-                Check(Nearly(untrayed.rect.right, trayIsland.rect.right, 0.01f),
-                      L"with no tray to show the anchor is the island itself", trayDetail);
-            }
-
-            // THE CARD'S GRID: the icons behind the button, in a wrapping grid inside the SAME card the
-            // system panel opens -- three rows of five on a machine with sixteen icons, where the panel's own
-            // two rows of three would hold six.
-            {
-                const RoundedBox trayCard =
-                    BoxForState(IslandState::Expanded,
-                                AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
-                // The counts are the ones that MATTER, not the ones that fit: this machine has sixteen tray
-                // icons, and the old list stopped at ten -- exactly the number five columns and two rows
-                // hold -- so the grid could overflow the card and nothing said so until a photograph did
-                // ("托盘卡片里没有显示全啊").
-                for (int count : {1, 3, 6, 10, 16, kMaxTrayIcons}) {
-                    const TrayPageLayout page = TrayPageFor(trayCard, count);
-                    bool inside = page.count == count && page.columns > 0 &&
-                                  page.columns <= kTrayPageMaxColumns;
-                    float smallestCell = 1e9f;
-                    bool noOverlap = true;
-                    for (int i = 0; i < page.count; ++i) {
-                        const RectF& cell = page.cells[i];
-                        if (cell.right - cell.left < smallestCell) smallestCell = cell.right - cell.left;
-                        if (cell.left < trayCard.rect.left || cell.right > trayCard.rect.right ||
-                            cell.top < trayCard.rect.top || cell.bottom > trayCard.rect.bottom) {
-                            inside = false;
-                        }
-                        for (int j = i + 1; j < page.count; ++j) {
-                            const RectF& other = page.cells[j];
-                            if (cell.left < other.right && other.left < cell.right &&
-                                cell.top < other.bottom && other.top < cell.bottom) {
-                                noOverlap = false;
-                            }
-                        }
-                    }
-                    std::swprintf(trayDetail, 256,
-                                  L"%d icons -> %d columns, first cell %.0f (w%.1f, min %.1f), "
-                                  L"last cell bottom %.0f of %.0f",
-                                  count, page.columns, page.cells[0].left,
-                                  page.cells[0].right - page.cells[0].left,
-                                  smallestCell, page.cells[count - 1].bottom, trayCard.rect.bottom);
-                    Check(inside, L"every tray cell is inside the card it is drawn in", trayDetail);
-                    Check(noOverlap, L"no two tray cells overlap", trayDetail);
-                    Check(smallestCell >= kTrayPageMinCellDip - 0.01f,
-                          L"... and every cell is still big enough to press", trayDetail);
-
-                    Check(page.cells[0].top > trayCard.rect.top + 30.0f,
-                          L"the grid starts below the page's heading", trayDetail);
-                }
-            }
-
-            // --- THE WIRE FORMAT OF A TRAY REGISTRATION ------------------------------------------
-            //
-            // The module that reads registrations lives inside the shell's process, where no test can
-            // follow it: everything it is told to read arrives as a WM_COPYDATA whose payload is the
-            // shell's own copy of NOTIFYICONDATA. So the READING of those bytes is a pure function in
-            // domain/TrayRegistration.h, and this is the test that keeps it honest.
-            //
-            // THE FIRST CASE IS REAL BYTES, not a construction: the 192 bytes below are the head of the
-            // copy that probe-tray-registrar.exe (uid 7, message 0xABCD, tip ISLANDBAR-PROBE-4711) sent
-            // to the shell on 2026-10-15, pasted from reviews/tray-copydata-dump.txt. The payload on the
-            // wire is 1484 bytes and only its head was captured, so the rest is zero here -- which is
-            // exactly why this case asserts no guid: the guid field lives at +0x3B0, past the capture.
-            {
-                static const char* probeHead =
-                    "2334753400000000BC030000820A1F000700000007000000CDAB00002B000100490053004C0041004E"
-                    "0044004200410052002D00500052004F00420045002D003400370031003100000000000000000000"
-                    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
-                    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
-                    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
-                    "0000000000000000000000000000000000000000000000000000000000000000000000000000";
-                std::vector<unsigned char> payload(island::kTrayCopyMinimum, 0);
-                for (size_t i = 0; i < std::strlen(probeHead) / 2 && i < payload.size(); ++i) {
-                    payload[i] = static_cast<unsigned char>(
-                        std::strtoul(std::string(probeHead + i * 2, 2).c_str(), nullptr, 16));
-                }
-                const island::TrayRegistration decoded =
-                    island::DecodeTrayRegistration(payload.data(), payload.size());
-                std::swprintf(trayWireDetail, 256,
-                              L"valid=%d uid=%u msg=0x%04X tip='%ls'",
-                              decoded.valid ? 1 : 0, decoded.uid, decoded.callback, decoded.tip);
-                Check(decoded.valid && decoded.command == island::kTrayCopyAdd && decoded.uid == 7 &&
-                          decoded.callback == 0xABCD && decoded.trayWindow == 0x1F0A82 &&
-                          !decoded.hasGuid &&
-                          std::wcscmp(decoded.tip, L"ISLANDBAR-PROBE-4711") == 0,
-                      L"a registration's real bytes decode to the values it was registered with",
-                      trayWireDetail);
-            }
-            // A GUID-registered icon -- the shape ChatGPT.exe registers in, with the guid Explorer's
-            // own registry entry names for it. Built here at the measured offsets because the captured
-            // head above does not reach the guid field; the values are the ones the capture carried.
-            {
-                std::vector<unsigned char> payload(island::kTrayCopyMinimum, 0);
-                const unsigned tag = island::kTrayCopyTag;
-                const unsigned window = 0x000E0B32, uid = 3, flags = 0x27, callback = 0x8001;
-                std::memcpy(payload.data(), &tag, 4);
-                std::memcpy(payload.data() + island::kTrayCopyOffsetWindow, &window, 4);
-                std::memcpy(payload.data() + island::kTrayCopyOffsetUid, &uid, 4);
-                std::memcpy(payload.data() + island::kTrayCopyOffsetFlags, &flags, 4);
-                std::memcpy(payload.data() + island::kTrayCopyOffsetCallback, &callback, 4);
-                const unsigned char guidBytes[16] = {0x8B, 0x8D, 0x76, 0xE5, 0x36, 0x69, 0x45, 0x4F,
-                                                     0xB1, 0xAD, 0x4C, 0x5F, 0xB4, 0x14, 0xCB, 0x35};
-                std::memcpy(payload.data() + island::kTrayCopyOffsetGuid, guidBytes, 16);
-                const wchar_t* tipText = L"ChatGPT";
-                std::memcpy(payload.data() + island::kTrayCopyOffsetTip, tipText,
-                            (std::wcslen(tipText) + 1) * sizeof(wchar_t));
-                const island::TrayRegistration decoded =
-                    island::DecodeTrayRegistration(payload.data(), payload.size());
-                std::swprintf(trayWireDetail, 256, L"valid=%d guid=%d uid=%u msg=0x%04X",
-                              decoded.valid ? 1 : 0, decoded.hasGuid ? 1 : 0, decoded.uid,
-                              decoded.callback);
-                Check(decoded.valid && decoded.hasGuid && decoded.uid == 3 &&
-                          decoded.callback == 0x8001 &&
-                          std::memcmp(decoded.guid, guidBytes, 16) == 0 &&
-                          std::wcscmp(decoded.tip, L"ChatGPT") == 0,
-                      L"a guid-registered icon decodes with its guid, which is what it is pressed by",
-                      trayWireDetail);
-            }
-            // ... AND THE TWO WAYS A PAYLOAD MUST BE REFUSED, because a reader that guesses is worse
-            // than one that learns nothing: the shell changing this format must cost the tray its
-            // learning, visibly, and not produce presses aimed at the wrong message number.
-            {
-                std::vector<unsigned char> payload(island::kTrayCopyMinimum, 0);
-                const unsigned notTheShellsTag = 0x12345678u;
-                std::memcpy(payload.data(), &notTheShellsTag, 4);
-                const island::TrayRegistration decoded =
-                    island::DecodeTrayRegistration(payload.data(), payload.size());
-                const island::TrayRegistration tooSmall =
-                    island::DecodeTrayRegistration(payload.data(), island::kTrayCopyMinimum - 1);
-                std::swprintf(trayWireDetail, 256, L"wrong tag valid=%d, short valid=%d",
-                              decoded.valid ? 1 : 0, tooSmall.valid ? 1 : 0);
-                Check(!decoded.valid && !tooSmall.valid,
-                      L"a payload that is not the shell's, or too short, is refused rather than read",
-                      trayWireDetail);
-            }
-
-            // --- THE CHANNEL BETWEEN THE MODULE AND THE BAR -------------------------------------
-            //
-            // A registration travels over a shared-memory ring (platform/TrayRing.h): the module
-            // publishes while an application waits for the shell, the bar drains it on its own time.
-            // Two things about that are worth a test on this machine: a record survives the round trip
-            // unchanged, and a ring whose ABI disagrees is REFUSED rather than read -- because the
-            // failure that produces is a press aimed at the wrong message number, which looks like
-            // nothing at all.
-            {
-                island::TrayRingPublisher publisher;
-                // A ring of this test's own. Publishing into the production ring would put records in a
-                // running bar's queue, and the ABI check below deliberately corrupts a header -- which
-                // must never be done to the ring the bar is reading.
-                const bool opened = publisher.Open(L"Local\\IslandBar.TrayRing.selftest",
-                                                   L"Local\\IslandBar.TrayRing.selftest.Event");
-                std::swprintf(trayWireDetail, 256, L"publisher opened=%d abi=%u record=%u",
-                              opened ? 1 : 0, island::kTrayRingAbi,
-                              static_cast<unsigned>(sizeof(island::TrayRingRecord)));
-                Check(opened && publisher.header && publisher.header->recordSize ==
-                                    sizeof(island::TrayRingRecord),
-                      L"the ring opens and states the record size both sides agreed on",
-                      trayWireDetail);
-
-                if (opened && publisher.header) {
-                    island::TrayRegistration pushed;
-                    pushed.valid = true;
-                    pushed.command = island::kTrayCopyAdd;
-                    pushed.trayWindow = 0x1234;
-                    pushed.uid = 9;
-                    pushed.flags = 0x7;
-                    pushed.callback = 0xBEEF;
-                    wcsncpy_s(pushed.tip, L"ROUND-TRIP", _TRUNCATE);
-                    publisher.Publish(pushed);
-
-                    island::TrayRingReader reader;
-                    unsigned cursor = 0;
-                    island::TrayRingRecord taken[island::kTrayRingCapacity] = {};
-                    reader.Open(L"Local\\IslandBar.TrayRing.selftest",
-                                L"Local\\IslandBar.TrayRing.selftest.Event");
-                    // Skip everything already in the ring (a bar may be running), then take the record
-                    // this check just pushed: the last one written.
-                    const unsigned all = reader.Drain(cursor, taken, island::kTrayRingCapacity);
-                    const island::TrayRegistration& back =
-                        taken[all > 0 ? all - 1 : 0].registration;
-                    std::swprintf(trayWireDetail, 256, L"took=%u uid=%u msg=0x%04X tip='%ls'",
-                                  all, back.uid, back.callback, back.tip);
-                    Check(all > 0 && back.valid && back.uid == 9 && back.callback == 0xBEEF &&
-                              back.trayWindow == 0x1234 &&
-                              std::wcscmp(back.tip, L"ROUND-TRIP") == 0,
-                          L"a registration survives the ring unchanged", trayWireDetail);
-
-                    // ... and the ABI is refused when it disagrees. Corrupted here on purpose and put
-                    // straight back: this ring belongs to this test process, and the next check below
-                    // is the one that reads it.
-                    const unsigned savedAbi = publisher.header->abi;
-                    publisher.header->abi = savedAbi + 1;
-                    island::TrayRingReader refusing;
-                    const bool refused = !refusing.Open(L"Local\\IslandBar.TrayRing.selftest",
-                                                        L"Local\\IslandBar.TrayRing.selftest.Event");
-                    publisher.header->abi = savedAbi;
-                    std::swprintf(trayWireDetail, 256, L"abi seen=%u, refused=%d",
-                                  refusing.abiSeen, refused ? 1 : 0);
-                    Check(refused && refusing.abiSeen == savedAbi + 1,
-                          L"a ring from another build is refused, not read", trayWireDetail);
-                }
-            }
-            // WHERE THE TRAY PAGE'S CARD STANDS: under the TRAY button, not under the one at the other
-            // end of the island.
-            //
-            // The panel and the tray page are one card with one owner (NextCardOwner sees only "a panel is
-            // asked for"), so the position can only come from the PAGE -- and the two controls are the
-            // island's two ends, about 300 DIP apart. The tray page was centred on the SYSTEM button, which
-            // is what "点击托盘按钮 弹出的卡片不在这个按钮下面" was: press the button on the right, get a
-            // card under the left.
-            //
-            // Asserted as the two things a user would notice: the answer names the button that was pressed,
-            // and the card that follows from it contains that button's centre and not the other's.
-            {
-                const float trayCentre = DeckCardAnchorCentre(trayIsland, CardHang::TrayButton);
-                const float systemCentre = DeckCardAnchorCentre(trayIsland, CardHang::SystemButton);
-                const RectF trayButton = TrayButtonFor(trayIsland);
-                const RectF systemButton = SystemButtonFor(trayIsland);
-                const float trayButtonCentre = (trayButton.left + trayButton.right) * 0.5f;
+                const float systemCentre = DeckCardAnchorCentre(testIsland, CardHang::SystemButton);
+                const RectF systemButton = SystemButtonFor(testIsland);
                 const float systemButtonCentre = (systemButton.left + systemButton.right) * 0.5f;
+                const float startCentre = DeckCardAnchorCentre(testIsland, CardHang::StartButton);
+                const float startButtonCentre =
+                    (StartButtonFor(testIsland).left + StartButtonFor(testIsland).right) * 0.5f;
 
                 const float monitor = 2560.0f;
-                const float cardLeft = CardLeftFor(trayCentre - kExpandedWidthDip * 0.5f,
+                const float cardLeft = CardLeftFor(systemCentre - kExpandedWidthDip * 0.5f,
                                                    kExpandedWidthDip, monitor);
                 const float cardRight = cardLeft + kExpandedWidthDip;
 
-                std::swprintf(trayDetail, 256,
-                              L"tray anchor %.0f (button %.0f), panel anchor %.0f (button %.0f), card "
+                std::swprintf(cardDetail, 256,
+                              L"panel anchor %.0f (button %.0f), start anchor %.0f (button %.0f), card "
                               L"%.0f..%.0f",
-                              trayCentre, trayButtonCentre, systemCentre, systemButtonCentre, cardLeft,
+                              systemCentre, systemButtonCentre, startCentre, startButtonCentre, cardLeft,
                               cardRight);
-                const float startCentre = DeckCardAnchorCentre(trayIsland, CardHang::StartButton);
-                const float startButtonCentre =
-                    (StartButtonFor(trayIsland).left + StartButtonFor(trayIsland).right) * 0.5f;
-                Check(Nearly(trayCentre, trayButtonCentre, 0.01f) &&
-                          Nearly(systemCentre, systemButtonCentre, 0.01f) &&
+                Check(Nearly(systemCentre, systemButtonCentre, 0.01f) &&
                           Nearly(startCentre, startButtonCentre, 0.01f),
-                      L"each page's card is centred on the button that opened it", trayDetail);
-                Check(std::fabs(trayCentre - systemCentre) > 200.0f,
-                      L"... and those two buttons are far enough apart for a wrong answer to show",
-                      trayDetail);
-                Check(trayCentre > cardLeft && trayCentre < cardRight &&
-                          !(systemButtonCentre > cardLeft && systemButtonCentre < cardRight),
-                      L"the tray page's card covers the tray button and not the system button",
-                      trayDetail);
+                      L"each card is centred on the button that opened it", cardDetail);
+                Check(std::fabs(startCentre - systemCentre) > 30.0f,
+                      L"... and the two controls do not give the same answer", cardDetail);
+                Check(systemCentre > cardLeft && systemCentre < cardRight,
+                      L"the card that follows from the anchor covers the button it hangs from", cardDetail);
                 Check(cardLeft >= 8.0f && cardRight <= monitor - 8.0f,
-                      L"and that card is still on the screen", trayDetail);
+                      L"and that card is still on the screen", cardDetail);
             }
 
             // ONLY THE LEVEL THAT IS SHOWING MAY ANSWER THE POINTER (2026-10-14, HANDOFF 8.81) -------
             //
-            // Reported with a photograph of the tray page's lower band: "在托盘卡片红框的地方拖动 声音也会跟着
-            // 变". All four levels are ONE card in one rectangle, so each of them has controls where another
-            // has empty space -- the panel's volume slider lies exactly across that band -- and the hit test
-            // was asking "is the panel open", which is true for every level of it.
+            // Reported with a photograph of one page's lower band: "在托盘卡片红框的地方拖动 声音也会跟着变".
+            // All the levels are ONE card in one rectangle, so each of them has controls where another has
+            // empty space -- the panel's volume slider lies exactly across that band -- and the hit test was
+            // asking "is the panel open", which is true for every level of it.
             {
-                const PanelLevel levels[4] = {PanelLevel::Tiles, PanelLevel::Sound, PanelLevel::Tray,
-                                              PanelLevel::Start};
+                const PanelLevel levels[3] = {PanelLevel::Tiles, PanelLevel::Sound, PanelLevel::Start};
                 int answering = 0;
                 int crossing = 0;
                 for (const PanelLevel showing : levels) {
@@ -6856,9 +6577,9 @@ void TestMusicCardLayout() {
                 }
                 wchar_t levelInputDetail[192];
                 std::swprintf(levelInputDetail, 192,
-                              L"%d of 16 pairs answer, %d of them from another level", answering,
+                              L"%d of 9 pairs answer, %d of them from another level", answering,
                               crossing);
-                Check(answering == 4 && crossing == 0,
+                Check(answering == 3 && crossing == 0,
                       L"exactly one level answers a point: the one that is showing", levelInputDetail);
             }
 
@@ -6867,84 +6588,72 @@ void TestMusicCardLayout() {
             // Every row of NextPanelLevel's table, because the two "put away" rows are what a later change
             // would drop: the card is still on screen for the length of its exit, so a level read per frame
             // from the page that was asked for switches the CONTENT on the first frame of the retraction --
-            // the tiles appear under a shrinking tray page ("点击展开 再点击收回去 会显示出系统卡片的东西"),
-            // and the card would also slide 296 DIP back to the other end of the bar.
+            // the tiles appear under a shrinking 声音输出 page ("点击展开 再点击收回去 会显示出系统卡片的东西").
             {
                 const PanelLevel panelOpen =
-                    NextPanelLevel(PanelLevel::Tiles, true, true, false, false, false);
-                const PanelLevel trayOpen =
-                    NextPanelLevel(PanelLevel::Tiles, true, true, true, false, false);
+                    NextPanelLevel(PanelLevel::Tiles, true, true, false, false);
                 const PanelLevel soundOpen =
-                    NextPanelLevel(PanelLevel::Tiles, true, true, false, true, false);
+                    NextPanelLevel(PanelLevel::Tiles, true, true, true, false);
                 const PanelLevel startOpen =
-                    NextPanelLevel(PanelLevel::Tiles, true, true, false, false, true);
+                    NextPanelLevel(PanelLevel::Tiles, true, true, false, true);
                 const PanelLevel back =
-                    NextPanelLevel(PanelLevel::Sound, true, true, false, false, false);
-                const PanelLevel trayClosing =
-                    NextPanelLevel(PanelLevel::Tray, true, false, true, false, false);
+                    NextPanelLevel(PanelLevel::Sound, true, true, false, false);
                 const PanelLevel soundClosing =
-                    NextPanelLevel(PanelLevel::Sound, true, false, false, false, false);
+                    NextPanelLevel(PanelLevel::Sound, true, false, false, false);
                 const PanelLevel startClosing =
-                    NextPanelLevel(PanelLevel::Start, true, false, false, false, false);
+                    NextPanelLevel(PanelLevel::Start, true, false, false, false);
                 const PanelLevel gone =
-                    NextPanelLevel(PanelLevel::Tray, false, false, false, false, false);
-                std::swprintf(trayDetail, 256,
-                              L"tiles=%d tray=%d sound=%d start=%d back=%d trayClosing=%d "
-                              L"soundClosing=%d startClosing=%d gone=%d",
-                              static_cast<int>(panelOpen), static_cast<int>(trayOpen),
-                              static_cast<int>(soundOpen), static_cast<int>(startOpen),
-                              static_cast<int>(back), static_cast<int>(trayClosing),
+                    NextPanelLevel(PanelLevel::Start, false, false, false, false);
+                std::swprintf(cardDetail, 256,
+                              L"tiles=%d sound=%d start=%d back=%d soundClosing=%d startClosing=%d gone=%d",
+                              static_cast<int>(panelOpen), static_cast<int>(soundOpen),
+                              static_cast<int>(startOpen), static_cast<int>(back),
                               static_cast<int>(soundClosing), static_cast<int>(startClosing),
                               static_cast<int>(gone));
-                Check(panelOpen == PanelLevel::Tiles && trayOpen == PanelLevel::Tray &&
-                          soundOpen == PanelLevel::Sound && startOpen == PanelLevel::Start &&
-                          back == PanelLevel::Tiles,
-                      L"a page that is asked for is the level the card shows", trayDetail);
-                Check(trayClosing == PanelLevel::Tray && soundClosing == PanelLevel::Sound &&
-                          startClosing == PanelLevel::Start,
-                      L"... and the panel being put away holds that level for the whole exit", trayDetail);
-                Check(gone == PanelLevel::Tiles && trayOpen != panelOpen,
+                Check(panelOpen == PanelLevel::Tiles && soundOpen == PanelLevel::Sound &&
+                          startOpen == PanelLevel::Start && back == PanelLevel::Tiles,
+                      L"a page that is asked for is the level the card shows", cardDetail);
+                Check(soundClosing == PanelLevel::Sound && startClosing == PanelLevel::Start,
+                      L"... and the panel being put away holds that level for the whole exit", cardDetail);
+                Check(gone == PanelLevel::Tiles && startOpen != panelOpen,
                       L"... released only when the card is gone, so the next open decides afresh",
-                      trayDetail);
+                      cardDetail);
 
                 // ... AND EXACTLY ONE CONTROL LOOKS OPEN, whichever level is showing -- the property the
                 // system button's chevron was getting wrong (it pointed up for every level, because it was
                 // asked `systemPanelOpen`, which is true whenever any card is up).
-                const PanelLevel every[] = {PanelLevel::Tiles, PanelLevel::Sound, PanelLevel::Tray,
-                                            PanelLevel::Start};
+                const PanelLevel every[] = {PanelLevel::Tiles, PanelLevel::Sound, PanelLevel::Start};
                 bool oneEach = true;
                 bool noneWithoutACard = true;
                 for (PanelLevel level : every) {
                     const ControlLit lit = ControlLitFor(level, true);
-                    const int count = (lit.system ? 1 : 0) + (lit.tray ? 1 : 0) + (lit.start ? 1 : 0);
+                    const int count = (lit.system ? 1 : 0) + (lit.start ? 1 : 0);
                     if (count != 1) oneEach = false;
                     // NO CARD AT ALL: nothing may be lit. This is the case the first version got wrong -- a
                     // bar that had just started, with no card on screen, showed the system button's chevron
                     // pointing up, because `Tiles` also means "nothing was asked for".
                     const ControlLit off = ControlLitFor(level, false);
-                    if (off.system || off.tray || off.start) noneWithoutACard = false;
+                    if (off.system || off.start) noneWithoutACard = false;
                 }
-                std::swprintf(trayDetail, 256,
-                              L"tiles: system=%d start=%d tray=%d | start: system=%d start=%d tray=%d | "
-                              L"no card: system=%d start=%d tray=%d",
+                std::swprintf(cardDetail, 256,
+                              L"tiles: system=%d start=%d | start: system=%d start=%d | "
+                              L"no card: system=%d start=%d",
                               ControlLitFor(PanelLevel::Tiles, true).system ? 1 : 0,
                               ControlLitFor(PanelLevel::Tiles, true).start ? 1 : 0,
-                              ControlLitFor(PanelLevel::Tiles, true).tray ? 1 : 0,
                               ControlLitFor(PanelLevel::Start, true).system ? 1 : 0,
                               ControlLitFor(PanelLevel::Start, true).start ? 1 : 0,
-                              ControlLitFor(PanelLevel::Start, true).tray ? 1 : 0,
                               ControlLitFor(PanelLevel::Tiles, false).system ? 1 : 0,
-                              ControlLitFor(PanelLevel::Tiles, false).start ? 1 : 0,
-                              ControlLitFor(PanelLevel::Tiles, false).tray ? 1 : 0);
+                              ControlLitFor(PanelLevel::Tiles, false).start ? 1 : 0);
                 Check(oneEach,
-                      L"exactly one control shows that it is open, for every level", trayDetail);
+                      L"exactly one control shows that it is open, for every level", cardDetail);
                 Check(noneWithoutACard,
-                      L"... and none of them does when no card is up at all", trayDetail);
+                      L"... and none of them does when no card is up at all", cardDetail);
                 Check(SystemButtonShowsOpen(PanelLevel::Tiles) &&
-                          !SystemButtonShowsOpen(PanelLevel::Tray) &&
+                          SystemButtonShowsOpen(PanelLevel::Sound) &&
                           !SystemButtonShowsOpen(PanelLevel::Start) &&
-                          StartButtonShowsOpen(PanelLevel::Start),
-                      L"the system button is not lit by the tray page or the Start card", trayDetail);
+                          StartButtonShowsOpen(PanelLevel::Start) &&
+                          !StartButtonShowsOpen(PanelLevel::Tiles),
+                      L"the system button is not lit by the Start card, and the Start button is", cardDetail);
             }
 
             // THE START CARD'S OWN GEOMETRY, which is the whole of its layout: a grid that starts empty,
@@ -6955,35 +6664,35 @@ void TestMusicCardLayout() {
                 const RoundedBox startCard =
                     BoxForState(IslandState::Expanded, AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
                 const StartPageLayout startLayout = StartPageFor(startCard);
-                std::swprintf(trayDetail, 256,
+                std::swprintf(cardDetail, 256,
                               L"card x[%.0f,%.0f] y[%.0f,%.0f]; grid x[%.0f,%.0f] y[%.0f,%.0f]; "
                               L"footer top %.0f; avatar x[%.0f,%.0f]; power x[%.0f,%.0f]",
                               startCard.rect.left, startCard.rect.right, startCard.rect.top, startCard.rect.bottom,
                               startLayout.grid.left, startLayout.grid.right, startLayout.grid.top, startLayout.grid.bottom,
                               startLayout.footer.top, startLayout.avatar.left, startLayout.avatar.right,
                               startLayout.powerButton.left, startLayout.powerButton.right);
-                Check(startLayout.valid, L"the Start card has a layout", trayDetail);
+                Check(startLayout.valid, L"the Start card has a layout", cardDetail);
                 Check(startLayout.grid.bottom < startLayout.footer.top &&
                           startLayout.footer.bottom <= startCard.rect.bottom &&
                           startLayout.grid.top > startCard.rect.top,
-                      L"the pins area sits above the footer, inside the card", trayDetail);
+                      L"the pins area sits above the footer, inside the card", cardDetail);
                 Check(startLayout.avatar.right < startLayout.powerButton.left &&
                           startLayout.footer.left <= startLayout.avatar.left &&
                           startLayout.powerButton.right <= startLayout.footer.right,
                       L"the account picture and the power button share the footer without overlapping",
-                      trayDetail);
+                      cardDetail);
                 Check(startLayout.grid.left >= startCard.rect.left && startLayout.grid.right <= startCard.rect.right,
-                      L"... and the grid is inside the card's width", trayDetail);
+                      L"... and the grid is inside the card's width", cardDetail);
 
                 // The cells: six across, reading order, and every one of them inside the grid.
                 Check((StartPinCellFor(startLayout, 0).left == startLayout.grid.left),
-                      L"the first pinned tile starts at the grid's own corner", trayDetail);
+                      L"the first pinned tile starts at the grid's own corner", cardDetail);
                 Check(Nearly(StartPinCellFor(startLayout, 5).left - StartPinCellFor(startLayout, 0).left,
                              5.0f * (kStartCellWidth + kStartCellGap), 0.01f),
-                      L"six tiles fill the first row at one pitch each", trayDetail);
+                      L"six tiles fill the first row at one pitch each", cardDetail);
                 Check(StartPinCellFor(startLayout, 6).left == startLayout.grid.left &&
                           StartPinCellFor(startLayout, 6).top > StartPinCellFor(startLayout, 0).top,
-                      L"the seventh tile starts the second row", trayDetail);
+                      L"the seventh tile starts the second row", cardDetail);
                 bool cellsInside = true;
                 for (int i = 0; i < StartPinCapacity(); ++i) {
                     const RectF cell = StartPinCellFor(startLayout, i);
@@ -6991,48 +6700,48 @@ void TestMusicCardLayout() {
                         cellsInside = false;
                     }
                 }
-                Check(cellsInside, L"every cell of a full grid is inside the pins area", trayDetail);
+                Check(cellsInside, L"every cell of a full grid is inside the pins area", cardDetail);
                 Check(StartPinCapacity() >= 12,
-                      L"the grid holds enough tiles to be worth filling by hand", trayDetail);
+                      L"the grid holds enough tiles to be worth filling by hand", cardDetail);
 
                 // The hit tests, at the points a user would press.
                 const RectF third = StartPinCellFor(startLayout, 3);
                 const float pinCentreY = (third.top + third.bottom) * 0.5f;
                 Check(StartPinCellAt(startLayout, 6, (third.left + third.right) * 0.5f, pinCentreY) == 3,
-                      L"a point on the fourth tile answers the fourth tile", trayDetail);
+                      L"a point on the fourth tile answers the fourth tile", cardDetail);
                 Check(StartPinCellAt(startLayout, 6, third.left - 2.0f, pinCentreY) == 2,
-                      L"... and the gap before it belongs to the tile before", trayDetail);
+                      L"... and the gap before it belongs to the tile before", cardDetail);
                 Check(StartPinCellAt(startLayout, 0, (startLayout.grid.left + startLayout.grid.right) * 0.5f,
                                      (startLayout.grid.top + startLayout.grid.bottom) * 0.5f) == -1 &&
                           StartRectHasPoint(startLayout.grid, (startLayout.grid.left + startLayout.grid.right) * 0.5f,
                                             (startLayout.grid.top + startLayout.grid.bottom) * 0.5f),
                       L"with nothing pinned, the middle of the area is the area and not a tile",
-                      trayDetail);
+                      cardDetail);
                 Check(StartRectHasPoint(startLayout.powerButton,
                                         (startLayout.powerButton.left + startLayout.powerButton.right) * 0.5f,
                                         (startLayout.powerButton.top + startLayout.powerButton.bottom) * 0.5f),
-                      L"the power button is under its own centre", trayDetail);
+                      L"the power button is under its own centre", cardDetail);
 
                 const RectF powerRow = StartPowerRowFor(startCard, 0);
                 Check(StartPowerRowAt(startCard, (powerRow.left + powerRow.right) * 0.5f,
                                       (powerRow.top + powerRow.bottom) * 0.5f) == 0,
-                      L"the first power row answers zero", trayDetail);
+                      L"the first power row answers zero", cardDetail);
                 Check(StartPowerRowFor(startCard, 4).bottom < startLayout.footer.top,
-                      L"... and the fifth stands above the footer, not on it", trayDetail);
+                      L"... and the fifth stands above the footer, not on it", cardDetail);
 
                 // The picker: rows from the grid's top, one per application, and the scroll offset is part
                 // of the answer.
                 const RectF pickerRow = StartPickerRowFor(startCard, 1);
                 Check(StartPickerRowAt(startCard, 0, 40, (pickerRow.left + pickerRow.right) * 0.5f,
                                        (pickerRow.top + pickerRow.bottom) * 0.5f) == 1,
-                      L"the second visible row answers the second application", trayDetail);
+                      L"the second visible row answers the second application", cardDetail);
                 Check(StartPickerRowAt(startCard, 7, 40, (pickerRow.left + pickerRow.right) * 0.5f,
                                        (pickerRow.top + pickerRow.bottom) * 0.5f) == 8,
                       L"... and with the list scrolled by seven, the second row is the ninth application",
-                      trayDetail);
+                      cardDetail);
                 Check(StartPickerRowAt(startCard, 0, 40, startLayout.grid.left + 4.0f, startLayout.footer.top - 2.0f) ==
                           -1,
-                      L"the footer's edge is not a row", trayDetail);
+                      L"the footer's edge is not a row", cardDetail);
 
                 // ... AND THE SCROLL OFFSET IS PART OF THAT ANSWER, which is also what makes the card ask
                 // for a frame at all when the pointer moves or the wheel turns. The three checks below are
@@ -7046,316 +6755,21 @@ void TestMusicCardLayout() {
                 const int kPin = static_cast<int>(IslandWindow::StartHitTarget::Pin);
                 const int kPickerRow = static_cast<int>(IslandWindow::StartHitTarget::PickerRow);
                 Check(!StartCardAsksForFrame(kPickerRow, 3, 7, kPickerRow, 3, 7),
-                      L"a pointer that has not moved asks for nothing", trayDetail);
+                      L"a pointer that has not moved asks for nothing", cardDetail);
                 Check(StartCardAsksForFrame(kPickerRow, 4, 7, kPickerRow, 3, 7),
-                      L"another row under the same pointer is a change", trayDetail);
+                      L"another row under the same pointer is a change", cardDetail);
                 Check(StartCardAsksForFrame(kPin, 0, 7, kPickerRow, 0, 7),
-                      L"... and so is a different kind of control", trayDetail);
+                      L"... and so is a different kind of control", cardDetail);
                 Check(StartCardAsksForFrame(kPickerRow, 3, 8, kPickerRow, 3, 7),
-                      L"one notch of wheel with the pointer standing still is a change too", trayDetail);
+                      L"one notch of wheel with the pointer standing still is a change too", cardDetail);
                 // The frame loop's own initialisers: "no target, no row, no scroll" against trackers that
                 // start at a value no hit can equal. The first frame of every run is this comparison.
                 Check(StartCardAsksForFrame(kNone, -1, 0, kNone, -2, -1),
-                      L"the first frame is a change (the trackers start unknown)", trayDetail);
+                      L"the first frame is a change (the trackers start unknown)", cardDetail);
             }
 
             // THE ROW GIVES WAY, AND THAT IS THE POINT OF THE RESERVATION.
             //
-            // The count of application icons that fit is computed from the room left after the BUTTON
-            // (see the frame loop): what has to hold is that the row, laid out with that count, ends before
-            // the button begins -- for every number of windows, which is what makes this a property rather
-            // than a coincidence for today's.
-            {
-                const float reserved = TrayButtonReservedDip();
-                const RectF button = TrayButtonFor(trayIsland);
-                bool clear = true;
-                for (int wanted : {1, 4, 12, 40}) {
-                    const int fits = TaskIconsThatFit(trayMonitor - reserved, wanted);
-                    if (fits <= 0) continue;
-                    float rowAmounts[FrameState::kMaxTaskButtons] = {};
-                    for (int i = 0; i < fits; ++i) rowAmounts[i] = 0.0f;
-                    // Laid out from the row's own box, which is the island moved along by the button: the
-                    // same box the renderer and the hit test use.
-                    const RoundedBox rowBox = RowAnchorWithTray(trayIsland, true);
-                    const RectF lastIcon = TaskIconButtonAtAmounts(rowBox, fits - 1, fits, rowAmounts);
-                    // The WIDEST case: that last button opened, which is what the row is sized against.
-                    const RectF lastIconOpen =
-                        TaskIconButtonAt(rowBox, fits - 1, fits, fits - 1, 1.0f);
-                    // The row must not run INTO the button, which is now to its LEFT as well -- so the test
-                    // is against the button's left edge at one end and the monitor's margin at the other.
-                    if (lastIcon.left < button.right || lastIconOpen.right > trayMonitor - kRowRightMarginDip) {
-                        clear = false;
-                        std::swprintf(trayDetail, 256,
-                                      L"%d windows -> %d icons: row starts at %.0f (button ends %.0f), open "
-                                      L"row ends at %.0f (monitor margin %.0f)",
-                                      wanted, fits, lastIcon.left, button.right, lastIconOpen.right,
-                                      trayMonitor - kRowRightMarginDip);
-                    }
-                }
-                Check(clear, L"the application row ends before the tray button, however many windows are "
-                             L"open",
-                      trayDetail);
-            }
-
-            // The button's own hit test, and the card's: a control that could not be reached would be drawn
-            // and completely inert -- the defect the application icons had before the union was extended for
-            // them.
-            {
-                const RectF button = TrayButtonFor(trayIsland);
-                const float centreX = (button.left + button.right) * 0.5f;
-                const float centreY = (button.top + button.bottom) * 0.5f;
-
-                // ... and a cell of the card's grid is a cell of that grid: two rows down and one along is
-                // icon number 6, and its neighbour to the left is a different one.
-                const RoundedBox trayCellCard =
-                    BoxForState(IslandState::Expanded,
-                                AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
-                const TrayPageLayout page = TrayPageFor(trayCellCard, kMaxTrayIcons);
-                const RectF& sixth = page.cells[6];
-                const int cellHit = TrayPageCellAt(trayCellCard, kMaxTrayIcons,
-                                                   (sixth.left + sixth.right) * 0.5f,
-                                                   (sixth.top + sixth.bottom) * 0.5f);
-                const int cellMiss = TrayPageCellAt(trayCellCard, kMaxTrayIcons,
-                                                    page.cells[0].left - 6.0f,
-                                                    page.cells[0].top + 4.0f);
-                std::swprintf(trayDetail, 256,
-                              L"button centre %ld,%ld; cell 6 centre -> %d, left of the grid -> %d",
-                              static_cast<LONG>(centreX), static_cast<LONG>(centreY), cellHit,
-                              cellMiss);
-                Check(cellHit == 6 && cellMiss < 0,
-                      L"a point on a tray cell is that icon and the margin beside it is not",
-                      trayDetail);
-
-                // --- the tray's OWN menu (2026-10-14, HANDOFF 8.80) -------------------------------
-                //
-                // A right click on a cell used to ask the shell for the application's menu: 300-600 ms,
-                // the shell's panel on screen (until 8.79), and the menu at the corner of the screen
-                // instead of under the pointer. This menu is the bar's own, and these are the two rules it
-                // runs on: WHICH rows it offers, and WHERE they land.
-                {
-                    // Which rows: an entry that would do nothing is not offered, and the application's own
-                    // menu -- the slow one, the one that leaves the bar -- is always last.
-                    //
-                    // The row the user found dead on 2026-10-15 is 应用自己的菜单… on a cell whose callback has
-                    // never been learned: it can only send the application its right-click message, and there
-                    // is no message to send. 打开 is the same question about the left button. Both are pinned
-                    // here as ABSENT rather than present-and-inert.
-                    TrayMenuAction all[kMaxTrayMenuEntries] = {};
-                    const int withEverything = TrayMenuEntriesFor(TrayMenuFacts{true, true, true}, all,
-                                                                  kMaxTrayMenuEntries);
-                    TrayMenuAction noCallback[kMaxTrayMenuEntries] = {};
-                    const int withNoCallback = TrayMenuEntriesFor(TrayMenuFacts{true, true, false}, noCallback,
-                                                                  kMaxTrayMenuEntries);
-                    TrayMenuAction bare[kMaxTrayMenuEntries] = {};
-                    const int withNothing = TrayMenuEntriesFor(TrayMenuFacts{false, false, false}, bare,
-                                                               kMaxTrayMenuEntries);
-                    TrayMenuAction onlyPath[kMaxTrayMenuEntries] = {};
-                    const int withPath = TrayMenuEntriesFor(TrayMenuFacts{false, true, true}, onlyPath,
-                                                            kMaxTrayMenuEntries);
-                    std::swprintf(trayDetail, 256,
-                                  L"everything=%d (last=%d), no callback=%d, nothing=%d, path only=%d",
-                                  withEverything,
-                                  withEverything > 0
-                                      ? static_cast<int>(all[withEverything - 1])
-                                      : -1,
-                                  withNoCallback, withNothing, withPath);
-                    Check(withEverything == 6 && all[0] == TrayMenuAction::Open &&
-                              all[1] == TrayMenuAction::ActivateWindow &&
-                              all[2] == TrayMenuAction::OpenLocation &&
-                              all[3] == TrayMenuAction::CloseWindow &&
-                              all[4] == TrayMenuAction::QuitApplication &&
-                              all[5] == TrayMenuAction::ApplicationMenu &&
-                              withNoCallback == 4 && noCallback[0] == TrayMenuAction::ActivateWindow &&
-                              noCallback[1] == TrayMenuAction::OpenLocation &&
-                              noCallback[2] == TrayMenuAction::CloseWindow &&
-                              noCallback[3] == TrayMenuAction::QuitApplication &&
-                              // path only, WITH a callback: 打开 and 应用自己的菜单… come back with it, and
-                              // the two window rows stay out because there is no window -- four rows.
-                              withNothing == 1 && bare[0] == TrayMenuAction::QuitApplication && withPath == 4,
-                          L"the menu offers only what can be done, and never a row that would do nothing",
-                          trayDetail);
-                    // The one entry with a second state says so in words, and only that one does.
-                    wchar_t armedDetail[192];
-                    std::swprintf(armedDetail, 192, L"'%ls' / '%ls'",
-                                  TrayMenuArmedLabel(TrayMenuAction::QuitApplication),
-                                  TrayMenuArmedLabel(TrayMenuAction::Open));
-                    Check(std::wcscmp(TrayMenuArmedLabel(TrayMenuAction::QuitApplication),
-                                      L"再点一次：结束应用") == 0 &&
-                              std::wcscmp(TrayMenuArmedLabel(TrayMenuAction::Open), L"打开") == 0,
-                          L"an armed entry says what the second press will do, and only it changes",
-                          armedDetail);
-                }
-                {
-                    // Where: the box hangs off the point it was opened for, and stays inside the card --
-                    // the card is what the window's input region covers, so a menu outside it would be
-                    // drawn where clicks cannot reach.
-                    const RoundedBox menuCard =
-                        BoxForState(IslandState::Expanded,
-                                    AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f));
-                    const float midX = (menuCard.rect.left + menuCard.rect.right) * 0.5f;
-                    const float midY = (menuCard.rect.top + menuCard.rect.bottom) * 0.5f;
-                    const TrayMenuLayout middle = TrayMenuFor(menuCard, midX, midY, 4);
-                    // A pointer in the card's bottom-right corner: the menu has to flip, not overflow.
-                    const TrayMenuLayout corner =
-                        TrayMenuFor(menuCard, menuCard.rect.right - 2.0f, menuCard.rect.bottom - 2.0f, 4);
-                    // ... and one at the top-left, where there is no room below or to the right either.
-                    const TrayMenuLayout topLeft = TrayMenuFor(menuCard, menuCard.rect.left + 2.0f,
-                                                              menuCard.rect.top + 2.0f, 4);
-                    const bool rowsInside =
-                        middle.rows[3].bottom <= middle.box.bottom + 0.01f &&
-                        middle.box.left >= menuCard.rect.left && middle.box.right <= menuCard.rect.right;
-                    const bool cornerInside = corner.box.left >= menuCard.rect.left &&
-                                              corner.box.right <= menuCard.rect.right &&
-                                              corner.box.top >= menuCard.rect.top &&
-                                              corner.box.bottom <= menuCard.rect.bottom;
-                    const bool topLeftInside = topLeft.box.left >= menuCard.rect.left &&
-                                               topLeft.box.right <= menuCard.rect.right &&
-                                               topLeft.box.top >= menuCard.rect.top &&
-                                               topLeft.box.bottom <= menuCard.rect.bottom;
-                    const int rowHit = TrayMenuRowAt(middle, (middle.rows[1].left + middle.rows[1].right) *
-                                                                  0.5f,
-                                                     (middle.rows[1].top + middle.rows[1].bottom) * 0.5f);
-                    const int rowMiss =
-                        TrayMenuRowAt(middle, middle.box.left - 30.0f, middle.box.top - 30.0f);
-                    const bool rowsOrdered = middle.rows[0].bottom <= middle.rows[1].top + 0.01f &&
-                                             middle.rows[1].bottom <= middle.rows[2].top + 0.01f;
-                    std::swprintf(trayDetail, 256,
-                                  L"middle %ld..%ld x %ld..%ld, corner %ld..%ld, row hit %d miss %d",
-                                  static_cast<LONG>(middle.box.left), static_cast<LONG>(middle.box.right),
-                                  static_cast<LONG>(middle.box.top), static_cast<LONG>(middle.box.bottom),
-                                  static_cast<LONG>(corner.box.left),
-                                  static_cast<LONG>(corner.box.right), rowHit, rowMiss);
-                    Check(middle.count == 4 && rowsInside && cornerInside && topLeftInside &&
-                              rowsOrdered && rowHit == 1 && rowMiss < 0,
-                          L"the menu hangs off its point, stays in the card, and its rows are hit-tested",
-                          trayDetail);
-                }
-
-                MonitorGeometry trayMon;
-                trayMon.screen = {0, 0, 2560, 1440};
-                trayMon.work = {0, 32, 2560, 1408};
-                trayMon.dpi = 96;
-                trayMon.dpiY = 96;
-                const RECT trayWindow = {0, 0, 2560, 320};
-                const POINT onTheTray = {static_cast<LONG>(centreX), static_cast<LONG>(centreY)};
-                std::swprintf(trayDetail, 256, L"tray button centre %ld,%ld", onTheTray.x, onTheTray.y);
-                Check(IslandWindow::ShouldAcceptPointer(trayMon, trayWindow, onTheTray,
-                                                        IslandState::Collapsed, 0, 0.0f, false, 1),
-                      L"the window accepts the pointer on the tray button", trayDetail);
-                Check(!IslandWindow::ShouldAcceptPointer(trayMon, trayWindow, onTheTray,
-                                                         IslandState::Collapsed, 0, 0.0f, false, 0),
-                      L"and does not when there is no tray to show", trayDetail);
-            }
-
-            // THE WINDOW REGION MUST COVER IT, or the tray is drawn and clipped -- measured on the way to
-            // this feature: sixteen icons found, handed to the frame, and not one pixel on screen, because
-            // the region stopped at the application row. (The same rule in its newest form: with the button
-            // beside the ISLAND, the region has to reach past the button -- which it does by reaching the
-            // row's own right edge, since the row is laid out from the box the button moves along.)
-            {
-                MonitorGeometry trayMon;
-                trayMon.screen = {0, 0, 2560, 1440};
-                trayMon.work = {0, 32, 2560, 1408};
-                trayMon.dpi = 96;
-                trayMon.dpiY = 96;
-                const IslandAnchor trayAnchor = AnchorForWindow(0.0f, kPillTopMarginDip, 2560.0f);
-                const RECT withTray = IslandWindow::InputRegionFor(
-                    trayMon, IslandState::Collapsed, trayAnchor, RoundedBox{}, 0.0f, -1, 0.0f,
-                    kMaxTrayIcons);
-                // The button, and the row that starts after it: both inside the region.
-                const RoundedBox restPill =
-                    IslandBoxFor(2560.0f, kCollapsedWidthDip, kCollapsedHeightDip);
-                const RectF button = TrayButtonFor(restPill);
-                const float rowRight =
-                    TaskIconButtonAt(restPill, 0, 1, -1).right;   // one icon, at rest
-                std::swprintf(trayDetail, 256,
-                              L"button ends at %.0f, region at %ld px, one-icon row ends at %.0f",
-                              button.right, withTray.right, rowRight);
-                Check(withTray.right >= static_cast<LONG>(button.right) &&
-                          withTray.right >= static_cast<LONG>(rowRight),
-                      L"the region covers the tray button and the row beside it", trayDetail);
-
-                // ... AND THE WHOLE SURFACE THE FIXED CONTROLS STAND ON, on the LEFT as well.
-                //
-                // That surface reaches a pad further left than the system button, and the region is what
-                // CLIPS the window: measured from the system button, the region stopped 4 DIP short of what
-                // is painted and the left end of the capsule came out with a square bite out of it, where the
-                // round end should be. Reported with a photograph: "看一下 这个地方缺了一角".
-                const RoundedBox surface = BarClusterFor(restPill, true);
-                std::swprintf(trayDetail, 256,
-                              L"surface left %.0f, region left %ld px; surface y [%.0f,%.0f], region y "
-                              L"[%ld,%ld]",
-                              surface.rect.left, withTray.left, surface.rect.top, surface.rect.bottom,
-                              withTray.top, withTray.bottom);
-                Check(withTray.left <= static_cast<LONG>(surface.rect.left) &&
-                          withTray.top <= static_cast<LONG>(surface.rect.top) &&
-                          withTray.bottom >= static_cast<LONG>(surface.rect.bottom),
-                      L"the region covers the one surface the deck, the island and the tray stand on",
-                      trayDetail);
-
-                // NOT asserted any more: that asking for the tray WIDENS the region. It did while the button
-                // stood at the window's right margin -- the region then had to be pushed out to reach it.
-                // Beside the ISLAND the button is between two things the region already covers, and the
-                // property that replaced it is the one asserted where the button is laid out: the row
-                // starts after the button.
-            }
-
-            // PRESSING AN ICON IN THE CARD: the identity, the position, and the test that picks the shell's
-            // button out of the ones on screen.
-            //
-            // The press itself cannot be exercised here -- it shows the shell's tray for a moment and
-            // presses a real application's icon, which a self-test has no business doing -- but its three
-            // ingredients can be, and they are where the defects were:
-            //
-            //   * every icon carries a shell identity (a UID or a GUID), or pressing it is impossible;
-            //   * the shell answers where the icons it displays ARE, and does not answer for the ones it
-            //     only has registered -- which is what tells a cell that can be pressed from one that
-            //     cannot;
-            //   * the rectangle the shell gives is matched to a UI Automation element by POSITION, and that
-            //     match has to be exact: a press on the wrong rectangle opens the wrong application.
-            {
-                TrayIcons live;
-                const int count = live.Refresh();
-                wchar_t detail[256];
-                std::swprintf(detail, 256, L"the live tray holds %d icon(s)", count);
-                Check(count > 0, L"the tray list has something in it to press", detail);
-
-                int withIdentity = 0;
-                for (int i = 0; i < count; ++i) {
-                    const TrayIcon& icon = live.At(i);
-                    if (icon.hasUid || icon.hasGuid) ++withIdentity;
-                }
-                std::swprintf(detail, 256, L"%d of %d carry a UID or a GUID", withIdentity, count);
-                Check(withIdentity == count,
-                      L"every icon in the card carries the identity an application registers it with",
-                      detail);
-
-                // ... AND WHAT A PRESS NEEDS IS THE APPLICATION'S CALLBACK, not a position: the icons that
-                // have one are pressable, the rest open this bar's own menu (see TrayPress.h). Asserted
-                // loosely on purpose -- how many are learned depends on what is running and on what allows a
-                // module inside it, so the number is reported rather than demanded.
-                const int covered = CountCoveredIcons(live);
-                std::swprintf(detail, 256,
-                              L"%d of %d icon(s) have a learned callback (cache: %ls)", covered, count,
-                              L"tray_callbacks.txt");
-                Check(covered >= 0 && covered <= count,
-                      L"the callback cache answers for the tray it describes and for nobody else", detail);
-                Info(L"tray presses go by learned callback", detail);
-            }
-            {
-                // Every result has a sentence, because these are what the log shows a user who asks why a
-                // press did not work. A case the switch forgot would print "?".
-                const TrayPressResult all[] = {
-                    TrayPressResult::Pressed, TrayPressResult::NoEntry, TrayPressResult::NoWindow,
-                    TrayPressResult::Refused,
-                };
-                bool named = true;
-                for (TrayPressResult result : all) {
-                    const wchar_t* text = TrayPressResultName(result);
-                    if (!text || !*text || std::wcscmp(text, L"?") == 0) named = false;
-                }
-                Check(named, L"every press result can be said in words");
-            }
         }
 
         // The input region must be as tall as the shape that is DRAWN, including the card.
@@ -8511,29 +7925,29 @@ int RunTaskbarProbe() {
     LogAndPrint("IslandBar native-taskbar probe\n");
     LogAndPrint("-----------------------------------------------\n");
 
-    const HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!tray) {
+    const HWND nativeTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!nativeTaskbar) {
         LogAndPrint("  Shell_TrayWnd not found -- nothing to hide on this desktop\n");
         return 0;
     }
 
     RECT before = {};
-    GetWindowRect(tray, &before);
+    GetWindowRect(nativeTaskbar, &before);
     LogAndPrint("  Shell_TrayWnd %p  visible=%d  rect=%ld,%ld %ldx%ld\n",
-                reinterpret_cast<void*>(tray),
-                IsWindowVisible(tray) ? 1 : 0,
+                reinterpret_cast<void*>(nativeTaskbar),
+                IsWindowVisible(nativeTaskbar) ? 1 : 0,
                 before.left, before.top,
                 before.right - before.left, before.bottom - before.top);
 
-    DWORD trayPid = 0;
-    GetWindowThreadProcessId(tray, &trayPid);
-    LogAndPrint("  owned by pid %lu\n", static_cast<unsigned long>(trayPid));
+    DWORD shellPid = 0;
+    GetWindowThreadProcessId(nativeTaskbar, &shellPid);
+    LogAndPrint("  owned by pid %lu\n", static_cast<unsigned long>(shellPid));
 
     // Whether this process may even talk to that window. UIPI drops window
     // messages sent from a lower integrity level to a higher one, and ShowWindow
     // on another process's window is exactly that kind of message: it returns
     // FALSE and nothing happens, with no error to inspect.
-    HANDLE probe = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, trayPid);
+    HANDLE probe = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, shellPid);
     LogAndPrint("  OpenProcess(QUERY_LIMITED) -> %s (err %lu)\n",
                 probe ? "allowed" : "DENIED",
                 probe ? 0UL : static_cast<unsigned long>(GetLastError()));
@@ -8575,15 +7989,15 @@ int RunTaskbarProbe() {
     wchar_t ours[64] = {};
     wchar_t theirs[64] = {};
     integrityOf(GetCurrentProcessId(), ours, 64);
-    integrityOf(trayPid, theirs, 64);
+    integrityOf(shellPid, theirs, 64);
     LogAndPrint("  integrity: island_bar = %ls, taskbar = %ls\n", ours, theirs);
 
     // --- method 1: ShowWindow(SW_HIDE) ---
-    const BOOL showRc = ShowWindow(tray, SW_HIDE);
+    const BOOL showRc = ShowWindow(nativeTaskbar, SW_HIDE);
     Sleep(150);
-    const bool hiddenByShow = IsWindowVisible(tray) == FALSE;
+    const bool hiddenByShow = IsWindowVisible(nativeTaskbar) == FALSE;
     LogAndPrint("  [%s] ShowWindow(SW_HIDE)  returned=%d  visible=%d\n",
-                hiddenByShow ? " OK " : "FAIL", showRc ? 1 : 0, IsWindowVisible(tray) ? 1 : 0);
+                hiddenByShow ? " OK " : "FAIL", showRc ? 1 : 0, IsWindowVisible(nativeTaskbar) ? 1 : 0);
 
     bool anyWorked = hiddenByShow;
 
@@ -8592,13 +8006,13 @@ int RunTaskbarProbe() {
     // exit would hide exactly that answer.
     if (!hiddenByShow) {
         // --- method 2: SetWindowPos(SWP_HIDEWINDOW) ---
-        const BOOL posRc = SetWindowPos(tray, nullptr, 0, 0, 0, 0,
+        const BOOL posRc = SetWindowPos(nativeTaskbar, nullptr, 0, 0, 0, 0,
                                         SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE |
                                         SWP_NOZORDER | SWP_NOACTIVATE);
         Sleep(150);
-        const bool hiddenByPos = IsWindowVisible(tray) == FALSE;
+        const bool hiddenByPos = IsWindowVisible(nativeTaskbar) == FALSE;
         LogAndPrint("  [%s] SetWindowPos(SWP_HIDEWINDOW) returned=%d  visible=%d\n",
-                    hiddenByPos ? " OK " : "FAIL", posRc ? 1 : 0, IsWindowVisible(tray) ? 1 : 0);
+                    hiddenByPos ? " OK " : "FAIL", posRc ? 1 : 0, IsWindowVisible(nativeTaskbar) ? 1 : 0);
         anyWorked = anyWorked || hiddenByPos;
     }
 
@@ -8610,19 +8024,19 @@ int RunTaskbarProbe() {
         // edge puts it out of reach of the pointer, which also defeats the
         // reveal-on-hover strip that auto-hide leaves behind.
         RECT moved = {};
-        const BOOL moveRc = SetWindowPos(tray, nullptr, before.left, -400,
+        const BOOL moveRc = SetWindowPos(nativeTaskbar, nullptr, before.left, -400,
                                          before.right - before.left,
                                          before.bottom - before.top,
                                          SWP_NOZORDER | SWP_NOACTIVATE);
         Sleep(200);
-        GetWindowRect(tray, &moved);
+        GetWindowRect(nativeTaskbar, &moved);
         const bool offScreen = (moved.bottom <= 0);
         LogAndPrint("  [%s] SetWindowPos(off-screen)   returned=%d  rect top=%ld\n",
                     offScreen ? " OK " : "FAIL", moveRc ? 1 : 0, moved.top);
 
         // Put it back before the next method, since they all start from the
         // visible state.
-        SetWindowPos(tray, nullptr, before.left, before.top,
+        SetWindowPos(nativeTaskbar, nullptr, before.left, before.top,
                      before.right - before.left, before.bottom - before.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         Sleep(150);
@@ -8634,9 +8048,9 @@ int RunTaskbarProbe() {
         // re-create or fight it. On a build that refuses to hide the bar, this at
         // least removes it visually. The rectangle still receives clicks, which is
         // why the probe reports it rather than treating it as a full solution.
-        const LONG_PTR oldEx = GetWindowLongPtrW(tray, GWL_EXSTYLE);
-        const BOOL layeredRc = SetWindowLongPtrW(tray, GWL_EXSTYLE, oldEx | WS_EX_LAYERED) != 0;
-        const BOOL alphaRc = SetLayeredWindowAttributes(tray, 0, 0, LWA_ALPHA);
+        const LONG_PTR oldEx = GetWindowLongPtrW(nativeTaskbar, GWL_EXSTYLE);
+        const BOOL layeredRc = SetWindowLongPtrW(nativeTaskbar, GWL_EXSTYLE, oldEx | WS_EX_LAYERED) != 0;
+        const BOOL alphaRc = SetLayeredWindowAttributes(nativeTaskbar, 0, 0, LWA_ALPHA);
         Sleep(200);
 
         // Sample the top-left corner, where the taskbar paints its own background.
@@ -8653,8 +8067,8 @@ int RunTaskbarProbe() {
                     static_cast<unsigned long>(pixel));
 
         // Restore the original extended style exactly, then visibility.
-        SetWindowLongPtrW(tray, GWL_EXSTYLE, oldEx);
-        SetWindowPos(tray, nullptr, 0, 0, 0, 0,
+        SetWindowLongPtrW(nativeTaskbar, GWL_EXSTYLE, oldEx);
+        SetWindowPos(nativeTaskbar, nullptr, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
                      SWP_FRAMECHANGED);
         anyWorked = anyWorked || transparent;
@@ -8686,15 +8100,15 @@ int RunTaskbarProbe() {
     }
 
     // --- restore, unconditionally ---
-    ShowWindow(tray, SW_SHOW);
-    SetWindowPos(tray, nullptr, before.left, before.top,
+    ShowWindow(nativeTaskbar, SW_SHOW);
+    SetWindowPos(nativeTaskbar, nullptr, before.left, before.top,
                  before.right - before.left, before.bottom - before.top,
                  SWP_SHOWWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
     Sleep(200);
 
     RECT restored = {};
-    GetWindowRect(tray, &restored);
-    const bool back = IsWindowVisible(tray) != FALSE;
+    GetWindowRect(nativeTaskbar, &restored);
+    const bool back = IsWindowVisible(nativeTaskbar) != FALSE;
     LogAndPrint("  [%s] restored: visible=%d rect=%ld,%ld %ldx%ld\n",
                 back ? " OK " : "FAIL", back ? 1 : 0,
                 restored.left, restored.top,
