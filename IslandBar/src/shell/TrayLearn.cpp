@@ -731,6 +731,23 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     // arrive after that: two waits, not one, because "did the module arrive at all" and "did the application
     // register" are different questions and the log has to be able to tell them apart.
     Sleep(1200);
+
+    // ASK A SECOND TIME, BECAUSE THE FIRST ASK GOES OUT BEFORE ANYONE IS LISTENING (2026-10-16).
+    //
+    // The first broadcast is sent the moment the hooks are accepted -- and accepting a hook is not the same
+    // as the module being resident: it lands when one of those threads next pumps a message, and only then
+    // does it install the channel that reads registrations (WH_CALLWNDPROC: a registration is a SENT
+    // WM_COPYDATA and never passes through a message queue, which is why the WH_GETMESSAGE hook this pass
+    // installs cannot see it). MEASURED: the first pass after the machine came up captured 0 registrations
+    // and learned nothing -- `0 of 14 icon(s) have a callback entry` -- while the very next pass, same
+    // build, module already pinned in Explorer, captured 42 and learned 8. An application registers once
+    // per ask, so asking once is asking at the wrong moment. The second ask costs one broadcast.
+    if (broadcast) {
+        const UINT taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+        DWORD_PTR ignored = 0;
+        SendMessageTimeoutW(HWND_BROADCAST, taskbarCreated, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 2000,
+                            &ignored);
+    }
     Sleep(1500);
 
     // THE HOOKS ARE UNHOOKED NOW, AND THAT IS HARMLESS, WHICH IS THE POINT OF THE PIN.
