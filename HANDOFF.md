@@ -12350,3 +12350,88 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar
   枚举**可见**窗口并做前后差，或者用 `--dump` 直接听。
 * 命令行里的应用名（`微信`）要经 `CommandLineToArgvW` 取宽参数；PowerShell 5.1 会把非 ASCII 参数转成 ANSI。
 * `.ps1` 纯 ASCII；探针源码也用 `\uXXXX` 写字形，不写字面中文。
+
+---
+
+## 8.142 **重启后的复测：Codex 那一格通了，微信那一格查出我们的 v4 编码写反了**（2026-10-16 01:05）
+
+用户：「可以」——批准两件事：把 1.3 装回机器，以及把 8.141 欠着的两项实测跑掉。
+
+### 8.142.1 复测之前的机器状态（都是实测，不是推断）
+
+* **屏幕上当时跑的是 1.2，不是树里的 1.3。** 00:26 有人跑过 1.2 的卸载器（`%TEMP%\IslandBarSetup.log`：
+  `program removed: C:\Users\18340\IslandBar\island_bar.exe`），00:53:53 又用**同一个旧安装包**
+  （`%USERPROFILE%\IslandBar\IslandBarSetup.exe`，文件版本 **1.2**、日期 10-13，1691136 字节的载荷）装回来。
+  树里最新的是 **1.3**（10-15 22:13，Release 1740288 字节）。所以 10-14/10-15 那些改动（最大化让出工作区、
+  亮度行、Wi-Fi/蓝牙/夜间/字幕的真开关、每帧画刷缓存、把真托盘裁到通知区域）当时都不在用户手上。
+* **两套配置全量重建**：Debug 与 Release 都 OK、零告警（`/WX` 生效）。
+* **自检 912 项全过 / 0 失败**（副本拷到 `%TEMP%\islandbar-1.3` 跑的，`exit=0`），`island_smoke` exit=0。
+* **1.3 Release 已部署**到 `%USERPROFILE%\IslandBar\island_bar.exe`；1.2 那份备份为
+  `island_bar.exe.bak-v12-20261016`。默认行为仍是**整条藏起来**，要留真托盘得加 `--native-tray`
+  （`main.cpp` 5140/5166/5410）。
+* **沙箱里的会话看不到任何窗口**：`FindWindow("Shell_TrayWnd")` 返回 0、整机可见窗口 0 个 ——
+  所以探针类实测（`--observe` / `--sendright` / `--dump`）一律要在沙箱外、正常权限下跑。
+
+### 8.142.2 **推翻 8.140.2 的 v4 结论**：真实编码与记的正好相反
+
+拿一个 uVersion=4 的应用（Wallpaper Engine，uid 1000、回调 0x0400）做 `--dump`：对**真实图标**做一次
+**真实右键**，抓 shell 亲口发的三条消息：
+
+| 顺序 | hwnd | wParam | lParam |
+|---|---|---|---|
+| 1 | `WPETrayWindow` | `0x0045095A` | `0x03E80204` |
+| 2 | `WPETrayWindow` | `0x0045095A` | `0x03E80205` |
+| 3 | `WPETrayWindow` | `0x0045095A` | `0x03E8007B` |
+
+解码：`0x45095A` 拆成 x=0x095A=**2394**、y=0x0045=**69**，而 UIA 报的图标矩形是 `2374,49 40x40`、
+探针的点击落点正是 `2394,69` —— **wParam 是鼠标的屏幕坐标**。lParam 的 LOWORD 依次是 `WM_RBUTTONDOWN` /
+`WM_RBUTTONUP` / `WM_CONTEXTMENU`，HIWORD 是 `0x03E8`=**1000**=它的 uid。所以：
+
+    version 4:  wParam = MAKELONG(鼠标 x, 鼠标 y)      // 屏幕坐标
+                 lParam = MAKELONG(事件, uid)           // LOWORD = 事件，HIWORD = uid
+
+8.140.2 写的是 **wParam=MAKELONG(uid, WM_CONTEXTMENU)** + **lParam=打包坐标** —— 两个字段正好互换了。
+昨天之所以"看起来对"，是因为把应用被打崩后的崩溃对话框（10.4 秒模态忙等）读成了"模态菜单循环"。
+
+顺带一条：v4 的一次真实右键，shell 发的是**三条**消息（down / up / CONTEXTMENU），前两条我们都在发，
+第三条才是触发菜单的那一条。
+
+### 8.142.3 Codex 那一格（8.140.6）：**通了**
+
+* `--dump ChatGPT`：shell 发给它的是 `0x8001 wParam=0x3 lParam=0x204` 与 `0x205`（**经典编码**：uid 进
+  wParam、lParam 是鼠标消息），与我们发的**逐字节相同**；收到之后它自己新建了一个窗口
+  （`0x360974`，类 `Chrome_WidgetWin_1`）。
+* `--sendright ChatGPT 1250 60 scan`：我们发的 **v3-rbuttonup**（经典）→ `delivered=yes`、窗口忙 43.5 ms、
+  **新窗口 `0x140908`（`Chrome_WidgetWin_1`）1226,48..1521,443（295x395）出现在我们格子的位置**，
+  前台窗口也变成它。同一次里的 v4-contextmenu 什么都没发生（它是 version 0，符合预期）。
+* 所以 8.140.6 的猜想成立：昨晚"真实右键也不弹"是**那个进程当时的状态**（安全模式）问题，不是我们的实现。
+  这台机器上这一格现在可用 —— **这是产品自绘托盘 + 路线 A 的第一个"发过去就真的弹"的端到端案例**。
+
+### 8.142.4 微信那一格：我们的 v4 编码把它打崩了（这一格仍未通过，但原因已定）
+
+`--sendright 微信 1250 60 all`（5 种编码各一次）实测：
+
+* 第 1 条 **v4-contextmenu** 发过去：窗口忙 262 ms、`delivered=NO`，接着屏幕上出现的是**微信自己的崩溃
+  对话框**（原话：`Weixin 遇到错误，给您带来不便，我们深表歉意。`，截图
+  `captures/wechat-retest-v4-contextmenu.png`）。
+* 微信随后整体退出并自动重启，**重启后停在"需在手机上完成登录"**（截图
+  `captures/wechat-retest-v4-select.png`）。事件日志里没有 WER 记录 —— 它用的是自己的错误报告窗口。
+* 后 4 条编码发过去时应用已处在崩溃后的状态（47 ms / 0.0 ms 忙，什么都没弹）。
+* **于是 8.140.5 欠着的那一格有了答案**：昨晚那 10.4 秒不是"模态菜单循环"，是**同一个崩溃对话框**；
+  "证据被无关对话框污染"这句话也不准确 —— 那个对话框就是这条消息造成的。
+* 机理与刚量到的协议一致：我们给的 wParam 的 HIWORD 是事件、LOWORD 是 uid(0)，lParam 是打包坐标；
+  微信按 v4 真实语义解出 HIWORD(lParam)=**60** 当 uid/索引，越界即崩。**错一次就能把应用打崩**，
+  这一条要写进产品实现注意事项。
+
+### 8.142.5 这一轮的收获与代价
+
+* 收获：v4 协议被实测钉死（坐标与 uid 两个独立特征互证）；Codex 那一格从"不明"变成"可用"；
+  `--dump`（在目标进程里挂只读钩子 + 一次真实点击）再次成为决定性工具。
+* 代价：**微信被我们的错误编码打断过一次**，用户需要重新在手机上确认登录。
+
+### 8.142.6 还没有做的
+
+1. **用修正后的 v4 编码复测微信**（探针里那 5 个 variant 的 v4 两条要改成
+   `wParam=MAKELONG(x,y)` / `lParam=MAKELONG(事件,uid)`），判据仍是窗口级证据里出现它自己的菜单窗口。
+2. 8.141 的两个待拍板项（没有菜单的应用要不要兜底、往 explorer 放只读模块的授权）——产品代码仍未动。
+3. 推送 GitHub（本地领先 `origin/main` 10 个提交）与文档回填（ROADMAP / FEATURES 仍是"托盘退役"那一版的说法）。
