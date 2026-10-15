@@ -379,6 +379,54 @@ bool LineIsFor(const std::wstring& line, const std::wstring& exe, unsigned uid,
     return static_cast<unsigned>(wcstoul(uidText.c_str(), nullptr, 10)) == uid;
 }
 
+// =====================================================================
+//  HOW THIS SIDE READS THE REPORT -- FOR THE SAME REASON IT WRITES IT ITSELF
+// =====================================================================
+//
+// A file handle that shares read, write AND delete, and the whole file read in one go. `_wfopen_s(..., L"r")`
+// is REFUSED with a sharing violation while the module holds this file for writing, and it fails silently, so
+// the pass reported `0 registration(s) captured` with its own lines sitting in the file it had just written
+// (measured 2026-10-16) -- while the next process to run, whose pass deleted the file first and left the
+// module holding a handle to an unlinked file, counted all of them. Reading the report is not allowed to
+// depend on who happens to have it open.
+class ReportReader {
+public:
+    bool Open(const std::wstring& path) {
+        const HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ,
+                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return false;
+        std::vector<char> bytes(1 << 20, 0);
+        DWORD read = 0;
+        const BOOL ok = ReadFile(handle, bytes.data(), static_cast<DWORD>(bytes.size() - 1), &read, nullptr);
+        CloseHandle(handle);
+        if (!ok || read == 0) return text.empty();
+        const int wide = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(read), nullptr, 0);
+        if (wide <= 0) return false;
+        text.assign(static_cast<size_t>(wide), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(read), text.data(), wide);
+        offset = 0;
+        return true;
+    }
+
+    // One line at a time, in the shape fgetws used to hand out: NUL-terminated, the newline removed.
+    bool Next(wchar_t* out, size_t count) {
+        if (!out || count == 0 || offset >= text.size()) return false;
+        size_t end = text.find(L'\n', offset);
+        if (end == std::wstring::npos) end = text.size();
+        size_t length = end - offset;
+        if (length > count - 1) length = count - 1;
+        std::wmemcpy(out, text.data() + offset, length);
+        out[length] = L'\0';
+        offset = end + 1;
+        return true;
+    }
+
+private:
+    std::wstring text;
+    size_t offset = 0;
+};
+
 // EVERYTHING THE MODULE HAS WRITTEN SO FAR, MERGED INTO THE CACHE THE PRESS PATH READS.
 //
 // Separate from the pass that installs the module, and that separation is what makes the module resident
@@ -417,10 +465,10 @@ void HarvestReport(TrayLearnResult* result) {
         };
         std::vector<VersionFact> versions;
         {
-            FILE* stream = nullptr;
-            if (_wfopen_s(&stream, report.c_str(), L"r, ccs=UTF-8") == 0 && stream) {
+            ReportReader reader;
+            if (reader.Open(report)) {
                 wchar_t line[1024] = {};
-                while (fgetws(line, 1024, stream)) {
+                while (reader.Next(line, 1024)) {
                     if (!wcsstr(line, L"NIM_SETVERSION")) continue;
                     wchar_t exe[260] = {};
                     if (!LineExe(line, exe, 260)) continue;
@@ -433,7 +481,6 @@ void HarvestReport(TrayLearnResult* result) {
                     if (Field(line, L"guid", guid, 64) && guid[0] == L'-') guid[0] = 0;
                     versions.push_back(VersionFact{BaseNameLower(exe), uid, guid, version});
                 }
-                fclose(stream);
             }
         }
         const auto statedVersion = [&versions](const std::wstring& exe, unsigned uid,
@@ -449,11 +496,11 @@ void HarvestReport(TrayLearnResult* result) {
             return 0;   // nothing said: the caller keeps whatever the registration itself carried
         };
 
-        FILE* stream = nullptr;
-        if (_wfopen_s(&stream, report.c_str(), L"r, ccs=UTF-8") == 0 && stream) {
+        ReportReader reader;
+        if (reader.Open(report)) {
             wchar_t line[1024] = {};
             std::vector<DWORD> attached;
-            while (fgetws(line, 1024, stream)) {
+            while (reader.Next(line, 1024)) {
                 if (wcsstr(line, L"attached pid")) {
                     unsigned pid = 0;
                     if (FieldNumber(line, L"pid", &pid, false) &&
@@ -498,7 +545,6 @@ void HarvestReport(TrayLearnResult* result) {
                 ++result->captured;
                 learned.push_back(item);
             }
-            fclose(stream);
             result->appsReached = static_cast<int>(attached.size());
         }
     }
@@ -643,6 +689,9 @@ bool InstallTrayHook() {
     return true;
 }
 
+// Defined beside the ring reader, below; this pass waits on what it fills in.
+bool FillObserverResult(TrayLearnResult* result, DWORD pid);
+
 TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     TrayLearnResult result;
     result.icons = icons.Count();
@@ -674,6 +723,7 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     // A hook that cannot be installed is not an error: it is reported through `appsReached` below.
     std::vector<DWORD> tried;
     std::vector<HHOOK> hooks;
+    std::vector<DWORD> hookThreads;
     const FARPROC procedure = GetProcAddress(g_hookModule, "IslandTrayHookProc");
     {
         // FindWindowW, not the card: the shell's tray window is the one that receives the registrations, and
@@ -704,8 +754,12 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
                         const HHOOK installed = SetWindowsHookExW(WH_GETMESSAGE,
                                                                   reinterpret_cast<HOOKPROC>(procedure),
                                                                   g_hookModule, entry.th32ThreadID);
-                        if (installed) hooks.push_back(installed);
-                        else lastError = GetLastError();
+                        if (installed) {
+                            hooks.push_back(installed);
+                            hookThreads.push_back(entry.th32ThreadID);
+                        } else {
+                            lastError = GetLastError();
+                        }
                     } while (Thread32Next(snapshot, &entry));
                 }
                 CloseHandle(snapshot);
@@ -719,6 +773,56 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
         }
     }
 
+    // --- MAKE THE MODULE LAND NOW, INSTEAD OF WHEN SOMETHING ELSE WAKES THOSE THREADS -------------
+    //
+    // Accepting a hook is not the same as the module being resident: a WH_GETMESSAGE hook runs when the hooked
+    // thread takes a message OUT OF ITS QUEUE, and until that happens this module is not in the shell's process
+    // at all -- so everything below (the handshake included) waits on an event a quiet Explorer may not
+    // produce. MEASURED 2026-10-16: the first pass after Explorer restarted captured 0 registrations from 143
+    // thread hooks (57 accepted), and the pass minutes later, same build, captured 42 -- the module had landed
+    // in between, on its own.
+    //
+    // A posted WM_NULL is the cheapest way to make a thread take a message out of its queue. It is inert (a
+    // null window handle, no window procedure runs), and the retrieval is exactly the call the module is
+    // waiting for.
+    int poked = 0;
+    for (DWORD threadId : hookThreads) {
+        if (PostThreadMessageW(threadId, WM_NULL, 0, 0)) ++poked;
+    }
+    result.poked = poked;
+
+    // --- WAIT FOR THE MODULE TO SAY IT IS LISTENING, THEN ASK ONCE ---------------------------------
+    //
+    // The module publishes what it installed (platform/TrayRing.h: a control record carrying pid, tray thread,
+    // hook count, attempts and the error). Asking applications to register BEFORE that arrives is asking a
+    // question nobody is there to hear: an application registers once per ask.
+    //
+    // The wait is bounded and is not a proxy for the handshake -- if it runs out, the pass still asks (an
+    // application that registers late is better than one that is never asked) and says in the log that the
+    // observer was not up.
+    const DWORD shellPid = TrayShellProcessId();
+    const ULONGLONG observerFrom = GetTickCount64();
+    while (GetTickCount64() - observerFrom < kObserverWaitMs) {
+        DrainTrayRing(&result);
+        if (FillObserverResult(&result, shellPid)) break;
+        Sleep(50);
+    }
+    result.observerMs = static_cast<long long>(GetTickCount64() - observerFrom);
+    FillObserverResult(&result, shellPid);
+
+    if (result.observerReady) {
+        LogAndPrint(L"  tray hook: the observer is up in the shell (tray thread %u, %u hook(s), attempt %u, "
+                    L"%d of %d hooked thread(s) took the message, %lld ms)\n",
+                    result.observerTid, result.observerHooks, result.observerAttempts, poked,
+                    static_cast<int>(hookThreads.size()), result.observerMs);
+    } else {
+        LogAndPrint(L"  tray hook: the observer did NOT report ready in %lld ms (tray thread %u, %u hook(s), "
+                    L"attempt %u, last error %u) -- the registrations asked for below may go unread\n",
+                    result.observerMs, result.observerTid, result.observerHooks, result.observerAttempts,
+                    result.observerError);
+    }
+    std::fflush(stdout);
+
     // --- the signal that makes applications register again -------------------------------
     if (broadcast) {
         const UINT taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
@@ -726,29 +830,18 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
         SendMessageTimeoutW(HWND_BROADCAST, taskbarCreated, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 2000,
                             &ignored);
     }
-
-    // The module is loaded the next time a hooked thread takes a message out of its queue, and the answers
-    // arrive after that: two waits, not one, because "did the module arrive at all" and "did the application
-    // register" are different questions and the log has to be able to tell them apart.
-    Sleep(1200);
-
-    // ASK A SECOND TIME, BECAUSE THE FIRST ASK GOES OUT BEFORE ANYONE IS LISTENING (2026-10-16).
+    // --- WHAT THE ONE ASK PRODUCED, COLLECTED WHILE IT ARRIVES --------------------------------------
     //
-    // The first broadcast is sent the moment the hooks are accepted -- and accepting a hook is not the same
-    // as the module being resident: it lands when one of those threads next pumps a message, and only then
-    // does it install the channel that reads registrations (WH_CALLWNDPROC: a registration is a SENT
-    // WM_COPYDATA and never passes through a message queue, which is why the WH_GETMESSAGE hook this pass
-    // installs cannot see it). MEASURED: the first pass after the machine came up captured 0 registrations
-    // and learned nothing -- `0 of 14 icon(s) have a callback entry` -- while the very next pass, same
-    // build, module already pinned in Explorer, captured 42 and learned 8. An application registers once
-    // per ask, so asking once is asking at the wrong moment. The second ask costs one broadcast.
-    if (broadcast) {
-        const UINT taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
-        DWORD_PTR ignored = 0;
-        SendMessageTimeoutW(HWND_BROADCAST, taskbarCreated, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 2000,
-                            &ignored);
+    // One broadcast, then a drain loop: the second broadcast this used to make was hiding the ordering problem
+    // the handshake above now solves (an ask that goes out before the observer is up fails the same way
+    // whether it is the first or the second), while the flat sleep that replaced it was too short to see the
+    // answers -- see kAnswerWaitMs for the measurement. Draining here rather than sleeping also means the
+    // number this pass prints is what actually arrived, not what happened to be in the ring when it looked.
+    const ULONGLONG answersFrom = GetTickCount64();
+    while (GetTickCount64() - answersFrom < kAnswerWaitMs) {
+        DrainTrayRing(&result);
+        Sleep(200);
     }
-    Sleep(1500);
 
     // THE HOOKS ARE UNHOOKED NOW, AND THAT IS HARMLESS, WHICH IS THE POINT OF THE PIN.
     //
@@ -795,6 +888,117 @@ const char* CommandName(unsigned command) {
     }
 }
 
+// =====================================================================
+//  WHAT THE MODULE SAID IT INSTALLED, REMEMBERED PER PROCESS
+// =====================================================================
+//
+// The hook state is a control record and not a registration (see platform/TrayRing.h), and it is kept HERE
+// rather than inside whichever pass happens to read it: a module that is already resident published its
+// verdict when it landed -- possibly minutes before this pass, and already consumed by the frame loop's tick
+// -- so a pass that only looked at the records arriving DURING it would call a working observer absent. Two
+// slots, because the only interesting pair is the shell that is running and the shell that just was.
+namespace {
+constexpr int kKnownObservers = 2;
+struct KnownObserver {
+    DWORD pid = 0;
+    TrayHookState state;
+    bool valid = false;
+};
+KnownObserver g_observers[kKnownObservers];
+} // namespace
+
+void RememberObserver(const TrayHookState& state) {
+    if (state.pid == 0) return;
+    for (KnownObserver& slot : g_observers) {
+        if (slot.valid && slot.pid == state.pid) {
+            slot.state = state;   // the newest verdict about a process replaces the one before it
+            return;
+        }
+    }
+    for (KnownObserver& slot : g_observers) {
+        if (!slot.valid) {
+            slot.pid = state.pid;
+            slot.state = state;
+            slot.valid = true;
+            return;
+        }
+    }
+    // Both slots hold a process that is no longer the shell: one of them is the shell that just went away.
+    for (KnownObserver& slot : g_observers) {
+        if (slot.pid != TrayShellProcessId()) {
+            slot.pid = state.pid;
+            slot.state = state;
+            return;
+        }
+    }
+    g_observers[0].pid = state.pid;
+    g_observers[0].state = state;
+}
+
+const TrayHookState* KnownObserverFor(DWORD pid) {
+    if (pid == 0) return nullptr;
+    for (const KnownObserver& slot : g_observers) {
+        if (slot.valid && slot.pid == pid) return &slot.state;
+    }
+    return nullptr;
+}
+
+// The observer's numbers into the result its caller prints. `pid` is the shell this pass is about. Returns
+// true when the module is up, which is what the wait below stops on.
+bool FillObserverResult(TrayLearnResult* result, DWORD pid) {
+    const TrayHookState* state = KnownObserverFor(pid);
+    if (!state || !result) return false;
+    result->observerReady = state->ready;
+    result->observerTid = state->trayThread;
+    result->observerHooks = state->hooks;
+    result->observerAttempts = state->attempts;
+    result->observerError = state->lastError;
+    return state->ready;
+}
+
+// =====================================================================
+//  HOW THIS SIDE WRITES THE REPORT -- THE SAME WAY THE MODULE DOES
+// =====================================================================
+//
+// A FILE_APPEND_DATA handle that shares read, write AND delete, and one WriteFile per line.
+//
+// WHY NOT _wfopen_s(..., L"a, ccs=UTF-8"), WHICH IS WHAT THIS USED TO DO. That is the exact failure the
+// tray's first pass after an Explorer restart was made of, and it took a whole round to see it because it is
+// SILENT: the module holds this file open for the life of the shell process (TrayHook.cpp: ReportHandle), and
+// the CRT's append open is REFUSED with a sharing violation while that handle is alive -- measured 2026-10-16
+// with the bar's own numbers: `35 record(s) taken` ... and not one line and not one error anywhere.
+//
+// The shape it produces is precisely the symptom this round started from: a pass that runs while the module
+// has just landed in a NEW shell writes nothing and reports `0 registration(s) captured`, while the pass
+// AFTER the file has been deleted once (the module then holding a handle to a file that no longer has a name)
+// captures everything. The first ask learned nothing and the second one learned everything, and the
+// difference was never the ask -- it was whether this side could write.
+struct ReportAppender {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+
+    ~ReportAppender() {
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    }
+
+    bool Open(const std::wstring& path) {
+        handle = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+        return handle != INVALID_HANDLE_VALUE;
+    }
+
+    // UTF-8 explicitly, for the same reason the module is explicit: the file is read back by a reader that
+    // parses it by name, whatever the codepage of the process that happens to be writing.
+    bool Write(const wchar_t* line) {
+        if (handle == INVALID_HANDLE_VALUE || !line) return false;
+        char utf8[2048] = {};
+        const int bytes = WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+        if (bytes <= 1) return false;
+        DWORD written = 0;
+        return WriteFile(handle, utf8, static_cast<DWORD>(bytes - 1), &written, nullptr) != 0;
+    }
+};
+
 // WHAT THE MODULE READ IN THE SHELL, TAKEN OUT OF THE RING AND WRITTEN DOWN.
 //
 // The module publishes one record per registration into shared memory and nothing else: it runs inside the
@@ -809,12 +1013,27 @@ const char* CommandName(unsigned command) {
 int DrainTrayRing(TrayLearnResult* result) {
     static TrayRingReader reader;
     static unsigned cursor = 0;
+    // THE TWO NUMBERS THAT SAY WHERE A RECORD WAS LOST, reported the first few times they are asked for. This
+    // function is the only place where "the module published it" and "the bar learned it" can disagree, and it
+    // disagreed silently once (2026-10-16): the ring held 170 records, one of them the probe registrar's own
+    // icon, and the bar reported 0 captures with nothing anywhere saying which of the two sides was wrong.
+    static volatile LONG explained = 0;
+    static volatile LONG openFailures = 0;
 
     TrayRingRecord records[kTrayRingCapacity] = {};
     const unsigned taken = reader.Drain(cursor, records, kTrayRingCapacity);
     if (taken == 0) {
         // Nothing new. If a ring exists with a different ABI, say so once: two builds that disagree about the
         // layout must not sit there quietly learning nothing.
+        //
+        // ... and when the ring IS the one this build expects, the cursor and the writer's count are the whole
+        // story: equal numbers mean every record has been read, and a cursor ahead of the writer means this
+        // process read records another thread of this same bar consumed.
+        if (reader.header && InterlockedIncrement(&explained) <= 3) {
+            LogAndPrint(L"  tray ring: nothing new (written %ld, cursor %u)\n",
+                        static_cast<long>(reader.header->written), cursor);
+            std::fflush(stdout);
+        }
         if (!reader.header && reader.abiSeen != 0 && reader.abiSeen != kTrayRingAbi && !result->ringAbiMismatch) {
             result->ringAbiMismatch = true;
             LogAndPrint(L"  tray learn: the module is publishing on ABI %u and this bar reads %u -- no "
@@ -825,10 +1044,36 @@ int DrainTrayRing(TrayLearnResult* result) {
         return 0;
     }
 
-    const std::wstring report = HomePath(kReportFile);
-    FILE* stream = nullptr;
-    if (report.empty() || _wfopen_s(&stream, report.c_str(), L"a, ccs=UTF-8") != 0 || !stream) return 0;
+    // CONTROL RECORDS FIRST, and never as a registration: the module's state is what the caller WAITS on, and
+    // it is remembered per process rather than per pass (see RememberObserver).
+    bool anyRegistration = false;
     for (unsigned i = 0; i < taken; ++i) {
+        if (records[i].kind == TrayRingKind::HookState) {
+            RememberObserver(records[i].hook);
+            continue;
+        }
+        anyRegistration = true;
+    }
+    if (!anyRegistration) return static_cast<int>(taken);
+
+    const std::wstring report = HomePath(kReportFile);
+    int written = 0;
+    ReportAppender appender;
+    if (report.empty() || !appender.Open(report)) {
+        // The line cannot be written, so nobody can learn from these records -- and that is said out loud
+        // rather than counted as a capture. `captured` means "a registration that reached the cache's door",
+        // and it is counted in ONE place (the reader that parses these lines, see HarvestReport): counting the
+        // same record here as well made the number twice what it was.
+        if (InterlockedIncrement(&openFailures) <= 3) {
+            LogAndPrint(L"  tray ring: %u record(s) taken but '%ls' cannot be opened for append -- the "
+                        L"registrations in them are LOST\n",
+                        taken, report.c_str());
+            std::fflush(stdout);
+        }
+        return static_cast<int>(taken);
+    }
+    for (unsigned i = 0; i < taken; ++i) {
+        if (records[i].kind != TrayRingKind::Registration) continue;
         const TrayRegistration& registration = records[i].registration;
         if (!registration.valid) continue;
 
@@ -845,15 +1090,34 @@ int DrainTrayRing(TrayLearnResult* result) {
         }
         // The same field names the in-application path writes (and the same ones this file has always held):
         // the reader below parses by NAME, so the two sources stay interchangeable.
-        fwprintf(stream, L"call S %hs pid %u exe %ls hwnd %p uid %u msg 0x%04X version %u flags 0x%X guid %ls "
-                         L"tip \"%ls\" (read in the shell, over the ring)\n",
-                 CommandName(registration.command), ownerPid, exe.empty() ? L"-" : exe.c_str(), trayWindow,
-                 registration.uid, registration.callback, registration.version, registration.flags,
-                 guidText.empty() ? L"-" : guidText.c_str(), registration.tip);
-        ++result->captured;
+        wchar_t line[1024] = {};
+        _snwprintf_s(line, 1024, _TRUNCATE,
+                     L"call S %hs pid %u exe %ls hwnd %p uid %u msg 0x%04X version %u flags 0x%X guid %ls "
+                     L"tip \"%ls\" (read in the shell, over the ring)\n",
+                     CommandName(registration.command), ownerPid, exe.empty() ? L"-" : exe.c_str(), trayWindow,
+                     registration.uid, registration.callback, registration.version, registration.flags,
+                     guidText.empty() ? L"-" : guidText.c_str(), registration.tip);
+        if (appender.Write(line)) ++written;
     }
-    fclose(stream);
-    if (result->captured > 0) std::fflush(stdout);
+    // ONLY A DISCREPANCY IS WORTH A LINE, AND A DISCREPANCY IS WHAT COST A WHOLE ROUND HERE.
+    //
+    // The failure this reports on was invisible by construction: 35 records taken, no line written, no error
+    // raised, and the pass reporting `0 registration(s) captured`. So the quiet case -- every record became a
+    // line -- says nothing at all, and anything else says what was taken, what was written, where it went and
+    // what the records claimed to be.
+    if (written != static_cast<int>(taken)) {
+        wchar_t kinds[200] = {};
+        int used = 0;
+        for (unsigned i = 0; i < taken && i < 6; ++i) {
+            const int added = _snwprintf_s(kinds + used, 200 - used, _TRUNCATE, L" %u/%s",
+                                           static_cast<unsigned>(records[i].kind),
+                                           records[i].registration.valid ? L"valid" : L"invalid");
+            if (added > 0) used += added;
+        }
+        LogAndPrint(L"  tray ring: %u record(s) taken, %d written to '%ls' (kind/valid:%ls)\n", taken, written,
+                    report.c_str(), kinds);
+        std::fflush(stdout);
+    }
     return static_cast<int>(taken);
 }
 
@@ -887,6 +1151,30 @@ std::wstring UncoveredApplications(const TrayIcons& icons) {
         joined += exe;
     }
     return joined;
+}
+
+// One clause for the summary line every caller prints: was the observer in the shell up BEFORE the
+// applications were asked? Written once here because three call sites print that line, and the difference
+// between "nothing registered" and "nobody was listening" is the whole question this pass is about.
+std::wstring ObserverClause(const TrayLearnResult& learned) {
+    wchar_t text[320] = {};
+    if (learned.observerReady) {
+        _snwprintf_s(text, 320, _TRUNCATE,
+                     L"observer up on the tray thread (tid %u, %u hook(s), %lld ms)",
+                     learned.observerTid, learned.observerHooks, learned.observerMs);
+    } else if (learned.observerAttempts > 0) {
+        _snwprintf_s(text, 320, _TRUNCATE,
+                     L"observer NOT up -- the hook was refused (tray thread %u, %u hook(s), attempt %u, "
+                     L"last error %u, waited %lld ms)",
+                     learned.observerTid, learned.observerHooks, learned.observerAttempts, learned.observerError,
+                     learned.observerMs);
+    } else {
+        _snwprintf_s(text, 320, _TRUNCATE,
+                     L"observer did not report in %lld ms (%d of the hooked threads took the message that "
+                     L"loads the module)",
+                     learned.observerMs, learned.poked);
+    }
+    return text;
 }
 
 } // namespace island

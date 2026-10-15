@@ -219,8 +219,22 @@ void ReportLine(const wchar_t* format, ...) {
 volatile LONG g_callbackMessage = 0;   // the callback message the application registered (from NIM_ADD)
 void* volatile g_trayWindow = nullptr; // ... and the window it registered
 bool g_watch = false;
-HHOOK g_sentHooks[96] = {};
+
+// How many WH_CALLWNDPROC hooks this process will hold, and how many times the sent channel is retried. The
+// cap on the walk is what it always was (96): measured, Explorer has 143 threads, so the walk alone can never
+// promise that the tray thread is among them -- which is the whole reason the attempt below aims first.
+constexpr int kMaxSentHooks = 96;
+constexpr LONG kMaxSentAttempts = 3;
+HHOOK g_sentHooks[kMaxSentHooks] = {};
 int g_sentHookCount = 0;
+
+// THE SENT CHANNEL'S STATE. `attempted`/`settled`/`inFlight` are separate from the report structure below
+// because the hook procedure runs on EVERY hooked thread of this process and two of them can reach this at
+// once; the numbers themselves are only written while an attempt is in flight and read afterwards.
+volatile LONG g_sentAttempted = 0;   // EnsureHooked's full attempt has run
+volatile LONG g_sentInFlight = 0;    // ... and an attempt is running right now
+volatile LONG g_sentSettled = 0;     // ready, or out of attempts: stop trying
+volatile LONG g_sentAttempts = 0;
 
 bool MarkerPresent() {
     wchar_t home[MAX_PATH] = {};
@@ -302,6 +316,29 @@ const wchar_t* OwnerLeaf(HWND window, wchar_t* out, size_t count) {
     return out;
 }
 
+// A COPY THAT DID NOT DECODE, SAID OUT LOUD (2026-10-16).
+//
+// This used to be a silent return, and that silence cost a round of measuring: the channel was installed on
+// the right thread, it was CALLED, it saw 23 WM_COPYDATA messages arrive at Shell_TrayWnd -- and the bar
+// counted 0 registrations, with nothing anywhere saying why. Three lines per process is enough: what the
+// shell sent (dwData), how big it was (cbData), and what its first bytes said.
+void ReportUndecodedCopy(const COPYDATASTRUCT* data) {
+    static volatile LONG explained = 0;
+    if (!data || InterlockedIncrement(&explained) > 3) return;
+    unsigned tag = 0;
+    unsigned command = 0xFFFFFFFFu;
+    if (data->lpData && data->cbData >= sizeof(tag)) {
+        std::memcpy(&tag, data->lpData, sizeof(tag));
+        if (data->cbData >= 8) {
+            std::memcpy(&command, static_cast<const unsigned char*>(data->lpData) + 4, sizeof(command));
+        }
+    }
+    ReportLine(L"call S ? pid %lu: a WM_COPYDATA did not decode -- dwData %lu, cbData %lu, tag 0x%08X, "
+               L"command %u (the tag has to be 0x%08X and the copy at least %llu bytes)",
+               GetCurrentProcessId(), data->dwData, data->cbData, tag, command, island::kTrayCopyTag,
+               static_cast<unsigned long long>(island::kTrayCopyMinimum));
+}
+
 // One WM_COPYDATA, decoded if it is a tray registration. Writes the same line the in-application path writes
 // (see LogCall), with "S" in place of "W"/"A" so the reader can tell where it was read, and with pid instead
 // of exe when the owning process refuses to name its image.
@@ -316,7 +353,10 @@ void ReportShellCopy(const wchar_t* channel, HWND receiver, WPARAM wparam, LPARA
     // before it reaches somebody's desktop.
     const island::TrayRegistration registration =
         island::DecodeTrayRegistration(data->lpData, data->cbData);
-    if (!registration.valid) return;
+    if (!registration.valid) {
+        ReportUndecodedCopy(data);
+        return;
+    }
 
     // ... AND IT GOES OUT OVER THE RING, not into a file.
     //
@@ -360,23 +400,133 @@ LRESULT CALLBACK SentProc(int code, WPARAM wparam, LPARAM lparam) {
     return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 
-// One CALLWNDPROC hook per thread of this process. hMod is NULL because the procedure lives in this very
-// process (documented for exactly this case), and the hooks are deliberately never removed: this module is
-// pinned and the process is about to be measured, not lived in.
-void InstallSentWatch() {
-    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return;
-    THREADENTRY32 entry = {};
-    entry.dwSize = sizeof(entry);
-    if (Thread32First(snapshot, &entry)) {
-        do {
-            if (entry.th32OwnerProcessID != GetCurrentProcessId()) continue;
-            if (g_sentHookCount >= 96) break;
-            const HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, SentProc, nullptr, entry.th32ThreadID);
-            if (hook) g_sentHooks[g_sentHookCount++] = hook;
-        } while (Thread32Next(snapshot, &entry));
+// One CALLWNDPROC hook on one thread. hMod is NULL because the procedure lives in this very process
+// (documented for exactly this case), and the hooks are deliberately never removed: this module is pinned and
+// the process is about to be measured, not lived in.
+bool HookOneThread(DWORD threadId, unsigned* error) {
+    if (threadId == 0) return false;
+    if (g_sentHookCount >= kMaxSentHooks) return false;
+    const HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, SentProc, nullptr, threadId);
+    if (!hook) {
+        if (error) *error = GetLastError();
+        return false;
     }
-    CloseHandle(snapshot);
+    g_sentHooks[g_sentHookCount++] = hook;
+    return true;
+}
+
+// The thread the shell DELIVERS registrations to, and whether it is ours to hook at all.
+//
+// "Ours" decides the whole strategy: hMod NULL means the hook procedure lives in the CALLING process, so only
+// its own threads can be hooked. Inside the shell that is exactly the case this module was deployed for;
+// inside an application the tray window belongs to the shell, where this hook would be refused, and the walk
+// below is the only route that can work.
+DWORD TrayThreadForThisProcess(bool* inShell) {
+    if (inShell) *inShell = false;
+    const HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!tray) return 0;
+    DWORD pid = 0;
+    const DWORD tid = GetWindowThreadProcessId(tray, &pid);
+    if (inShell) *inShell = pid == GetCurrentProcessId();
+    return tid;
+}
+
+// WHAT ONE ATTEMPT MANAGED. Every number here travels to the bar (see PublishSentWatch), because the failure
+// this replaces was silent: a pass reported 143 threads and 57 accepted hooks with no line saying WHICH
+// threads, so it could not be told apart from "the tray thread was in the other 86".
+struct SentWatchReport {
+    bool ready = false;        // the channel is up: the thread that receives registrations is watched
+    bool inShell = false;
+    unsigned trayThread = 0;
+    unsigned hooks = 0;        // hooks this process holds by the end of the attempt
+    unsigned attempts = 0;
+    unsigned lastError = 0;
+};
+SentWatchReport g_sentWatch;
+
+// THE HANDSHAKE, and why it goes to the ring rather than to the report file.
+//
+// The bar used to answer "is anybody listening?" with a sleep, and its first ask after Explorer restarted
+// went out before this side existed at all -- measured 2026-10-16: 0 registrations captured from a pass that
+// reported 143 thread hooks, and 42 from the same build minutes later. A record in shared memory is the one
+// signal that survives the bar truncating the report file (a pinned module holds its handle and keeps writing
+// into the unlinked file, see platform/TrayRing.h), and it is where the bar is already looking.
+void PublishSentWatch(const SentWatchReport& report) {
+    island::TrayHookState state;
+    state.pid = GetCurrentProcessId();
+    state.inShell = report.inShell;
+    state.ready = report.ready;
+    state.trayThread = report.trayThread;
+    state.hooks = report.hooks;
+    state.attempts = report.attempts;
+    state.lastError = report.lastError;
+    g_ring.PublishHookState(state);
+}
+
+// One attempt at the sent channel. `first` adds the snapshot walk; the retries repeat only the ONE hook that
+// matters, because the walk cannot be undone and repeating it would add hooks without adding coverage.
+//
+// ORDER IS THE FIX OF 2026-10-16. A registration is a WM_COPYDATA SENT to Shell_TrayWnd, so the hook that
+// sees it is a WH_CALLWNDPROC on THAT WINDOW'S THREAD. The walk alone never promised that thread: it hooks up
+// to 96 of this process's 143 threads in whatever order the snapshot produced. The measurement that settled
+// it is the probe in scripts/retired/tray (probe-tray-observer.cpp): hooked on that ONE thread, it captures
+// 12-53 registrations every single time.
+void AttemptSentWatch(bool first) {
+    const LONG attempt = InterlockedIncrement(&g_sentAttempts);
+    SentWatchReport report;
+    report.attempts = static_cast<unsigned>(attempt);
+    report.trayThread = TrayThreadForThisProcess(&report.inShell);
+
+    if (report.inShell && report.trayThread) {
+        if (HookOneThread(report.trayThread, &report.lastError)) report.ready = true;
+    }
+
+    if (!report.ready && first) {
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 entry = {};
+            entry.dwSize = sizeof(entry);
+            if (Thread32First(snapshot, &entry)) {
+                do {
+                    if (entry.th32OwnerProcessID != GetCurrentProcessId()) continue;
+                    if (g_sentHookCount >= kMaxSentHooks) break;
+                    unsigned error = 0;
+                    if (!HookOneThread(entry.th32ThreadID, &error)) {
+                        if (error && !report.ready) report.lastError = error;
+                        continue;
+                    }
+                    // ... and the walk DOES settle the question when it happens to cover the tray thread:
+                    // that, and not the number of hooks, is what makes the channel ready.
+                    if (report.inShell && entry.th32ThreadID == report.trayThread) report.ready = true;
+                } while (Thread32Next(snapshot, &entry));
+            }
+            CloseHandle(snapshot);
+        }
+    }
+
+    report.hooks = static_cast<unsigned>(g_sentHookCount);
+    // Outside the shell there is no tray thread to be ready ON: any accepted hook is the channel, exactly as
+    // it was before this change.
+    if (!report.inShell) report.ready = report.hooks > 0;
+
+    g_sentWatch = report;
+    if (report.ready || attempt >= kMaxSentAttempts) InterlockedExchange(&g_sentSettled, 1);
+
+    PublishSentWatch(report);
+    ReportLine(L"sent watch pid %lu: %ls, tray thread %u, %u of this process's threads hooked "
+               L"(attempt %u of %ld, last error %u)",
+               GetCurrentProcessId(),
+               report.ready ? L"the channel is up" : L"NOT ready -- registrations may go unread",
+               report.trayThread, report.hooks, report.attempts, kMaxSentAttempts, report.lastError);
+}
+
+// The retries, driven by the messages this process already handles: no sleep and no spin inside somebody
+// else's message pump, one attempt per message, and nothing at all once the state is settled.
+void MaybeRetrySentWatch() {
+    if (!g_sentAttempted || g_sentSettled || g_sentInFlight) return;
+    if (InterlockedCompareExchange(&g_sentInFlight, 1, 0) != 0) return;
+    AttemptSentWatch(false);
+    InterlockedExchange(&g_sentInFlight, 0);
 }
 
 // What one walk found: how many slots were redirected, and how many ALREADY pointed at the detour. The
@@ -873,7 +1023,16 @@ void EnsureHooked() {
     // WM_COPYDATA sent TO it (see ReportShellCopy), and that is read on the WH_CALLWNDPROC side only. The
     // marker file still decides whether the NOISY observation log is written; it no longer decides whether
     // registrations are seen.
-    InstallSentWatch();
+    //
+    // ... AND IT IS ATTEMPTED HERE, ONCE. This runs inside the shell's own message handling, so a failed
+    // attempt is retried on the next messages that arrive (MaybeRetrySentWatch, driven by the hook procedure)
+    // rather than in a loop that would stall the pump it is running in.
+    InterlockedExchange(&g_sentAttempted, 1);
+    // Claimed before the attempt, not after: the hook procedure can run on another thread of this process
+    // while this one is installing, and it must not start a second attempt beside it.
+    InterlockedExchange(&g_sentInFlight, 1);
+    AttemptSentWatch(true);
+    InterlockedExchange(&g_sentInFlight, 0);
     if (MarkerPresent()) {
         g_watch = true;
         ReportLine(L"observing pid %lu exe %ls: marker present, %d thread(s) hooked for SENT messages and "
@@ -894,6 +1053,10 @@ void EnsureHooked() {
 extern "C" __declspec(dllexport) LRESULT CALLBACK IslandTrayHookProc(int code, WPARAM wparam, LPARAM lparam) {
     __try {
         EnsureHooked();
+        // THE SENT CHANNEL'S LATER ATTEMPTS, on the messages this process is already handling. A tray thread
+        // that refused a hook while Explorer was still starting up may accept it a message later, and this is
+        // where that is noticed without anybody waiting.
+        MaybeRetrySentWatch();
         // TEMPORARY (see the observation block above): messages the application PULLS OUT OF ITS QUEUE that
         // are for its own tray window, or that carry its registered callback number. The filter is what keeps
         // this from logging the application's whole private message traffic.

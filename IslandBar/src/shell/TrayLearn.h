@@ -54,7 +54,44 @@ struct TrayLearnResult {
     int newEntries = 0;    // lines added to the callback cache
     int covered = 0;       // icons of the card that have an entry afterwards
     long long ms = 0;      // how long the whole thing took
+
+    // WHAT THE OBSERVER INSIDE THE SHELL SAID, before anybody was asked to register. It is the difference
+    // between "nobody registered" and "nobody was listening", and it used to be the second one without the log
+    // saying so: measured 2026-10-16, the first pass after Explorer restarted reported 143 thread hooks, 57
+    // accepted, and captured nothing, while the pass minutes later, same build, captured 42.
+    //
+    // The module publishes this over the ring (platform/TrayRing.h) and this pass WAITS for it, bounded by
+    // kObserverWaitMs, before broadcasting TaskbarCreated. A pass whose wait runs out still asks -- an
+    // application that registers late is better than one that is never asked -- and records that it did.
+    bool observerReady = false;
+    unsigned observerTid = 0;        // the thread the registrations are delivered to
+    unsigned observerHooks = 0;
+    unsigned observerAttempts = 0;
+    unsigned observerError = 0;
+    int poked = 0;                   // hooked threads that accepted the message that makes the module land
+    long long observerMs = 0;        // how long the wait for the module actually lasted
 };
+
+// How long a pass waits for the module inside the shell to report that it is listening. It is an engineering
+// number, not a Windows guarantee: the module publishes as soon as the thread hook is accepted, which is
+// microseconds after the bar makes it land -- the wait is here because "the shell is starting up and its tray
+// window does not exist yet" is a real state, not because the handshake is slow.
+inline constexpr unsigned kObserverWaitMs = 3000;
+
+// ... and how long a pass stays to collect the answers to its ONE ask.
+//
+// MEASURED 2026-10-16, three restarts of Explorer in a row: the registrations reached the shell 3.3 s, 3.5 s
+// and "still not in" 3.5 s after the broadcast. The flat 1.5 s wait this replaces missed all 27 of the first
+// run's copies and reported `0 registration(s) captured` from a machine that was learning perfectly well (the
+// frame loop's tick picked them up on its next round). An application answers TaskbarCreated on its own
+// schedule, so the pass drains in a loop while it waits, and this is the engineering parameter for how long:
+// long enough for the slowest answer seen so far, and only ever on a worker thread that has nothing else to
+// do. It is a measurement to be revised, not a Windows promise.
+inline constexpr unsigned kAnswerWaitMs = 6000;
+
+// One clause for the summary line every caller prints: whether the observer was up before the applications
+// were asked. Written here rather than at each call site so the three of them cannot drift apart.
+std::wstring ObserverClause(const TrayLearnResult& learned);
 
 // Loads the staged copy of the module next to the bar and keeps it for the session. Called once from the main
 // thread at startup, before any learning pass.

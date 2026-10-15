@@ -303,11 +303,12 @@ int RunTrayLearn() {
                         L"application and asking each to register again\n",
                         count, coveredBefore);
     const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+    const std::wstring observer = island::ObserverClause(learned);
     island::LogAndPrint(L"tray learn: the shell (%d process(es) offered) was %ls, %d registration(s) "
-                        L"captured, %d new entr(ies)\n",
+                        L"captured, %d new entr(ies) -- %ls\n",
                         learned.appsTried,
                         learned.appsAlreadyWatched > 0 ? L"already carrying the module" : L"given the module",
-                        learned.captured, learned.newEntries);
+                        learned.captured, learned.newEntries, observer.c_str());
     island::LogAndPrint(L"tray learn: %d of %d icon(s) now have a callback entry (before: %d), %lld ms\n",
                         learned.covered, learned.icons, coveredBefore, learned.ms);
     wchar_t home[MAX_PATH] = {};

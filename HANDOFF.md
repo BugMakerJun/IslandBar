@@ -12534,3 +12534,84 @@ Debug 与 Release 全量重建都 OK、零告警（`/WX` 生效）。产品代�
 4. 安装器带第二份 RCDATA + `%LOCALAPPDATA%` 版本化释放；
 5. 复测微信那一格（**需要用户把微信登录回来**：它现在没有托盘注册）；
 6. 验收全绿之后，才删探针与 `traylab\`、`retired-tray\`。
+
+---
+
+## 8.145 **评审第 42 轮 + 托盘"刚重启 explorer 第一趟抓不到"的根因**（2026-10-16 03:10）
+
+用户：「现在还没做完的继续把」。这一轮把 8.144.4 里托盘产品化的最后一件收掉：**第一次学习抓不到注册**。
+
+### 8.145.1 评审第 42 轮（q37）怎么跑的，两边说了什么
+
+上一轮只发出去了一个 `1`（自动化贴文本失败，对话里留下 "111"），所以这一轮重新发：用页面自己的
+`submit_conversation_message`（WebMCP）不行（本机该文档没有工具），最后是 **内联浏览器里 AX 元素索引 +
+`paste(45, 文本)` + `pressKey(45, "Return")`** 成功，读答复用 `document.body.innerText`。全文见
+`reviews/review-a37-chatgpt.txt`（14,089 字节）与 `reviews/review-a37-gemini.txt`。
+
+* **ChatGPT：修正。** 同意"WH_GETMESSAGE 看不见发送消息、真正读注册的是 WH_CALLWNDPROC"这一点；但指出
+  **"第一趟 = SentProc 没装上"证据不足**（安装失败、时序、回调未执行、解码失败、共享环丢失都能造成 0 条）。
+  建议分阶段：**(a) 记录成败（必须）→ (b) 先定向 Shell_TrayWnd 所属线程 → (c) 最后删掉全线程遍历 →
+  (d) 就绪握手 + 定向钩子 + 有界重试 + 分层计数**。三条提醒：不要让 bar 拿空模块句柄去钩 explorer 的线程
+  （跨进程必须走模块）；**不要用伪造的 NIM_ADD 当握手**（会污染缓存）；5 秒就绪窗口是工程参数。
+* **Gemini：修正。** 直接推荐"只钩 Shell_TrayWnd 那一个线程"（探针在同一台机上每次抓 12–53 条），并要
+  模块在共享内存里写就绪标志、bar 收到才广播，上限 2000 ms。
+
+落地的取舍：两条建议都做了；**数字改成实测来的**——就绪窗口 3000 ms、广播后收答案窗口 6000 ms（见下），
+ChatGPT 建议的"20 次冷启动"这一轮做了 4 次（都写在本节里），没有凑数。
+
+### 8.145.2 改了什么（一处一层）
+
+| 文件 | 改动 |
+|---|---|
+| `platform/TrayRing.h` | **ABI 2**；记录带 `kind`（`Registration` / `HookState`）；新增控制记录 `TrayHookState`（pid / inShell / ready / trayThread / hooks / attempts / lastError）；`Publish` **每次写 kind**（环形槽位会被复用） |
+| `trayhook/TrayHook.cpp` | `InstallSentWatch` → `AttemptSentWatch`：**在 shell 里先钩 `Shell_TrayWnd` 所属那一个线程**，失败（或自己不在 shell 里，例如被注进应用）才退回原来的全线程遍历（仍 ≤96）；结论经环发布；`MaybeRetrySentWatch` 有界重试 3 次（跟着消息走，**不睡**）；新增 `ReportUndecodedCopy`：解码失败不再静默（每进程最多 3 行） |
+| `shell/TrayLearn.cpp` | ① 装完钩子后 **poke**（`PostThreadMessage(WM_NULL)`）——让被钩线程立刻取一条消息，模块当场落地；② **等旧环上的就绪握手**（≤3000 ms）再广播，observer 没起来就照实说；③ 广播后**边等边收**（≤6000 ms，每 200 ms 排空一次）；④ 删掉 `e30f8e7` 那次"再广播一次"（那是掩盖时序的补丁）；⑤ **报告文件的读写换成 `CreateFileW`**（写 `FILE_APPEND_DATA`、读 `GENERIC_READ`，共享 READ\|WRITE\|DELETE）——**这一条是根因**；⑥ 帧循环的 5 秒 tick 在学习趟进行中不再排空环（两边抢同一个游标，且趟会把 tick 刚写的行删掉）；⑦ `captured` 只在解析报告那一处计数（原来两边各数一遍） |
+| `main.cpp` / `cli/Cli.cpp` | 三处汇总行追加 observer 子句（`ObserverClause`）：就绪 / 未就绪 / 没报到，各自带数字 |
+| `selftest/Diagnostics.cpp` | +2 条：控制记录走环往返；槽位复用后 kind 不残留。**970 → 976 条 OK**，`RESULT: PASS`（Release 在真实会话里跑） |
+
+### 8.145.3 根因：不是"没听见"，是**这一侧写不进/读不了报告文件**
+
+原来的推断（模块没落地 / 钩错线程）都错了。实测链：
+
+1. **模块其实一直抓得到**：直接从 shared memory 里 dump 环形缓冲区，`written=171`、其中 63 条是注册，
+   还包括我们自己的对照探针 `uid=7 cb=0xABCD`（`probe-tray-registrar.exe`，它自己日志写着 `NIM_ADD -> TRUE`）。
+2. **bar 那侧一行都没写出去**：加诊断后看到 `tray ring: 35 record(s) taken`，然后**既没有行、也没有错误**。
+3. 原因：模块在 shell 进程里**一直持有** `tray_learned.txt`（`FILE_APPEND_DATA`，共享 R/W/D，`TrayHook.cpp:ReportHandle`），
+   而 bar 用的是 `_wfopen_s(..., L"a, ccs=UTF-8")`——**被共享冲突拒绝**（实测：同一时刻 `FileShare.ReadWrite` 可以打开，
+   `FileShare.Read` / `None` 都报 "being used by another process"）。CRT 的失败是静默的。
+4. **读也是同一个坑**：`_wfopen_s(..., L"r")` 同样被拒 → 即使行写进去了，趟里的解析也数不出来。
+5. 这正好解释"第一趟 0、第二趟有"：**趟开始时会删掉报告文件**，模块的句柄随后变成指向"已删除文件"的孤儿句柄，
+   于是**下一趟**的 CRT 打开反而成功——所以第二趟一切正常。不是 ask 的问题，是能不能写的问题。
+
+### 8.145.4 验收（Release，本机真实会话，连续 4 次重启 explorer）
+
+同一份构建，逐次 `taskkill /f /im explorer.exe` + 重启：
+
+| 次数 | 模块就绪 | 重启后**第一趟** captured | 备注 |
+|---|---|---|---|
+| 1 | 62 ms（tray thread 10524） | **18** | 修好落盘、读侧还是旧路径 |
+| 2 | 63 ms | 0 → 读侧修好后为 **9** | 读侧共享冲突 |
+| 3 | 47 ms | **9** | 汇总行带 observer 子句 |
+| 4 | 47 ms | **9** | 同一份 Release 构建 |
+
+对照：修复前同样场景是 **0 / 0 / 0**；同一台机上另外两趟（非重启场景）分别是 24 / 26 条。
+就绪时间从"没有数字"变成 **47–140 ms**，一行日志能同时看到：`tray hook: the observer is up in the shell
+(tray thread N, 1 hook(s), attempt 1, 56 of 56 hooked thread(s) took the message, 47 ms)`，以及
+`tray learn: ... N registration(s) captured ... -- observer up on the tray thread (tid N, 1 hook(s), 47 ms)`。
+
+`--self-test` 976 条全过（真实会话里窗口枚举那两项也过）、`island_smoke` PASS、Debug 与 Release 全量重建
+都零告警（`/WX` 生效）。
+
+### 8.145.5 代价与注意
+
+* **环形缓冲区 ABI 升到 2**：旧模块（还在 explorer 里钉着的那些）继续往 v1 环发布，bar 只读 v2 ——
+  **explorer 不重启就一直学不到**。这是升 ABI 的明账，写在 `TrayRing.h` 里。
+* `%USERPROFILE%\IslandBar\tray_watch.txt`（观察日志开关）仍然在，所以 `tray_learned.txt` 里会有
+  `observed ...` 行（每进程几千行这种量级）。要关就删掉这个文件。
+* `captured` 的口径已统一：**报告文件里能解析、窗口还活着的 NIM_ADD/MODIFY 行数**（单一来源）。
+
+### 8.145.6 还没做
+
+1. 复测微信那一格（**需要用户先把微信登录回来**）。
+2. 推 GitHub（按规矩等用户说"测试没问题"）。
+3. 探针/`retired/tray` 的清理：等用户确认这一版托盘没问题之后再做。

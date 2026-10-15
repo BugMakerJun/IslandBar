@@ -31,19 +31,53 @@
 
 namespace island {
 
-// Bump this when TrayRegistrationRecord's layout changes in any way. Nothing else needs to move with it: the
-// name carries the version too, so two builds simply use two different rings and neither reads the other.
-inline constexpr unsigned kTrayRingAbi = 1;
-inline constexpr wchar_t kTrayRingName[] = L"Local\\IslandBar.TrayRing.v1";
-inline constexpr wchar_t kTrayRingEventName[] = L"Local\\IslandBar.TrayRing.Event.v1";
+// Bump this when TrayRingRecord's layout changes in any way. Nothing else needs to move with it: the name
+// carries the version too, so two builds simply use two different rings and neither reads the other.
+//
+// ABI 2 added the CONTROL half of the record (see TrayRingKind below). An older build's copy -- which is
+// pinned inside the running shell, so it stays for the life of that process -- keeps publishing into the v1
+// ring, which this bar does not read: the tray learns nothing from that shell until it restarts. That is the
+// documented cost of the bump, and the alternative (reading a record whose layout changed under it) is a
+// press aimed at the wrong message number.
+inline constexpr unsigned kTrayRingAbi = 2;
+inline constexpr wchar_t kTrayRingName[] = L"Local\\IslandBar.TrayRing.v2";
+inline constexpr wchar_t kTrayRingEventName[] = L"Local\\IslandBar.TrayRing.Event.v2";
 inline constexpr unsigned kTrayRingCapacity = 64;
 inline constexpr unsigned kTrayRingMagic = 0x59415254u;   // 'TRAY'
+
+// WHAT A RECORD IS. A registration is what the product is for; the hook state is a CONTROL record -- the
+// module saying, in the one channel that survives, what it managed to install.
+//
+// Why this channel and not the report file: the bar TRUNCATES that file before every learning pass, and a
+// pinned module holds its handle and keeps writing into the now-unlinked file (HANDOFF 8.121) -- so a line
+// written from inside the shell after a pass starts may never be readable by the bar. Shared memory has no
+// such failure mode, and it is where the bar is already looking.
+enum class TrayRingKind : unsigned {
+    Registration = 0,
+    HookState = 1,
+};
+
+// What the module installed inside the shell, and the answer to a question the bar used to answer with a
+// sleep: "is anybody listening yet?". MEASURED 2026-10-16: the first pass after Explorer restarted captured
+// 0 registrations of the 143 thread hooks it reported, while the pass minutes later, same build, captured 42.
+// The broadcast that makes applications register again is worth nothing before this side is up.
+struct TrayHookState {
+    unsigned pid = 0;
+    bool inShell = false;      // this copy of the module runs inside the shell's own process
+    bool ready = false;        // ... and the thread that receives registrations is watched
+    unsigned trayThread = 0;   // that thread (0 when there is no Shell_TrayWnd to ask)
+    unsigned hooks = 0;        // WH_CALLWNDPROC hooks this attempt accepted
+    unsigned attempts = 0;     // 1-based: which attempt produced this state
+    unsigned lastError = 0;    // what SetWindowsHookEx said when it failed
+};
 
 // One registration, as it travels between the two processes. It is the decoded form and not the raw copy: the
 // raw bytes are the shell's private structure, and sending them across a process boundary would mean the reader
 // decoding a layout it cannot check.
 struct TrayRingRecord {
+    TrayRingKind kind = TrayRingKind::Registration;
     TrayRegistration registration;
+    TrayHookState hook;
 };
 
 struct TrayRingHeader {
@@ -117,7 +151,22 @@ struct TrayRingPublisher {
     void Publish(const TrayRegistration& registration) {
         if (!Open() || !records) return;
         const LONG index = InterlockedIncrement(&header->written) - 1;
-        records[index % kTrayRingCapacity].registration = registration;
+        TrayRingRecord& slot = records[index % kTrayRingCapacity];
+        // The kind is written on EVERY publish: the slot it lands in may still hold a control record from an
+        // earlier lap round this ring, and a reader that trusted the old one would file a hook state as an
+        // application's callback.
+        slot.kind = TrayRingKind::Registration;
+        slot.registration = registration;
+        if (event) SetEvent(event);
+    }
+
+    // ... and one control record, which is not a registration and must never be read as one.
+    void PublishHookState(const TrayHookState& state) {
+        if (!Open() || !records) return;
+        const LONG index = InterlockedIncrement(&header->written) - 1;
+        TrayRingRecord& slot = records[index % kTrayRingCapacity];
+        slot.kind = TrayRingKind::HookState;
+        slot.hook = state;
         if (event) SetEvent(event);
     }
 };

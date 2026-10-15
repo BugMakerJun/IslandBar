@@ -1079,14 +1079,15 @@ unsigned long long lastMusicMeterMs = 0;
                 island::TrayIcons icons;
                 icons.Refresh();
                 const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+                const std::wstring observer = island::ObserverClause(learned);
                 island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was %s, %d "
                                     "registration(s) captured, %d new entr(ies) -- %d of %d icon(s) have a "
-                                    "callback entry (in %lld ms)",
+                                    "callback entry (in %lld ms) -- %ls",
                                     learned.appsTried,
                                     learned.appsAlreadyWatched > 0 ? "already carrying the module"
                                                                    : "given the module",
                                     learned.captured, learned.newEntries, learned.covered, learned.icons,
-                                    learned.ms);
+                                    learned.ms, observer.c_str());
             }).detach();
         }
         std::fflush(stdout);
@@ -3860,7 +3861,18 @@ float musicWavePhase = 0.0f;
                     // broadcast, no waiting: an application that has already been reached keeps reporting
                     // every registration for the rest of the session, and this is where those become
                     // pressable (see shell/TrayLearn.h).
-                    const int harvested = island::HarvestLearnedCallbacks();
+                    //
+                    // ... EXCEPT WHILE A LEARNING PASS IS RUNNING, and that exception is a fix, not a
+                    // precaution. The tick and a pass drain the SAME ring through the same cursor
+                    // (shell/TrayLearn.cpp), and the pass DELETES the report file before it starts: records
+                    // this tick consumed had their lines written into a file the pass then removed.
+                    // MEASURED 2026-10-16: the first pass after Explorer restarted logged "0 registration(s)
+                    // captured" while the ring held 63 registrations, because this tick had drained them a
+                    // hundred milliseconds earlier. Nothing was lost -- the cache above is where they land --
+                    // but the count a pass prints is the count the next person believes, so the two must not
+                    // race over it.
+                    const int harvested =
+                        bar.learnInFlight->load() ? 0 : island::HarvestLearnedCallbacks();
                     if (harvested > 0) {
                         island::LogAndPrint("  tray learn: %d registration(s) arrived from applications "
                                             "already reached by the module -- %d of %d icon(s) have a "
@@ -3895,14 +3907,15 @@ float musicWavePhase = 0.0f;
                             island::TrayIcons icons;
                             icons.Refresh();
                             const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+                            const std::wstring observer = island::ObserverClause(learned);
                             island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was "
                                                 "%s, %d registration(s) captured, %d new entr(ies) -- %d of "
-                                                "%d icon(s) have a callback entry (in %lld ms)",
+                                                "%d icon(s) have a callback entry (in %lld ms) -- %ls",
                                                 learned.appsTried,
                                                 learned.appsAlreadyWatched > 0 ? "already carrying the module"
                                                                                : "given the module",
                                                 learned.captured, learned.newEntries, learned.covered,
-                                                learned.icons, learned.ms);
+                                                learned.icons, learned.ms, observer.c_str());
                             learnFlight->store(false);
                         }).detach();
                     }

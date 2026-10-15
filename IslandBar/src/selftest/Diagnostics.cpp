@@ -6775,6 +6775,52 @@ void TestMusicCardLayout() {
                               std::wcscmp(back.tip, L"ROUND-TRIP") == 0,
                           L"a registration survives the ring unchanged", trayWireDetail);
 
+                    // ... AND THE CONTROL RECORD THE HANDSHAKE TRAVELS IN. The bar waits for this before it
+                    // asks the applications to register again (shell/TrayLearn.h), so the two kinds must not
+                    // be readable as each other: a hook state filed as a registration would invent an
+                    // application entry out of the module's own numbers, and a registration read as state
+                    // would end the wait on somebody else's icon.
+                    island::TrayHookState state;
+                    state.pid = GetCurrentProcessId();
+                    state.inShell = true;
+                    state.ready = true;
+                    state.trayThread = 0x21;
+                    state.hooks = 1;
+                    state.attempts = 2;
+                    state.lastError = 0;
+                    publisher.PublishHookState(state);
+                    const unsigned more = reader.Drain(cursor, taken, island::kTrayRingCapacity);
+                    const island::TrayRingRecord& control = taken[more > 0 ? more - 1 : 0];
+                    std::swprintf(trayWireDetail, 256, L"took=%u kind=%u ready=%d tid=%u hooks=%u attempts=%u",
+                                  more, static_cast<unsigned>(control.kind), control.hook.ready ? 1 : 0,
+                                  control.hook.trayThread, control.hook.hooks, control.hook.attempts);
+                    Check(more > 0 && control.kind == island::TrayRingKind::HookState && control.hook.ready &&
+                              control.hook.trayThread == 0x21 && control.hook.hooks == 1 &&
+                              control.hook.attempts == 2 &&
+                              control.hook.pid == static_cast<unsigned>(GetCurrentProcessId()),
+                          L"the observer's handshake travels the ring as a control record, with the numbers "
+                          L"the log needs",
+                          trayWireDetail);
+
+                    // ... and the kind belongs to the RECORD, not to the slot it landed in: the ring wraps,
+                    // so a registration that reuses a control record's slot must still read as one. The ring
+                    // is filled past its capacity on purpose -- that is the only state in which the two
+                    // share a slot.
+                    for (unsigned i = 0; i < island::kTrayRingCapacity; ++i) {
+                        publisher.PublishHookState(state);
+                    }
+                    island::TrayRegistration after = pushed;
+                    after.uid = 11;
+                    publisher.Publish(after);
+                    const unsigned reused = reader.Drain(cursor, taken, island::kTrayRingCapacity);
+                    const island::TrayRingRecord& newest = taken[reused > 0 ? reused - 1 : 0];
+                    std::swprintf(trayWireDetail, 256, L"took=%u kind=%u uid=%u", reused,
+                                  static_cast<unsigned>(newest.kind), newest.registration.uid);
+                    Check(reused > 0 && newest.kind == island::TrayRingKind::Registration &&
+                              newest.registration.uid == 11,
+                          L"a registration reusing a control record's slot does not read as a control record",
+                          trayWireDetail);
+
                     // ... and the ABI is refused when it disagrees. Corrupted here on purpose and put
                     // straight back: this ring belongs to this test process, and the next check below
                     // is the one that reads it.

@@ -1,0 +1,131 @@
+￼
+主菜单
+Gemini
+自动
+￼
+￼
+￼
+￼
+￼
+￼
+与 Gemini 对话
+你说 第 42 轮评审（文件序列 q37）：**托盘搬进产品之后，只剩一个问题——"刚开机／刚重启 explorer 的第一次学习抓不到注册"**。 请明确表态：同意 / 反对 / 修正，并指出你认为哪个判…
+第 42 轮评审（文件序列 q37）：**托盘搬进产品之后，只剩一个问题——"刚开机／刚重启 explorer 的第一次学习抓不到注册"**。
+请明确表态：同意 / 反对 / 修正，并指出你认为哪个判断是错的。请给出你推荐的修法与理由。
+【一、现在是怎么工作的（都是实测，不是推测）】
+1) 托盘注册是应用把 (窗口, uid, uCallbackMessage, uVersion, 提示文字) 注册给 shell；这条注册是应用
+   用 **SendMessage 发**给 `Shell_TrayWnd` 的一条 **WM_COPYDATA**（同步，应用等 shell 返回）。
+2) 产品里有一个模块 `island_tray_hook.dll`：bar 用 `SetWindowsHookExW(WH_GETMESSAGE, 导出过程, 模块, 线程)`
+   把它"递"进 explorer（每线程一个钩子）；模块在自己的导出过程第一次被调用时做 `EnsureHooked()`：
+   改写 explorer 里 `Shell_NotifyIcon` 的调用点（IAT / GetProcAddress 槽），并调用
+   `InstallSentWatch()` —— 它 `CreateToolhelp32Snapshot` 取**本进程**的线程，然后对每个线程
+   `SetWindowsHookExW(WH_CALLWNDPROC, SentProc, nullptr, threadId)`；**失败没有任何日志**。
+3) `SentProc` 是真正读注册的那条通道：看到 `call->message == WM_COPYDATA` 就解码（偏移 +0x004 命令、
+   +0x00C 窗口、+0x010 uid、+0x018 uCallbackMessage、+0x020 tip、+0x328 uVersion），然后
+   **memcpy 进共享内存环 + 一个命名事件**发布出来；bar 在自己的 tick 里排空环，学成缓存条目。
+4) bar 安装完钩子后会广播 `TaskbarCreated`，让应用重新注册一次（应用只会在收到这个广播时重注册）。
+【二、现象（今天实测两次，确定可复现）】
+• **刚重启 explorer 之后的第一趟**（模块第一次落地）：
+  `tray hook: 57 of 143 thread hook(s) accepted for the shell (pid 19264, last error 87)`，
+  然后 `tray learn: the shell (1 process(es) offered) was already carrying the module,
+  0 registration(s) captured, 0 new entr(ies) -- 0 of 14 icon(s) have a callback entry (in 4719 ms)`。
+• **同一份构建、几分钟之后再跑一趟**（模块已经钉在同一个 explorer 里）：
+  `tray learn: 9 registration(s) arrived ... -- 8 of 14 icon(s) have a callback entry now`，
+  同一趟里 `42 registration(s) captured`；模块报告里出现 53 条
+  `call S NIM_ADD ... (read in the shell, over the ring)`。
+• 我已经试过的一招**没用**：在第一趟广播之后 1.2 秒**再广播一次** `TaskbarCreated`，让应用再注册一遍
+  —— 第一趟仍然是 0 条。
+• 对照：我们的实验探针（`probe-tray-observer.cpp`）**只钩 `Shell_TrayWnd` 所属的那一个线程**  
+（`GetWindowThreadProcessId(FindWindow(L"Shell_TrayWnd"))`），用 WH_CALLWNDPROC，同一台机器上
+  每次都能抓到 12–53 条注册。
+【三、我目前的理解（请判断对不对）】
+`WH_GETMESSAGE` 看不见这条注册是**原理上**的：它只在被钩线程从消息队列取消息时被调用，而注册是
+**发送**（SendMessage）的，不进队列。它能起作用是因为"把模块送进 explorer"，以及触发 `EnsureHooked()`
+——真正读注册的是随后装上的 `WH_CALLWNDPROC`（`SentProc`）。第一趟失败，说明那一趟 `SentProc`
+在注册到达之前**还没装上**，或者根本没装成（失败被吞了，没有数字）。
+【四、要你们回答的四个问题】
+Q1 第一趟抓不到、第二趟抓得到，请按可能性排序给出机制解释（例如：`EnsureHooked()` 只在第一次回调时
+   跑一次而那一刻的线程快照不完整；模块落地与广播的时序竞争；`SetWindowsHookEx(WH_CALLWNDPROC)` 对
+   某些线程返回失败被吞；环/事件的游标在第一趟被错过；explorer 新进程里模块的起点与旧进程不同……）。
+Q2 修法你推荐哪一个（可以否掉我的选项）：(a) 模块把 sent hook 的成败数字写进报告并重试；
+   (b) bar 直接对 `Shell_TrayWnd` 所属线程装 WH_CALLWNDPROC（探针的做法）；
+   (c) 模块不再快照全部线程、改成针对任务栏窗口/线程装钩子；(d) 你的方案。
+Q3 "模块已经可捕获"应该用什么条件判定，再广播才不算白问？（例如：bar 先让 shell 回一次消息/事件、
+   模块发布一条假的握手记录、模块报告落地……）第一趟该等多久？
+Q4 这个修复的验收指标（一个数字 + 一行日志）你建议怎么写？
+￼
+展开
+复制提示
+修改
+Gemini 说
+明确表态
+修正
+哪一个判断是错的？
+你在线索（一.2）中提到“失败没有任何日志”，但在你随后贴出的实测日志里其实已经明确输出了：tray hook: 57 of 143 thread hook(s) accepted for the shell (pid 19264, last error 87)。这说明代码里不仅有统计，还捕获到了错误码 87（ERROR_INVALID_PARAMETER）。
+这个细节恰恰是破案的关键：explorer 拥有 143 个线程，其中包含大量没有消息队列的纯后台工作线程。对这些线程调用 SetWindowsHookEx(WH_CALLWNDPROC, ..., threadId) 会直接报错失效。而 Shell_TrayWnd 所在的真正核心线程很可能在第一趟时恰好落在了那 86 个失败的线程之中，导致核心通道压根没建起来。
+Q1：第一趟抓不到、第二趟抓得到的原因排序（机制解释）
+Explorer 线程未就绪与错误 87 导致核心线程漏挂
+：
+explorer 刚启动时，
+EnsureHooked() 发起的 CreateToolhelp32Snapshot 包含了 143 个线程。许多线程尚未建立消息队列或处于不适合挂钩的状态，导致 SetWindowsHookEx 对其中 86 个线程返回 ERROR_INVALID_PARAMETER（错误码 87）。托盘窗口 Shell_TrayWnd 所在的线程在第一趟时可能正好没有被成功挂上 WH_CALLWNDPROC。
+时序竞争与 EnsureHooked() 触发过早
+：
+WH_GETMESSAGE 首次被触发时（由 explorer 中任意一个有消息的线程唤醒），立刻触发全线程快照。此时 explorer 刚拉起，UI 线程和消息循环正处于初始化的高峰期，线程状态极其不稳定。
+TaskbarCreated 广播时机过早
+：
+bar 在安装完钩子的瞬间就立刻广播了 
+TaskbarCreated，此时应用收到广播并疯狂重发 WM_COPYDATA，但此时底层 SentProc 还没有完全在正确的线程上生效，导致第一趟错失。第二趟之所以能抓到，是因为几分钟后应用因各种原因重注册时，explorer 的线程已经全部稳定。
+Q2：推荐的修法与理由
+推荐方案：方案 (d) —— 精准定向挂钩（结合探针思路与模块重构）
+具体做法：
+放弃对 explorer 全线程（143个）盲目轰炸：不再遍历所有线程装 WH_CALLWNDPROC。
+精准定位托盘线程：在模块落地或 EnsureHooked() 执行时，直接通过 FindWindow(L"Shell_TrayWnd", nullptr) 拿到托盘窗口句柄，再用 GetWindowThreadProcessId 获取其准确的目标线程 ID (dwThreadId)。
+只对该核心线程加钩子：仅对这个特定的 threadId 安装 WH_CALLWNDPROC（就像你的实验探针 probe-tray-observer.cpp 那样）。
+理由
+：
+探针的实测结果已经给出了铁证——只钩托盘窗口所属的那一个线程，在同一台机器上
+每次都能稳稳抓到 12–53 条注册。抛弃无效的 142 个后台线程钩子，既消除了错误 87 的干扰，又保证了 100% 的命中率。
+Q3：“模块已经可捕获”的判定条件与等待时间
+判定条件
+：
+不要采用盲目延时（如硬等 1.2 秒）。应当由 
+island_tray_hook.dll 在成功定位 Shell_TrayWnd 并成功安装目标线程的 WH_CALLWNDPROC 之后，主动向共享内存写入一个就绪标志（例如 tray_hook_ready = true）并触发一个命名事件。bar 在检测到该标志位变为真（或收到事件通知）后，再发出 TaskbarCreated 广播。
+第一趟该等多久
+：
+设置一个合理的超时上限（例如 
+2000 ms）。在 explorer 启动后，DLL 通常在几十到几百毫秒内即可完成落地和精准挂钩，事件触发后 bar 即可立即广播，既安全又高效。
+Q4：修复的验收指标
+数字指标：> 0（即：刚重启 explorer 后的第一趟学习，captured registrations 必须大于 0，正常应达到同等应用规模的注册数，例如 
+≥
+10
+）。
+日志行：
+Plaintext
+下载代码
+复制代码
+tray hook: target tray thread (tid XXXXX) successfully hooked; tray learn: captured X registration(s) on first pass.
+答得好
+答得不好
+重做
+分享和导出
+复制
+显示更多选项
+Gemini 是一款 AI 工具，其回答未必正确无误。
+￼
+￼
+￼
+￼
+问问 Gemini
+￼
+上传和工具
+语音输入 (^⇧D)
+￼
+发起新对话
+打开对话操作菜单。
+Reviewing Core Problem
+￼
+Notifications
+￼
+￼
+￼
+￼
