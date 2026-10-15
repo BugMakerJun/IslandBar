@@ -19,21 +19,30 @@ set_target_properties(island_bar_setup PROPERTIES OUTPUT_NAME "IslandBarSetup")
 
 set(ISLANDBAR_SETUP_PAYLOAD_DIR "${CMAKE_CURRENT_BINARY_DIR}/payload")
 set(ISLANDBAR_SETUP_PAYLOAD "${ISLANDBAR_SETUP_PAYLOAD_DIR}/island_bar.exe")
+set(ISLANDBAR_SETUP_PAYLOAD_HOOK "${ISLANDBAR_SETUP_PAYLOAD_DIR}/island_tray_hook.dll")
 
 add_custom_command(
-    OUTPUT "${ISLANDBAR_SETUP_PAYLOAD}"
+    OUTPUT "${ISLANDBAR_SETUP_PAYLOAD}" "${ISLANDBAR_SETUP_PAYLOAD_HOOK}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${ISLANDBAR_SETUP_PAYLOAD_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:island_bar>" "${ISLANDBAR_SETUP_PAYLOAD}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:island_tray_hook>" "${ISLANDBAR_SETUP_PAYLOAD_HOOK}"
     DEPENDS island_bar
-    COMMENT "Copying island_bar.exe into the setup payload"
+    COMMENT "Copying island_bar.exe and island_tray_hook.dll into the setup payload"
     VERBATIM
 )
 add_custom_target(island_bar_setup_payload DEPENDS "${ISLANDBAR_SETUP_PAYLOAD}")
 add_dependencies(island_bar_setup island_bar_setup_payload)
 
+# THE MODULE IS A PAYLOAD TOO, and it was missed for a whole day: IslandBar is two binaries since the tray's
+# learning moved into the shell's process, and a fresh install from an installer carrying only the executable
+# had no tray learning in it -- nothing on screen said so, and the bar looked simply worse than the machine it
+# was built on. The dependency is explicit so RC.EXE cannot read a payload that will be replaced underneath it.
+add_dependencies(island_bar_setup island_tray_hook)
+
 # configure_file substitutes @NAME@ for the variable called NAME, so the template's own name for
 # the payload is bound here rather than by using that variable throughout.
 set(PAYLOAD "${ISLANDBAR_SETUP_PAYLOAD}")
+set(PAYLOAD_HOOK "${ISLANDBAR_SETUP_PAYLOAD_HOOK}")
 configure_file(payload.rc.in "${CMAKE_CURRENT_BINARY_DIR}/payload.rc" @ONLY)
 target_sources(island_bar_setup PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/payload.rc")
 
@@ -41,7 +50,7 @@ target_sources(island_bar_setup PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/payload.rc"
 # the two would run in either order and the installer would be built around a payload that
 # was not there yet.
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/payload.rc"
-                            PROPERTIES OBJECT_DEPENDS "${ISLANDBAR_SETUP_PAYLOAD}")
+                            PROPERTIES OBJECT_DEPENDS "${ISLANDBAR_SETUP_PAYLOAD};${ISLANDBAR_SETUP_PAYLOAD_HOOK}")
 
 target_include_directories(island_bar_setup PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 

@@ -484,7 +484,8 @@ bool TakeNightLightOutcome(bool* wanted, bool* stateAfter, bool* succeeded) {
 }
 
 bool LiveCaptionsRunning() {
-    // Toolhelp rather than OpenProcess per pid: one call answers for every process on the machine.
+    // Toolhelp, the same way TrayIcons asks which applications are running: one call for every process
+    // on the machine.
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return false;
 

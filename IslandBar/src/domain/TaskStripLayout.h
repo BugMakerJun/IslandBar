@@ -746,24 +746,92 @@ inline bool ControlWashStep(float* value, float* velocity, float target, float d
     return SpringStep(value, velocity, target, dtSeconds, kControlSpringOmega);
 }
 
-// THE ONE SURFACE THE BAR'S FIXED CONTROLS STAND ON: the system button, the Start button and the island,
-// as a single rounded rectangle.
+// --- the system tray: the applications' own tray icons, at the right-hand END of the bar -------
 //
-// Those three never move relative to each other -- the deck hangs off the island's left edge -- so drawn
-// separately they were beads of the same colour with 4-8 DIP gaps, which reads as a dotted line rather
-// than as one object. iOS's island is one shape; this is the same idea applied to the part of this bar
-// whose geometry is fixed.
+// WHERE IT GOES, and why it is anchored to the MONITOR rather than to the row beside it. The
+// application icon row grows and shrinks with the windows that are open, so a tray hung off its right
+// edge would slide sideways every time a window opened -- and the tray is the one part of this bar whose
+// position the user learns by muscle memory. Anchored to the monitor's right edge it never moves, which
+// is also how the shell's own tray behaves.
+//
+// The two groups still have to not collide, and that is the row's problem: the row is sized from the
+// room left over after this much is reserved (see TaskIconsThatFitInWidth's caller in main.cpp).
+// The tray's button, and it is a BEAD IN THE SAME ROW as the application icons: the same 30 DIP square
+// they use, so the row's rhythm does not break where the tray begins and so the smallest click target on
+// the bar is not the smallest thing on it. It was 22 -- one size down from everything else, measured
+// against a screenshot of the whole bar: the tray's three dots read as a bead that had been scaled down
+// by accident, and it was the one control whose target was smaller than Windows' own guidance.
+inline constexpr float kTrayIconDip         = 30.0f;   // the button; the picture inside is smaller
+inline constexpr float kTrayPictureDip      = 16.0f;
+inline constexpr float kTrayGapDip          = 2.0f;
+inline constexpr float kTrayRightMarginDip  = 6.0f;
+// Bounded, because an unbounded list is a list nobody can draw -- but generously, and the PAGE fits whatever
+// is inside this bound by shrinking its cells (see TrayPageFor). It used to be 10, written when the tray was
+// a ROW along the bar; the page dropped everything past the tenth and said nothing, which is how this machine
+// came to show ten of its sixteen icons ("托盘卡片里没有显示全啊").
+inline constexpr int   kMaxTrayIcons        = 24;
+
+// ONE BUTTON, and the icons behind it, which is the second half of what the user asked for:
+//
+//     "在红框位置创建一个按钮 点击按钮弹出卡片 卡片里是这些托盘"
+//
+// The first version drew every tray icon inline at the right-hand end -- ten of them, and a machine with
+// more running applications than that had nowhere to put the rest. A button and a card is also what the
+// shell itself does (the chevron over the notification area), and it keeps the bar's right-hand end a
+// fixed, readable width however many applications are running.
+//
+// The BUTTON stands immediately to the RIGHT of the island, mirroring the deck on its left:
+//
+//     [ system ][ Start ]   island   [ tray ]  [ icon ] [ icon ] ...
+//
+// Anchored to the island's own right edge, exactly as the Start and system buttons are anchored to its
+// left edge, so the bar's cluster reads as one thing. Asked for twice: first "在红框位置创建一个按钮" (the
+// red box was at the end of a FULL application row, which made it look like the right-hand margin), and
+// then "位置不对 应该放在灵动岛右侧".
+//
+// It is NOT at the window's right margin: that version was built and looked like a stray control floating
+// at the far end of the bar, away from everything it belongs to.
+inline RectF TrayButtonFor(const RoundedBox& island) {
+    RectF box;
+    box.left = island.rect.right + kTaskIconPadDip;
+    box.right = box.left + kTrayIconDip;
+    // On the island's own line, like the deck buttons and the application icons: one row, one centre.
+    const float centreY = (island.rect.top + island.rect.bottom) * 0.5f;
+    box.top = centreY - kTrayIconDip * 0.5f;
+    box.bottom = box.top + kTrayIconDip;
+    return box;
+}
+
+inline bool TrayButtonHit(const RoundedBox& island, float x, float y) {
+    const RectF box = TrayButtonFor(island);
+    return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+}
+
+// The room the button takes beside the island, for the row's own sizing: the button, the gap between it
+// and the icon row, AND the gap between the button and the edge of the one surface the fixed controls
+// stand on (see BarClusterFor). The last one is why this is not simply the button's own width plus a gap:
+// the row has to start clear of that surface, not 4 DIP inside its rounded end.
+inline float TrayButtonReservedDip() { return kTrayIconDip + kTaskIconGapDip * 2.0f; }
+
+// THE ONE SURFACE THE BAR'S FIXED CONTROLS STAND ON: the system button, the Start button, the island and
+// the tray button, as a single rounded rectangle.
+//
+// Those four never move relative to each other -- the deck hangs off the island's left edge and the tray
+// off its right -- so drawn separately they were four beads of the same colour with 4-8 DIP gaps, which
+// reads as a dotted line rather than as one object. iOS's island is one shape; this is the same idea
+// applied to the part of this bar whose geometry is fixed.
 //
 // The application icon row is deliberately NOT part of it: the row's length changes with the windows that
 // are open, and a surface whose edge grows and shrinks with them is the "things move on their own" this
 // project has been told off for twice.
 //
 // The pad is the row's own 4 DIP, so the cluster is one "block" in the bar's rhythm: 8 around the island
-// inside it, 4 everywhere else, and 4 DIP clear of it before the icon row.
-inline RoundedBox BarClusterFor(const RoundedBox& island) {
+// inside it, 4 everywhere else, and 4 DIP clear of it before the icon row (which is what
+// TrayButtonReservedDip adds the second `kTaskIconGapDip` for).
+inline RoundedBox BarClusterFor(const RoundedBox& island, bool trayButtonShown) {
     RoundedBox out;
     out.rect.left = SystemButtonFor(island).left - kTaskIconGapDip;
-    out.rect.right = island.rect.right + kTaskIconGapDip;
+    out.rect.right = (trayButtonShown ? TrayButtonFor(island).right : island.rect.right) + kTaskIconGapDip;
     out.rect.top = island.rect.top;
     out.rect.bottom = island.rect.bottom;
     // A stadium, from the island's own height: the ends stay true semicircles whatever the height is, and
@@ -774,6 +842,19 @@ inline RoundedBox BarClusterFor(const RoundedBox& island) {
 }
 
 // The box the application icon row is laid out from, given that the tray button stands between the island
+// and the row.
+//
+// ONE number, and everything the row does -- its left edge, every button, every hit test and every
+// assertion -- follows from it, because they all measure from this box's right edge. That is why the
+// button needed no parameter threaded through the row's own functions: the row is told where it starts,
+// and where it starts is now one button further along.
+inline RoundedBox RowAnchorWithTray(const RoundedBox& island, bool trayButtonShown) {
+    if (!trayButtonShown) return island;
+    RoundedBox out = island;
+    out.rect.right += TrayButtonReservedDip();
+    return out;
+}
+
 // WHERE AN OUTER CARD HANGS FROM: the centre of the control that opened it.
 //
 // One card, one rule, and three controls: the panel hangs from the system button, the tray page from the
@@ -786,15 +867,16 @@ inline RoundedBox BarClusterFor(const RoundedBox& island) {
 // page, centred on the system button) and, photographed rather than reported, the Start card appearing
 // under the system button at 853..1373 when the Start button is at 1132..1162.
 //
-// An enum rather than a bool, so a third control cannot be added by somebody who reads `startPage ? start :
+// An enum rather than a bool, so a fourth level cannot be added by somebody who reads `trayPage ? tray :
 // system` and assumes the two cases exhaust it -- which is exactly how the Start card got the panel's
 // position.
-enum class CardHang { SystemButton, StartButton };
+enum class CardHang { SystemButton, StartButton, TrayButton };
 
 inline float DeckCardAnchorCentre(const RoundedBox& island, CardHang hang) {
     RectF button = {};
     switch (hang) {
         case CardHang::StartButton: button = StartButtonFor(island); break;
+        case CardHang::TrayButton: button = TrayButtonFor(island); break;
         case CardHang::SystemButton:
         default: button = SystemButtonFor(island); break;
     }

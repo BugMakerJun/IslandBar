@@ -23,7 +23,8 @@
 #include "domain/Geometry.h"      // RoundedBox: the text is laid out inside the pill's box
 #include "media/MusicSession.h"  // the now-playing field capacities
 #include "domain/CardLayout.h"    // where the card's controls go
-#include "domain/TaskStripLayout.h"  // where the application icon row sits, and how many icons fit
+#include "domain/TaskStripLayout.h"  // where the tray sits, and how many icons fit
+#include "shell/TrayIcons.h"     // the icons themselves
 #include "shell/StartApps.h"     // the Start card's applications
 
 namespace island {
@@ -109,11 +110,25 @@ public:
     void DrawClock(ID2D1DeviceContext2* context, const RoundedBox& box,
                    ClockStyle style, float opacity);
 
+    // THE SYSTEM TRAY: one button at the right-hand end of the bar, and a card behind it.
+    //
+    // Asked for in these words: "在红框位置创建一个按钮 点击按钮弹出卡片 卡片里是这些托盘" -- a button and a
+    // card rather than the row of icons the first version drew along the bar.
+    //
+    // The button is deliberately NOT a chevron: the deck's own system button already carries one, and two
+    // identical marks at the two ends of the bar would read as the same control. Three dots say "there is
+    // more than fits", which is what this is.
+    // `wash` as for the Start button; `open` still forces a full one, because the card being open is a
+    // state rather than something the pointer is doing.
+    void DrawTrayButton(ID2D1DeviceContext2* context, const RectF& box, float wash, bool open,
+                        const D2D1_COLOR_F& fill, float opacity);
+
     // --- the Start card -------------------------------------------------------------------------------
     //
     // Everything that card shows, assembled by the frame loop: the user's own pins with their icons, the
     // shell's full list for the picker, and the two things in its footer. Pointers rather than copies,
-    // because the shell's list is 121 applications and a frame is rebuilt every frame.
+    // because the shell's list is 121 applications and a frame is rebuilt every frame -- the same
+    // arrangement the tray page uses.
     struct StartCardText {
         const StartApp* pins = nullptr;
         int pinCount = 0;
@@ -154,6 +169,21 @@ public:
 
     void DrawStartPage(ID2D1DeviceContext2* context, const RoundedBox& card, const StartCardText& text,
                        float opacity);
+
+    // The card's tray page: the icons in a wrapping grid, each with the wash the other buttons get.
+    //
+    // `revision` is the list's own, so a decoded bitmap is kept until the icons themselves change: the bar
+    // draws at the compositor's rate and a PNG decode per frame per icon would be the most expensive thing
+    // on it. `hoveredIndex` is a cell of the grid (see TrayPageFor).
+    void DrawTrayPage(ID2D1DeviceContext2* context, const RoundedBox& card, const wchar_t* title,
+                      const TrayIcon* icons, int count, unsigned long long revision, float opacity,
+                      int hoveredIndex, bool moving = false);
+
+    // The tray's own context menu: a small raised surface with one row per entry, the row under the
+    // pointer washed white. Geometry comes from `TrayMenuFor` (CardLayout.h) -- the box and the rows are
+    // handed in, so the drawing and the hit test cannot disagree about which row a point is on.
+    void DrawTrayMenu(ID2D1DeviceContext2* context, const island::RectF* rows, int count,
+                      const wchar_t* const* labels, int hoveredRow, float opacity);
 
     // --- the date, the weekday, the time and the weather: one line, two homes ----
     //
@@ -675,6 +705,18 @@ private:
     };
     SoundIconSlot soundIcons_[SoundPageText::kMaxMixRows];
 
+    // The tray icons, one decoded bitmap each, kept until the list's revision changes.
+    //
+    // The REVISION is what makes the index a safe key: the list bumps it when its contents change, and
+    // its contents include which icon sits at which index (an application starting shifts the order), so
+    // a bitmap cached under index 3 cannot survive into a list where index 3 is a different icon.
+    struct TrayIconSlot {
+        ID2D1Bitmap1* bitmap = nullptr;
+        unsigned long long revision = 0;
+        int index = -1;
+    };
+    TrayIconSlot trayIconSlots_[kMaxTrayIcons];
+
     // The bitmap for one mixer row's icon. The PNG is decoded and uploaded only when that row's revision
     // changes, so a steady page costs nothing per frame.
     ID2D1Bitmap1* SoundIconAt(ID2D1DeviceContext2* context, int slot, const unsigned char* png,
@@ -692,6 +734,11 @@ private:
     CachedBitmapSlot callIcon_;
     ID2D1Bitmap1* CallIconBitmap(ID2D1DeviceContext2* context, const uint8_t* pixels, int width,
                                  int height, unsigned long long revision);
+
+    // The decoded bitmap for one tray icon, cached until the list's revision changes. One place knows how
+    // to turn a registry PNG into something drawable, and it is called by the tray page.
+    ID2D1Bitmap1* TrayIconBitmap(ID2D1DeviceContext2* context, int index, const TrayIcon& icon,
+                                 unsigned long long revision);
 
     // The Start card's own bitmaps: one per pinned tile and one for the account picture.
     //
@@ -716,7 +763,7 @@ private:
     // WHY THIS EXISTS. The draw path used to create a brush wherever it needed one -- ninety-odd places
     // in this file -- and a creation is a device call with an allocation behind it. Where the count is
     // constant (a title, a clock) that is a handful per frame and nobody notices; where it scales with
-    // what is on screen it is a brush per window in the task row, per tile, per mixer row
+    // what is on screen it is a brush per tray icon, per window in the task row, per tile, per mixer row
     // -- and the bar repaints for as long as it is on screen, which is all day.
     //
     // The cache follows the same rule as the bitmaps above it: keyed by something that identifies the

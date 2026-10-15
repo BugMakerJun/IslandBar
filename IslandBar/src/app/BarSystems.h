@@ -44,6 +44,7 @@
 #include "services/WeChatWatch.h"
 #include "shell/StartApps.h"
 #include "shell/SystemStatus.h"      // SystemStatusReader, SystemStatus
+#include "shell/TrayIcons.h"
 #include "shell/Weather.h"
 
 namespace island {
@@ -94,6 +95,7 @@ struct BarSystems {
 
     // the shell's own things, mirrored
     ThumbnailPreview preview;
+    TrayIcons trayIcons;
     StartApps startApps;
     WindowList taskWindows;
 };

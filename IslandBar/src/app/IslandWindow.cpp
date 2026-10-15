@@ -396,7 +396,8 @@ bool IslandWindow::TakePress(POINT* screenPoint) {
 RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState state,
                                   const IslandAnchor& anchor, const RoundedBox& current,
                                   float cardLeftDip, int taskIconCount,
-                                  float statusStripWidthDip, bool noticeStripUp) {
+                                  float statusStripWidthDip, int trayIconCount,
+                                  bool noticeStripUp) {
     // The bounding box of what the bar actually DRAWS, in window pixels.
     //
     // Horizontally it runs from the left of the state's own shape to the right of the longest icon row
@@ -478,18 +479,19 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
         if (cardLeft < left) left = cardLeft;
     }
 
-    // ... AND THE CARD'S RIGHT EDGE, which is the same defect at the other end of the bar.
+    // ... AND THE CARD'S RIGHT EDGE, which is the same defect at the other end of the bar -- and the one
+    // that took a photograph of the tray page to find.
     //
     // The right edge above came from `shape`, and `shape` is not the card: the card is PINNED to the
     // control that was pressed, while the shape is the island's own animated box. For the system panel,
     // which hangs under the button at the LEFT end, the card's right edge happens to fall inside the icon
-    // row and nothing showed. A card opened from the far end of the bar is the case that reveals it: with
-    // a single application window open the row ends before the card does.
+    // row and nothing showed. The tray button is at the RIGHT end, its card is the same 520 DIP wide, and
+    // with a single application window open the row ends before the card does.
     //
-    // Measured on screen with such a card open: the region was 670..1568 while the card ran from 1130
+    // Measured on screen with the tray page open: the region was 670..1568 while the card ran from 1130
     // to 1650 -- 82 DIP of the card outside the region. The region clips PAINTING as well as input, so
-    // the card came out with a hard square right edge, no rounded corner, and its rightmost controls
-    // could not be clicked either. Reported as a screenshot with "有个bug".
+    // the card came out with a hard square right edge, no rounded corner, and the rightmost tray icons
+    // could not be clicked either. Reported as a screenshot of the tray page with "有个bug".
     //
     // The card's own rectangle is the only correct answer while a card is up, and this is the sixth time
     // that sentence has had to be written in this file.
@@ -503,13 +505,13 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     // region is what decides that, not the hit test.
     //
     // FROM THE SURFACE THEY STAND ON, not from the system button: that surface is one capsule covering the
-    // deck and the island, and it reaches a pad FURTHER LEFT than the system button does
+    // deck, the island and the tray button, and it reaches a pad FURTHER LEFT than the system button does
     // (see BarClusterFor). Measured here instead, the region stopped 4 DIP short of what is painted -- and
     // the region CLIPS, so the left end of the capsule came out with a square bite taken out of it where the
     // round end should be. Reported as a photograph of the bar with "看一下 这个地方缺了一角" round the
     // bottom-left of the deck.
     {
-        const RoundedBox cluster = BarClusterFor(island);
+        const RoundedBox cluster = BarClusterFor(island, trayIconCount > 0);
         if (cluster.rect.left < left) left = cluster.rect.left;
     }
 
@@ -549,6 +551,10 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     // start clear of whatever shape is beside it, and the region is what decides whether the icons can be
     // pressed at all.
     const RoundedBox rowIsland = RowAnchorBox(current, restingIsland);
+    // ... and the tray button stands between the island and the row, so the row starts one button further
+    // along (see RowAnchorWithTray). Without this the region stops short of the icons -- the row and the
+    // region would disagree about where the row begins, and an icon outside the region cannot be clicked.
+    const RoundedBox rowWithTray = RowAnchorWithTray(rowIsland, trayIconCount > 0);
     // A negative count means "size it for the most that could fit", which is what a caller with no
     // window list wants: the region must not change as windows open and close, or the resize is a
     // window-manager call per change for nothing.
@@ -556,7 +562,7 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     const int fitting = TaskIconsThatFit(widthDip, wanted);
     const float cardWidthDip = (cardLeftDip > 0.0f) ? kExpandedWidthDip : 0.0f;
     const float rowLeft =
-        TaskRowFor(rowIsland, fitting > 0 ? fitting : 1, cardLeftDip, cardWidthDip).left;
+        TaskRowFor(rowWithTray, fitting > 0 ? fitting : 1, cardLeftDip, cardWidthDip).left;
     // The row's right edge at its WIDEST, not at rest.
     //
     // This used the resting width of every button, which is 30 DIP each -- but a button the pointer is on
@@ -570,18 +576,30 @@ RECT IslandWindow::InputRegionFor(const MonitorGeometry& monitor, IslandState st
     // for the widened button, and it was the drawing side that was short.
     float rowRight = rowLeft;
     if (fitting > 0) {
-        // From the row's own box: the same box the icons are DRAWN from, so the region cannot stop short
-        // of them.
+        // From the row's own box, which the tray button has moved along -- the same box the icons are
+        // DRAWN from, so the region cannot stop short of them.
         //
         // THE SAME BOX AS `rowLeft`, which is the whole point and was not true: the left edge above is
-        // measured from `rowIsland`, which follows the notice strip, while this end was measured from the
+        // measured from `rowWithTray`, which follows the notice strip, while this end was measured from the
         // RESTING PILL. While a strip was up the two ends were therefore 100 DIP apart -- the region
         // stopped short of the row it is supposed to cover, and the region CLIPS, so the right-hand end of
-        // the row was never painted at all. Reported as "右侧还有少一部分",
+        // the row and the tray icons beside it were never painted at all. Reported as "右侧还有少一部分",
         // with a photograph of the bar in exactly that state.
-        rowRight = TaskIconButtonAt(rowIsland, fitting - 1, fitting, fitting - 1, 1.0f).right;
+        rowRight = TaskIconButtonAt(rowWithTray, fitting - 1, fitting, fitting - 1, 1.0f).right;
     }
     if (rowRight > right) right = rowRight;
+
+    // THE TRAY, at the monitor's right-hand margin.
+    //
+    // The fifth time this file has had to say it, and the first time it was learned the hard way on this
+    // feature: the region is what decides which pixels this window owns, so a region that stops short of
+    // the tray CLIPS it. Measured: the icons were found (16 of them), the frame was handed them, and the
+    // bar drew nothing -- because the tray's strip is 238 DIP to the right of everything else the region
+    // covered. See InputRegionFor's other notes for the same rule applied to the card, the deck and the
+    // status strip.
+    // The tray BUTTON needs no line of its own here: it stands between the island's right edge and the
+    // row, both of which are already inside the region. (Its version at the window's right margin did need
+    // one -- that is what the note above is about.)
 
     RECT region = {};
     region.left = static_cast<LONG>(left * scale);
@@ -628,7 +646,7 @@ void IslandWindow::ApplyInputRegion() {
     // only the renderer knows about is a plan the clickable area cannot keep up with.
     const RECT region =
         InputRegionFor(monitor_, motion_.Target(), anchor, motion_.Current(), cardLeftDip_,
-                       taskButtonCount_, statusStripWidthDip_, noticeStripUp_);
+                       taskButtonCount_, statusStripWidthDip_, trayIconCount_, noticeStripUp_);
 
     // Skipped when it is the same rectangle as last time.
     //
@@ -694,6 +712,13 @@ bool IslandWindow::PointerOverControl(POINT screenPoint) const {
     if (IconAtScreen(screenPoint) >= 0) return true;
     if (StartAtScreen(screenPoint) || SystemButtonAtScreen(screenPoint)) return true;
 
+    // ... AND THE TRAY BUTTON IS ONE OF THE BUTTONS.
+    //
+    // Found by the check written beside it in Diagnostics: the tray was a control for the CLICK and not for
+    // the CURSOR, so the three dots that open the tray page showed a plain arrow -- the same defect the
+    // media card's transport buttons had, reported as "这些按钮 鼠标移上去 应该变成小手".
+    if (TrayButtonAtScreen(screenPoint)) return true;
+
     // THE CARD'S CONTROLS ARE THE CONTROLS OF THE CARD THAT IS UP.
     //
     // Gated on the owner, and that gate is not tidiness: the panel's tiles and the media card's transport
@@ -719,7 +744,12 @@ int IslandWindow::IconAtScreen(POINT screenPoint) const {
     const float widthDip = PixelsToDip(rect_.right - rect_.left, monitor_.dpi);
     const RoundedBox island = IslandBoxFor(widthDip, kCollapsedWidthDip, kCollapsedHeightDip);
     // ... the row is measured from the same box the drawing uses: see LayoutIslandFor.
-    const RoundedBox rowIsland = RowAnchorBox(motion_.Current(), island);
+    // ... AND THE TRAY BUTTON MOVES IT ALONG, exactly as the drawing does: the row is drawn one button
+    // further right and this is the hit test that has to agree with it. It did not, and the symptom was
+    // precise: pointing at the FIRST icon opened the SECOND, because the hit test still thought the row
+    // began where it used to. Reported as "鼠标移上去 第二个图片展开了".
+    const RoundedBox rowIsland = RowAnchorWithTray(RowAnchorBox(motion_.Current(), island),
+                                                   trayIconCount_ > 0);
 
     float localX = 0.0f;
     float localY = 0.0f;
@@ -745,12 +775,36 @@ int IslandWindow::IconAtScreen(POINT screenPoint) const {
 
 bool IslandWindow::HitTestScreen(POINT screenPoint) const {
     return ShouldAcceptPointer(monitor_, rect_, screenPoint, motion_.Target(),
-                               RowButtonCount(), cardLeftDip_, fullscreenApp_,
+                               RowButtonCount(), cardLeftDip_, fullscreenApp_, trayIconCount_,
                                motion_.Current(), noticeStripUp_);
 }
 
 void IslandWindow::SetFullscreenApp(bool fullscreenApp) {
     fullscreenApp_ = fullscreenApp;
+}
+
+void IslandWindow::SetTrayIconCount(int count) {
+    trayIconCount_ = count < 0 ? 0 : count;
+}
+
+void IslandWindow::OpenTrayMenu(int cell, int entryCount) {
+    if (cell < 0 || trayIconCount_ <= 0 || cardLeftDip_ <= 0.0f) {
+        CloseTrayMenu();
+        return;
+    }
+    const RoundedBox card =
+        PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
+    const island::TrayPageLayout page = TrayPageFor(card, trayIconCount_);
+    if (cell >= page.count) {
+        CloseTrayMenu();
+        return;
+    }
+    // From the bottom-right corner of the cell: the menu hangs off the icon that was right clicked, the way
+    // a context menu hangs off its object, and TrayMenuFor keeps it inside the card from there.
+    const island::RectF& icon = page.cells[cell];
+    trayMenuLayout_ = island::TrayMenuFor(card, icon.right, icon.bottom, entryCount);
+    trayMenuOpen_ = trayMenuLayout_.count > 0;
+    trayMenuRowHovered_ = -1;
 }
 
 void IslandWindow::SetSystemPanel(const TextRenderer::SystemPanelText& panel, float cardLeftDip) {
@@ -946,7 +1000,7 @@ IslandAnchor IslandWindow::CurrentAnchor() const {
 
 bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const RECT& windowRect,
                                        POINT screenPoint, IslandState state, int iconCount,
-                                       float cardLeftDip, bool fullscreenApp,
+                                       float cardLeftDip, bool fullscreenApp, int trayIconCount,
                                        const RoundedBox& currentShape, bool noticeStripUp) {
     // THE BAR IS NOT THERE WHILE A FULL-SCREEN APPLICATION IS IN FRONT.
     //
@@ -1030,8 +1084,15 @@ bool IslandWindow::ShouldAcceptPointer(const MonitorGeometry& monitor, const REC
         return inside(island, localX, localY) || inside(shape, localX, localY);
     }
 
-    // The row, from the same box the drawing uses.
-    const RoundedBox rowIsland = island;
+    // The tray BUTTON is the bar, exactly as the application icons are: it is drawn beside the island,
+    // outside every one of the state's shapes, so a button the pointer could not reach would be drawn and
+    // completely inert -- the defect the application icons had before this same union was extended for
+    // them. (The card's own grid needs nothing here: it is inside the card, and the card's column below
+    // already accepts the pointer.)
+    if (trayIconCount > 0 && TrayButtonHit(island, localX, localY)) return true;
+
+    // The row, from the box that accounts for the tray button standing between it and the island.
+    const RoundedBox rowIsland = RowAnchorWithTray(island, trayIconCount > 0);
     if (iconCount > 0 && TaskRowContains(rowIsland, iconCount, localX, localY)) {
         return true;
     }
@@ -1098,6 +1159,16 @@ bool IslandWindow::SystemButtonAtScreen(POINT screenPoint) const {
     return SystemButtonHit(LayoutIslandFor(), localX, localY);
 }
 
+bool IslandWindow::TrayButtonAtScreen(POINT screenPoint) const {
+    if (!hwnd_ || trayIconCount_ <= 0) return false;
+
+    float localX = 0.0f;
+    float localY = 0.0f;
+    ToLocalDip(screenPoint, &localX, &localY);
+    return TrayButtonHit(LayoutIslandFor(), localX, localY);
+}
+
+
 void IslandWindow::UpdatePointerState() {
     if (!hwnd_) return;
 
@@ -1152,7 +1223,7 @@ void IslandWindow::UpdatePointerState() {
                                    localY >= column.top && localY <= column.bottom;
         }
         const bool accepted = ShouldAcceptPointer(monitor_, rect_, cursor, motion_.Target(),
-                                                  RowButtonCount(), cardLeftDip_, false,
+                                                  RowButtonCount(), cardLeftDip_, false, 0,
                                                   motion_.Current(), noticeStripUp_);
 
         // `haveTrace_` distinguishes the first poll from a genuine transition.
@@ -1203,8 +1274,8 @@ void IslandWindow::UpdatePointerState() {
             // under it. Deciding only from the resting layout would then report "between buttons"
             // and close the button being pointed at, which ALSO let the island open, because "not on
             // an icon" is what permits that.
-            // From the row's own box: a hover test against the island's edge answers for a row that is not
-            // the one on screen.
+            // From the row's own box, which the tray button has moved along: a hover test against the
+            // island's edge answers for a row that is not the one on screen.
             //
             // ... AND THROUGH RowAnchorBox, exactly as IconAtScreen answers. This is the HOVER half of
             // the same rule the click half follows, and the two disagreed while a notice strip was up:
@@ -1214,9 +1285,34 @@ void IslandWindow::UpdatePointerState() {
             // test that names a different row from the one painted is the whole family of defect this
             // function has now been fixed for twice.
             const RoundedBox rowAnchor = RowAnchorBox(motion_.Current(), island);
-            hovered = TaskIconToKeepOpen(rowAnchor, RowButtonCount(), hoveredIcon_, localX, localY);
+            hovered = TaskIconToKeepOpen(RowAnchorWithTray(rowAnchor, trayIconCount_ > 0),
+                                         RowButtonCount(), hoveredIcon_, localX, localY);
         }
         hoveredIcon_ = hovered;
+
+        // The tray, from the monitor's own width: the button is anchored to the right-hand edge rather than
+        // to the row, so the row growing must not move it (see TrayButtonFor).
+        trayButtonHovered_ = trayIconCount_ > 0 && TrayButtonHit(island, localX, localY);
+
+        // ... and the icon under the pointer when its CARD is up. The card is placed by the frame loop, so
+        // this is the same placed rectangle the renderer drew into -- the same rule the music card's
+        // controls and the panel's tiles follow (see PlacedCardFor).
+        trayCellHovered_ = -1;
+        if (trayIconCount_ > 0 && cardLeftDip_ > 0.0f) {
+            // The anchor the window is laid out from, NOT a local one: the card is placed from the resting
+            // pill's box, and the frame loop placed it from this same anchor.
+            const RoundedBox card =
+                PlacedCardFor(BoxForState(IslandState::Collapsed, CurrentAnchor()), cardLeftDip_);
+            trayCellHovered_ = TrayPageCellAt(card, trayIconCount_, localX, localY);
+        }
+
+        // ... and the tray's own menu, when one is up: the rows it was OPENED with, not a fresh layout from
+        // the pointer -- a menu whose box is recomputed from the pointer every frame walks away from the
+        // pointer that is on it, and then the row under the pointer changes as it moves.
+        trayMenuRowHovered_ = -1;
+        if (trayMenuOpen_) {
+            trayMenuRowHovered_ = TrayMenuRowAt(trayMenuLayout_, localX, localY);
+        }
 
         // ... and the same question for the Start card, which is laid out by the same rule.
         startHit_ = {};
@@ -1287,7 +1383,7 @@ void IslandWindow::UpdatePointerState() {
 
     const bool inside =
         ShouldAcceptPointer(monitor_, rect_, cursor, motion_.Target(), RowButtonCount(),
-                            cardLeftDip_, false, motion_.Current(), noticeStripUp_);
+                            cardLeftDip_, false, 0, motion_.Current(), noticeStripUp_);
     if (inside != pointerInside_) {
         pointerInside_ = inside;
         pointerInsideChanged_ = true;
@@ -1503,8 +1599,9 @@ LRESULT IslandWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         }
 
         // A RIGHT CLICK, counted rather than acted on, like the left one: what it means is policy and
-        // belongs in the frame loop. It is how a pinned tile comes off the Start card, and the window is
-        // the only thing that hears the click.
+        // belongs in the frame loop. It exists for the tray page's cells -- right-clicking one of the
+        // shell's tray icons is how its application's own menu opens, which is the only way to reach an
+        // item like 退出 -- and the window is the only thing that hears the click.
         case WM_RBUTTONUP: {
             POINT where = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ClientToScreen(hwnd_, &where);

@@ -78,7 +78,7 @@ void LogProcessMemory(const char* reason, const ProcessMemorySample& sample,
     // print as "0.0MB", which reads as "the GPU is using nothing" -- the opposite of "not known".
     if (sample.vramValid) {
         LogAndPrint("  mem[%s]: private=%.1fMB ws=%.1fMB vram=%.1f/%.1fMB handles=%lu threads=%lu "
-                    "gdi=%lu user=%lu cover=%lluB lyrics=%d winicons=%d bitmaps=%d notify=%d "
+                    "gdi=%lu user=%lu cover=%lluB lyrics=%d tray=%d winicons=%d bitmaps=%d notify=%d "
                     "tasks=%d",
                     why,
                     static_cast<double>(sample.privateBytes) / kBytesPerMegabyte,
@@ -86,17 +86,17 @@ void LogProcessMemory(const char* reason, const ProcessMemorySample& sample,
                     static_cast<double>(sample.vramLocalBytes) / kBytesPerMegabyte,
                     static_cast<double>(sample.vramNonLocalBytes) / kBytesPerMegabyte,
                     sample.handles, sample.threads, sample.gdiObjects, sample.userObjects,
-                    counts.coverBytes, counts.lyricLines, counts.windowIcons,
+                    counts.coverBytes, counts.lyricLines, counts.trayIcons, counts.windowIcons,
                     counts.bitmaps, counts.notifications, counts.taskButtons);
     } else {
         LogAndPrint("  mem[%s]: private=%.1fMB ws=%.1fMB vram=n/a handles=%lu threads=%lu "
-                    "gdi=%lu user=%lu cover=%lluB lyrics=%d winicons=%d bitmaps=%d notify=%d "
+                    "gdi=%lu user=%lu cover=%lluB lyrics=%d tray=%d winicons=%d bitmaps=%d notify=%d "
                     "tasks=%d",
                     why,
                     static_cast<double>(sample.privateBytes) / kBytesPerMegabyte,
                     static_cast<double>(sample.workingSetBytes) / kBytesPerMegabyte,
                     sample.handles, sample.threads, sample.gdiObjects, sample.userObjects,
-                    counts.coverBytes, counts.lyricLines, counts.windowIcons,
+                    counts.coverBytes, counts.lyricLines, counts.trayIcons, counts.windowIcons,
                     counts.bitmaps, counts.notifications, counts.taskButtons);
     }
 }
