@@ -1354,6 +1354,7 @@ constexpr int kSampleLabel = 26;   // a line under the strip, for the name under
 
 struct SampleItem {
     std::wstring name;         // flattened, for the menu and the log
+    RECT screen = {};          // where the shell has it, which is where a real click must land
     bool shellButton = false;  // one of the shell's own, drawn as a glyph
     wchar_t glyph[8] = {};     // ... that glyph
     HICON icon = nullptr;      // or the application's icon, from the registry match
@@ -1495,6 +1496,10 @@ LRESULT CALLBACK SampleProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             HMENU menu = CreatePopupMenu();
             AppendMenuW(menu, MF_STRING, 1, L"打开（左键那一下）");
             AppendMenuW(menu, MF_STRING, 2, L"打开文件位置");
+            if (!g_sample[cell].shellButton) {
+                // Only for an application: the shell's own five have no menu of their own to ask for.
+                AppendMenuW(menu, MF_STRING, 4, L"应用自己的菜单…（会闪一下）");
+            }
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, 3, L"关闭样例");
             SetForegroundWindow(hwnd);
@@ -1517,6 +1522,38 @@ LRESULT CALLBACK SampleProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             } else if (chosen == 3) {
                 Log(L"TRAYSAMPLE: closing from the menu");
                 g_sampleQuit = true;
+            } else if (chosen == 4) {
+                // THE APPLICATION'S OWN MENU, AND WHAT IT COSTS (measured, HANDOFF 8.138): the shell has to
+                // be on screen at that spot for the length of the click -- a real click can only land on
+                // pixels that are really there, and a posted message is not honoured by the XAML tray. So:
+                // put the shell's overflow panel back on screen, right-click the icon the way a user
+                // would (pointer moved and restored), then clip the panel away again.
+                const HWND panel = FindWindowW(L"TopLevelWindowForOverflowXamlIsland", nullptr);
+                if (panel) {
+                    SetWindowRgn(panel, nullptr, TRUE);
+                    Sleep(160);
+                }
+                const POINT middle = {(g_sample[cell].screen.left + g_sample[cell].screen.right) / 2,
+                                      (g_sample[cell].screen.top + g_sample[cell].screen.bottom) / 2};
+                POINT saved = {};
+                GetCursorPos(&saved);
+                SetCursorPos(middle.x, middle.y);
+                Sleep(70);
+                INPUT inputs[2] = {};
+                inputs[0].type = INPUT_MOUSE;
+                inputs[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+                inputs[1].type = INPUT_MOUSE;
+                inputs[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+                const UINT sent = SendInput(2, inputs, sizeof(INPUT));
+                Sleep(250);
+                SetCursorPos(saved.x, saved.y);
+                if (panel) {
+                    HRGN sliver = CreateRectRgn(0, 0, 1, 1);
+                    SetWindowRgn(panel, sliver, TRUE);
+                }
+                Log(L"TRAYSAMPLE: asked the shell for '%ls' own menu at %ld,%ld (%u event(s), pointer back"
+                    L" at %ld,%ld) -- the panel was shown for that click and is away again",
+                    g_sample[cell].name.c_str(), middle.x, middle.y, sent, saved.x, saved.y);
             }
             return 0;
         }
@@ -1588,6 +1625,7 @@ int RunTraySample(int seconds, int x, int y) {
             if (shellButtons != fromStrip) continue;      // one pass for each of the two groups
             SampleItem& item = g_sample[g_sampleCount];
             item.name = Flattened(ElementText(element.Get(), UIA_NamePropertyId));
+            element->get_CurrentBoundingRectangle(&item.screen);
             item.shellButton = fromStrip;
             if (item.name.empty()) item.name = L"(no name)";
             element.Get()->AddRef();
