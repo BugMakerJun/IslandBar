@@ -11906,3 +11906,59 @@ preview: resting on a task icon shows a live thumbnail
 | 自检一条断言失败：`the system button is not lit by the Start card` | 我改写那条断言时把 `PanelLevel::Tray` 直接换成了 `PanelLevel::Sound`，而**声音页本来就是"系统按钮亮"的一层** | 改成明确写出两个控件的亮灭规则（Tiles/Sound 亮系统键，Start 亮 Start 键） |
 
 **教训**：删代码块用行范围是快的，但块的**括号边界**要在删之前读一遍；改写断言时要把断言**本身**重新想一遍，不能只做名字替换。
+
+---
+
+## 8.133 **托盘重新规划：三个判别实验（同名窗口 / 搬窗口 / 裁剪任务栏）** ✅
+
+用户的要求：「你们三个重新规划一下托盘应该怎么做，不要固化在灵动岛上，如果重新只做系统托盘的话怎么做」→ 又问了一句「替代 Explorer 的完整桌面 Shell 呢？」→ 授权做实验：「你们决定好后你可以测试看看 我就想要最后的结果，插一嘴，如果做 Explorer 内存会不会占用很大啊，我还是想要轻量级一点」。
+
+### 8.133.1 先把问题说清楚：托盘不是一个 API，是 shell 进程里的一个窗口
+
+应用调 `Shell_NotifyIcon` 时，是 shell32 把注册**交给那个窗口**（8.109 实测：给 `Shell_TrayWnd` 的同步 `WM_COPYDATA`，`dwData=1`，1484 字节扩展 NOTIFYICONDATA）。所以"怎么拿到真托盘"只剩三个问题，各有一个实验：
+
+| 实验 | 问题 | 做法（`scripts/probe-tray-lab.cpp`，一个 exe 四个子命令） |
+|---|---|---|
+| **E1** | 不换 shell，能不能**当那个窗口**？ | `--host` 注册一个同名类 `Shell_TrayWnd` 的窗口收 `WM_COPYDATA`；`--client` 真的调 `Shell_NotifyIcon(NIM_ADD/MODIFY/DELETE)` |
+| **E2** | 当不了的话，能不能**把真托盘露出来**？ | `--crop on` 对 `Shell_TrayWnd` 调 `SetWindowRgn`，只留 `TrayNotifyWnd` 那一块 |
+| **E3** | 真托盘能不能**被搬走**？ | `--reparent` 对 `TrayNotifyWnd` 调 `SetParent` 到我们自己的窗口（立即还原） |
+
+### 8.133.2 结果（都是实测，有日志有截图）
+
+| 实验 | 结果 | 证据 |
+|---|---|---|
+| **E1 抢宿主：失败** | `RegisterClassExW("Shell_TrayWnd")` **成功**（atom 49575，"类名全系统唯一"这个说法是错的），但注册**一条都没到我们这儿** | 两种对照各跑一遍：①宿主先起、客户端后注册 → 宿主收到 **0** 条；②客户端先注册、宿主 3 秒后出现、客户端再 `NIM_MODIFY` → 宿主仍收到 **0** 条。客户端的 `NIM_ADD/MODIFY/DELETE` **全部返回 1**（成功），`FindWindow("Shell_TrayWnd")` 两次都返回 explorer 的窗口（pid 30644）。所以 shell32 不是"每次找第一个同名窗口"，也没有把宿主换给我们 |
+| **E2 裁剪任务栏：成功** | `SetWindowRgn` 只留 `2416,0 144x32` 之后：**托盘本身完全正常**（折叠箭头 / 输入法 / 音量 / 时钟都在），左边 2416 DIP 回到桌面；托盘中心 `WindowFromPoint(2488,16)` 仍是 `TrayNotifyWnd`（explorer），被裁掉的地方 `WindowFromPoint(100,10)` 是桌面 `SysListView32`（**不影响点击穿透**） | 截图 `captures/tray-lab-00-taskbar-normal.png`（整条任务栏）对 `tray-lab-01-crop-on-right.png`（只剩托盘）；日志 `probe-tray-lab.log` |
+| E2 的**存活**：好 | 一次图标增删之后 `GetWindowRgn -> kind 2, box 2416,0 144x32` —— **shell 没有把区域改回去** | 同上 |
+| **E3 搬窗口：被接受** | `SetParent(TrayNotifyWnd, 我们的窗口)` **返回原父窗口、GetLastError=0**（Gemini 预测"必被测 `ERROR_ACCESS_DENIED`"**不成立**）；托盘矩形从 `2416,0` 变成 `2424,31`，随后我们立刻还原，复查 `2416,0 144x32` | 探针日志；`--crop status` 之后复查父窗口仍是任务栏 |
+
+**E3 只证明了"允许"，没证明"像素跟着走"**：Win11 任务栏的像素由铺满整条的 `Windows.UI.Composition.DesktopWindowContentBridge`（2560x32）画，`TrayNotifyWnd` 只是其中一块。要判它，得在搬完之后截图 + 点一次。
+
+### 8.133.3 由实验结果得到的架构结论
+
+1. **要"拥有托盘协议"（应用注册进我们手里），只有一条路：自己当 shell**（`Winlogon\Shell` 指向我们）。E1 证明"占名"没用；ChatGPT 也提醒过"当登录 shell ≠ 当托盘宿主"，两者要分别验证。
+2. **要"看到并点到真托盘"，最便宜的路是 E2**：不动协议、不注入、不 UIA —— 让原生任务栏活着，把它裁到只剩托盘。两边评审的排序里这条都排第一（"最少代码得到真实行为"）。
+3. 剩下的**唯一工程量**是把栏现在的行为从"藏任务栏"改成"裁任务栏"：实测栏的看门狗只跟**可见性**较劲（4 秒后把任务栏藏回去），**不碰区域**（区域在它眼皮下存活）。所以这条路要改的是"隐藏策略"，不是托盘代码。
+4. 代价（写明白）：托盘那 144 DIP 里**包含时钟**（`TrayNotifyWnd` 没有子 HWND，图标/音量/时钟都是 XAML 画的），所以"只留托盘、不含时钟"做不到；那 144 DIP 会一直占在屏幕右上角（或按 E3 试搬走，未验证）。
+
+### 8.133.4 内存口径（用户这一轮点名问的）
+
+| 进程 | 私有字节 | 工作集 | 线程 |
+|---|---|---|---|
+| `explorer.exe`（当 shell 的那个） | **204 MB** | 314.8 MB | 164 |
+| `island_bar.exe`（栏，含音乐/歌词/缩略图） | 86-103 MB | 121 MB | 67 |
+
+* **E2 那条路不新增任何常驻进程**：explorer 本来就在跑（栏藏的是它的任务栏，不是它的进程），所以"真托盘"的额外内存是 **0**，只多几行区域代码。
+* **自建完整 shell** 才会动这 204 MB —— 而且只有在我们连桌面、文件窗口、开始菜单一起重写的前提下才能省下来；"半换"（我们当 shell + 再拉一个 explorer 做文件管理）等于两边都还在，只会更多。
+* 结论：**想要轻量，就走 E2，别换 shell。**
+
+### 8.133.5 这一轮的工具与坑
+
+* 新增 `scripts/probe-tray-lab.cpp` + `scripts/probe-tray-lab.ps1`（编译并复制到 `%USERPROFILE%\IslandBar\traylab\`，因为项目树里的 exe 起不来）。
+
+| 坑 | 现象 | 修法 |
+|---|---|---|
+| 两个探针进程同时写一个日志 | 第二个 `_wfopen_s` 共享冲突失败 → 那个进程的报告全部写进一个看不见的控制台，看起来像"宿主一条都没收到" | 改用 `_wfsopen(..., _SH_DENYNO)` |
+| wide `%s` 传了 narrow 字符串 | `ACCEPTED` 打成 `䍁䕃呐䑅` —— 这个项目已经记过两次的老毛病 | 改 wide 字面量 |
+
+**没有做的事**：没有改 IslandBar 的任何代码（探针独立、跑完还原）；没有写注册表；没有换 shell；任务栏区域已还原（`--crop off` + 栏重启后重新隐藏）。
