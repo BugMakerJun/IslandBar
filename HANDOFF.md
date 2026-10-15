@@ -11668,3 +11668,30 @@ uninstaller written: ...  shortcut written: ...  registered under Settings > App
 `startApps`（对象）留在 `RunBar`，它下面那个后台线程的 `[&startApps]` 捕获照旧。
 
 **验证**：两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；然后用开始按钮自己的诊断开关（`ISLANDBAR_START_MS`）让它按下去并截图——图钉列表（15 个）、底部账号头像与名字、被指针指到那一项的高亮（wash 值 > 0）全部正常，日志里 `start button: island x [1170, 1390] -> button x [1132, 1162]…`、`start: 124 application(s) in shell:AppsFolder`、`start menu: Ctrl+Esc was sent` 都对得上。
+
+### 8.126 **BarState 第 6 片：应用行、状态行与悬停预览（26 个字段）** ✅（跑起来验证）
+
+`main.cpp` **5,844 → 5,764 行**（这一片是 80 行连续代码）。
+
+搬的是：应用行的标题副本与每格图标按钮的生长值/速度（`taskTitles` / `taskHoverAmount` / `taskHoverVelocity`）、栏自身三个按钮的 wash（`controlWash` / `controlWashVelocity` / `controlWashAnimating` / `iconAnimating` / `rowAppearAnimating`）、状态行（`statusStripOpacity` / `statusStripAnimating` / `lastWeatherRevision` / `statusSkyText` / `statusTemperatureText`）、每格图标槽（局部类型 `RowSlot` + `rowSlots` / `rowSlotCount`）、冻结的窗口句柄与行内图标数（`taskHandles` / `taskWindowsShown`）、悬停预览那一组（`previewTarget` / `previewSinceMs` / `previewReported` / `previewLastRefusals`），以及"变才报"的那四个 `lastReported*` 和 `lastTaskRefresh`。
+
+`RowSlot` 留在结构体里当**嵌套类型**（它只在声明处与数组里出现，没有别的使用者），这和第 5 片的 `WashSlot` 不同——那个出现在 lambda 形参上，只能提到命名空间作用域。
+
+#### 8.126.1 顺带修正一处方向搞反的依赖
+
+`rowSlots` 的容量用的是 `island::FrameState::kMaxTaskButtons`（32），而它定义在 `render/Renderer.h`。让**状态头去 include 渲染头**只为拿一个容量常量，是把依赖方向搞反了。所以：
+
+- 常量搬到 `domain/TaskStripLayout.h`（它本来就是管这一行布局的地方），附上理由；
+- `FrameState` 里留一行别名 `static constexpr int kMaxTaskButtons = island::kMaxTaskButtons;`，**渲染器与 main.cpp 里所有既有写法一个字都不用改**，含义也不变。
+
+#### 8.126.2 验证
+
+两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；起 bar 后这一片的字段全在日志里活着：
+
+```
+taskbar: state=music-strip, 4 buttons from 4 windows listed (4 listed of 313: 294 invisible, …)
+row: hovered=-1, 4 icons on the right [0 1398..1428 h0.00] [1 1432..1462 h0.00] …
+preview: resting on a task icon shows a live thumbnail
+```
+
+（`h0.00` 就是搬走的 `taskHoverAmount`。）

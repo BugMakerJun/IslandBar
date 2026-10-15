@@ -1205,86 +1205,6 @@ unsigned long long lastMusicMeterMs = 0;
     // strip is on screen. The titles are copied into this array for the frame to point at: the list
     // can refresh between frames, and a frame that pointed into the list would read freed entries.
     island::WindowList taskWindows;
-    wchar_t taskTitles[island::kMaxTaskWindows][island::kTaskTitleCapacity] = {};
-    // How far each icon button's growth has run, 0 to 1. Held across frames because it is an
-    // animation, not a state: the button opens over several frames rather than snapping.
-    //
-    // ONE value, not two. An earlier version animated the width and the push-along separately, and
-    // while the two disagreed the widened button's right edge ran past the next button's left edge
-    // and painted over it -- which is the "the icons are covered / it did not make room" report that
-    // survived two rounds of diagnosis. Both the width and the push now come from this value, so
-    // they cannot disagree.
-    float taskHoverAmount[island::kMaxTaskWindows] = {};
-    // ... and how fast each of them is moving, which is what makes it a spring rather than a ramp: the
-    // value alone cannot settle (see RowOpenStep).
-    float taskHoverVelocity[island::kMaxTaskWindows] = {};
-    // ... and the same for the three washes on the bar's own buttons (Start, the system panel's toggle,
-    // the tray). They used to switch on in a single frame -- see FrameState::startWash.
-    float controlWash[3] = {};        // 0 = Start, 1 = system toggle, 2 = tray
-    float controlWashVelocity[3] = {};
-    // Set while any of those three is still moving, so the loop keeps drawing until they settle.
-    bool controlWashAnimating = false;
-    // True while any button is mid-transition, so the loop keeps drawing until it settles.
-    bool iconAnimating = false;
-// Whether any icon in the row is still arriving or leaving. Set inside the draw (where the row is
-// updated) and read by the next frame's redraw decision, so the arrival animation keeps running.
-bool rowAppearAnimating = false;
-
-// --- the date / weekday / time / weather line -----------------------------
-//
-// How far the BESIDE-THE-DECK copy of it has faded in, 0 to 1, held across frames because it is an
-// animation and not a state. It follows the one rule that decides where the line goes: while the
-// pill's own line is free the line is INSIDE the pill (no fade -- the pill is always there), and
-// while the pill's line is taken (the lyric, a message, a call) the same words stand beside the
-// deck and fade in. See StatusPlacementFor for the rule and StatusStripFadeStep for the fade.
-float statusStripOpacity = 0.0f;
-// True while that fade is in flight, which is what asks for the next frame. Set inside the draw and
-// read by the next pass, like the two arrival flags above.
-bool statusStripAnimating = false;
-// The weather reader's revision as of the last draw, so a new reading is a redraw reason of its own:
-// the reading arrives on a worker, a few seconds after the bar has settled.
-unsigned long long lastWeatherRevision = 0;
-// Where the reading lives for the frame to point at: the word and the temperature, apart, because
-// the line gives them their own sizes and a gap between them. Members of this scope rather than the
-// reader's own storage, because a reading can be replaced mid-frame -- replace it and the frame
-// would print half of one reading and half of the next.
-wchar_t statusSkyText[32] = {};
-wchar_t statusTemperatureText[32] = {};
-// One entry per window the row is drawing or fading out: an icon's membership of the row and how far
-// in it is (see TaskIconAppearStep).
-struct RowSlot {
-    HWND  handle = nullptr;
-    float appear = 0.0f;
-};
-RowSlot rowSlots[island::FrameState::kMaxTaskButtons] = {};
-int rowSlotCount = 0;
-    // How many application icons the row is currently showing. The click handler bounds
-    // itself by this and not by the window list, which can hold windows the row had no room
-    // for -- activating one of those would switch to a window with no icon on screen.
-    int  taskWindowsShown = 0;
-    // The window behind each drawn icon, frozen when the frame was built.
-    //
-    // The click resolves through THIS and not through the live list. The list is
-    // re-enumerated every 500 ms and its order can differ from the one on screen, so
-    // indexing into it at click time could activate a window the user did not point at.
-    HWND taskHandles[island::kMaxTaskWindows] = {};
-    // --- the hover preview's own state ---------------------------------------
-    //
-    // Which window the preview is FOR, and when the pointer arrived on its icon. The delay is the
-    // whole reason this exists: the pointer crosses the row on its way somewhere, and a preview that
-    // appeared on the first frame would flash for every icon it passed.
-    HWND previewTarget = nullptr;
-    unsigned long long previewSinceMs = 0;
-    // Reported once each, because "the preview never appeared" and "the compositor refused this window"
-    // are different answers and only the log can tell them apart.
-    bool previewReported = false;
-    int  previewLastRefusals = 0;
-    // What was last written to the trace, so it reports changes rather than every frame.
-    int   lastReportedHoveredIcon = -2;
-    float lastReportedHoverAmount = -1.0f;
-    int   lastReportedPointed = -2;
-    bool  lastReportedAnimating = false;
-    unsigned long long lastTaskRefresh = 0;
 
     if (!renderOk) {
         island::LogAndPrint("WARNING: composition surface unavailable; the window stays empty\n");
@@ -2981,9 +2901,9 @@ float musicWavePhase = 0.0f;
                     dismissPanel();
                     island::LogAndPrint("  system panel: closed (click elsewhere)\n");
                     std::fflush(stdout);
-                } else if (icon >= 0 && icon < taskWindowsShown) {
+                } else if (icon >= 0 && icon < bar.taskWindowsShown) {
                     // The handle that was DRAWN at this position, not whatever the live list holds now.
-                    const HWND target = taskHandles[icon];
+                    const HWND target = bar.taskHandles[icon];
                     island::LogAndPrint("  icon click: index %d -> %p", icon,
                                         reinterpret_cast<void*>(target));
 
@@ -3023,7 +2943,7 @@ float musicWavePhase = 0.0f;
                     // different faults and the log otherwise shows neither. This is the line that
                     // separates them.
                     island::LogAndPrint("  icon click: no icon (index %d, %d shown)", icon,
-                                        taskWindowsShown);
+                                        bar.taskWindowsShown);
                     std::fflush(stdout);
 
                 const island::CardControl control = window.MusicControlAtScreen(cursor);
@@ -3543,13 +3463,13 @@ float musicWavePhase = 0.0f;
                 const bool islandOpen = (window.State() == island::IslandState::Hover);
                 const int pointed = islandOpen ? -1 : window.HoveredIcon();
 
-                iconAnimating = false;
+                bar.iconAnimating = false;
                 for (int i = 0; i < island::kMaxTaskWindows; ++i) {
                     const float target = (i == pointed) ? 1.0f : 0.0f;
                     // A spring per button, not a linear ramp: see RowOpenStep for why, and for the
                     // sub-stepping that keeps it stable at this machine's worst frame times.
-                    if (island::RowOpenStep(&taskHoverAmount[i], &taskHoverVelocity[i], target, dt)) {
-                        iconAnimating = true;
+                    if (island::RowOpenStep(&bar.taskHoverAmount[i], &bar.taskHoverVelocity[i], target, dt)) {
+                        bar.iconAnimating = true;
                     }
                 }
 
@@ -3560,15 +3480,15 @@ float musicWavePhase = 0.0f;
                 // differs slightly every frame, and including it in the condition produced a line per
                 // frame -- hundreds of lines in five seconds, burying everything else. A trace
                 // condition has to be a value that is actually stable between the events being traced.
-                if (pointed != lastReportedPointed || iconAnimating != lastReportedAnimating) {
-                    lastReportedPointed = pointed;
-                    lastReportedAnimating = iconAnimating;
+                if (pointed != bar.lastReportedPointed || bar.iconAnimating != bar.lastReportedAnimating) {
+                    bar.lastReportedPointed = pointed;
+                    bar.lastReportedAnimating = bar.iconAnimating;
                     // The step is gone (the row opens on a spring now, which has a velocity rather than a
                     // rate), so the trace reports the velocity of the first button instead -- the number
                     // that says whether the movement is settling or still swinging.
                     island::LogAndPrint("  anim: pointed=%d animating=%d velocity=%.3f hover0=%.2f",
-                                        pointed, iconAnimating ? 1 : 0, taskHoverVelocity[0],
-                                        taskHoverAmount[0]);
+                                        pointed, bar.iconAnimating ? 1 : 0, bar.taskHoverVelocity[0],
+                                        bar.taskHoverAmount[0]);
                     std::fflush(stdout);
                 }
             }
@@ -3768,8 +3688,8 @@ float musicWavePhase = 0.0f;
             // A new weather reading is the same kind of reason: it arrives on its own schedule, and
             // nothing else about the frame has to move for the strip to have something new to say.
             bool weatherChanged = false;
-            if (weather.Revision() != lastWeatherRevision) {
-                lastWeatherRevision = weather.Revision();
+            if (weather.Revision() != bar.lastWeatherRevision) {
+                bar.lastWeatherRevision = weather.Revision();
                 weatherChanged = true;
             }
 
@@ -3821,9 +3741,9 @@ float musicWavePhase = 0.0f;
             const bool needDraw = animating || clockChanged || notificationChanged ||
                                   musicChanged || lyricsScrolling || lyricLineChanged ||
                                   lyricLineAnimating || progressChanged || musicMeterDue ||
-                                  iconAnimating || rowAppearAnimating || soundPageChanged ||
-                                  callMeterDue || statusStripAnimating || weatherChanged ||
-                                  controlWashAnimating ||
+                                  bar.iconAnimating || bar.rowAppearAnimating || soundPageChanged ||
+                                  callMeterDue || bar.statusStripAnimating || weatherChanged ||
+                                  bar.controlWashAnimating ||
                                   // ... and the Start card's own pointer and scroll. Neither is a state
                                   // this loop watches anywhere else, and without them the highlight and the
                                   // list moved only on the next clock tick -- measured, that is ONE redraw
@@ -3846,7 +3766,7 @@ float musicWavePhase = 0.0f;
                 if (lyricsScrolling || lyricLineChanged || lyricLineAnimating) ++whyLyrics;
                 if (musicMeterDue) ++whyMusic;
                 if (progressChanged) ++whyProgress;
-                if (statusStripAnimating || weatherChanged) ++whyStatusStrip;
+                if (bar.statusStripAnimating || weatherChanged) ++whyStatusStrip;
                 if (startHoverChanged) ++whyStartHover;
                 if (bar.startWashAnimating) ++whyStartWash;
                 if (!haveDrawn) ++whyFirst;
@@ -4006,16 +3926,16 @@ float musicWavePhase = 0.0f;
                     const bool want[3] = {window.StartHovered() || forcedStartHover,
                                           window.SystemButtonHovered(),
                                           window.TrayButtonHovered()};
-                    controlWashAnimating = false;
+                    bar.controlWashAnimating = false;
                     for (int i = 0; i < 3; ++i) {
-                        if (island::ControlWashStep(&controlWash[i], &controlWashVelocity[i],
+                        if (island::ControlWashStep(&bar.controlWash[i], &bar.controlWashVelocity[i],
                                                     want[i] ? 1.0f : 0.0f, dt)) {
-                            controlWashAnimating = true;
+                            bar.controlWashAnimating = true;
                         }
                     }
-                    frame.startWash = controlWash[0];
-                    frame.systemButtonWash = controlWash[1];
-                    frame.trayButtonWash = controlWash[2];
+                    frame.startWash = bar.controlWash[0];
+                    frame.systemButtonWash = bar.controlWash[1];
+                    frame.trayButtonWash = bar.controlWash[2];
                 }
                 // The level the card is SHOWING, not the page that was asked for: the two differ for the
                 // whole of the exit, and drawing the request is what put the tiles under a shrinking tray
@@ -4387,8 +4307,8 @@ float musicWavePhase = 0.0f;
                 // (see FrameState::restingState). A card does not change this, which is the point.
                 frame.restingState = resting;
 
-                if (GetTickCount64() - lastTaskRefresh >= 500) {
-                    lastTaskRefresh = GetTickCount64();
+                if (GetTickCount64() - bar.lastTaskRefresh >= 500) {
+                    bar.lastTaskRefresh = GetTickCount64();
                     taskWindows.Refresh();
                 }
 
@@ -4437,43 +4357,43 @@ float musicWavePhase = 0.0f;
                 // The order of the LISTED ones is untouched: the departing ones are appended, so nothing
                 // that is staying moves because something else left.
                 const float rowDt = static_cast<float>(dt > 0.1 ? 0.1 : dt);
-                for (int i = 0; i < rowSlotCount;) {
+                for (int i = 0; i < bar.rowSlotCount;) {
                     bool listedNow = false;
                     for (int j = 0; j < listed; ++j) {
-                        if (taskWindows.At(j).handle == rowSlots[i].handle) {
+                        if (taskWindows.At(j).handle == bar.rowSlots[i].handle) {
                             listedNow = true;
                             break;
                         }
                     }
-                    rowSlots[i].appear =
-                        island::TaskIconAppearStep(rowSlots[i].appear, listedNow, rowDt);
-                    if (!listedNow && rowSlots[i].appear <= 0.0f) {
-                        rowSlots[i] = rowSlots[rowSlotCount - 1];   // swap the last one in
-                        --rowSlotCount;
+                    bar.rowSlots[i].appear =
+                        island::TaskIconAppearStep(bar.rowSlots[i].appear, listedNow, rowDt);
+                    if (!listedNow && bar.rowSlots[i].appear <= 0.0f) {
+                        bar.rowSlots[i] = bar.rowSlots[bar.rowSlotCount - 1];   // swap the last one in
+                        --bar.rowSlotCount;
                         continue;
                     }
                     ++i;
                 }
-                for (int j = 0; j < listed && rowSlotCount < island::FrameState::kMaxTaskButtons; ++j) {
+                for (int j = 0; j < listed && bar.rowSlotCount < island::FrameState::kMaxTaskButtons; ++j) {
                     const HWND handle = taskWindows.At(j).handle;
                     bool tracked = false;
-                    for (int i = 0; i < rowSlotCount; ++i) {
-                        if (rowSlots[i].handle == handle) {
+                    for (int i = 0; i < bar.rowSlotCount; ++i) {
+                        if (bar.rowSlots[i].handle == handle) {
                             tracked = true;
                             break;
                         }
                     }
                     if (!tracked) {
-                        rowSlots[rowSlotCount].handle = handle;
-                        rowSlots[rowSlotCount].appear = 0.0f;   // arrives from nothing
-                        ++rowSlotCount;
+                        bar.rowSlots[bar.rowSlotCount].handle = handle;
+                        bar.rowSlots[bar.rowSlotCount].appear = 0.0f;   // arrives from nothing
+                        ++bar.rowSlotCount;
                     }
                 }
 
                 int drawn = 0;
                 const auto appearanceOf = [&](HWND handle) {
-                    for (int i = 0; i < rowSlotCount; ++i) {
-                        if (rowSlots[i].handle == handle) return rowSlots[i].appear;
+                    for (int i = 0; i < bar.rowSlotCount; ++i) {
+                        if (bar.rowSlots[i].handle == handle) return bar.rowSlots[i].appear;
                     }
                     return 1.0f;
                 };
@@ -4482,26 +4402,26 @@ float musicWavePhase = 0.0f;
                     // Copied into a persistent buffer: the frame is consumed after this loop
                     // body returns, and the list can refresh in between, so pointing at the
                     // entry's own title would be a dangling read.
-                    wcsncpy_s(taskTitles[drawn], island::kTaskTitleCapacity, entry.title,
+                    wcsncpy_s(bar.taskTitles[drawn], island::kTaskTitleCapacity, entry.title,
                               _TRUNCATE);
-                    frame.taskButtons[drawn].title = taskTitles[drawn];
+                    frame.taskButtons[drawn].title = bar.taskTitles[drawn];
                     frame.taskButtons[drawn].active =
                         (entry.handle == taskWindows.ForegroundHandle());
                     frame.taskButtons[drawn].minimised = entry.iconic;
                     // The icon is resolved by the RENDERER, which owns the GPU bitmaps and
                     // caches one per window. The caller only names the window.
                     frame.taskButtonWindow[drawn] = entry.handle;
-                    taskHandles[drawn] = entry.handle;
+                    bar.taskHandles[drawn] = entry.handle;
                     frame.taskButtonAppear[drawn] = appearanceOf(entry.handle);
                     ++drawn;
                 }
                 // ... and the ones on their way out, which have no title to show any more (their window is
                 // usually gone) -- only the icon, which the renderer still has cached.
-                for (int i = 0; i < rowSlotCount && drawn < island::FrameState::kMaxTaskButtons; ++i) {
-                    if (rowSlots[i].appear <= 0.0f) continue;
+                for (int i = 0; i < bar.rowSlotCount && drawn < island::FrameState::kMaxTaskButtons; ++i) {
+                    if (bar.rowSlots[i].appear <= 0.0f) continue;
                     bool stillListed = false;
                     for (int j = 0; j < listed; ++j) {
-                        if (taskWindows.At(j).handle == rowSlots[i].handle) {
+                        if (taskWindows.At(j).handle == bar.rowSlots[i].handle) {
                             stillListed = true;
                             break;
                         }
@@ -4510,9 +4430,9 @@ float musicWavePhase = 0.0f;
                     frame.taskButtons[drawn].title = nullptr;
                     frame.taskButtons[drawn].active = false;
                     frame.taskButtons[drawn].minimised = false;
-                    frame.taskButtonWindow[drawn] = rowSlots[i].handle;
-                    taskHandles[drawn] = rowSlots[i].handle;
-                    frame.taskButtonAppear[drawn] = rowSlots[i].appear;
+                    frame.taskButtonWindow[drawn] = bar.rowSlots[i].handle;
+                    bar.taskHandles[drawn] = bar.rowSlots[i].handle;
+                    frame.taskButtonAppear[drawn] = bar.rowSlots[i].appear;
                     ++drawn;
                 }
 
@@ -4520,14 +4440,14 @@ float musicWavePhase = 0.0f;
                 frame.taskButtonAppearValid = true;
                 // Whether any icon is still on its way in or out, which is what asks for the next frame.
                 // Read by needDraw on the NEXT pass, because the row is updated inside the draw.
-                rowAppearAnimating = false;
+                bar.rowAppearAnimating = false;
                 for (int i = 0; i < drawn; ++i) {
-                    if (frame.taskButtonAppear[i] < 0.999f) rowAppearAnimating = true;
+                    if (frame.taskButtonAppear[i] < 0.999f) bar.rowAppearAnimating = true;
                 }
                 // The count the WINDOW is told is the count that is DRAWN, because the row's geometry is
                 // laid out from it: a departing icon occupies a slot for the length of its exit, and a hit
                 // test against a different count would point at the wrong slot for 0.2 s.
-                taskWindowsShown = drawn;
+                bar.taskWindowsShown = drawn;
 
                 // Told to the window so it can work out whether the pointer is on an icon, and
                 // which one. The window owns the hit test; the frame loop owns the list, and this
@@ -4635,7 +4555,7 @@ float musicWavePhase = 0.0f;
 
                 // --- the hover preview: a live thumbnail under the icon the pointer rests on -------
                 //
-                // AFTER A DWELL, not on arrival (see previewTarget), and not while a card is up: the
+                // AFTER A DWELL, not on arrival (see bar.previewTarget), and not while a card is up: the
                 // media card and the system panel hang BELOW the bar, which is exactly where a preview
                 // goes, so one would be drawn under the other.
                 //
@@ -4646,14 +4566,14 @@ float musicWavePhase = 0.0f;
                     const unsigned long long previewNow = GetTickCount64();
                     const int hoveredIcon = frame.taskHoveredIndex;
                     const HWND wanted = (hoveredIcon >= 0 && hoveredIcon < drawn)
-                                            ? taskHandles[hoveredIcon]
+                                            ? bar.taskHandles[hoveredIcon]
                                             : nullptr;
-                    if (wanted != previewTarget) {
-                        previewTarget = wanted;
-                        previewSinceMs = previewNow;
+                    if (wanted != bar.previewTarget) {
+                        bar.previewTarget = wanted;
+                        bar.previewSinceMs = previewNow;
                     }
 
-                    const bool rested = wanted && (previewNow - previewSinceMs) >= kThumbnailDwellMs;
+                    const bool rested = wanted && (previewNow - bar.previewSinceMs) >= kThumbnailDwellMs;
                     // ONCE IT IS UP, IT FOLLOWS THE POINTER ALONG THE ROW AT ONCE.
                     //
                     // The dwell exists to stop a preview flashing up for every icon the pointer passes on
@@ -4679,7 +4599,7 @@ float musicWavePhase = 0.0f;
                         const island::RoundedBox islandBox = island::RowAnchorWithTray(
                             window.LayoutIslandFor(), frame.trayIconCount > 0);
                         const island::RectF button = island::TaskIconButtonAtAmounts(
-                            islandBox, hoveredIcon, drawn, taskHoverAmount);
+                            islandBox, hoveredIcon, drawn, bar.taskHoverAmount);
                         RECT iconPx = {};
                         iconPx.left = monitorPx.left +
                                       static_cast<LONG>(std::lround(button.left * scale));
@@ -4698,8 +4618,8 @@ float musicWavePhase = 0.0f;
                             sourceSize.cx, sourceSize.cy, iconPx, monitorPx, scale);
                         shown = placement.valid && preview.Place(placement);
 
-                        if (!previewReported) {
-                            previewReported = true;
+                        if (!bar.previewReported) {
+                            bar.previewReported = true;
                             island::LogAndPrint(
                                 "  preview: hwnd %p -> card %ld,%ld %ldx%ld, picture %ldx%ld "
                                 "(compositor says %ldx%ld), shown=%d, hr=0x%08llX",
@@ -4718,8 +4638,8 @@ float musicWavePhase = 0.0f;
                     // A refusal is reported once per count rather than once per frame: a window the
                     // compositor will not preview is a fact about that window, and repeating it 60 times
                     // a second would drown the log.
-                    if (preview.Refusals() != previewLastRefusals) {
-                        previewLastRefusals = preview.Refusals();
+                    if (preview.Refusals() != bar.previewLastRefusals) {
+                        bar.previewLastRefusals = preview.Refusals();
                         island::LogAndPrint("  preview: the compositor refused a thumbnail of hwnd %p "
                                             "(0x%08llX)",
                                             reinterpret_cast<void*>(wanted), preview.LastResult());
@@ -4739,7 +4659,7 @@ float musicWavePhase = 0.0f;
                     frame.taskButtons[i].fill = frame.pill.fill;
                     // Handed over from the animation, which runs before this draw. An icon on its way OUT
                     // is never widened: the amount belongs to the slot it used to occupy.
-                    frame.taskButtons[i].hoverAmount = (i < listed) ? taskHoverAmount[i] : 0.0f;
+                    frame.taskButtons[i].hoverAmount = (i < listed) ? bar.taskHoverAmount[i] : 0.0f;
                 }
                 // What the loop worked out, before the draw: the pointer's icon, and the two
                 // animated amounts for the first button.
@@ -4748,12 +4668,12 @@ float musicWavePhase = 0.0f;
                 // the renderer's own `row:` line says what the layout PRODUCED. A row that does not
                 // move is either a decision that never changed or a layout that ignored it, and only
                 // having both makes the difference visible.
-                if (window.HoveredIcon() != lastReportedHoveredIcon ||
-                    taskHoverAmount[0] != lastReportedHoverAmount) {
-                    lastReportedHoveredIcon = window.HoveredIcon();
-                    lastReportedHoverAmount = taskHoverAmount[0];
+                if (window.HoveredIcon() != bar.lastReportedHoveredIcon ||
+                    bar.taskHoverAmount[0] != bar.lastReportedHoverAmount) {
+                    bar.lastReportedHoveredIcon = window.HoveredIcon();
+                    bar.lastReportedHoverAmount = bar.taskHoverAmount[0];
                     island::LogAndPrint("  loop: hoveredIcon=%d, button0 hover=%.2f, %d icons",
-                                        window.HoveredIcon(), taskHoverAmount[0],
+                                        window.HoveredIcon(), bar.taskHoverAmount[0],
                                         window.IconCount());
                     std::fflush(stdout);
                 }
@@ -4802,7 +4722,7 @@ float musicWavePhase = 0.0f;
                 // region DECIDES which pixels belong to this window, so a strip outside it is clipped --
                 // see SetStatusStripWidth. Keyed on the FADE rather than on the placement flag, because
                 // the strip is still on screen for the length of its exit.
-                window.SetStatusStripWidth(statusStripOpacity > 0.001f
+                window.SetStatusStripWidth(bar.statusStripOpacity > 0.001f
                                                ? island::kStatusStripWidthDip
                                                : 0.0f);
 
@@ -4979,9 +4899,9 @@ float musicWavePhase = 0.0f;
                 const island::StatusPlacement placement =
                     island::StatusPlacementFor(islandLineTaken);
 
-                statusStripOpacity =
-                    island::StatusStripFadeStep(statusStripOpacity, placement.besideDeck, dt);
-                frame.statusStripOpacity = statusStripOpacity;
+                bar.statusStripOpacity =
+                    island::StatusStripFadeStep(bar.statusStripOpacity, placement.besideDeck, dt);
+                frame.statusStripOpacity = bar.statusStripOpacity;
 
                 // The reading is COPIED into this scope's buffers rather than pointed at where the
                 // worker keeps it: the worker can publish between this line and the draw, and a frame
@@ -4990,10 +4910,10 @@ float musicWavePhase = 0.0f;
                 //
                 // Two pieces, not one string: the line sets the word and the temperature apart (see
                 // FrameState::statusSky).
-                weather.Pieces(statusSkyText, 32, statusTemperatureText, 32);
-                frame.statusSky = statusSkyText[0] != L'\0' ? statusSkyText : nullptr;
+                weather.Pieces(bar.statusSkyText, 32, bar.statusTemperatureText, 32);
+                frame.statusSky = bar.statusSkyText[0] != L'\0' ? bar.statusSkyText : nullptr;
                 frame.statusTemperature =
-                    statusTemperatureText[0] != L'\0' ? statusTemperatureText : nullptr;
+                    bar.statusTemperatureText[0] != L'\0' ? bar.statusTemperatureText : nullptr;
                 // ... and the CODE the two pieces came from, because the mark before the word is drawn
                 // from it: the line used to draw one cloud-with-rain whatever the sky was.
                 {
@@ -5005,7 +4925,7 @@ float musicWavePhase = 0.0f;
                 }
 
                 // Read by the next pass's redraw decision, like the icon row's own arrival flags.
-                statusStripAnimating = statusStripOpacity > 0.001f && statusStripOpacity < 0.999f;
+                bar.statusStripAnimating = bar.statusStripOpacity > 0.001f && bar.statusStripOpacity < 0.999f;
 
                 // The card's printed time and the fill of its bar, from the ONE playhead at the top of
                 // this iteration -- the same number the pill's lyric line is chosen by.

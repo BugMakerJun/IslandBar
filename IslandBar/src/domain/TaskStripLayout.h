@@ -70,6 +70,15 @@ inline constexpr float kTaskWideButtonDip = 132.0f;
 // and the user's "8 icons and no more" turned out to come from the arithmetic below, not from here.
 inline constexpr int kMaxTaskIcons = 20;
 
+// How many icons the row can draw at once, INCLUDING the ones fading out.
+//
+// It lives here rather than in the renderer's FrameState, where it was, because it is a cap on the row --
+// a layout fact -- and two other things need to name it: the frame state that carries the buttons, and the
+// bar's own state (app/BarState.h) which holds one entry per slot. A state header that has to include a
+// render header to learn how many icons fit is the dependency pointing the wrong way; the renderer keeps a
+// one-line alias so every existing `FrameState::kMaxTaskButtons` still reads the same and means the same.
+inline constexpr int kMaxTaskButtons = 32;
+
 // The row a button occupies, given the width everything before it used up.
 //
 // One function for both kinds of button, because they are the same button: the offsets are the

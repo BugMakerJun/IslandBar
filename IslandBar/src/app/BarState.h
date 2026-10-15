@@ -31,6 +31,7 @@
 #include "domain/CardLayout.h"   // TrayMenuAction, kMaxTrayMenuEntries
 #include "media/Lyrics.h"        // kLyricLineCapacity, TrackPosition
 #include "media/MusicSession.h"  // kMusicTitleCapacity, kMusicArtistCapacity
+#include "platform/WindowList.h" // kMaxTaskWindows, kTaskTitleCapacity: the row's titles are copied from it
 
 namespace island {
 
@@ -42,6 +43,14 @@ struct WashSlot {
     float value = 0.0f;
     float velocity = 0.0f;
 };
+    // --- the application row, the status line, and the hover preview (slice 6) --------------------------
+    //
+    // Moved 2026-10-15, comments and all. Three features share this block and they share it because they
+    // drive EACH OTHER: the row decides how many icons there is room for, the status line moves beside the
+    // deck when the pill's own line is taken (by a lyric, a message or a call), and the preview waits on the
+    // pointer resting on an icon in that row. The titles are COPIED into this struct's array because the
+    // window list refreshes between frames and a frame pointing into the list would read freed entries, and
+    // the handles are frozen in the same way -- the click resolves through them and not through the live list.
 struct BarState {
 
     // --- the Start card's own state (slice 5) --------------------------------------------------------
@@ -286,6 +295,86 @@ struct BarState {
     unsigned long long lastFullscreenCheck = 0;
     int lastReportedButtons = -1;
     island::IslandState lastReportedState = island::IslandState::Collapsed;
+    wchar_t taskTitles[island::kMaxTaskWindows][island::kTaskTitleCapacity] = {};
+    // How far each icon button's growth has run, 0 to 1. Held across frames because it is an
+    // animation, not a state: the button opens over several frames rather than snapping.
+    //
+    // ONE value, not two. An earlier version animated the width and the push-along separately, and
+    // while the two disagreed the widened button's right edge ran past the next button's left edge
+    // and painted over it -- which is the "the icons are covered / it did not make room" report that
+    // survived two rounds of diagnosis. Both the width and the push now come from this value, so
+    // they cannot disagree.
+    float taskHoverAmount[island::kMaxTaskWindows] = {};
+    // ... and how fast each of them is moving, which is what makes it a spring rather than a ramp: the
+    // value alone cannot settle (see RowOpenStep).
+    float taskHoverVelocity[island::kMaxTaskWindows] = {};
+    // ... and the same for the three washes on the bar's own buttons (Start, the system panel's toggle,
+    // the tray). They used to switch on in a single frame -- see FrameState::startWash.
+    float controlWash[3] = {};        // 0 = Start, 1 = system toggle, 2 = tray
+    float controlWashVelocity[3] = {};
+    // Set while any of those three is still moving, so the loop keeps drawing until they settle.
+    bool controlWashAnimating = false;
+    // True while any button is mid-transition, so the loop keeps drawing until it settles.
+    bool iconAnimating = false;
+// Whether any icon in the row is still arriving or leaving. Set inside the draw (where the row is
+// updated) and read by the next frame's redraw decision, so the arrival animation keeps running.
+bool rowAppearAnimating = false;
+
+// --- the date / weekday / time / weather line -----------------------------
+//
+// How far the BESIDE-THE-DECK copy of it has faded in, 0 to 1, held across frames because it is an
+// animation and not a state. It follows the one rule that decides where the line goes: while the
+// pill's own line is free the line is INSIDE the pill (no fade -- the pill is always there), and
+// while the pill's line is taken (the lyric, a message, a call) the same words stand beside the
+// deck and fade in. See StatusPlacementFor for the rule and StatusStripFadeStep for the fade.
+float statusStripOpacity = 0.0f;
+// True while that fade is in flight, which is what asks for the next frame. Set inside the draw and
+// read by the next pass, like the two arrival flags above.
+bool statusStripAnimating = false;
+// The weather reader's revision as of the last draw, so a new reading is a redraw reason of its own:
+// the reading arrives on a worker, a few seconds after the bar has settled.
+unsigned long long lastWeatherRevision = 0;
+// Where the reading lives for the frame to point at: the word and the temperature, apart, because
+// the line gives them their own sizes and a gap between them. Members of this scope rather than the
+// reader's own storage, because a reading can be replaced mid-frame -- replace it and the frame
+// would print half of one reading and half of the next.
+wchar_t statusSkyText[32] = {};
+wchar_t statusTemperatureText[32] = {};
+// One entry per window the row is drawing or fading out: an icon's membership of the row and how far
+// in it is (see TaskIconAppearStep).
+struct RowSlot {
+    HWND  handle = nullptr;
+    float appear = 0.0f;
+};
+RowSlot rowSlots[island::kMaxTaskButtons] = {};
+int rowSlotCount = 0;
+    // How many application icons the row is currently showing. The click handler bounds
+    // itself by this and not by the window list, which can hold windows the row had no room
+    // for -- activating one of those would switch to a window with no icon on screen.
+    int  taskWindowsShown = 0;
+    // The window behind each drawn icon, frozen when the frame was built.
+    //
+    // The click resolves through THIS and not through the live list. The list is
+    // re-enumerated every 500 ms and its order can differ from the one on screen, so
+    // indexing into it at click time could activate a window the user did not point at.
+    HWND taskHandles[island::kMaxTaskWindows] = {};
+    // --- the hover preview's own state ---------------------------------------
+    //
+    // Which window the preview is FOR, and when the pointer arrived on its icon. The delay is the
+    // whole reason this exists: the pointer crosses the row on its way somewhere, and a preview that
+    // appeared on the first frame would flash for every icon it passed.
+    HWND previewTarget = nullptr;
+    unsigned long long previewSinceMs = 0;
+    // Reported once each, because "the preview never appeared" and "the compositor refused this window"
+    // are different answers and only the log can tell them apart.
+    bool previewReported = false;
+    int  previewLastRefusals = 0;
+    // What was last written to the trace, so it reports changes rather than every frame.
+    int   lastReportedHoveredIcon = -2;
+    float lastReportedHoverAmount = -1.0f;
+    int   lastReportedPointed = -2;
+    bool  lastReportedAnimating = false;
+    unsigned long long lastTaskRefresh = 0;
 };
 
 } // namespace island

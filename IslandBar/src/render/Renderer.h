@@ -322,7 +322,9 @@ struct FrameState {
     // The hover state exists to hold these, so this is what the bar is for rather than an extra.
     // Passed as a plain array plus a count: the renderer must draw exactly as many buttons as the
     // click handler will hit-test, and a count the renderer silently adjusted would break that.
-static constexpr int kMaxTaskButtons = 32;
+    // The row's cap, owned by the layout (see domain/TaskStripLayout.h for why it moved there). Kept as a
+    // member so every `FrameState::kMaxTaskButtons` in the renderer and in main.cpp reads the same as before.
+    static constexpr int kMaxTaskButtons = island::kMaxTaskButtons;
     TextRenderer::TaskButton taskButtons[kMaxTaskButtons] = {};
     int taskButtonCount = 0;
     // Each icon's appearance: 0 while it is arriving, 1 when it is settled, and back down while it is
