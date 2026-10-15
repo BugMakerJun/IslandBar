@@ -82,6 +82,7 @@ add_executable(island_bar
     shell/TrayLearn.cpp
     shell/TrayMenu.cpp
     shell/TrayPress.cpp
+    shell/TrayUia.cpp
     shell/Weather.cpp
 
     # --- selftest: the runtime assertions (-self-test) ---------------

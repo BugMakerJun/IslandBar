@@ -3,6 +3,8 @@
 // =====================================================================
 #include "shell/TrayPress.h"
 
+#include "shell/TrayUia.h"   // the fallback for the icons no message can ever reach
+
 #include "core/Log.h"
 
 #include <shellapi.h>
@@ -19,6 +21,20 @@
 #pragma comment(lib, "ole32.lib")
 
 namespace island {
+
+// ISLANDBAR_NO_TRAY_UIA=1 turns the UI Automation fallback off, and that switch exists because the fallback
+// has a visible cost: making the shell's taskbar exist for the length of a press (see shell/TrayUia.h). The
+// user asked for a tray that behaves like the real one, and this is how the last few cells get there -- but a
+// flicker they cannot turn off would be worse than the coverage, so it can be turned off, and the bar's own
+// menu answers those cells again exactly as it did before.
+bool TrayUiaFallbackEnabled() {
+    static const bool enabled = [] {
+        wchar_t setting[8] = {};
+        return !(GetEnvironmentVariableW(L"ISLANDBAR_NO_TRAY_UIA", setting, 8) > 0 && setting[0] == L'1');
+    }();
+    return enabled;
+}
+
 namespace {
 
 // NOTHING ELSE LIVES AT THIS SCOPE ANY MORE, and that is worth stating: this file used to hold the taskbar a
@@ -911,6 +927,101 @@ const wchar_t* TrayPressResultName(TrayPressResult result) {
     return L"?";
 }
 
+// --- reading a name out of a report line ------------------------------------------------------------
+//
+// The three helpers below are the reader's, not the writer's: they pull one ` key value ` token, one number and
+// one quoted value out of a line of tray_learned.txt. Small and local on purpose -- the file's other reader
+// (TrayLearn.cpp) has its own, and the two are different jobs: that one turns lines into cache entries, this
+// one answers "what does the shell call this icon".
+bool ReportField(const wchar_t* line, const wchar_t* key, wchar_t* out, size_t count) {
+    wchar_t needle[32] = {};
+    _snwprintf_s(needle, 32, _TRUNCATE, L" %ls ", key);
+    const wchar_t* found = wcsstr(line, needle);
+    if (!found) return false;
+    found += wcslen(needle);
+    size_t i = 0;
+    while (found[i] && found[i] != L' ' && found[i] != L'"' && i + 1 < count) {
+        out[i] = found[i];
+        ++i;
+    }
+    out[i] = 0;
+    return i > 0;
+}
+
+bool ReportFieldNumber(const wchar_t* line, const wchar_t* key, unsigned* out) {
+    wchar_t text[32] = {};
+    if (!ReportField(line, key, text, 32)) return false;
+    wchar_t* end = nullptr;
+    *out = static_cast<unsigned>(wcstoul(text, &end, 10));
+    return end != text;
+}
+
+bool ReportFieldQuoted(const wchar_t* line, const wchar_t* key, wchar_t* out, size_t count) {
+    wchar_t needle[32] = {};
+    _snwprintf_s(needle, 32, _TRUNCATE, L" %ls \"", key);
+    const wchar_t* found = wcsstr(line, needle);
+    if (!found) return false;
+    found += wcslen(needle);
+    size_t i = 0;
+    while (found[i] && found[i] != L'"' && i + 1 < count) {
+        out[i] = found[i];
+        ++i;
+    }
+    out[i] = 0;
+    return i > 0;
+}
+
+// THE NAME THE SHELL ITSELF USES FOR THIS ICON, out of the registrations the module has reported.
+//
+// The two names the bar has for a cell are usually the same string and are not always. A GUID-registered icon
+// -- the security centre, Explorer's own network and volume buttons -- has an EMPTY tooltip in the shell's
+// registry record, so the card falls back to the executable's name ("SecurityHealthSystray.exe") while the
+// shell's element is named "Windows 安全中心 - 建议的操作。". The shell told us that name in the registration it
+// sent when the icon appeared, and the report file holds it: this is a read of that file, by the same
+// (exe, uid/guid) identity the cache is keyed by, for the one case where a press needs a name and the card has
+// the wrong one. The file is small and a press is a rare event, so the scan is free.
+std::wstring RecordedShellTipFor(const TrayPressRequest& request) {
+    wchar_t home[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) == 0) return std::wstring();
+    const std::wstring report = std::wstring(home) + L"\\IslandBar\\tray_learned.txt";
+    FILE* stream = nullptr;
+    if (_wfopen_s(&stream, report.c_str(), L"r, ccs=UTF-8") != 0 || !stream) return std::wstring();
+
+    const std::wstring exe = BaseNameLower(request.exePath);
+    std::wstring tip;
+    wchar_t line[1024] = {};
+    while (fgetws(line, 1024, stream)) {
+        if (!wcsstr(line, L"call S NIM_ADD") && !wcsstr(line, L"call S NIM_MODIFY")) continue;
+        wchar_t lineExe[260] = {};
+        if (!ReportField(line, L"exe", lineExe, 260) || BaseNameLower(lineExe) != exe) continue;
+        // The identity: the guid when the icon is named by one, the uid otherwise -- the same rule the cache
+        // uses, so a cell and its record cannot be paired up two different ways.
+        wchar_t lineGuid[64] = {};
+        const bool haveLineGuid = ReportField(line, L"guid", lineGuid, 64) && lineGuid[0] != L'-';
+        if (request.hasGuid || haveLineGuid) {
+            if (!request.hasGuid) continue;
+            GUID guid = request.guid;
+            wchar_t wanted[64] = {};
+            _snwprintf_s(wanted, 64, _TRUNCATE,
+                         L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+                         static_cast<unsigned long>(guid.Data1), guid.Data2, guid.Data3, guid.Data4[0],
+                         guid.Data4[1], guid.Data4[2], guid.Data4[3], guid.Data4[4], guid.Data4[5],
+                         guid.Data4[6], guid.Data4[7]);
+            if (!haveLineGuid || _wcsicmp(lineGuid, wanted) != 0) continue;
+        } else {
+            unsigned uid = 0;
+            if (!ReportFieldNumber(line, L"uid", &uid) || uid != request.uid) continue;
+        }
+        wchar_t lineTip[256] = {};
+        if (ReportFieldQuoted(line, L"tip", lineTip, 256) && lineTip[0]) {
+            tip = lineTip;
+            break;
+        }
+    }
+    fclose(stream);
+    return tip;
+}
+
 // Presses one icon, and there is only ONE route now: the application's own callback message, sent to its own
 // tray window (see the top of TrayPress.h, and SendTrayCallback for what the message looks like).
 //
@@ -927,6 +1038,43 @@ TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool rightClick)
         // something deliberate instead of a button that does nothing.
         if (outcome.result == TrayPressResult::Pressed) outcome.result = TrayPressResult::NoEntry;
     }
+
+    // ... AND ONE MORE ROUTE, FOR THE CELLS THAT WILL NEVER BE LEARNABLE.
+    //
+    // Some icons cannot be pressed by sending anything: nothing ever registers them (NVIDIA's, whose icons were
+    // created before this bar existed), they are not applications at all (the shell's own network, volume and
+    // clock buttons), or they refuse to be entered (AppContainer and elevated applications). For those the
+    // honest answer is to ask the SHELL to press them, which is what the real tray does -- see shell/TrayUia.h.
+    //
+    // IT IS A FALLBACK, NOT THE ROAD. It costs something visible: the shell's taskbar has to exist for the
+    // length of the press, because UIA cannot see a tray that is not there. So a cell whose callback is known
+    // never comes here, a left-held verdict of "this application ignores its callback" is respected (that is a
+    // fact about the application, not about our knowledge), and the whole route can be turned off with
+    // ISLANDBAR_NO_TRAY_UIA=1 -- which is the switch to reach for if the flicker is worse than the coverage.
+    // ... AND IT IS TRIED EVEN WHEN THE VERDICT SAYS THE CALLBACK IS IGNORED, which was the first version's
+    // mistake: "this application ignores its own callback" is a fact about the MESSAGE route, and this is a
+    // different one -- the shell pressing the icon itself. Measured: Steam's left press has been recorded as
+    // ignored for two rounds, and through UIA it answers in 453 ms.
+    if (outcome.result == TrayPressResult::NoEntry && !rightClick && TrayUiaFallbackEnabled()) {
+        // TWO NAMES, because the card's is sometimes the executable: see RecordedShellTipFor.
+        const std::wstring recordedTip = RecordedShellTipFor(request);
+        const TrayUiaOutcome uia =
+            PressTrayIconWithUia(request.name, recordedTip.empty() ? nullptr : recordedTip.c_str());
+        if (uia.pressed) {
+            outcome.result = TrayPressResult::Pressed;
+            outcome.route = L"the shell's own tray (UI Automation)";
+            if (outcome.answer[0] == L'\0') {
+                wcsncpy_s(outcome.answer, uia.detail, _TRUNCATE);
+            }
+        } else {
+            // Reported rather than swallowed: "the icon was not in the shell's tree" and "the shell refused to
+            // invoke it" are different answers, and the log is the only place either one is visible.
+            LogAndPrint(L"  tray press: the UI Automation fallback did not press '%ls' -- %ls\n",
+                        request.name, uia.detail);
+            std::fflush(stdout);
+        }
+    }
+
     outcome.ms = MillisSince(pressStart);
     return outcome;
 }
