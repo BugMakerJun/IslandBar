@@ -25,7 +25,10 @@
 
 #include <windows.h>
 
+#include "app/PlayerWindow.h"    // PlayerWindowInfo: the player that never publishes a session
 #include "domain/CardLayout.h"   // TrayMenuAction, kMaxTrayMenuEntries
+#include "media/Lyrics.h"        // kLyricLineCapacity, TrackPosition
+#include "media/MusicSession.h"  // kMusicTitleCapacity, kMusicArtistCapacity
 
 namespace island {
 
@@ -152,6 +155,60 @@ struct BarState {
     // the mercy of a click landing somewhere else on the machine. See ISLANDBAR_PANEL_LOCK.
     bool panelLocked = false;
     bool lockedSoundPage = false;
+
+    // --- what is playing, its lyrics, and the channels that bring news in (slice 3) ------------------
+    //
+    // Moved 2026-10-15, comments and all. TWO KINDS OF THING ARE IN HERE and it is worth knowing which is
+    // which: the MEDIA state (what the pill is showing, and the strings the renderer is given) and the
+    // POLL CLOCKS for the three channels that have no event to listen to (the toast database, WeChat, and
+    // the sound of a call). The objects that own those channels -- MusicSession, ToastReader, the lyric
+    // provider -- stay in RunBar for now: building them is a sequence, and they get their own slice.
+    unsigned long long lastToastPoll = 0;
+    unsigned long long lastWeChatPoll = 0;
+    // When the call strip's meter was last redrawn. See the redraw reasons below.
+    unsigned long long lastCallMeterMs = 0;
+    // The WeChat sound channel's own clock: 200 ms, because the edge it looks for lasts about a second.
+    unsigned long long lastWeChatSoundPoll = 0;
+    // >0: fire one play/pause on the media session after this long. The transport is otherwise reachable
+    // only by clicking the card, and a script's click cannot reach it (the window's own synthetic click
+    // lands wherever the REAL cursor is), so this is the only way to exercise the request path and the
+    // promptness of the button's state without a person.
+    DWORD autoTransportMs = 0;
+    bool transportForced = false;
+    // Seconds since the line on screen changed, for its entrance (see LyricLineRollFor). Starts past
+    // the end of the entrance so nothing fades until a real line change resets it.
+    float lyricLineAge = 1.0f;
+    // The line on screen and the one it replaced, copied rather than pointed at.
+    //
+    // The cross-fade lasts several frames, so the line being replaced has to survive past the frame that
+    // changed it, and the provider's own text cannot be borrowed: a track change replaces that whole store.
+    char  shownLyricText[island::kLyricLineCapacity] = {};
+    char  replacedLyricText[island::kLyricLineCapacity] = {};
+    float replacedLyricScrollDip = 0.0f;
+    // The TRACK the lyric state above belongs to. The session's revision is not that question -- it
+    // moves for a position update as well -- so the track is compared by name (see the music block).
+    char  drawnTrackTitle[island::kMusicTitleCapacity] = {};
+    char  drawnTrackArtist[island::kMusicArtistCapacity] = {};
+    // --- the window-title source, and which of the two the pill is showing ---------
+    //
+    // ONE source at a time: the media session if there is one, otherwise the player's own window title
+    // (see PlayerWindow.h). `active*` is that decision, taken once per frame in the music block below
+    // and read by everything downstream -- the lyric line, the marquee, the level meter's frames and
+    // the pill's fallback line -- so no two of them can disagree about which track is up.
+    island::PlayerWindowInfo playerWindowNow;
+    unsigned long long lastPlayerWindowRevision = 0;
+    // The stopwatch for a track whose position nobody reports: it runs only while the song plays, and
+    // it is reset when the track changes. Advanced in the frame loop (see TrackPositionFor).
+    double trackPlayedMs = 0.0;
+    // This frame's distance into the track, and whether the session supplied it. ONE answer, decided
+    // once per frame and read by the lyric line, the card's printed time and its bar, and the
+    // once-a-second redraw -- so none of them can disagree about where the song is.
+    island::TrackPosition track;
+    bool activePresent = false;
+    bool activeFromSession = false;
+    bool activePlaying = false;
+    const char* activeTitle = "";
+    const char* activeArtist = "";
 };
 
 } // namespace island

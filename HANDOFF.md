@@ -11619,3 +11619,16 @@ uninstaller written: ...  shortcut written: ...  registered under Settings > App
 **验证**：两套配置全量重建（/WX）零告警；`--self-test` PASS、`island_smoke` PASS；覆盖率不变（3 of 11）；然后用面板自己的诊断开关（`ISLANDBAR_PANEL_MS` + `ISLANDBAR_PANEL_CLOSE_MS` + `ISLANDBAR_PANEL_LOCK`）把它钉开并截图——Wi-Fi/蓝牙/飞行模式磁贴、辅助功能与投影磁贴、音量与亮度滑条（手柄位置来自 `shownVolume` / `sliderHandleGrowth`）、页码箭头全部正常，说明这 25 个字段的读写接得对。
 
 顺带两条观察记在这里，不属本轮改动：① 日志里 `sound page: 3 device(s) …` 每秒约四行，是声音页读取器在刷（属于 ROADMAP 里"日志降噪"那条）；② 部署目录里的 staged 模块副本已经涨到 20 份（每次部署切一份新的、旧的被 shell 钉住），这是"explorer 重启一次"能一并清掉的东西。
+
+### 8.123 **BarState 第 3 片：媒体、歌词与三个渠道的轮询时钟（21 个字段）** ✅
+
+`main.cpp` **5,939 → 5,893 行**；`app/BarState.h` 现在带三个 include（`app/PlayerWindow.h`、`media/Lyrics.h`、`media/MusicSession.h`）——因为搬进来的字段里有 `PlayerWindowInfo`、`TrackPosition` 和三个容量常量，**结构体自己带的类型就得自己声明**。
+
+这一片里有两种东西，头文件里写清了区别：
+
+- **媒体状态**：正在播什么（`activePresent` / `activeFromSession` / `activePlaying` / `activeTitle` / `activeArtist`）、进度（`track` / `trackPlayedMs`）、给渲染器的两份字符串（`drawnTrackTitle` / `drawnTrackArtist`）、歌词那一组（`lyricLineAge` / `shownLyricText` / `replacedLyricText` / `replacedLyricScrollDip`），以及"没发布会话的播放器"（`playerWindowNow` / `lastPlayerWindowRevision`）和自动切换播放器/音轨的节流（`autoTransportMs` / `transportForced`）。
+- **轮询时钟**：`lastToastPoll` / `lastWeChatPoll` / `lastCallMeterMs` / `lastWeChatSoundPoll` —— 这三个渠道没有事件可听，只能按节拍问。
+
+**验证**：两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；起 bar 后媒体与歌词照常驱动：日志里 `music: [QQMusic.exe] 张妙格 - 海棠次第开 (playing)`、`redraws: … music=58 lyrics=16`、`mem[start]: … lyrics=49`。
+
+搬的过程里踩到一个值得记的：**按"行里带 `=` 或 `[`"去认字段名，会漏掉那些以 `;` 结尾的声明**（`island::PlayerWindowInfo playerWindowNow;`、`island::TrackPosition track;`）。两行声明被删掉了、使用点没加限定 → 编译器报一串"未声明的成员"。教训与 8.117 那条同类：机械改写的判据要覆盖所有声明的写法，改完必须让编译器过一遍。

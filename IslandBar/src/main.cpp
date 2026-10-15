@@ -919,20 +919,14 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     if (!toastsAvailable) {
         island::LogAndPrint("  notifications: system toasts are NOT being read (see above)");
     }
-    unsigned long long lastToastPoll = 0;
 
     // The THIRD channel: WeChat, which tells Windows nothing at all and shows its own popup instead.
     //
     // Polled faster than the toast database because a WeChat popup is on screen for a few seconds: two
     // seconds of polling would miss it about as often as not. The scan is a handful of windows.
     island::WeChatWatcher wechat;
-    unsigned long long lastWeChatPoll = 0;
-    // When the call strip's meter was last redrawn. See the redraw reasons below.
-    unsigned long long lastCallMeterMs = 0;
 // ... and the same clock for the pill's background meter (see musicMeterDue).
 unsigned long long lastMusicMeterMs = 0;
-    // The WeChat sound channel's own clock: 200 ms, because the edge it looks for lasts about a second.
-    unsigned long long lastWeChatSoundPoll = 0;
     std::fflush(stdout);
 
     // --- what is playing ---
@@ -988,7 +982,7 @@ unsigned long long lastMusicMeterMs = 0;
     // --- lyrics ---
     //
     // Also on a worker thread, because fetching them is a network round trip. A
-    // failure here is not fatal either: the strip falls back to the track name.
+    // failure here is not fatal either: the strip falls back to the bar.track name.
     // --- the output volume ---
     //
     // On its own worker, because IMMDeviceEnumerator touches the audio service and can block
@@ -1367,7 +1361,7 @@ int rowSlotCount = 0;
         unsigned long long lastDecodedArtworkRevision = 0;
         const uint8_t* artworkPixels = nullptr;
 // The wave's colour, taken from the cover when it is decoded (see AccentColourFromArtwork). The default
-// is what a track with no artwork -- or an unsaturated one -- keeps.
+// is what a bar.track with no artwork -- or an unsaturated one -- keeps.
 island::AccentColour waveAccent;
 float musicWavePhase = 0.0f;
         int artworkWidth = 0;
@@ -1404,7 +1398,7 @@ float musicWavePhase = 0.0f;
         // The bar is meant to sit on the desktop for days, so "it uses little memory" is a claim about
         // a 24-hour curve rather than about one reading. The curve is built from a line every five
         // minutes plus one shortly after an operation that is suspected of growing the process: a card
-        // closing, a track change, a tray refresh. The steady line answers "does it grow at all"; the
+        // closing, a bar.track change, a tray refresh. The steady line answers "does it grow at all"; the
         // event line answers "which operation grows it". ProcessMetrics.h carries the rule for reading
         // the two together -- bytes rising with a count is a cache, bytes rising alone is a leak.
         constexpr unsigned long long kMemorySampleMs = 5ull * 60ull * 1000ull;
@@ -1480,12 +1474,6 @@ float musicWavePhase = 0.0f;
         DWORD autoPanelCycleMs = 0;
         DWORD autoStartMs = 0;
         DWORD autoStartCycleMs = 0;
-    // >0: fire one play/pause on the media session after this long. The transport is otherwise reachable
-    // only by clicking the card, and a script's click cannot reach it (the window's own synthetic click
-    // lands wherever the REAL cursor is), so this is the only way to exercise the request path and the
-    // promptness of the button's state without a person.
-    DWORD autoTransportMs = 0;
-    bool transportForced = false;
         int forcedHoverIcon = -2;   // -2 none, -1 the last icon, 0..n that icon
         DWORD autoDeckHoverMs = 0;  // >0: pretend the pointer reaches a deck button after this long
         bool deckHoverForced = false;
@@ -1588,7 +1576,7 @@ float musicWavePhase = 0.0f;
                 autoStartMs = static_cast<DWORD>(wcstoul(setting, nullptr, 10));
             }
             if (GetEnvironmentVariableW(L"ISLANDBAR_TRANSPORT_MS", setting, 32) > 0) {
-                autoTransportMs = static_cast<DWORD>(wcstoul(setting, nullptr, 10));
+                bar.autoTransportMs = static_cast<DWORD>(wcstoul(setting, nullptr, 10));
             }
             if (GetEnvironmentVariableW(L"ISLANDBAR_START_CYCLE_MS", setting, 32) > 0) {
                 autoStartCycleMs = static_cast<DWORD>(wcstoul(setting, nullptr, 10));
@@ -1685,41 +1673,7 @@ float musicWavePhase = 0.0f;
         unsigned long long lastLyricsRevision = lyrics.Revision();
         int  lastLyricIndex = -2;      // -2 forces the first evaluation
         float lyricsScrollDip = 0.0f;
-    // Seconds since the line on screen changed, for its entrance (see LyricLineRollFor). Starts past
-    // the end of the entrance so nothing fades until a real line change resets it.
-    float lyricLineAge = 1.0f;
-    // The line on screen and the one it replaced, copied rather than pointed at.
-    //
-    // The cross-fade lasts several frames, so the line being replaced has to survive past the frame that
-    // changed it, and the provider's own text cannot be borrowed: a track change replaces that whole store.
-    char  shownLyricText[island::kLyricLineCapacity] = {};
-    char  replacedLyricText[island::kLyricLineCapacity] = {};
-    float replacedLyricScrollDip = 0.0f;
-    // The TRACK the lyric state above belongs to. The session's revision is not that question -- it
-    // moves for a position update as well -- so the track is compared by name (see the music block).
-    char  drawnTrackTitle[island::kMusicTitleCapacity] = {};
-    char  drawnTrackArtist[island::kMusicArtistCapacity] = {};
 
-    // --- the window-title source, and which of the two the pill is showing ---------
-    //
-    // ONE source at a time: the media session if there is one, otherwise the player's own window title
-    // (see PlayerWindow.h). `active*` is that decision, taken once per frame in the music block below
-    // and read by everything downstream -- the lyric line, the marquee, the level meter's frames and
-    // the pill's fallback line -- so no two of them can disagree about which track is up.
-    island::PlayerWindowInfo playerWindowNow;
-    unsigned long long lastPlayerWindowRevision = 0;
-    // The stopwatch for a track whose position nobody reports: it runs only while the song plays, and
-    // it is reset when the track changes. Advanced in the frame loop (see TrackPositionFor).
-    double trackPlayedMs = 0.0;
-    // This frame's distance into the track, and whether the session supplied it. ONE answer, decided
-    // once per frame and read by the lyric line, the card's printed time and its bar, and the
-    // once-a-second redraw -- so none of them can disagree about where the song is.
-    island::TrackPosition track;
-    bool activePresent = false;
-    bool activeFromSession = false;
-    bool activePlaying = false;
-    const char* activeTitle = "";
-    const char* activeArtist = "";
         // Marquee speed. Slow enough to read a Chinese lyric line.
         constexpr float kLyricScrollDipPerSec = 26.0f;
 
@@ -1838,8 +1792,8 @@ float musicWavePhase = 0.0f;
             // Two seconds rather than every frame because it is a database query, and the delay is invisible:
             // the shell's own toast appears at the same moment and the bar's card follows it. Nothing here
             // depends on the push channel and nothing in the push channel depends on this.
-            if (toastsAvailable && GetTickCount64() - lastToastPoll >= 2000) {
-                lastToastPoll = GetTickCount64();
+            if (toastsAvailable && GetTickCount64() - bar.lastToastPoll >= 2000) {
+                bar.lastToastPoll = GetTickCount64();
                 frameWork |= kWorkToastPoll;
                 const int arrived = toasts.Poll(&notifications);
                 if (arrived > 0) {
@@ -1853,8 +1807,8 @@ float musicWavePhase = 0.0f;
             }
 
             // ... and WeChat, which has no channel of its own and is recognised by its popup appearing.
-            if (GetTickCount64() - lastWeChatPoll >= 500) {
-                lastWeChatPoll = GetTickCount64();
+            if (GetTickCount64() - bar.lastWeChatPoll >= 500) {
+                bar.lastWeChatPoll = GetTickCount64();
                 frameWork |= kWorkWeChatScan;
                 if (wechat.Poll(&notifications, GetTickCount64()) > 0) {
                     island::LogAndPrint("  wechat: %d message announcement(s) so far", wechat.Announced());
@@ -1868,8 +1822,8 @@ float musicWavePhase = 0.0f;
             // Its own clock (200 ms) rather than the window scan's: a notification sound is about a second
             // long, and a check every half second could read the session as active twice in a row and never
             // see the edge -- the sound would play with no announcement and no evidence anywhere.
-            if (soundOutputStarted && soundOutput && GetTickCount64() - lastWeChatSoundPoll >= 200) {
-                lastWeChatSoundPoll = GetTickCount64();
+            if (soundOutputStarted && soundOutput && GetTickCount64() - bar.lastWeChatSoundPoll >= 200) {
+                bar.lastWeChatSoundPoll = GetTickCount64();
                 frameWork |= kWorkWeChatSound;
                 soundOutput->Snapshot(soundSnapshot.get());
 
@@ -1929,7 +1883,7 @@ float musicWavePhase = 0.0f;
                 // again (nothing about it changes). A paused player is exactly that case: same title,
                 // position 0, no state change. Measured live: NetEase paused while the bar started, and
                 // for the whole run there was no `music:` line at all while gsmtc_probe saw the session --
-                // the bar believed nothing was playing, so its card could not be opened and its own track
+                // the bar believed nothing was playing, so its card could not be opened and its own bar.track
                 // was invisible.
                 const bool firstMusicReading = !haveMusicReading;
                 if (firstMusicReading || music.Revision() != lastMusicRevision) {
@@ -1943,11 +1897,11 @@ float musicWavePhase = 0.0f;
 
                     // Whether this reading is a DIFFERENT TRACK than the one the pill is showing -- which
                     // is the question the cover line below asks. The lyric fetch and the roll reset are
-                    // NOT done here: which SOURCE the track came from is decided once, further down, by
+                    // NOT done here: which SOURCE the bar.track came from is decided once, further down, by
                     // the block that also knows about the window-title source (see PlayerWindow.h).
                     const bool sessionTrackChanged =
-                        std::strcmp(drawnTrackTitle, nowPlaying.title) != 0 ||
-                        std::strcmp(drawnTrackArtist, nowPlaying.artist) != 0;
+                        std::strcmp(bar.drawnTrackTitle, nowPlaying.title) != 0 ||
+                        std::strcmp(bar.drawnTrackArtist, nowPlaying.artist) != 0;
 
                     // Nothing to announce when the reading has no session at all: the FIRST reading is
                     // taken unconditionally (see above), so without this guard a machine with nothing
@@ -1957,7 +1911,7 @@ float musicWavePhase = 0.0f;
                         // WIDE, with the arguments converted first. This line used to go through the NARROW
                         // LogAndPrint overload, which widens its arguments a byte at a time -- so a UTF-8
                         // artist name came out as `è±é¦ç§å¦å®¶ï¼çæ ï¼` in the log while every other line
-                        // around it read correctly. Found by reading the log of a NetEase track (HANDOFF
+                        // around it read correctly. Found by reading the log of a NetEase bar.track (HANDOFF
                         // 8.72). The project's own note on that overload warned about exactly this.
                         {
                             wchar_t wideApp[island::kMusicAppCapacity] = {};
@@ -1980,7 +1934,7 @@ float musicWavePhase = 0.0f;
                         }
                         std::fflush(stdout);
 
-                        // ... AND WHETHER THERE IS A COVER, once per track.
+                        // ... AND WHETHER THERE IS A COVER, once per bar.track.
                         //
                         // Asked in as many words -- "现在音乐获取 封面 能获取到不" -- and there was no line
                         // anywhere that answered it: the card either had a cover or it did not, and the
@@ -2000,12 +1954,12 @@ float musicWavePhase = 0.0f;
 
             }
 
-            // Lyrics arrive later than the track does, so a fetch completing is its own reason to
+            // Lyrics arrive later than the bar.track does, so a fetch completing is its own reason to
             // redraw -- and it is read OUT HERE, not inside the session branch above.
             //
             // It was inside that branch, and the live run caught it: with the session reader off
             // (ISLANDBAR_NO_SESSION=1, the switch for exercising the window-title source) the fetch
-            // completed and NOTHING READ IT -- the log showed the track arriving from the window title
+            // completed and NOTHING READ IT -- the log showed the bar.track arriving from the window title
             // and then no `lyrics:` line at all, while the words were sitting in the provider. The
             // provider is the same one for both sources, so this belongs to neither of them.
             if (lyrics.Revision() != lastLyricsRevision) {
@@ -2031,68 +1985,68 @@ float musicWavePhase = 0.0f;
             // Measured need: NetEase Cloud Music 3.1.40 plays with the system's session list empty
             // until its own switch is turned on (HANDOFF 8.72), and until then the island had nothing
             // at all to show for the music.
-            if (playerWindowAvailable && playerWindow.Revision() != lastPlayerWindowRevision) {
-                lastPlayerWindowRevision = playerWindow.Revision();
+            if (playerWindowAvailable && playerWindow.Revision() != bar.lastPlayerWindowRevision) {
+                bar.lastPlayerWindowRevision = playerWindow.Revision();
                 // ONLY the reading. It is NOT announced here, because "this player publishes no session"
                 // is a statement about which source is IN USE, and that is decided in the block below --
                 // the live run produced the opposite: the window arrived a few hundred milliseconds before
                 // the session did (the reader's first poll), so the log announced the fallback while a
-                // session was about to be published, and the track it named was the same one.
-                playerWindow.Snapshot(&playerWindowNow);
+                // session was about to be published, and the bar.track it named was the same one.
+                playerWindow.Snapshot(&bar.playerWindowNow);
             }
 
-            // --- ONE track change, whichever source it came from -------------------------
+            // --- ONE bar.track change, whichever source it came from -------------------------
             //
-            // The track the PILL is showing, and the one decision that follows from it. There is
-            // exactly one such track: the session's while a session exists, otherwise the player's own
+            // The bar.track the PILL is showing, and the one decision that follows from it. There is
+            // exactly one such bar.track: the session's while a session exists, otherwise the player's own
             // window title. Everything that keys on "a different song is up" reads this -- so the two
             // sources cannot each believe they own the transition, which is what a reset and a fetch
             // inside each source's own block would amount to.
             {
                 const bool sessionUp = nowPlaying.present && nowPlaying.title[0] != '\0';
                 const bool windowUp =
-                    !sessionUp && playerWindowNow.present && playerWindowNow.title[0] != '\0';
-                activePresent = sessionUp || windowUp;
-                activeFromSession = sessionUp;
+                    !sessionUp && bar.playerWindowNow.present && bar.playerWindowNow.title[0] != '\0';
+                bar.activePresent = sessionUp || windowUp;
+                bar.activeFromSession = sessionUp;
                 // Whether the line may creep: a paused session stands still (its playhead is not
                 // moving), while a window title only exists while the player is playing something.
-                activePlaying =
+                bar.activePlaying =
                     sessionUp ? nowPlaying.state == island::PlaybackState::Playing : windowUp;
-                activeTitle = sessionUp ? nowPlaying.title : (windowUp ? playerWindowNow.title : "");
-                activeArtist = sessionUp ? nowPlaying.artist : (windowUp ? playerWindowNow.artist : "");
+                bar.activeTitle = sessionUp ? nowPlaying.title : (windowUp ? bar.playerWindowNow.title : "");
+                bar.activeArtist = sessionUp ? nowPlaying.artist : (windowUp ? bar.playerWindowNow.artist : "");
 
-                const bool trackChanged = std::strcmp(drawnTrackTitle, activeTitle) != 0 ||
-                                          std::strcmp(drawnTrackArtist, activeArtist) != 0;
+                const bool trackChanged = std::strcmp(bar.drawnTrackTitle, bar.activeTitle) != 0 ||
+                                          std::strcmp(bar.drawnTrackArtist, bar.activeArtist) != 0;
                 if (trackChanged) {
-                    strncpy_s(drawnTrackTitle, sizeof(drawnTrackTitle), activeTitle, _TRUNCATE);
-                    strncpy_s(drawnTrackArtist, sizeof(drawnTrackArtist), activeArtist, _TRUNCATE);
-                    // A track change invalidates the lyrics and their scroll position.
+                    strncpy_s(bar.drawnTrackTitle, sizeof(bar.drawnTrackTitle), bar.activeTitle, _TRUNCATE);
+                    strncpy_s(bar.drawnTrackArtist, sizeof(bar.drawnTrackArtist), bar.activeArtist, _TRUNCATE);
+                    // A bar.track change invalidates the lyrics and their scroll position.
                     //
                     // AND ONLY A TRACK CHANGE. The session bumps its revision for a POSITION update too
                     // (once every second or two), so keying this on the revision re-announced the same
                     // line as if it had changed, restarted a long line's marquee and replayed the roll
                     // with the same words on both sides: "歌词每1、2秒就会上下出现一模一样的歌词然后和
-                    // 在一起似的". The comparison is on the track, not on the revision.
+                    // 在一起似的". The comparison is on the bar.track, not on the revision.
                     lyricsScrollDip = 0.0f;
                     lastLyricIndex = -2;
-                    // The stopwatch restarts with the track: it is the playhead for every source that
+                    // The stopwatch restarts with the bar.track: it is the playhead for every source that
                     // cannot supply one (see TrackPositionFor -- aligned when the bar catches the song as
                     // it starts, drifting when it does not).
-                    trackPlayedMs = 0.0;
-                    if (activePresent) {
-                        lyrics.Request(activeTitle, activeArtist);
-                        if (!activeFromSession) {
+                    bar.trackPlayedMs = 0.0;
+                    if (bar.activePresent) {
+                        lyrics.Request(bar.activeTitle, bar.activeArtist);
+                        if (!bar.activeFromSession) {
                             // WHICH SOURCE, said out loud. Without this line a log cannot tell that the
                             // words on the pill came from a window title instead of a session -- and the
                             // difference matters the moment someone compares it with `gsmtc_probe`.
                             wchar_t wideApp[island::kPlayerWindowAppCapacity] = {};
                             wchar_t wideArtist[island::kPlayerWindowArtistCapacity] = {};
                             wchar_t wideTitle[island::kPlayerWindowTitleCapacity] = {};
-                            MultiByteToWideChar(CP_UTF8, 0, playerWindowNow.app, -1, wideApp,
+                            MultiByteToWideChar(CP_UTF8, 0, bar.playerWindowNow.app, -1, wideApp,
                                                 static_cast<int>(island::kPlayerWindowAppCapacity));
-                            MultiByteToWideChar(CP_UTF8, 0, playerWindowNow.artist, -1, wideArtist,
+                            MultiByteToWideChar(CP_UTF8, 0, bar.playerWindowNow.artist, -1, wideArtist,
                                                 static_cast<int>(island::kPlayerWindowArtistCapacity));
-                            MultiByteToWideChar(CP_UTF8, 0, playerWindowNow.title, -1, wideTitle,
+                            MultiByteToWideChar(CP_UTF8, 0, bar.playerWindowNow.title, -1, wideTitle,
                                                 static_cast<int>(island::kPlayerWindowTitleCapacity));
                             island::LogAndPrint(
                                 L"  music: [%ls] %ls - %ls (from its window title -- this player"
@@ -2192,10 +2146,10 @@ float musicWavePhase = 0.0f;
             // paused player still has them.
             //
             // EITHER source counts as something to say, because the question is what the PILL is for, not
-            // where the words came from: the session's track, or the player's own window title while it
+            // where the words came from: the session's bar.track, or the player's own window title while it
             // publishes no session (see PlayerWindow.h). The CARD is a different question and stays with
             // the session -- see ShouldPromoteToCard.
-            const bool musicResting = activePresent;
+            const bool musicResting = bar.activePresent;
             const island::IslandState resting =
                 musicResting ? island::IslandState::MusicStrip : island::IslandState::Collapsed;
 
@@ -2791,7 +2745,7 @@ float musicWavePhase = 0.0f;
                         }
 
                         case island::SoundPageTarget::Scrollbar: {
-                            // A press on the track moves the page a screenful towards where it was pressed,
+                            // A press on the bar.track moves the page a screenful towards where it was pressed,
                             // which is what the shell's own scrollbar does. The window says WHICH WAY -- it is
                             // the one that knows where the thumb is, from the same layout the press was
                             // hit-tested against -- and the OFFSET stays here with the page it belongs to.
@@ -3413,10 +3367,10 @@ float musicWavePhase = 0.0f;
             // ... and one play/pause on the media session, which is otherwise reachable only by clicking
             // the card: "点击暂停 歌曲停止了 但是这个差不多2秒左右才变播放按钮" could not be checked here at all
             // until this existed (a script's synthetic click goes to the REAL cursor's position).
-            if (autoTransportMs > 0 && !forcedState && !transportForced) {
+            if (bar.autoTransportMs > 0 && !forcedState && !bar.transportForced) {
                 const DWORD elapsed = static_cast<DWORD>(GetTickCount() - diagnosticStart);
-                if (elapsed >= autoTransportMs) {
-                    transportForced = true;
+                if (elapsed >= bar.autoTransportMs) {
+                    bar.transportForced = true;
                     const bool asked = music.RequestTogglePlayPause();
                     island::LogAndPrint("  diagnostic: play/pause %ls at %lu ms\n",
                                         asked ? L"requested" : L"REFUSED (no session to control)",
@@ -3576,7 +3530,7 @@ float musicWavePhase = 0.0f;
                 // A DRAG UNDER WAY HOLDS THE CARD OPEN, whatever the pointer does.
                 //
                 // A slider's gesture is "press it, drag anywhere, release" -- the pointer leaves the row,
-                // leaves the card, and often leaves the bar itself on its way to the end of the track. With
+                // leaves the card, and often leaves the bar itself on its way to the end of the bar.track. With
                 // the policy left in charge the card retracted mid-drag: the handle stopped updating at the
                 // exact moment the user was watching it, which is the other half of "卡卡的，没有过渡".
                 // Same shape as the rule that already holds the card for a notification: something explicit
@@ -3606,19 +3560,19 @@ float musicWavePhase = 0.0f;
             // they are -- the same rule the session's projected reading has.
             {
                 const bool sessionTimeline =
-                    activeFromSession &&
+                    bar.activeFromSession &&
                     island::SessionReportsTimeline(nowPlaying.positionMs, nowPlaying.durationMs);
-                if (activePresent && !sessionTimeline && activePlaying) {
-                    trackPlayedMs += static_cast<double>(dt) * 1000.0;
+                if (bar.activePresent && !sessionTimeline && bar.activePlaying) {
+                    bar.trackPlayedMs += static_cast<double>(dt) * 1000.0;
                 }
-                track = island::TrackPositionFor(
+                bar.track = island::TrackPositionFor(
                     nowPlaying.positionMs, nowPlaying.durationMs,
                     static_cast<long long>(GetTickCount64() - musicPositionAt),
-                    static_cast<long long>(trackPlayedMs), activePlaying);
+                    static_cast<long long>(bar.trackPlayedMs), bar.activePlaying);
                 // A session with a timeline but nothing playing yet: keep the caller's other sources out
-                // of it -- `TrackPositionFor` already answered, and `activePresent` says whether there is
+                // of it -- `TrackPositionFor` already answered, and `bar.activePresent` says whether there is
                 // anything on the pill at all.
-                if (!activePresent) track = island::TrackPosition();
+                if (!bar.activePresent) bar.track = island::TrackPosition();
             }
 
             // --- open the pointed-at icon button, over a few frames ----------------
@@ -3686,7 +3640,7 @@ float musicWavePhase = 0.0f;
             const bool notificationChanged = (activeId != lastNotificationId);
             lastNotificationId = activeId;
 
-            // A track change is a reason to redraw even when nothing moved.
+            // A bar.track change is a reason to redraw even when nothing moved.
             const bool musicChanged = (music.Revision() != lastDrawnMusicRevision);
             lastDrawnMusicRevision = music.Revision();
 
@@ -3724,22 +3678,22 @@ float musicWavePhase = 0.0f;
             // lyric vanished the moment the system button opened a panel, with the music still playing:
             // "我现在正在播放音乐 但是点击系统按钮的时候 灵动岛就不显示歌词了".
             if (musicResting) {
-                lyricLineAge += static_cast<float>(dt > 0.1 ? 0.1 : dt);
+                bar.lyricLineAge += static_cast<float>(dt > 0.1 ? 0.1 : dt);
                 // The wave drifts even while the level sits still, which is what keeps it looking
                 // alive between the beats. Wrapped, so a session that runs for hours cannot lose
                 // precision in the sine's argument.
                 musicWavePhase += static_cast<float>(dt > 0.1 ? 0.1 : dt) * 1.15f;
                 if (musicWavePhase > 6.2831853f * 64.0f) musicWavePhase -= 6.2831853f * 64.0f;
                 if (currentLyrics && !currentLyrics->Empty()) {
-                    // The position is what selects the line, so it advances within a track without the
-                    // track itself changing -- and it has to be the PROJECTED one, not the raw reading:
+                    // The position is what selects the line, so it advances within a bar.track without the
+                    // bar.track itself changing -- and it has to be the PROJECTED one, not the raw reading:
                     // the session reports once every second or two, so the line changed a couple of
                     // seconds after the words were sung ("现在歌词和唱的有点对应不上"). The same numbers
                     // the card's time and bar use are taken from the one playhead decided above, which
                     // falls back to the bar's own stopwatch for a session that sends no timeline at all
                     // -- NetEase Cloud Music does that, and the line sat on the first one for the whole
                     // song before this ("歌词不动"). See TrackPositionFor.
-                    const long long sungMs = track.ms;
+                    const long long sungMs = bar.track.ms;
                     const int index = currentLyrics->LineAt(sungMs);
                     const island::LyricLine* line = currentLyrics->At(index);
                     const char* nextText = (line && line->text[0] != '\0') ? line->text : "";
@@ -3752,14 +3706,14 @@ float musicWavePhase = 0.0f;
                         // and this loop then re-asks which line is current. Rolling on that put the SAME
                         // text on both sides of the window -- "歌词每1、2秒就会上下出现一模一样的歌词
                         // 然后和在一起似的" -- and it restarted a long line's marquee from the top.
-                        if (island::LyricLineChanged(nextText, shownLyricText)) {
+                        if (island::LyricLineChanged(nextText, bar.shownLyricText)) {
                             // The line being replaced is kept -- with the marquee offset it had reached --
                             // because the cross-fade draws it in the same place for the whole change.
-                            strncpy_s(replacedLyricText, sizeof(replacedLyricText), shownLyricText,
+                            strncpy_s(bar.replacedLyricText, sizeof(bar.replacedLyricText), bar.shownLyricText,
                                       _TRUNCATE);
-                            replacedLyricScrollDip = lyricsScrollDip;
+                            bar.replacedLyricScrollDip = lyricsScrollDip;
                             lyricsScrollDip = 0.0f;   // a new line starts at its beginning
-                            lyricLineAge = 0.0f;      // ... and fades in rather than appearing
+                            bar.lyricLineAge = 0.0f;      // ... and fades in rather than appearing
                             lyricLineChanged = true;
                             // The WORDS are on the line too, not just the index: "which line is it" cannot
                             // be checked from a number, and the whole point of this record is that the pill
@@ -3769,12 +3723,12 @@ float musicWavePhase = 0.0f;
                             wchar_t wideLine[island::kLyricLineCapacity] = {};
                             MultiByteToWideChar(CP_UTF8, 0, nextText, -1, wideLine,
                                                 static_cast<int>(island::kLyricLineCapacity));
-                            if (track.fromSession) {
+                            if (bar.track.fromSession) {
                                 island::LogAndPrint(
                                     L"  lyrics: line %d at %lld ms (the session last reported %lld ms): "
                                     L"%ls\n",
                                     index, sungMs, nowPlaying.positionMs, wideLine);
-                            } else if (activeFromSession) {
+                            } else if (bar.activeFromSession) {
                                 // A session that sends no timeline: the number is the bar's own stopwatch,
                                 // which is exactly what has to be checked when the words look out of step
                                 // with the singing. Measured on NetEase Cloud Music, which reports
@@ -3794,10 +3748,10 @@ float musicWavePhase = 0.0f;
                             }
                         }
                     }
-                    lyricLineAnimating = lyricLineAge < island::kLyricLineEnterSeconds;
+                    lyricLineAnimating = bar.lyricLineAge < island::kLyricLineEnterSeconds;
                     // What is on screen, kept in step whether or not the words changed -- the
                     // comparison above is against this.
-                    strncpy_s(shownLyricText, sizeof(shownLyricText), nextText, _TRUNCATE);
+                    strncpy_s(bar.shownLyricText, sizeof(bar.shownLyricText), nextText, _TRUNCATE);
 
                     if (line && line->text[0] != '\0') {
                         lyricLine = line->text;
@@ -3826,7 +3780,7 @@ float musicWavePhase = 0.0f;
                                 // are what it is for -- but a line that kept creeping across a paused player
                                 // would be reading a playhead that is not moving, and asking for frames
                                 // forever to do it.
-                                if (activePlaying) {
+                                if (bar.activePlaying) {
                                     lyricsScrolling = true;
                                     lyricsScrollDip +=
                                         static_cast<float>(dt) * kLyricScrollDipPerSec;
@@ -3835,9 +3789,9 @@ float musicWavePhase = 0.0f;
                         }
                     }
                 }
-                // No lyrics for this track: the title is the honest fallback. The
+                // No lyrics for this bar.track: the title is the honest fallback. The
                 // clock is only shown when there is no music at all.
-                if (!lyricLine) fallbackLine = activeTitle;
+                if (!lyricLine) fallbackLine = bar.activeTitle;
             }
 
             // Does the card's printed position need to change?
@@ -3851,7 +3805,7 @@ float musicWavePhase = 0.0f;
             // the time printed on the card and the words on the island cannot disagree -- including for
             // a session that sends no timeline, where both are the bar's own count.
             const long long shownPosition =
-                (window.State() == island::IslandState::Expanded) ? track.ms : 0;
+                (window.State() == island::IslandState::Expanded) ? bar.track.ms : 0;
             // The volume can be changed by the keyboard or the shell flyout, not only here, so
             // it is a redraw reason too.
             bool volumeChanged = false;
@@ -3884,8 +3838,8 @@ float musicWavePhase = 0.0f;
             // frames of its own. 20 Hz: twice a second looks broken, and sixty times a second is a meter nobody
             // can see paid for with a loop that never idles during a call that may last an hour.
             const bool callMeterDue = (wechat.CallNotificationId() != 0) &&
-                                      (GetTickCount64() - lastCallMeterMs >= 50);
-            if (callMeterDue) lastCallMeterMs = GetTickCount64();
+                                      (GetTickCount64() - bar.lastCallMeterMs >= 50);
+            if (callMeterDue) bar.lastCallMeterMs = GetTickCount64();
 
             // The pill's background meter is the other thing here that moves without an event, and it
             // asks for frames at 30 Hz: the rate the reading behind it is refreshed at (see
@@ -3893,7 +3847,7 @@ float musicWavePhase = 0.0f;
             // Only while music is what the bar is showing: a wave nobody can see is a redraw nobody
             // asked for.
             const bool musicMeterDue =
-                musicResting && activePlaying &&
+                musicResting && bar.activePlaying &&
                 volumeAvailable && (GetTickCount64() - lastMusicMeterMs >= 33);
             if (musicMeterDue) lastMusicMeterMs = GetTickCount64();
 
@@ -4322,7 +4276,7 @@ float musicWavePhase = 0.0f;
                             // WHICH ROW the pointer is on, for the handle's own size: the hit carries the
                             // row index (0 the volume, 1 the brightness), and a drag pins it to the row the
                             // gesture started on -- a handle that shrank because the pointer wandered off
-                            // the track mid-drag would be the slider losing the control being held.
+                            // the bar.track mid-drag would be the slider losing the control being held.
                             const island::SystemPanelHit echoHit =
                                 window.SystemPanelHitAtScreen(echoPoint);
                             const bool onSlider =
@@ -5010,9 +4964,9 @@ float musicWavePhase = 0.0f;
                 frame.fallbackLine = fallbackLine;
                 // How far through its arrival the pill's line is, and what it is replacing: 1 and
                 // nothing once it has settled.
-                frame.lyricLineRoll = island::LyricLineRollFor(lyricLineAge);
-                frame.lyricLinePrev = replacedLyricText[0] != '\0' ? replacedLyricText : nullptr;
-                frame.lyricLinePrevScrollDip = replacedLyricScrollDip;
+                frame.lyricLineRoll = island::LyricLineRollFor(bar.lyricLineAge);
+                frame.lyricLinePrev = bar.replacedLyricText[0] != '\0' ? bar.replacedLyricText : nullptr;
+                frame.lyricLinePrevScrollDip = bar.replacedLyricScrollDip;
                 frame.noticeLine = noticeLine.empty() ? nullptr : noticeLine.c_str();
 
                 // --- the CALL strip ------------------------------------------------------
@@ -5106,11 +5060,11 @@ float musicWavePhase = 0.0f;
                 // this iteration -- the same number the pill's lyric line is chosen by.
                 //
                 // The bar needs a TOTAL, and a player that sends no timeline has none: NetEase Cloud
-                // Music reports `EndTime 00:00`, so the track is drawn (the renderer always draws it) but
+                // Music reports `EndTime 00:00`, so the bar.track is drawn (the renderer always draws it) but
                 // NEVER filled, and the total reads `--:--` rather than a `00:00` the player never said.
                 // The elapsed time still moves, because the bar is counting it -- before this, both ends
                 // showed `00:00` and nothing moved at all ("进度条也不动").
-                if (activePresent) {
+                if (bar.activePresent) {
                     // The TOTAL: the session's, or -- when it publishes none, which is NetEase Cloud
                     // Music's case -- the catalogue's, which the lyric provider fetched together with the
                     // words (see Lyrics::trackDurationMs). Now the bar has a scale to fill against and the
@@ -5119,10 +5073,10 @@ float musicWavePhase = 0.0f;
                         nowPlaying.durationMs > 0
                             ? nowPlaying.durationMs
                             : (currentLyrics ? currentLyrics->trackDurationMs : 0);
-                    frame.musicPositionMs = track.ms;
+                    frame.musicPositionMs = bar.track.ms;
                     frame.musicDurationMs = totalMs;
                     if (totalMs > 0) {
-                        const double fraction = static_cast<double>(track.ms) /
+                        const double fraction = static_cast<double>(bar.track.ms) /
                                                 static_cast<double>(totalMs);
                         frame.progressFraction = static_cast<float>(fraction > 1.0 ? 1.0 : fraction);
                     }
@@ -5151,9 +5105,9 @@ float musicWavePhase = 0.0f;
 
                 // Album art is decoded once per artwork revision, not per frame: the
                 // decode is the expensive part and the bytes only change when the
-                // track does. The blurred background is built here too -- it is a
+                // bar.track does. The blurred background is built here too -- it is a
                 // second encode/decode pair, and doing it per frame would be wasteful
-                // for a wash that only changes with the track.
+                // for a wash that only changes with the bar.track.
                 //
                 // ... AND IT IS DECODED WHETHER OR NOT THE CARD IS UP.
                 //
@@ -5161,14 +5115,14 @@ float musicWavePhase = 0.0f;
                 // and that gate had two costs, which the user found one after the other:
                 //
                 //   * the pill's audio wave takes its COLOUR from this same decode, so with the card closed the
-                //     strip kept the previous track's accent for the whole song. Reported as "歌词后面的 随音乐
+                //     strip kept the previous bar.track's accent for the whole song. Reported as "歌词后面的 随音乐
                 //     跳动的的颜色 如果鼠标不移入 就一直一个颜色" -- the colour only changed when the pointer
                 //     went onto the island, because that is what opened the card, and opening the card is what
                 //     ran the decode.
                 //   * a cover that arrived while the card was closed had not been decoded by the time the card
                 //     opened, so the card showed the placeholder for a moment and then caught up.
                 //
-                // One decode per track either way: the same work the card would have done a moment later.
+                // One decode per bar.track either way: the same work the card would have done a moment later.
                 if (nowPlaying.artworkSize > 0) {
                     if (nowPlaying.artworkRevision != lastDecodedArtworkRevision) {
                         lastDecodedArtworkRevision = nowPlaying.artworkRevision;
@@ -5225,7 +5179,7 @@ float musicWavePhase = 0.0f;
                         frame.artworkWidth = artworkWidth;
                         frame.artworkHeight = artworkHeight;
                         // The renderer caches the GPU bitmap against this, so it is
-                        // uploaded once per track rather than once per frame.
+                        // uploaded once per bar.track rather than once per frame.
                         frame.artworkRevision = nowPlaying.artworkRevision;
                     }
                     if (backgroundPixels) {
@@ -5247,12 +5201,12 @@ float musicWavePhase = 0.0f;
                     //
                     // Everything the block above produces lives on in `artworkPixels` and `backgroundPixels`
                     // -- file-scope pointers the renderer caches its GPU copies against -- and that block only
-                    // runs while the session HAS artwork. So a track that starts without any kept drawing the
-                    // PREVIOUS track's cover: reported as "歌曲切换了 但是封面图没有换", which is the opposite
+                    // runs while the session HAS artwork. So a bar.track that starts without any kept drawing the
+                    // PREVIOUS bar.track's cover: reported as "歌曲切换了 但是封面图没有换", which is the opposite
                     // of the complaint before it (an empty slot) and the same root cause seen from the other
                     // side.
                     //
-                    // A revision of 0 is the session saying "this track has no cover yet", and the retry in
+                    // A revision of 0 is the session saying "this bar.track has no cover yet", and the retry in
                     // MusicSession keeps asking for one -- when it arrives the revision goes to 1 and the
                     // decode above takes over. Until then the card shows the PLACEHOLDER (see DrawMusicCard),
                     // not someone else's album art.
@@ -5264,7 +5218,7 @@ float musicWavePhase = 0.0f;
                     backgroundWidth = 0;
                     backgroundHeight = 0;
                     waveAccent = island::AccentColour{};
-                    island::LogAndPrint("  music: cover dropped (the new track has none yet)\n");
+                    island::LogAndPrint("  music: cover dropped (the new bar.track has none yet)\n");
                     std::fflush(stdout);
                 }
 
@@ -5548,7 +5502,7 @@ float musicWavePhase = 0.0f;
 // page, so a Chinese song title arrives as GBK bytes -- and percent-encoding those produces
 // `%B9%A9%CF%FA...`, which is what a search endpoint was actually sent while it expected
 // `%E4%BE%9B...` in UTF-8. Every Chinese query was malformed, which is exactly the kind of
-// failure that looks like "the service has no lyrics for this track".
+// failure that looks like "the service has no lyrics for this bar.track".
 //
 // `CommandLineToArgvW` returns the real wide characters, and the rest of the program works
 // in UTF-8, so the conversion happens here, once. ASCII flags are unaffected either way.
