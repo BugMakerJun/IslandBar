@@ -12819,3 +12819,44 @@ case WM_TRAYICON:
 （`busy_ms=0`、`outcome=failed`）。所以"它自己的菜单"用消息拿不到这件事，**没有被这一行改变**。
 那几格的出路仍然只有 8.147.6 里列的三条：真实点击（用户已否决）／把系统托盘留在屏幕上／维持现在
 （我们自己的菜单＋如实标注）。
+
+---
+
+## 8.150 **用户递来完整的标准托盘程序 → 用它当对照样机，逼出第二个真 bug**（2026-10-16 04:50）
+
+用户贴了一份**可直接编译的完整 Win32 托盘程序**，并说「试试这个可不可以实现」。做法：把它编成一次性
+对照样机（`%TEMP%\traydemo\traydemo.exe`，不进仓库），启动 → 我们的学习趟捕获它
+（缓存里出现 `traydemo.exe|0x0401|TrayDemoClass|1001|both|0`）→ 用**产品的右键**按它那一格。
+
+### 8.150.1 这一测证明了两件事
+
+1. **我们的链路本身是对的**：标准实现的处理函数（`LOWORD(lParam)` → `GetCursorPos` →
+   `SetForegroundWindow` → `TrackPopupMenu`）被我们的消息**按出了它自己的菜单**
+   —— 截图 `%TEMP%\traydemo\at-cursor.png` 里就是"打开主窗口 / 退出"。所以 ChatGPT 那类的失败是
+   **应用侧**的事实，不是我们链路的问题。
+2. **产品里的第二个真 bug**：同一个标准的处理函数**在消息里直接弹模态菜单**（`TrackPopupMenu` 不返回
+   直到菜单被关掉），于是我们的 `SendMessageTimeout(…, 1500 ms)` **超时**，被当成"消息投递失败"：
+
+   ```
+   tray press: [0] 'Win32 托盘示例' (registered by UID)
+     -> the message could not be delivered [right click]: the message could not be delivered (press 1563 ms)
+   ```
+
+   **菜单明明在屏幕上，日志说失败**；更糟的是 `Refused != Pressed` 会让卡片**再叠一层我们自己的菜单**
+   盖在它上面 —— 这正是用户说的"我想要的效果出不来"的一种来源。**凡是按教科书写法（在消息里直接弹菜单）
+   的应用都会踩这个坑。**
+
+### 8.150.2 修法（提交 `…`，一行判断）
+
+`DeliverMessage`：`SendMessageTimeout` 返回 0 时**再看错误码**——`ERROR_TIMEOUT` 表示"消息送到了，
+只是应用还在它的菜单循环里"，**不算失败**，继续交给观察层判定；只有窗口真的不在
+（`ERROR_INVALID_WINDOW_HANDLE`）才算失败。
+
+### 8.150.3 验收（同一份构建）
+
+| 对象 | 修复前 | 修复后 |
+|---|---|---|
+| 对照样机（教科书写法，模态菜单在消息里） | `the message could not be delivered`（1563 ms） | **`outcome=native_menu`**，`busy_ms=1500`，证据 `its own '#32768' at 998,933 158x59`（它自己的菜单窗口） |
+| RazerAppEngine（栏为前台） | 62 ms 成功 | **62 ms 成功，无回退** |
+
+自检与 `island_smoke` 全过；Release 已部署。

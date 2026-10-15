@@ -709,11 +709,25 @@ void MarkCallbackLeftSpelling(const TrayPressRequest& request, TrayCallback::Lef
 //
 // SendMessageTimeout and not SendMessage: this runs on the bar's press worker while an application of
 // unknown health is on the other side, and a hung application must cost a bounded wait, not the bar.
+//
+// ... AND A TIMEOUT IS NOT A FAILURE (2026-10-16, measured against the textbook handler the user pasted).
+// The canonical tray handler opens its menu INSIDE the message -- GetCursorPos, SetForegroundWindow,
+// TrackPopupMenu -- and TrackPopupMenu does not return until the menu is dismissed. So the send times out
+// while the application's own menu is on screen, and calling that "the message could not be delivered" was
+// wrong twice over: the log said failure while the menu was up (screenshot in HANDOFF 8.150), and the
+// caller's `Refused != Pressed` made the card open THIS BAR's menu on top of the application's. A timeout
+// here means "delivered, and its answer is not something this call can wait for"; the observer that
+// follows is what decides.
 BOOL DeliverMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam, bool sendNotPost) {
     if (!sendNotPost) return PostMessageW(window, message, wparam, lparam);
     DWORD_PTR ignored = 0;
-    return SendMessageTimeoutW(window, message, wparam, lparam, SMTO_ABORTIFHUNG | SMTO_NORMAL, 1500,
-                               &ignored) != 0;
+    if (SendMessageTimeoutW(window, message, wparam, lparam, SMTO_ABORTIFHUNG | SMTO_NORMAL, 1500,
+                            &ignored) != 0) {
+        return TRUE;
+    }
+    // A window that is gone answers ERROR_INVALID_WINDOW_HANDLE and IS a failure; a window that is still
+    // holding the message is the application's menu being open.
+    return GetLastError() == ERROR_TIMEOUT;
 }
 
 // Sends that callback and waits for the application to answer. False means "this route was not taken" --
