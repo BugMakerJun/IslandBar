@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "app/AppBar.h"
+#include "app/BarState.h"     // the bar's own state: slice 1 is the tray card and its menu
 #include "shell/StartMenu.h"
 #include "domain/TaskStripLayout.h"
 #include "platform/WindowList.h"
@@ -681,18 +682,13 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
 
     // Whether the system panel is open. It is a TOGGLE, like the shell flyout it mirrors.
     bool systemPanelOpen = forcedSystemPanel;
-    // The TRAY's own level of the same card: the icons behind the button at the right-hand end of the bar.
-    // Kept beside the panel's flag because the two are two levels of one card (see the click handler).
-    bool trayPageOpen = false;
-    // THE TRAY'S OWN MENU (2026-10-14, HANDOFF 8.80): which cell it belongs to and what its rows say. The
-    // geometry lives in the window -- it owns the card and answers the hover test -- and this is the
-    // meaning: the same split as every other control on this bar.
-    int trayMenuCell = -1;
-    island::TrayMenuAction trayMenuActions[island::kMaxTrayMenuEntries] = {};
-    int trayMenuActionCount = 0;
-    // Whether 结束应用 has been asked for once and is waiting for the press that carries it out. Cleared
-    // whenever the menu opens or closes: an armed entry must not survive the menu it was armed in.
-    bool trayQuitArmed = false;
+    // THE BAR'S OWN STATE, SLICE 1: the tray card, its menu, and the clocks that re-read the tray and
+    // learn what it holds. See app/BarState.h for why it is a struct now and what moves in next.
+    //
+    // bar.lastShellPid is seeded HERE rather than in the struct, because the shell that exists at startup is
+    // what the first tick must compare against.
+    island::BarState bar;
+    bar.lastShellPid = island::TrayShellProcessId();
     // Which level of the panel's card is showing -- the tiles, the 声音输出 page, or the tray page. Held
     // for the card's whole life, like the owner: the card is on screen for the length of its own exit, so
     // the level it was opened with is also what it leaves with (see NextPanelLevel, and the three places
@@ -862,26 +858,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // shell (see FullScreenAppInFront). Polled: three cheap calls, four times a second.
     bool fullscreenAppInFront = false;
     unsigned long long lastFullscreenCheck = 0;
-    // The tray is re-read on its own slow cadence: it touches the registry and a process snapshot, and
-    // what it describes -- which applications are running -- changes on that scale.
-    unsigned long long lastTrayRefresh = 0;
-    // -1 rather than the count read above: the first refresh in the loop then reports the tray's size
-    // once, at startup, which is the line to look for when the tray is empty.
-    int lastTrayCount = -1;
-    // The applications that still have no callback entry at the last attempt, and the two things that keep
-    // that attempt from becoming a loop. See the tray tick: a pass is offered again only when the SET of
-    // applications to try has changed (a new tray application appeared), never on a timer.
-    // Which process the tray's registrations are read in -- see TrayShellProcessId. Watched, because the
-    // module is pinned for the life of the process it lands in: an Explorer that restarts has to be given it
-    // again. Nothing else needs a pass any more, which is the point of reading registrations in the shell.
-    //
-    // Seeded with the shell that exists right now, so the startup pass below is not immediately repeated by
-    // the first tick (measured: it was, three times over, on the first run of this code).
-    DWORD lastShellPid = island::TrayShellProcessId();
-    // Shared with the worker and on the heap: the worker is detached, and a detached thread writing to a
-    // local of a function that has already returned is a crash waiting for the user to close the bar.
-    std::shared_ptr<std::atomic<bool>> learnInFlight = std::make_shared<std::atomic<bool>>(false);
-    unsigned long long lastLearnAttempt = 0;
     island::IslandWindow window;
     if (!window.Create(monitor, /*show=*/true)) {
         island::LogAndPrint("FATAL: could not create the window (error %lu)\n", GetLastError());
@@ -1617,8 +1593,8 @@ float musicWavePhase = 0.0f;
             // cannot be synthesised from a script on this machine (see ISLANDBAR_CLICK_AT), so without this
             // there is no way to photograph it.
             if (GetEnvironmentVariableW(L"ISLANDBAR_TRAY_PAGE", setting, 32) > 0) {
-                trayPageOpen = wcstol(setting, nullptr, 10) != 0;
-                systemPanelOpen = trayPageOpen;
+                bar.trayPageOpen = wcstol(setting, nullptr, 10) != 0;
+                systemPanelOpen = bar.trayPageOpen;
                 island::LogAndPrint("  diagnostic: the tray page is opened at startup\n");
                 std::fflush(stdout);
             }
@@ -2317,7 +2293,7 @@ float musicWavePhase = 0.0f;
                 // set, which was harmless while the level was read from the request and is not now: a card
                 // put away by a click outside must take every level with it, exactly as a click on the
                 // system button does (see the click handler).
-                trayPageOpen = false;
+                bar.trayPageOpen = false;
                 // ... and the tray's own menu, which is a thing in front of that page rather than a level
                 // of it, so it cannot outlive the card it was opened over.
                 window.CloseTrayMenu();
@@ -2569,10 +2545,10 @@ float musicWavePhase = 0.0f;
                     // what the second will do (the row's own label changes; see TrayMenuArmedLabel) and the
                     // menu stays open, so the second press is the same gesture in the same place. The Start
                     // card's power list is arranged the same way, for the same reason.
-                    if (row >= 0 && row < trayMenuActionCount &&
-                        trayMenuActions[row] == island::TrayMenuAction::QuitApplication &&
-                        !trayQuitArmed) {
-                        trayQuitArmed = true;
+                    if (row >= 0 && row < bar.trayMenuActionCount &&
+                        bar.trayMenuActions[row] == island::TrayMenuAction::QuitApplication &&
+                        !bar.trayQuitArmed) {
+                        bar.trayQuitArmed = true;
                         // WIDE, because this line is Chinese: the narrow overload widens its argument a byte
                         // at a time, which is how `结束应用` came out as `ç»æåºç¨` in the log while the
                         // lines around it read correctly (the same defect HANDOFF 8.72/8.73 records).
@@ -2582,12 +2558,12 @@ float musicWavePhase = 0.0f;
                         continue;
                     }
                     window.CloseTrayMenu();
-                    trayQuitArmed = false;
-                    if (row >= 0 && row < trayMenuActionCount) {
-                        const island::TrayMenuAction action = trayMenuActions[row];
+                    bar.trayQuitArmed = false;
+                    if (row >= 0 && row < bar.trayMenuActionCount) {
+                        const island::TrayMenuAction action = bar.trayMenuActions[row];
                         island::LogAndPrint(L"  tray menu: %ls\n", island::TrayMenuLabel(action));
                         std::fflush(stdout);
-                        island::RunTrayMenuAction(trayIcons, taskWindows, trayMenuCell, action);
+                        island::RunTrayMenuAction(trayIcons, taskWindows, bar.trayMenuCell, action);
                         if (action == island::TrayMenuAction::Open ||
                             action == island::TrayMenuAction::CloseWindow ||
                             action == island::TrayMenuAction::ApplicationMenu) {
@@ -2659,7 +2635,7 @@ float musicWavePhase = 0.0f;
                     startPageState = 0;
                     startPickerScroll = 0;
                     startPowerConfirm = -1;
-                    trayPageOpen = false;
+                    bar.trayPageOpen = false;
                     soundPageOpen = false;
                     island::LogAndPrint("  start click: the bar's own card %ls\n",
                                         startPageOpen ? L"open" : L"closed");
@@ -2672,8 +2648,8 @@ float musicWavePhase = 0.0f;
                     // two share a card, a position and an animation -- and the two flags have to be kept in
                     // step: opening one closes the other, or the card would be asked to be two pages at
                     // once.
-                    const bool opening = !trayPageOpen;
-                    trayPageOpen = opening;
+                    const bool opening = !bar.trayPageOpen;
+                    bar.trayPageOpen = opening;
                     systemPanelOpen = opening;
                     systemPanelPage = 0;
                     soundPageOpen = false;
@@ -2786,7 +2762,7 @@ float musicWavePhase = 0.0f;
                     systemPanelOpen = !systemPanelOpen;
                     systemPanelPage = 0;   // always opens on the first page, like the shell's flyout
                     // ... and the tray's page is a level of the same card, so it goes with it.
-                    trayPageOpen = false;
+                    bar.trayPageOpen = false;
                     // The page is a LEVEL of the panel, so closing the panel closes it too -- and a drag
                     // left half-done is ended, or the next press anywhere would go on dragging a slider
                     // that is no longer on screen.
@@ -3316,17 +3292,17 @@ float musicWavePhase = 0.0f;
             // learned callback and are left out without one, because a row that does nothing is worse than a
             // row that is not there (requested by the user on 2026-10-15, see TrayMenuEntriesFor).
             const auto openBarTrayMenu = [&](int cell) {
-                trayMenuCell = cell;
+                bar.trayMenuCell = cell;
                 island::TrayMenuFacts facts;
-                island::TrayMenuFactsFor(trayIcons, taskWindows, trayMenuCell, &facts);
-                trayMenuActionCount = island::TrayMenuEntriesFor(facts, trayMenuActions,
+                island::TrayMenuFactsFor(trayIcons, taskWindows, bar.trayMenuCell, &facts);
+                bar.trayMenuActionCount = island::TrayMenuEntriesFor(facts, bar.trayMenuActions,
                                                                 island::kMaxTrayMenuEntries);
-                window.OpenTrayMenu(trayMenuCell, trayMenuActionCount);
-                trayQuitArmed = false;   // a new menu starts unarmed
+                window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
+                bar.trayQuitArmed = false;   // a new menu starts unarmed
                 wchar_t flatMenuName[128] = {};
                 island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d callback=%d)\n",
-                                    island::FlatName(trayIcons.At(trayMenuCell).name, flatMenuName, 128),
-                                    trayMenuActionCount, facts.hasWindow ? 1 : 0,
+                                    island::FlatName(trayIcons.At(bar.trayMenuCell).name, flatMenuName, 128),
+                                    bar.trayMenuActionCount, facts.hasWindow ? 1 : 0,
                                     facts.hasExePath ? 1 : 0, facts.hasCallback ? 1 : 0);
                 std::fflush(stdout);
             };
@@ -4072,7 +4048,7 @@ float musicWavePhase = 0.0f;
                 // `outerCardUp` is: a field set after the thing that reads it is a field one frame stale
                 // (see the note below, and the four times this project has paid for that lesson).
                 panelLevel = island::NextPanelLevel(panelLevel, frame.outerCardUp, systemPanelOpen,
-                                                    trayPageOpen, soundPageOpen, startPageOpen);
+                                                    bar.trayPageOpen, soundPageOpen, startPageOpen);
                 const bool trayPageShown = panelLevel == island::PanelLevel::Tray;
                 const bool soundPageShown = panelLevel == island::PanelLevel::Sound;
                 const bool startPageShown = panelLevel == island::PanelLevel::Start;
@@ -4084,12 +4060,12 @@ float musicWavePhase = 0.0f;
                 //
                 // Refreshed here and not at the top of the loop so the count the frame draws, the count the
                 // row's sizing spent room on and the count the window hit-tests are all the same number.
-                if (GetTickCount64() - lastTrayRefresh >= kTrayRefreshMs) {
-                    lastTrayRefresh = GetTickCount64();
+                if (GetTickCount64() - bar.lastTrayRefresh >= kTrayRefreshMs) {
+                    bar.lastTrayRefresh = GetTickCount64();
                     frameWork |= kWorkTrayRefresh;
                     const int trayNow = trayIcons.Refresh();
-                    if (trayNow != lastTrayCount) {
-                        lastTrayCount = trayNow;
+                    if (trayNow != bar.lastTrayCount) {
+                        bar.lastTrayCount = trayNow;
                         island::LogAndPrint("  tray: %d icon(s) (%d of %d registered applications are "
                                             "running)",
                                             trayNow, trayIcons.RunningApps(), trayIcons.Examined());
@@ -4118,16 +4094,20 @@ float musicWavePhase = 0.0f;
                     // that, and for nothing else -- an application starting later needs no pass at all, which
                     // is the whole point of reading registrations where they arrive (shell/TrayLearn.h).
                     const DWORD shellNow = island::TrayShellProcessId();
-                    if (shellNow != 0 && shellNow != lastShellPid && !learnInFlight->load() &&
-                        GetTickCount64() - lastLearnAttempt >= 15000) {
-                        lastShellPid = shellNow;
-                        lastLearnAttempt = GetTickCount64();
-                        learnInFlight->store(true);
+                    if (shellNow != 0 && shellNow != bar.lastShellPid && !bar.learnInFlight->load() &&
+                        GetTickCount64() - bar.lastLearnAttempt >= 15000) {
+                        bar.lastShellPid = shellNow;
+                        bar.lastLearnAttempt = GetTickCount64();
+                        bar.learnInFlight->store(true);
                         island::LogAndPrint("  tray learn: the shell is a new process (pid %lu) -- offering "
                                             "the module to it again (background)\n",
                                             static_cast<unsigned long>(shellNow));
                         std::fflush(stdout);
-                        std::thread([learnInFlight]() {
+                        // The flag is captured INTO A LOCAL NAME: a capture list takes names, not members, and
+                        // the worker outlives this scope -- it is detached, which is exactly why the flag is a
+                        // shared_ptr on the heap (see app/BarState.h).
+                        const std::shared_ptr<std::atomic<bool>> learnFlight = bar.learnInFlight;
+                        std::thread([learnFlight]() {
                             island::TrayIcons icons;
                             icons.Refresh();
                             const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
@@ -4139,7 +4119,7 @@ float musicWavePhase = 0.0f;
                                                                                : "given the module",
                                                 learned.captured, learned.newEntries, learned.covered,
                                                 learned.icons, learned.ms);
-                            learnInFlight->store(false);
+                            learnFlight->store(false);
                         }).detach();
                     }
                 }
@@ -4177,13 +4157,13 @@ float musicWavePhase = 0.0f;
                 frame.trayMenuHovered = window.TrayMenuRowHovered();
                 if (frame.trayMenuOpen) {
                     const island::TrayMenuLayout& menu = window.TrayMenu();
-                    const int rows = menu.count < trayMenuActionCount ? menu.count : trayMenuActionCount;
+                    const int rows = menu.count < bar.trayMenuActionCount ? menu.count : bar.trayMenuActionCount;
                     frame.trayMenuRowCount = rows;
                     for (int i = 0; i < rows; ++i) {
                         frame.trayMenuRows[i] = menu.rows[i];
                         frame.trayMenuLabels[i] =
-                            trayQuitArmed ? island::TrayMenuArmedLabel(trayMenuActions[i])
-                                          : island::TrayMenuLabel(trayMenuActions[i]);
+                            bar.trayQuitArmed ? island::TrayMenuArmedLabel(bar.trayMenuActions[i])
+                                          : island::TrayMenuLabel(bar.trayMenuActions[i]);
                     }
                 }
                 // ... and the three washes, each a spring toward "the pointer is on it" (see

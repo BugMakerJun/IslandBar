@@ -11502,3 +11502,45 @@ Windows 安全中心 …      | SystemTray.NormalButton | invoke=True | 2374,89,
 | `island_smoke` | PASS |
 | **搬走的命令逐条跑**：`--tray-surface` / `--tray-dump` / `--window-list` / `--toast-dump 2` / `--icon-dump` | 全部照常出结果（覆盖率仍是 3 of 10；toast 读出 2 条；`--icon-dump Weixin.exe` 解出 32x32 图标并写出 PNG——这条同时验证了跟着搬走的 `ArgumentAsUtf8ToWide`） |
 | 部署 + 重启 bar | pid 27836，正常 |
+
+### 8.119 **架构改造第四步：`RunBar` 的状态开始搬进 `app/BarState.h`（World 的第一片）** ✅（已部署，含真实右击与托盘 tick 验证）
+
+#### 8.119.1 为什么是"一片一片搬"
+
+`RunBar` 现在约 5,000 行，顶部有 135 个声明。要区分"跨帧存活的状态"和"单帧内部算出来的值"，读者只能靠用途分散程度去猜；想改其中一个，也没有地方能先看见全貌。
+
+整块搬（135 个一起）风险太高：一处机械替换出错就可能变成"静默用了外层状态"这种编译器抓不住的 bug。所以按评审给的方向**按名字成组搬**，每组搬完都走一遍全量重建 + 自检 + 冒烟 + 部署，这样出错一定归因到刚搬的那一组。
+
+#### 8.119.2 第一片搬了什么
+
+`src/app/BarState.h`（新）：`struct BarState`，先放托盘卡片与它的菜单，以及"重读托盘 + 学习"的那组时钟——共 10 个字段，**连同它们原有的注释一起**搬过去：
+
+| 字段 | 它是什么 |
+|---|---|
+| `trayPageOpen` | 面板卡片里托盘那一层是否打开（与面板的 tiles 是同一张卡的两层） |
+| `trayMenuCell` / `trayMenuActions` / `trayMenuActionCount` | 本栏自己的托盘菜单属于哪一格、有哪些行（几何在窗口里，含义在这里） |
+| `trayQuitArmed` | "结束应用"是否已经被点过一次、正等第二次按下（菜单一开一关就必须清） |
+| `lastTrayRefresh` / `lastTrayCount` | 重读托盘的慢时钟；`-1` 让第一帧把托盘尺寸报一次 |
+| `lastShellPid` | 托盘注册是在哪个进程里读的（explorer 重启后必须重装模块） |
+| `learnInFlight` / `lastLearnAttempt` | 学习线程的互斥标记（堆上的 `shared_ptr`，因为线程是 detach 的）与上一次尝试的时间 |
+
+`main.cpp`：删掉这些声明（连注释），在原位放一个 `island::BarState bar;`，`lastShellPid` 在构造后立刻用 `island::TrayShellProcessId()` 播种；**44 处使用点**加 `bar.` 限定，全部由编译器核对。
+
+搬的过程中撞到一个 C++ 细节，值得记一笔：lambda 的捕获列表 `[learnInFlight]` 被机械替换成 `[bar.learnInFlight]`——**捕获列表里只能是名字，不能是成员访问**。修法是先把 `bar.learnInFlight` 取到一个局部 `learnFlight`，再捕获它；这恰好也说明了原来的设计意图（标志之所以在堆上，就是因为这个线程会活过这个作用域）。
+
+#### 8.119.3 验证
+
+| 项 | 结果 |
+|---|---|
+| Release / Debug 全量重建（/WX 生效） | OK，零告警 |
+| `--self-test` | PASS |
+| `island_smoke` | PASS |
+| `--tray-learn`（走 `lastShellPid` / `learnInFlight` / `lastLearnAttempt`） | 正常运行：`the shell (1 process(es) offered) was already carrying the module, 0 registration(s) captured` |
+| `--tray-surface` | 3 of 11 可按 |
+| `--tray-press 0 --right --fire` | `delivered ... the application answered`（菜单/按压链路正常） |
+| 起 bar 后的托盘 tick（读 `lastTrayCount` / `lastTrayRefresh` / `lastShellPid`） | 日志正常：`tray: 11 icon(s) ...` / `tray learn: 4 of 11 icon(s) known ...` |
+| 部署 + 重启 bar | pid 25812，正常 |
+
+#### 8.119.4 下一片
+
+按同样的方式继续：面板与声音页的那组状态（`systemPanelOpen` / `panelLevel` / `systemPanelPage` / 三个滑条的拖动与回显）、通知与媒体那组、然后是对象组（window / renderer / text / 会话）。全部搬完之后，`RunBar` 剩下的就是"每帧：取事件 → 消解 → 画"，那时才谈得上按相位切成函数。

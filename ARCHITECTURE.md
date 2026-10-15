@@ -19,7 +19,8 @@ src/
   domain/           纯逻辑，独立静态库目标 island_domain：几何、布局、动画、状态策略、JSON 读取。
                     这一层不许包含 <windows.h>，也不许链接任何库（见第 3 节）
   core/             所有模块共用的基础设施：日志、进程指标
-  app/              窗口与生命周期：IslandWindow（画与命中）、AppBar（占位）、PlayerWindow
+  app/              窗口与生命周期：IslandWindow（画与命中）、AppBar（占位）、PlayerWindow、
+                    BarState.h（bar 自己的状态；正在一片一片从 RunBar 里搬进来，见第 7 节）
   render/           D2D/DComp 渲染：Renderer、TextRenderer、玻璃材质
   media/            GSMTC 会话、歌词、音量、声音输出、图片解码
   shell/            与 shell 打交道：托盘（TrayIcons/TrayPress/TrayLearn）、开始菜单、天气、系统开关、原生任务栏
@@ -95,7 +96,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 ## 7. 已知的架构债（写在明处，不是等人发现）
 
 - **模块边界还没有被构建系统强制**：`core/` 有了编译期护栏，但 `shell/`、`render/`、`media/` 之间仍是同一个目标里的翻译单元，互相 include 的门槛很低。下一步是把 `core/` 抽成独立静态库目标，再逐层往上锁。
-- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（6.0k / 8.6k 行）。已经搬出去的两块：托盘的行为去了 `shell/TrayMenu.*`（234 行），代替岛运行的那些命令去了 `cli/Cli.cpp`（约 1,000 行）。`main.cpp` 剩下的主体是 `RunBar`——**一个约 5,000 行的帧循环**，里面是窗口、渲染、媒体、通知、天气、系统面板和托盘卡片的全部驱动逻辑，外加许多散落的局部状态与 1 秒 / 5 秒轮询。下一步不是继续搬函数，而是先立一个**单一世界状态**（把这些局部对象收进一个 `World`），再把轮询改成事件，最后才按状态切片。这一步会动到托盘链路的宿主环境，所以它自己就是一轮。
+- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（6.0k / 8.6k 行）。已经搬出去的三块：托盘的行为去了 `shell/TrayMenu.*`（234 行）、代替岛运行的那些命令去了 `cli/Cli.cpp`（约 1,000 行）、`RunBar` 里**第一组跨帧状态**去了 `app/BarState.h`（托盘卡片、它的菜单、重读托盘与学习的时钟，10 个字段）。
+  `main.cpp` 剩下的主体仍是 `RunBar`——约 5,000 行的帧循环，装着窗口、渲染、媒体、通知、天气、系统面板和托盘卡片的全部驱动逻辑。**状态迁移是"一组一组来"的**：每组搬完都全量重建两套配置 + 自检 + 冒烟 + 部署，这样出错一定归因到刚搬的那组（整块机械替换的风险是"静默用了外层状态"，编译器抓不住）。顺序：面板与声音页那组 → 通知与媒体那组 → 对象组（window / renderer / text / 会话）。等这些搬完，`RunBar` 才谈得上按相位切成函数。
 - **模块与主程序之间靠文件轮询**：`trayhook` 写 `tray_learned.txt`，bar 每 5 秒读一次；模块也没有 ABI 版本契约（现在靠内容哈希命名来避免文件锁）。正式做法应是共享内存或管道加版本号，把文件降级为可回放语料。
 - **安装器还没带 `island_tray_hook.dll`**：托盘学习是正式功能，所以全新安装缺这个 DLL 就是功能缺口。
 - **托盘按压没有自动化回归**：只能靠 CLI 探针（`--tray-surface` / `--tray-learn` / `--tray-press N`）加人工验证。
