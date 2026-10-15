@@ -11544,3 +11544,32 @@ Windows 安全中心 …      | SystemTray.NormalButton | invoke=True | 2374,89,
 #### 8.119.4 下一片
 
 按同样的方式继续：面板与声音页的那组状态（`systemPanelOpen` / `panelLevel` / `systemPanelPage` / 三个滑条的拖动与回显）、通知与媒体那组、然后是对象组（window / renderer / text / 会话）。全部搬完之后，`RunBar` 剩下的就是"每帧：取事件 → 消解 → 画"，那时才谈得上按相位切成函数。
+
+### 8.120 **安装器终于带上托盘模块了（F1）** ✅（已实测安装）
+
+用户 2026-10-15 的指令：「继续把 全部完善好」。按 `ROADMAP.md` 的 F1 先做——它是唯一一条"全新安装会缺一个正式功能"的缺口。
+
+#### 8.120.1 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `setup/payload.rc.in` | 第二份载荷：`1002 RCDATA "@PAYLOAD_HOOK@"`，并写清为什么是两个而不是一个 |
+| `setup/CMakeLists.txt` | 载荷复制命令一次产出两个文件；`PAYLOAD_HOOK` 绑给 .rc；`add_dependencies(island_bar_setup island_tray_hook)` + `OBJECT_DEPENDS` 两个载荷，保证 RC 不会读到还没生成/会被替换的文件 |
+| `setup/Setup.cpp` | `ExtractPayload(**resourceId, label, destination, error)` 泛化；安装时写 exe 与 DLL 两个文件（**DLL 写失败不判定安装失败**——岛没有它也能跑，但摘要里必须写明）；安装摘要多一行 `tray:`；卸载时也删 DLL（被 explorer 钉住删不掉时如实报告），并把 DLL 大小计入"已安装大小" |
+
+**DLL 写失败为什么不算安装失败**：岛没有模块照常运行（只有托盘卡片学不到东西）。拒绝安装比"装好并说清缺什么"更糟。这条区分还顺带区分了两种失败：老安装器根本没有这份资源（构建错误），和资源在但写不进去（被 shell 钉住的锁）。
+
+#### 8.120.2 验证（这一步只能靠真的装一次）
+
+第一次跑失败，日志里写 `creating '...\island_bar.exe.new' failed (5 拒绝访问)`——**不是安装器的问题，是我踩了本仓库文档第一条硬事实**：镜像在 `C:\PROJECT\Taskbar` 下的进程会被降成 LOW 完整性，低完整性写不了用户目录。把安装器复制到 `%TEMP%` 再跑：
+
+```
+IslandBar setup 1.3 -- C:\Users\18340\AppData\Local\Temp\IslandBarSetup-test.exe
+mode: install
+directory: C:\Users\18340\IslandBar
+program written: C:\Users\18340\IslandBar\island_bar.exe (1867264 bytes)
+tray module written: C:\Users\18340\IslandBar\island_tray_hook.dll (508928 bytes)
+uninstaller written: ...  shortcut written: ...  registered under Settings > Apps
+```
+
+退出码 0；两个文件时间戳都刷新；开机自启快捷方式没有被动过；用**装出来的** exe 起 bar：`integrity: same as the shell's`、`tray hook: module ready at ...island_tray_hook-A7C48217338CD471.dll`（说明它从刚装好的 DLL 现切了一份内容哈希副本）、托盘 11 格、4 格有条目、`3 of 11 can be pressed`。

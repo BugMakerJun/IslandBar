@@ -33,7 +33,7 @@
 
 | # | 事项 | 为什么 | 验收 |
 |---|---|---|---|
-| F1 | **安装器带上 `island_tray_hook.dll`**（`setup/CMakeLists.txt` + `payload.rc.in` 加第二份 RCDATA + `Setup.cpp` 落两个文件） | 托盘学习是正式功能；全新安装现在缺这个 DLL 就是功能缺口 | 装完 `%USERPROFILE%\IslandBar` 里两个文件都在，且 `--tray-surface` 能出结果 |
+| F1 | ~~**安装器带上 `island_tray_hook.dll`**~~ | — | ✅ 已完成：payload 加第二份 RCDATA（1002），安装器写两个文件并各自记日志；安装摘要里有一行 `tray: module installed / NOT INSTALLED`；卸载也会删它（被 explorer 占着时如实报告）。**实测**：从树外跑 `/silent /no-launch`，日志 `program written (1867264 bytes)` + `tray module written (508928 bytes)`，退出码 0，装出来的 bar 起得来、托盘 3 of 11 可按 |
 | F2 | **模块与主程序之间的通道**：文件轮询 → 共享内存/管道 + **ABI 版本号**；文件降级为可回放语料 | 现在是"模块写文件、bar 每 5 秒读"，且模块没有版本契约（靠内容哈希命名绕开文件锁）；ABI 不匹配时应拒绝装载而不是各跑各的 | 日志有一行说明通道与版本；`--tray-learn` 与 5 秒 tick 照常；自检加一条版本不匹配的断言 |
 | F3 | **UIA 兜底**（把 shell 自己的托盘图标交给 UIA `Invoke`）——**只对没学到的格子**，需要你点头 | 实测可行：调 ChatGPT 那个元素 17 ms 返回、窗口到前台、指针不动；代价是原生任务栏要"活着"一小会儿 | 一行日志说明这次走的是哪条路；没学到的格子按下有真实效果 |
 | F4 | **托盘按压的自动化回归**：把"注册载荷解析 + 缓存合并 + 判定规则"做成不依赖活应用的用例（真实载荷语料已在 `reviews/tray-copydata-dump.txt`） | 现在只能靠 CLI 探针加人工看；重构中任何一处碰到解析逻辑都只能靠手感 | 语料喂进解析器，断言 uid/guid/msg/tip 与预期逐条相等 |

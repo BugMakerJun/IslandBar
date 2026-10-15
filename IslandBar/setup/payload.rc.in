@@ -13,10 +13,17 @@
 //  The path is absolute on purpose: a relative one would be resolved against whatever
 //  working directory the resource compiler happens to be invoked with, which is not
 //  visible from here and cannot be checked.
+//
+//  TWO PAYLOADS, NOT ONE (2026-10-15). IslandBar is no longer one binary: the tray's learning
+//  runs in a module that is loaded into the shell's own process (see ARCHITECTURE.md), and an
+//  installer that carried only the executable produced an install with no tray learning at all
+//  -- a feature that simply was not there, with nothing on screen to say why. 1002 is the
+//  module; the ids are named in Setup.cpp and the two files have to stay in step.
 // =====================================================================
 #include <winver.h>
 
 1001 RCDATA "@PAYLOAD@"
+1002 RCDATA "@PAYLOAD_HOOK@"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,3,0,0

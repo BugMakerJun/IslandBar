@@ -65,9 +65,14 @@ namespace {
 // The constants are here rather than spelled out at each use because three of them have to
 // agree with something else: the resource id with payload.rc.in, and the two file names with
 // the uninstall entry this program writes.
+// TWO PAYLOADS. 1001 is the bar, 1002 is the tray module that has to be installed beside it: since
+// 2026-10-15 the tray's learning runs inside the shell's own process, so a copy of the bar without the
+// module has no tray learning and nothing on screen to say why (see payload.rc.in).
 constexpr int kPayloadResourceId = 1001;      // 1001 in payload.rc.in -- change both together
+constexpr int kHookResourceId = 1002;         // 1002 in payload.rc.in -- change both together
 constexpr wchar_t kAppName[] = L"IslandBar";
 constexpr wchar_t kProgramName[] = L"island_bar.exe";
+constexpr wchar_t kHookModuleName[] = L"island_tray_hook.dll";
 constexpr wchar_t kUninstallerName[] = L"IslandBarUninstall.exe";
 constexpr wchar_t kStartupShortcut[] = L"IslandBar.lnk";
 constexpr wchar_t kMenuShortcut[] = L"IslandBar.lnk";
@@ -458,22 +463,26 @@ void RemoveRegistryTree(HKEY root, const wchar_t* subkey) {
 
 // --- the payload ---------------------------------------------------------------------
 
-// The bar, out of this program's own resources, written to `destination`.
+// One payload out of this program's own resources, written to `destination`.
 //
 // Written to a temporary name and moved into place: a copy interrupted half way through would
 // otherwise leave an island_bar.exe that starts and then crashes, which is worse than not
 // installing at all. The move is atomic on the same volume.
-bool ExtractPayload(const std::wstring& destination, std::wstring* error) {
-    HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(kPayloadResourceId), RT_RCDATA);
+//
+// `resourceId` and `label` say WHICH payload: 1001 is the bar, 1002 is the tray module, and the label is what
+// the log calls the thing it just wrote (see the two ids in payload.rc.in).
+bool ExtractPayload(int resourceId, const wchar_t* label, const std::wstring& destination,
+                    std::wstring* error) {
+    HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
     if (!resource) {
-        *error = L"the payload is not in this executable (the resource is missing)";
+        *error = Format(L"the %s is not in this executable (resource %d is missing)", label, resourceId);
         return false;
     }
     HGLOBAL loaded = LoadResource(nullptr, resource);
     const void* bytes = loaded ? LockResource(loaded) : nullptr;
     const DWORD size = SizeofResource(nullptr, resource);
     if (!bytes || size == 0) {
-        *error = L"the payload resource is empty";
+        *error = Format(L"the %s resource is empty", label);
         return false;
     }
 
@@ -502,7 +511,7 @@ bool ExtractPayload(const std::wstring& destination, std::wstring* error) {
         DeleteFileQuietly(temporary);
         return false;
     }
-    Say(Format(L"program written: %s (%lu bytes)", destination.c_str(), size));
+    Say(Format(L"%s written: %s (%lu bytes)", label, destination.c_str(), size));
     return true;
 }
 
@@ -628,6 +637,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     int result = 0;
     std::wstring summary;
+    // Set when the tray module could not be written. It does not fail the install (the bar runs without it),
+    // but it MUST reach the summary: an install whose tray card silently does nothing is the failure this
+    // whole change exists to prevent (see the two payloads in payload.rc.in).
+    std::wstring trayModuleMissing;
 
     std::wstring startupFolder;
     std::wstring menuFolder;
@@ -667,7 +680,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             }
 
             std::wstring error;
-            if (!ExtractPayload(programPath, &error)) {
+            if (!ExtractPayload(kPayloadResourceId, L"program", programPath, &error)) {
                 // The file is there but could not be replaced: the running copy is the only thing
                 // that can be holding it, and it is not running from where we looked.
                 const int others = StopRunningBar(directory, /*onlyFromThatDirectory=*/false);
@@ -675,12 +688,29 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                     Say(Format(L"stopped %d bar(s) started from elsewhere", others));
                     Sleep(700);
                 }
-                if (!ExtractPayload(programPath, &error)) {
+                if (!ExtractPayload(kPayloadResourceId, L"program", programPath, &error)) {
                     Say(Format(L"the program could not be installed: %s", error.c_str()));
                     summary = L"The program could not be installed.\n\n" + error +
                               L"\n\nIs IslandBar running from another folder? Close it and try again.";
                     result = 1;
                 }
+            }
+        }
+
+        // THE TRAY MODULE, and a failure here is NOT a failed install.
+        //
+        // The bar runs without it -- everything except the tray card works -- so refusing to install would be
+        // worse than installing and saying what is missing. This is also the difference between the two
+        // failures this program can have: an installer built before 2026-10-15 carries no module at all (the
+        // resource is missing, which is a build mistake), while a module that is present but cannot be written
+        // is a lock -- the module is pinned inside Explorer for the life of that process, so a running shell
+        // can hold it.
+        if (result == 0) {
+            const std::wstring hookPath = directory + L"\\" + kHookModuleName;
+            std::wstring hookError;
+            if (!ExtractPayload(kHookResourceId, L"tray module", hookPath, &hookError)) {
+                Say(Format(L"THE TRAY MODULE WAS NOT INSTALLED: %s", hookError.c_str()));
+                trayModuleMissing = hookError;
             }
         }
 
@@ -707,7 +737,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             } else if (!options.autostart) {
                 Say(L"autostart not requested: no shortcut in the Startup folder");
             }
-            WriteUninstallEntry(directory, FileSizeOf(programPath));
+            WriteUninstallEntry(directory, FileSizeOf(programPath) + FileSizeOf(directory + L"\\" + kHookModuleName));
 
             if (options.launch) {
                 // Started through the shell, which is the whole point: the bar hides the shell's
@@ -730,6 +760,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             summary = Format(
                 L"IslandBar %s is installed.\n\n"
                 L"  program:   %s\n"
+                L"  tray:      %s\n"
                 L"  autostart: %s\n"
                 L"  menu:      %s\n"
                 L"             %s\n"
@@ -738,6 +769,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 L"To stop it for a while: end island_bar.exe in Task Manager and then run the\n"
                 L"uninstaller above, or restart Explorer, and the Windows taskbar comes back.",
                 kVersion, programPath.c_str(),
+                trayModuleMissing.empty()
+                    ? L"module installed (the bar learns the tray from inside the shell)"
+                    : Format(L"NOT INSTALLED -- the tray card will have nothing to press (%s)",
+                             trayModuleMissing.c_str()).c_str(),
                 options.autostart ? L"on (a shortcut in your Startup folder)"
                                   : L"off (not requested)",
                 menuLink.empty() ? L"(no Start Menu folder)" : menuLink.c_str(),
@@ -772,6 +807,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
         DeleteFileQuietly(programPath);
         Say(Format(L"program removed: %s", programPath.c_str()));
+
+        // ... AND THE TRAY MODULE, which is loaded INSIDE EXPLORER while that process lives, so this can
+        // legitimately fail: a pinned module is held by the shell until Explorer restarts. Reported rather
+        // than retried -- and the file is inert without the bar, so leaving it is untidy rather than harmful.
+        // The cached learnings go with it only when the user asked for the settings to go as well; the tray
+        // callbacks are read from tray_callbacks.txt, which is not this installer's to decide.
+        const std::wstring hookPath = directory + L"\\" + kHookModuleName;
+        if (!DeleteFileQuietly(hookPath)) {
+            Say(Format(L"the tray module could not be removed yet (it is loaded in Explorer): %s",
+                       hookPath.c_str()));
+        } else {
+            Say(Format(L"tray module removed: %s", hookPath.c_str()));
+        }
 
         std::wstring keeper;
         if (options.removeSettings) {
