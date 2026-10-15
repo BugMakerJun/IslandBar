@@ -6,6 +6,8 @@
 //      probe-tray-lab.exe --client <phase>     an application that registers a tray icon
 //      probe-tray-lab.exe --crop on|off|status clip the live taskbar down to its tray area
 //      probe-tray-lab.exe --reparent           can the shell's tray window be re-parented?
+//      probe-tray-lab.exe --move-tray <secs>   re-parent it into a visible window of OURS, hold, put back
+//      probe-tray-lab.exe --park <x> <y> <s>   crop to the tray, then PARK the whole taskbar so the tray sits at x,y
 //
 //  WHY THESE THREE. The tray is not an API: it is a WINDOW inside the shell's process, and
 //  Shell_NotifyIcon is shell32 handing a registration to it (measured 2026-10-15: a synchronous
@@ -346,6 +348,155 @@ int RunReparent() {
     return 0;
 }
 
+// --- E3b, and if it can be moved, do the PIXELS come with it? -------------
+//
+//  E3 proved the call is accepted (it returns the old parent with no error). That is not the same
+//  question as "does the tray then live in my window": Windows 11 paints this taskbar from a
+//  Windows.UI.Composition.DesktopWindowContentBridge spanning all 2,560 DIP, and TrayNotifyWnd is
+//  only one part of that surface. This mode moves the window into a visible window of ours and holds
+//  it there long enough to be photographed, then puts it back and destroys OUR window only after the
+//  tray is safe again -- destroying the parent with the tray still inside would destroy the tray.
+int RunMoveTray(int seconds) {
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    const HWND tray = taskbar ? FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
+    if (!tray) {
+        Log(L"MOVE: no TrayNotifyWnd to move");
+        return 1;
+    }
+    RECT before = {};
+    GetWindowRect(tray, &before);
+    Log(L"MOVE: tray starts at %ld,%ld %ldx%ld", before.left, before.top,
+        before.right - before.left, before.bottom - before.top);
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"TrayLabMoveHost";
+    wc.hbrBackground = CreateSolidBrush(RGB(200, 40, 120));   // magenta, so a missing tray is obvious
+    RegisterClassExW(&wc);
+    const HWND host = CreateWindowExW(WS_EX_TOOLWINDOW, L"TrayLabMoveHost", L"tray move host",
+                                      WS_POPUP | WS_VISIBLE, 700, 500, 400, 80, nullptr, nullptr,
+                                      wc.hInstance, nullptr);
+    Log(L"MOVE: our window is %p at 700,500 400x80", reinterpret_cast<void*>(host));
+    if (!host) return 1;
+    UpdateWindow(host);
+    Sleep(500);
+
+    SetLastError(0);
+    const HWND previous = SetParent(tray, host);
+    Log(L"MOVE: SetParent -> %p (last error %lu)", reinterpret_cast<void*>(previous), GetLastError());
+    SetWindowPos(tray, nullptr, 20, 24, 144, 32, SWP_NOZORDER | SWP_SHOWWINDOW);
+    RECT during = {};
+    GetWindowRect(tray, &during);
+    Log(L"MOVE: tray rect while moved %ld,%ld %ldx%ld -- hold for %d s (photograph now)",
+        during.left, during.top, during.right - during.left, during.bottom - during.top, seconds);
+
+    const ULONGLONG until = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+    MSG msg = {};
+    while (GetTickCount64() < until) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(20);
+    }
+
+    // Where would a click land while it is moved?
+    const POINT middle = {(during.left + during.right) / 2, (during.top + during.bottom) / 2};
+    const HWND hit = WindowFromPoint(middle);
+    DWORD hitPid = 0;
+    if (hit) GetWindowThreadProcessId(hit, &hitPid);
+    wchar_t cls[128] = {};
+    if (hit) GetClassNameW(hit, cls, 128);
+    Log(L"MOVE: WindowFromPoint(%ld,%ld) -> %p '%ls' (pid %lu)", middle.x, middle.y,
+        reinterpret_cast<void*>(hit), cls, hitPid);
+
+    SetParent(tray, taskbar);
+    SetWindowPos(tray, nullptr, before.left, before.top, before.right - before.left,
+                 before.bottom - before.top, SWP_NOZORDER | SWP_SHOWWINDOW);
+    RECT after = {};
+    GetWindowRect(tray, &after);
+    Log(L"MOVE: put back -- tray rect now %ld,%ld %ldx%ld (was %ld,%ld)", after.left, after.top,
+        after.right - after.left, after.bottom - after.top, before.left, before.top);
+    DestroyWindow(host);
+    Log(L"MOVE: done");
+    return 0;
+}
+
+// --- E4, park the cropped taskbar so the real tray sits where we want -----
+//
+//  E3b answered the pixel question the hard way: the tray WINDOW moves (input follows it) but the
+//  PIXELS do not, because Windows 11 paints the taskbar from a Windows.UI.Composition.
+//  DesktopWindowContentBridge that spans the whole 2,560 DIP and is a CHILD OF THE TASKBAR. So move
+//  the thing the bridge belongs to. Crop first (so nothing but the tray is painted), then move the
+//  taskbar by the delta that lands TrayNotifyWnd on the wanted screen point.
+int RunPark(int trayX, int trayY, int seconds) {
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    const HWND tray = taskbar ? FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
+    if (!tray) {
+        Log(L"PARK: no TrayNotifyWnd");
+        return 1;
+    }
+    RECT bar = {}, trayRect = {};
+    GetWindowRect(taskbar, &bar);
+    GetWindowRect(tray, &trayRect);
+    Log(L"PARK: taskbar %ld,%ld | tray %ld,%ld %ldx%ld | wanted %d,%d", bar.left, bar.top,
+        trayRect.left, trayRect.top, trayRect.right - trayRect.left, trayRect.bottom - trayRect.top,
+        trayX, trayY);
+
+    ShowWindow(taskbar, SW_SHOWNA);
+    Sleep(200);
+    HRGN region = CreateRectRgn(trayRect.left - bar.left, trayRect.top - bar.top,
+                                trayRect.right - bar.left, trayRect.bottom - bar.top);
+    Log(L"PARK: crop -> %d", SetWindowRgn(taskbar, region, TRUE));
+    Sleep(300);
+
+    const int dx = trayX - trayRect.left;
+    const int dy = trayY - trayRect.top;
+    const BOOL moved = SetWindowPos(taskbar, nullptr, bar.left + dx, bar.top + dy, 0, 0,
+                                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    Sleep(400);
+    RECT afterBar = {}, afterTray = {};
+    GetWindowRect(taskbar, &afterBar);
+    GetWindowRect(tray, &afterTray);
+    Log(L"PARK: SetWindowPos(dx=%d dy=%d) -> %d | taskbar now %ld,%ld | tray now %ld,%ld %ldx%ld",
+        dx, dy, moved, afterBar.left, afterBar.top, afterTray.left, afterTray.top,
+        afterTray.right - afterTray.left, afterTray.bottom - afterTray.top);
+
+    const POINT middle = {(afterTray.left + afterTray.right) / 2, (afterTray.top + afterTray.bottom) / 2};
+    const HWND hit = WindowFromPoint(middle);
+    DWORD hitPid = 0;
+    if (hit) GetWindowThreadProcessId(hit, &hitPid);
+    wchar_t cls[128] = {};
+    if (hit) GetClassNameW(hit, cls, 128);
+    Log(L"PARK: WindowFromPoint(%ld,%ld) -> %p '%ls' (pid %lu)", middle.x, middle.y,
+        reinterpret_cast<void*>(hit), cls, hitPid);
+    Log(L"PARK: holding %d s -- photograph now", seconds);
+
+    const ULONGLONG until = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+    MSG msg = {};
+    while (GetTickCount64() < until) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, QS_ALLINPUT)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(20);
+    }
+
+    // And does it STAY there, or does the shell drag it back?
+    RECT settled = {};
+    GetWindowRect(tray, &settled);
+    Log(L"PARK: %d s later the tray is at %ld,%ld (asked for %d,%d)", seconds, settled.left,
+        settled.top, trayX, trayY);
+
+    SetWindowRgn(taskbar, nullptr, TRUE);
+    SetWindowPos(taskbar, nullptr, bar.left, bar.top, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Log(L"PARK: restored (region cleared, taskbar back at %ld,%ld)", bar.left, bar.top);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -366,6 +517,16 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "--reparent") == 0) {
         return RunReparent();
+    }
+    if (std::strcmp(argv[1], "--move-tray") == 0) {
+        const int seconds = (argc > 2) ? std::atoi(argv[2]) : 15;
+        return RunMoveTray(seconds > 0 ? seconds : 15);
+    }
+    if (std::strcmp(argv[1], "--park") == 0 && argc > 3) {
+        const int x = std::atoi(argv[2]);
+        const int y = std::atoi(argv[3]);
+        const int seconds = (argc > 4) ? std::atoi(argv[4]) : 12;
+        return RunPark(x, y, seconds > 0 ? seconds : 12);
     }
     Log(L"unknown command");
     return 2;

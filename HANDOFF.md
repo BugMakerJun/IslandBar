@@ -11962,3 +11962,45 @@ preview: resting on a task icon shows a live thumbnail
 | wide `%s` 传了 narrow 字符串 | `ACCEPTED` 打成 `䍁䕃呐䑅` —— 这个项目已经记过两次的老毛病 | 改 wide 字面量 |
 
 **没有做的事**：没有改 IslandBar 的任何代码（探针独立、跑完还原）；没有写注册表；没有换 shell；任务栏区域已还原（`--crop off` + 栏重启后重新隐藏）。
+
+---
+
+## 8.134 **托盘回来了：不画它，把系统自己的那一个留在屏幕上** ✅（已部署）
+
+用户看完 8.133 的实验结果后说「权限都给你 你自己操作吧」。于是按 E2 落地：**栏不再藏整条任务栏，改成用窗口区域把它裁到只剩通知区域**。
+
+### 8.134.1 又补了两个实验，把方案钉死
+
+| 实验 | 问题 | 结果 |
+|---|---|---|
+| **E3b**（`--move-tray`） | 把 `TrayNotifyWnd` 搬进我们自己的窗口，**像素跟不跟**？ | 窗口和**输入**都搬过去了（新位置 `WindowFromPoint` 返回 `TrayNotifyWnd`），**像素留在原地** —— 我们的窗口里是空的洋红，原位置照旧画着 21:54 和那几个图标。原因就是那条铺满 2560 的 XAML 内容桥在画，而它属于**任务栏**。截图为证：`captures/tray-move-01-our-window.png`（我们窗口里没有托盘）对 `tray-move-02-original-spot.png`（原位置托盘还在） |
+| **E4**（`--park`） | 那连桥一起搬 —— 移动整条任务栏，把托盘停到岛上？ | `SetWindowPos` 返回 1 但**没生效**：任务栏仍在 0,0、托盘仍在 2416,0。shell 把任务栏的位置锁死了 |
+
+结论：**能搬的只有"显示什么"，不是"显示在哪"**。所以最终方案就是裁剪，托盘待在 shell 放它的地方（本机右上角）。
+
+### 8.134.2 改了什么（文件级）
+
+| 文件 | 改法 |
+|---|---|
+| `platform/NativeTaskbar.h/.cpp` | 新增第三种模式：`SetKeepTrayVisible(true)` 时 `Hide()` 变成"`SW_SHOWNA` + 把任务栏区域裁到 `TrayNotifyWnd` 的矩形"；`EnsureHidden()` 在每约 0.8 秒的看门狗里负责"它被藏了就再显示、区域丢了或托盘尺寸变了就重裁"；`Restore()` 清区域并恢复原状；区域**加在任务栏上**（加在托盘窗口上没用——见 E3b）。另有 `SetSuppressed()`：全屏应用在前面时连托盘一起退场 |
+| `main.cpp` | 默认改成"保留真托盘"；新增 `--hide-taskbar`（回到旧的整条隐藏）与 `--no-native-tray`（同义）；日志分别写 `native taskbar: clipped to the tray -- the REAL system tray stays on screen` / `tray re-clipped` / `hidden`；用法文本补上 |
+| `selftest/Diagnostics.cpp` | 加 4 条断言（对象初始是隐藏模式、接受托盘模式、接受/解除抑制）——**自检 908 → 912 项，0 失败** |
+
+### 8.134.3 实测与验收
+
+| 项 | 结果 |
+|---|---|
+| 两套配置全量重建（`/WX`） | 0 告警 0 错误 |
+| `--self-test` / `island_smoke` | **PASS（912 项 0 失败）** / **PASS** |
+| 部署后起栏 | 日志 `native taskbar: clipped to the tray -- the REAL system tray stays on screen`；私有内存 **83.6 MB**（与隐藏模式的 85-87 MB 同量级，**没有新增进程**） |
+| 托盘是否活着 | 截图 `captures/tray-mode-corner.png`：折叠箭头、输入法、音量、时钟 21:58 都在 |
+| 输入归谁 | `(2480,16) -> TrayNotifyWnd`（托盘可点）、`(2000,16) -> SysListView32`（被裁掉的地方点穿到桌面）、`(1200,16) -> IslandBar.IslandWindow`（岛还是岛） |
+| 看门狗是否在干活 | 日志里两次 `native taskbar: tray re-clipped (the shell had put the taskbar back)` —— shell 确实会抢，我们每约 0.8 秒查一次并重新裁 |
+| 工作区 | `work area: the strip is released -- 0,32 - 2560,1440 -> 0,0 - 2560,1440`（最大化窗口仍然铺满全屏，与之前一致） |
+
+### 8.134.4 代价与未做的事（写明白）
+
+* 那 144 DIP **包含时钟**：`TrayNotifyWnd` 没有子 HWND，图标/音量/时钟都由 XAML 画，所以"只留图标、把时钟去掉"做不到（想做只能把区域裁得更窄，连时钟一起切掉一部分）。
+* 托盘**只能待在 shell 放它的地方**（本机右上角）：E3b/E4 已经把"搬走"这条路证伪。
+* **全屏应用时托盘跟着退场**（`SetSuppressed`）—— 与栏自己的"全屏就退场"一致，但没有在真游戏里实测过。
+* 没有碰"自己当 shell"那条路（E1 已证明没有便宜的替代）；也没有动 `--probe-taskbar` 的报告。

@@ -628,7 +628,7 @@ void BuildSoundPage(const island::SoundOutputSnapshot& snapshot, const island::S
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
 int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar_t* forcedState,
-           bool forcedStartHover, bool forcedSystemPanel) {
+           bool forcedStartHover, bool forcedSystemPanel, bool keepNativeTray) {
     island::MonitorGeometry monitor = island::QueryMonitor(nullptr);
 
     // --- the material ---------------------------------------------------------------------------
@@ -704,6 +704,9 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     if (hideNativeTaskbar) {
         systems.haveTaskbar = systems.taskbar.Locate();
         if (systems.haveTaskbar) {
+            // WHICH OF THE THREE THINGS HAPPENS TO THE SHELL'S TASKBAR is decided here, before the
+            // first Hide(): the object remembers the mode for every later call (see NativeTaskbar.h).
+            systems.taskbar.SetKeepTrayVisible(keepNativeTray);
             // Check the integrity level as well as the result. When this process is
             // confined to a lower integrity level than the shell, every method of
             // hiding the taskbar is silently dropped by UIPI: the calls return 0,
@@ -713,10 +716,22 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
             const bool blocked = systems.taskbar.IsBlockedByIntegrity();
             const bool hidden = systems.taskbar.Hide();
 
-            if (hidden && !blocked) {
+            if (hidden && !blocked && keepNativeTray) {
+                // The tray is the shell's own: its icons, its menus, its overflow, its clock. Nothing
+                // about it is drawn or simulated here -- see HANDOFF 8.133 for why this is the only
+                // route that survives measurement.
+                island::LogAndPrint("  native taskbar: clipped to the tray -- the REAL system tray"
+                                    " stays on screen");
+                island::LogAndPrint("  (the rest of the taskbar is cut away by a window region;"
+                                    " --hide-taskbar goes back to hiding it)");
+            } else if (hidden && !blocked) {
                 island::LogAndPrint("  native taskbar: hidden");
                 island::LogAndPrint("  (restored on exit; if this process is killed"
                                     " instead, restart Explorer)");
+            } else if (blocked && keepNativeTray) {
+                island::LogAndPrint("  native taskbar: CANNOT KEEP THE TRAY VISIBLE from this process");
+                island::LogAndPrint("    (see --probe-taskbar: a lower integrity level than the shell's"
+                                    " is dropped by UIPI)");
             } else if (blocked) {
                 island::LogAndPrint("  native taskbar: CANNOT BE HIDDEN from this process");
                 island::LogAndPrint("    island_bar.exe runs at a LOWER integrity level than the");
@@ -1489,8 +1504,19 @@ float musicWavePhase = 0.0f;
                 // "the bar's cycle" was looking at two cycles that had already been and gone (HANDOFF 8.86).
                 taskbarCheckCountdown = 50;
                 frameWork |= kWorkTaskbarCheck;
+                // A full-screen application takes the tray with it, exactly as it takes the rest of the
+                // bar: keeping the tray visible is this mode's whole job, so it has to be told when NOT
+                // to (see NativeTaskbar::SetSuppressed).
+                if (systems.taskbar.KeepTrayVisible()) {
+                    systems.taskbar.SetSuppressed(bar.fullscreenAppInFront);
+                }
                 if (systems.taskbar.EnsureHidden()) {
-                    island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
+                    if (systems.taskbar.KeepTrayVisible()) {
+                        island::LogAndPrint("  native taskbar: tray re-clipped (the shell had put the"
+                                            " taskbar back)\n");
+                    } else {
+                        island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
+                    }
                     std::fflush(stdout);
                 }
                 // ... and the same question for the work area the hide used to reserve. The shell
@@ -5110,6 +5136,8 @@ int main(int argc, char** argv) {
     bool selfTest = false;
     bool demo = false;
     bool keepTaskbar = false;
+    bool hideTaskbar = false;
+    bool nativeTray = true;   // see the log line and NativeTaskbar.h: the real tray stays on screen
     bool claimAppBar = false;
     bool keepStrip = false;
     bool windowList = false;
@@ -5128,6 +5156,10 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--self-test") == 0) selfTest = true;
         if (std::strcmp(argv[i], "--demo") == 0) demo = true;
         if (std::strcmp(argv[i], "--keep-taskbar") == 0) keepTaskbar = true;
+        // The two ends of the default: keep the real tray (the default, as of 2026-10-15) or hide the
+        // native taskbar outright and have nothing where the tray used to be.
+        if (std::strcmp(argv[i], "--hide-taskbar") == 0) hideTaskbar = true;
+        if (std::strcmp(argv[i], "--no-native-tray") == 0) nativeTray = false;
         if (std::strcmp(argv[i], "--appbar") == 0) claimAppBar = true;
         // Keeps the shell's strip reserved: a maximized window then stops below the band, exactly as it
         // did before the work area was ever released. Here for the case where the release misbehaves on a
@@ -5282,6 +5314,8 @@ int main(int argc, char** argv) {
             island::LogAndPrint("usage: island_bar.exe [options]");
             island::LogAndPrint("  (no arguments)   show the bar and hide the native taskbar");
             island::LogAndPrint("  --keep-taskbar   leave the native taskbar visible");
+            island::LogAndPrint("  --hide-taskbar   hide the native taskbar (the default until"
+                                " 2026-10-15; the tray is then not on screen at all)");
             island::LogAndPrint("  --keep-strip     do not release the strip the shell taskbar reserves");
             island::LogAndPrint("                   (a maximized window then keeps a band at the top)");
             island::LogAndPrint("  --self-test      run the runtime assertions; exit code = failures");
@@ -5362,11 +5396,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Hiding the native taskbar is the default: the whole point of the project is
-    // to be the taskbar. --keep-taskbar exists for developing the bar alongside
-    // the real one, and for comparing the two.
+    // THE NATIVE TASKBAR IS NOT HIDDEN ANY MORE, IT IS CLIPPED (2026-10-15). The default keeps the
+    // real system tray on screen -- the shell's own icons, menus, overflow and clock -- because the
+    // three measurements in HANDOFF 8.133 left no cheaper way to have a tray that behaves exactly like
+    // the system one. `--hide-taskbar` (or `--no-native-tray`) is the old behaviour, and
+    // `--keep-taskbar` still means "do not touch it at all".
     const int result = RunBar(/*hideNativeTaskbar=*/!keepTaskbar, claimAppBar, keepStrip, forcedState,
-                           forcedStartHover, forcedSystemPanel);
+                           forcedStartHover, forcedSystemPanel,
+                           /*keepNativeTray=*/keepTaskbar ? false : (hideTaskbar ? false : nativeTray));
     // The status reader is closed by RunBar, where it was opened.
     CoUninitialize();
     return result;

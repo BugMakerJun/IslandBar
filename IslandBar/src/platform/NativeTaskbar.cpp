@@ -77,6 +77,26 @@ bool NativeTaskbar::Hide() {
         wasVisible_ = IsWindowVisible(trayWnd_) != FALSE;
     }
 
+    // --- the real tray instead of a hidden taskbar (see the header) -------------------------------
+    //
+    // Nothing is hidden: the taskbar is SHOWN and clipped to its notification area, so the shell
+    // keeps owning the tray -- its icons, its menus, its overflow, the clock -- and every click on
+    // it does exactly what the real one does. `weHidIt_` is still set, because this object is the
+    // reason the taskbar's state differs from what was found, and Restore() is what undoes it.
+    if (keepTrayVisible_) {
+        if (suppressed_) {
+            // See SetSuppressed: something has the whole screen, so the tray goes off with it.
+            ShowWindow(trayWnd_, SW_HIDE);
+            weHidIt_ = true;
+            return IsWindowVisible(trayWnd_) == FALSE;
+        }
+        ShowWindow(trayWnd_, SW_SHOWNA);   // never activate: the bar must not steal the foreground
+        if (trayNotify_) ShowWindow(trayNotify_, SW_SHOWNA);
+        const bool cropped = ApplyTrayRegion();
+        weHidIt_ = true;
+        return cropped;
+    }
+
     if (wasVisible_ || weHidIt_) {
         ShowWindow(trayWnd_, SW_HIDE);
     }
@@ -103,6 +123,18 @@ void NativeTaskbar::Restore() {
     // The strip goes back FIRST, before the taskbar is shown: showing the taskbar makes the shell
     // re-derive the work area from it, and this way the two answers are the same one.
     RestoreWorkArea();
+
+    if (keepTrayVisible_) {
+        if (trayWnd_ && IsWindow(trayWnd_)) {
+            ClearTrayRegion();
+            if (weHidIt_ && wasVisible_) {
+                ShowWindow(trayWnd_, SW_SHOW);
+                if (trayNotify_) ShowWindow(trayNotify_, SW_SHOW);
+            }
+        }
+        weHidIt_ = false;
+        return;
+    }
 
     // Only undo what we did. If the taskbar was already hidden when the bar
     // started -- auto-hide, or the user's own choice -- putting it back would be
@@ -132,6 +164,45 @@ void NativeTaskbar::Restore() {
 }
 
 bool NativeTaskbar::EnsureHidden() {
+    // --- the tray mode, where "make sure" means "make sure it is still SHOWN and still clipped" ----
+    if (keepTrayVisible_) {
+        if (suppressed_) {
+            if (trayWnd_ && IsWindow(trayWnd_) && IsWindowVisible(trayWnd_)) {
+                ShowWindow(trayWnd_, SW_HIDE);
+                return true;
+            }
+            return false;
+        }
+        if (!weHidIt_) {
+            if (!trayWnd_ || !IsWindow(trayWnd_)) {
+                if (!Locate()) return false;
+            }
+            if (!IsWindowVisible(trayWnd_)) return false;   // the user's own choice, not ours to undo
+            return Hide();                                  // it is there and visible, and that is the job
+        }
+        if (!trayWnd_ || !IsWindow(trayWnd_)) {
+            HandleExplorerRestart();
+            const bool cropped = ApplyTrayRegion();
+            return cropped;
+        }
+        bool acted = false;
+        if (!IsWindowVisible(trayWnd_)) {
+            // Something hid it (a full-screen gesture, the shell's own state, the user). Showing it
+            // again is the whole point of this mode, and it is what makes the mode self-healing.
+            ShowWindow(trayWnd_, SW_SHOWNA);
+            if (trayNotify_) ShowWindow(trayNotify_, SW_SHOWNA);
+            acted = true;
+        }
+        // ... and the region, which the shell is not expected to change but which this window IS
+        // rebuilt without when Explorer restarts or a display change makes the tray a different size.
+        RECT tray = {};
+        if (trayNotify_ && IsWindow(trayNotify_) && GetWindowRect(trayNotify_, &tray) &&
+            (!haveRegion_ || !EqualRect(&tray, &appliedTrayRect_))) {
+            if (ApplyTrayRegion()) acted = true;
+        }
+        return acted;
+    }
+
     // NOTHING WAS EVER HIDDEN BY US. Two situations produce that, and they want opposite answers.
     //
     // The taskbar did not exist when this process started -- which is the ordinary case for a bar that
@@ -335,6 +406,47 @@ void NativeTaskbar::HandleExplorerRestart() {
     // Restore needs in order to put it back.
     weHidIt_ = true;
     located_ = false;
+}
+
+// --- keeping the real tray on screen -------------------------------------------------------------
+//
+// The rectangle is TrayNotifyWnd's, measured in screen coordinates and converted to the taskbar's
+// client space, and the region goes on the TASKBAR. Clipping the tray window itself would clip
+// nothing: on this build the taskbar's pixels are painted by a Windows.UI.Composition.
+// DesktopWindowContentBridge that spans the whole bar and belongs to the taskbar, which is why a
+// moved tray window takes its input with it and leaves its pixels behind (measured, HANDOFF 8.133).
+//
+// Failing is reported rather than swallowed: the caller's answer decides whether the bar says "the
+// real tray is on screen" or "it could not be kept".
+bool NativeTaskbar::ApplyTrayRegion() {
+    if (!trayWnd_ || !IsWindow(trayWnd_)) return false;
+    if (!trayNotify_ || !IsWindow(trayNotify_)) {
+        trayNotify_ = FindWindowExW(trayWnd_, nullptr, kTrayNotifyClass, nullptr);
+    }
+    if (!trayNotify_) return false;
+
+    RECT bar = {};
+    RECT tray = {};
+    if (!GetWindowRect(trayWnd_, &bar) || !GetWindowRect(trayNotify_, &tray)) return false;
+    if (tray.right <= tray.left || tray.bottom <= tray.top) return false;
+
+    HRGN region = CreateRectRgn(tray.left - bar.left, tray.top - bar.top,
+                                tray.right - bar.left, tray.bottom - bar.top);
+    if (!region) return false;
+    if (!SetWindowRgn(trayWnd_, region, TRUE)) {
+        DeleteObject(region);   // the call took no ownership, so this one is ours to free
+        return false;
+    }
+    haveRegion_ = true;
+    appliedTrayRect_ = tray;
+    return true;
+}
+
+void NativeTaskbar::ClearTrayRegion() {
+    if (!haveRegion_) return;
+    if (trayWnd_ && IsWindow(trayWnd_)) SetWindowRgn(trayWnd_, nullptr, TRUE);
+    haveRegion_ = false;
+    appliedTrayRect_ = {};
 }
 
 } // namespace island

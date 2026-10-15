@@ -45,6 +45,7 @@
 #include "platform/ThumbnailPreview.h"
 #include "app/IslandWindow.h"
 #include "platform/Monitor.h"
+#include "platform/NativeTaskbar.h"   // the three answers to "what happens to the shell's taskbar"
 #include "shell/SystemToggles.h"
 #include "render/Theme.h"
 #include "platform/GlassMaterial.h"
@@ -7834,6 +7835,24 @@ int RunSelfTest() {
 
     const MonitorGeometry monitor = QueryMonitor(nullptr);
     Section(L"monitor metrics");
+
+    // THE TASKBAR'S MODES (2026-10-15): the object has three answers -- clip the taskbar to the tray and
+    // keep the real tray on screen (the default), hide it, or leave it alone -- and the frame loop asks
+    // two of them every tick. The WINDOW work is not asserted here (it needs the real shell and it is
+    // what `--probe-taskbar` is for); what is asserted is that the object starts in hiding mode and
+    // remembers what it is told, because a flag that silently fails to take would look like "the tray
+    // mode does not work" rather than like "the flag was lost".
+    {
+        island::NativeTaskbar taskbar;          // never located: only the flags are exercised
+        Check(!taskbar.KeepTrayVisible() && !taskbar.Suppressed(),
+              L"the taskbar object starts in hiding mode");
+        taskbar.SetKeepTrayVisible(true);
+        Check(taskbar.KeepTrayVisible(), L"... and takes the tray mode when it is asked for");
+        taskbar.SetSuppressed(true);
+        Check(taskbar.Suppressed(), L"... and the suppression that a full-screen app asks for");
+        taskbar.SetSuppressed(false);
+        Check(!taskbar.Suppressed(), L"... and lets the suppression go again");
+    }
 
     {
         wchar_t metrics[192];

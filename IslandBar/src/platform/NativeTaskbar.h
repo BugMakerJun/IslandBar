@@ -8,6 +8,19 @@
 //  remembered rather than assumed -- if the taskbar was already hidden when the
 //  bar started (by the user, by an auto-hide setting, or by a previous crashed
 //  run) then restoring must not fight that choice.
+//
+//  THREE MODES, and the middle one is the default since 2026-10-15:
+//
+//    * KEEP THE REAL TRAY (the default): the taskbar is not hidden but CLIPPED to the notification
+//      area, so the system tray itself -- the shell's own icons, its own menus, its own overflow, the
+//      clock -- stays on screen and every click on it is the real thing. Measured on this build:
+//      the region survives icon changes, clicks in the clipped part fall through to the desktop, and
+//      the tray keeps working. See HANDOFF 8.133 for the three experiments behind it (a same-named
+//      window cannot take over the tray; the tray window cannot be moved -- its pixels are painted by
+//      a composition surface belonging to the whole taskbar; clipping the taskbar works).
+//    * HIDE IT (`--hide-taskbar`): the original behaviour, for comparing the two and for a desktop
+//      with no room for the tray.
+//    * LEAVE IT ALONE (`--keep-taskbar`): the debug mode, where the real taskbar is the taskbar.
 // =====================================================================
 #pragma once
 
@@ -25,6 +38,19 @@ public:
 
     // Locates the shell's taskbar windows. Safe to call when none exist.
     bool Locate();
+
+    // CLIP THE TASKBAR TO ITS NOTIFICATION AREA INSTEAD OF HIDING IT. Set before Hide(); every
+    // later call (Hide, EnsureHidden, Restore) then works in this mode.
+    void SetKeepTrayVisible(bool on) { keepTrayVisible_ = on; }
+    bool KeepTrayVisible() const { return keepTrayVisible_; }
+
+    // WHILE SOMETHING HAS THE WHOLE SCREEN, THE TRAY GOES WITH IT. The bar's own rule is that a
+    // full-screen application leaves the top of the screen empty (see the frame loop's stand-down), and
+    // a kept tray is no exception: the taskbar is simply hidden for the duration and clipped again when
+    // suppression ends. Without this the tray would float over the game, because keeping it visible is
+    // exactly what this mode is for.
+    void SetSuppressed(bool on) { suppressed_ = on; }
+    bool Suppressed() const { return suppressed_; }
 
     // Hides the taskbar, remembering whether it was visible first. Repeated calls
     // are cheap and harmless.
@@ -90,11 +116,26 @@ private:
     // The screen bounds of the display the shell's taskbar is on: what the strip is released TO.
     bool TaskbarMonitorBounds(RECT* out) const;
 
+    // The clipping, in the one place the window and the geometry are both known.
+    //
+    // The region is on the TASKBAR, not on the tray window, because the taskbar is what paints: on
+    // this build its pixels come from a Windows.UI.Composition.DesktopWindowContentBridge spanning
+    // the whole bar, so clipping a child window would leave the painting where it was (measured --
+    // the window moved and the pixels did not).
+    bool ApplyTrayRegion();
+    void ClearTrayRegion();
+
     HWND trayWnd_ = nullptr;        // Shell_TrayWnd: the primary taskbar
     HWND trayNotify_ = nullptr;     // TrayNotifyWnd: the clock/notification corner
     bool wasVisible_ = false;       // as found, before we touched anything
     bool weHidIt_ = false;
     bool located_ = false;
+
+    // See SetKeepTrayVisible.
+    bool keepTrayVisible_ = false;
+    bool suppressed_ = false;
+    bool haveRegion_ = false;         // a region of ours is on the taskbar
+    RECT appliedTrayRect_ = {};       // ... clipping it to this rectangle (screen coordinates)
 
     // The work area this process found, and whether it has been touched. Saved even when the values
     // look familiar: the point is to put back what was there, not what the shell would compute.
