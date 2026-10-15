@@ -791,7 +791,7 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     const WindowWatch watch = TakeWindowWatch(request);
     const HWND foregroundBefore = GetForegroundWindow();
 
-    // ---- the right to take the foreground, granted BEFORE the message is posted ------------------------
+    // ---- the right to take the foreground, granted BEFORE the message is sent --------------------------
     //
     // The rule a posted callback runs into (HANDOFF 8.105): an application restoring its own window from a
     // background callback is refused the foreground. The click that began this press landed on OUR bar, so
@@ -799,13 +799,27 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     // AllowSetForegroundWindow works. It grants the right; an application that does not use it gets nothing
     // from it, which is why the answer is still watched for and why BringApplicationForward exists.
     //
-    // Only for a left click: the right-click route's business is the application's own menu, and moving the
-    // foreground under a menu the shell anchors to the real tray icon would put the menu's owner behind
-    // something else for no reason.
+    // AND IT IS GRANTED FOR A RIGHT PRESS TOO (2026-10-16). This was left-click-only, with the reasoning that
+    // "a right press's business is the application's own menu, so it need not move the foreground". That
+    // reasoning was WRONG, and the user sent the canonical handler that shows why:
+    //
+    //      case WM_TRAYICON:
+    //          if (lParam == WM_RBUTTONUP) {
+    //              GetCursorPos(&pt);
+    //              SetForegroundWindow(hWnd);            // "so the menu does not fail to close itself"
+    //              TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
+    //          }
+    //
+    // An application calls SetForegroundWindow on ITS OWN window before it shows its menu, and a modern
+    // flyout (WinUI) dismisses itself when its window cannot come forward. The foreground at that moment is
+    // this bar -- the click that began the press landed on the card -- so refusing the grant means the
+    // application's handler runs, is refused the foreground, and raises nothing. That is exactly what was
+    // measured on this machine as "应用菜单 does nothing": the window procedure returned in microseconds and
+    // no menu appeared, while its own LEFT click (which was granted the foreground all along) worked.
     DWORD targetPid = 0;
     GetWindowThreadProcessId(window, &targetPid);
     bool foregroundGranted = false;
-    if (!rightClick && targetPid) foregroundGranted = AllowSetForegroundWindow(targetPid) != FALSE;
+    if (targetPid) foregroundGranted = AllowSetForegroundWindow(targetPid) != FALSE;
 
     // ---- WHICH SPELLING, AND HOW IT IS DELIVERED ---------------------------------------------------------
     //
