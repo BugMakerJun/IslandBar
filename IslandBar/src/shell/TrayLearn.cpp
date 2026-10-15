@@ -19,16 +19,27 @@
 
 #include "core/Log.h"
 
+// The channel the module publishes on, and the wire format of one record (see platform/TrayRing.h).
+#include "domain/TrayRegistration.h"
+#include "platform/TrayRing.h"
+
 #include <psapi.h>   // GetProcessMemoryInfo: which of an application's processes carries its tray icon
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "psapi.lib")
 
 namespace island {
+
+// Drains the shared-memory ring the module publishes on, writes the records it finds as report lines, and
+// returns how many it took. Declared here (and not inside the anonymous namespace below, which is where its
+// callers live) because its definition is a public function of this module; see platform/TrayRing.h.
+int DrainTrayRing(TrayLearnResult* result);
+
 namespace {
 
 // A GUID as the registry and the cache file spell it: braces, upper-case hex. Hand-written rather than
@@ -380,6 +391,11 @@ bool LineIsFor(const std::wstring& line, const std::wstring& exe, unsigned uid,
 // Truncated by the installing pass (see LearnTrayCallbacks), so it never grows without bound.
 void HarvestReport(TrayLearnResult* result) {
     if (!result) return;
+    // FIRST THE RING, THEN THE FILE. The module publishes registrations into shared memory (it runs inside the
+    // shell's message handling, where a disk write would be paid for by the registering application), and this
+    // turns whatever is new into the same lines the file holds. Called from here rather than from one caller so
+    // that every path -- the five-second tick and a --tray-learn pass -- sees registrations in the same order.
+    DrainTrayRing(result);
     const std::wstring report = HomePath(kReportFile);
     std::vector<Learned> learned;
     if (!report.empty()) {
@@ -747,6 +763,81 @@ DWORD TrayShellProcessId() {
     DWORD pid = 0;
     GetWindowThreadProcessId(tray, &pid);
     return pid;
+}
+
+// The NIM_ command as the report has always spelled it. The reader below parses these NAMES, so this is the one
+// place the number becomes a word -- and it must match what the in-application path writes.
+const char* CommandName(unsigned command) {
+    switch (command) {
+        case kTrayCopyAdd: return "NIM_ADD";
+        case kTrayCopyModify: return "NIM_MODIFY";
+        case kTrayCopyDelete: return "NIM_DELETE";
+        case kTrayCopySetFocus: return "NIM_SETFOCUS";
+        case kTrayCopySetVersion: return "NIM_SETVERSION";
+        default: return "NIM_?";
+    }
+}
+
+// WHAT THE MODULE READ IN THE SHELL, TAKEN OUT OF THE RING AND WRITTEN DOWN.
+//
+// The module publishes one record per registration into shared memory and nothing else: it runs inside the
+// shell's message handling, with the registering application waiting on it, so the reading, the formatting and
+// the disk are the bar's job (see platform/TrayRing.h). This function is that job: it drains whatever is new,
+// writes the same line the module used to write -- so the reader below, and the cache format, do not change --
+// and reports how many records it took.
+//
+// THE OWNER IS RESOLVED HERE, from the window handle in the record, rather than being sent across. That is not
+// an optimisation: it means the ring carries only what the shell actually told the application (the decoded
+// registration) and the bar derives the rest the same way it does for a card cell.
+int DrainTrayRing(TrayLearnResult* result) {
+    static TrayRingReader reader;
+    static unsigned cursor = 0;
+
+    TrayRingRecord records[kTrayRingCapacity] = {};
+    const unsigned taken = reader.Drain(cursor, records, kTrayRingCapacity);
+    if (taken == 0) {
+        // Nothing new. If a ring exists with a different ABI, say so once: two builds that disagree about the
+        // layout must not sit there quietly learning nothing.
+        if (!reader.header && reader.abiSeen != 0 && reader.abiSeen != kTrayRingAbi && !result->ringAbiMismatch) {
+            result->ringAbiMismatch = true;
+            LogAndPrint(L"  tray learn: the module is publishing on ABI %u and this bar reads %u -- no "
+                        L"registrations will arrive until the two match (see platform/TrayRing.h)\n",
+                        reader.abiSeen, kTrayRingAbi);
+            std::fflush(stdout);
+        }
+        return 0;
+    }
+
+    const std::wstring report = HomePath(kReportFile);
+    FILE* stream = nullptr;
+    if (report.empty() || _wfopen_s(&stream, report.c_str(), L"a, ccs=UTF-8") != 0 || !stream) return 0;
+    for (unsigned i = 0; i < taken; ++i) {
+        const TrayRegistration& registration = records[i].registration;
+        if (!registration.valid) continue;
+
+        const HWND trayWindow = reinterpret_cast<HWND>(static_cast<uintptr_t>(registration.trayWindow));
+        DWORD ownerPid = 0;
+        GetWindowThreadProcessId(trayWindow, &ownerPid);
+        const std::wstring exe = ownerPid ? ExeLeafForPid(ownerPid) : std::wstring();
+
+        std::wstring guidText;
+        if (registration.hasGuid) {
+            GUID guid = {};
+            std::memcpy(&guid, registration.guid, sizeof(guid));
+            guidText = GuidText(guid);
+        }
+        // The same field names the in-application path writes (and the same ones this file has always held):
+        // the reader below parses by NAME, so the two sources stay interchangeable.
+        fwprintf(stream, L"call S %hs pid %u exe %ls hwnd %p uid %u msg 0x%04X version %u flags 0x%X guid %ls "
+                         L"tip \"%ls\" (read in the shell, over the ring)\n",
+                 CommandName(registration.command), ownerPid, exe.empty() ? L"-" : exe.c_str(), trayWindow,
+                 registration.uid, registration.callback, registration.version, registration.flags,
+                 guidText.empty() ? L"-" : guidText.c_str(), registration.tip);
+        ++result->captured;
+    }
+    fclose(stream);
+    if (result->captured > 0) std::fflush(stdout);
+    return static_cast<int>(taken);
 }
 
 int HarvestLearnedCallbacks() {

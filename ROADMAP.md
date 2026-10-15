@@ -27,7 +27,8 @@
 | 5 | **开始卡片那组**：图钉/选择器/电源列表的状态、账号头像与名字、图标指针与尺寸、六个 wash 弹簧、指针命中的记忆（20 个字段 + `WashSlot`） | ✅ 已完成（截图验证） |
 | 6 | 应用行、状态行与悬停预览（26 个字段，含局部类型 `RowSlot`与被搬走的 `kMaxTaskButtons`） | ✅ 已完成（跑起来验证） |
 | 7 | 对象组：22 个对象进 `app/BarSystems.h`（window / renderer / text / 会话 / 通知 / 托盘 / 任务列表…），成员的声明顺序与源码逐行相同 | ✅ 已完成（跑起来验证） |
-| 8 | F2：模块↔主程序通道换共享内存 + ABI 版本号 | 下一片 |
+| 8 | ~~F2：模块↔主程序通道换共享内存 + ABI 版本号~~ | ✅ 已完成：`platform/TrayRing.h`（共享内存环 + 命名事件 + 头部里的 magic/ABI/记录大小/容量），模块只 publish（同步路径里再无磁盘 I/O），bar 在自己的 tick 里排空并写盘；ABI 不匹配双方都拒绝并有日志。自检三条（开通/往返/拒绝）。**实测**：对照程序的注册经环到达，bar 写下 `(read in the shell, over the ring)`，缓存得到 `probe-tray-registrar.exe|0xABCD|…|7|both|4` |
+| 9 | 收尾项：日志降噪（媒体状态每秒一行、声音页每秒约四行）、自检里那几条 wire/ring 检查被重复执行（它们被放进了按状态/页循环的分支里） | 下一片 |
 
 **每片的验收（缺一不可）**：两套配置全量重建（`/WX` 生效）零告警 → `--self-test` PASS → `island_smoke` PASS → 该片涉及的命令逐条手跑 → 部署到 `%USERPROFILE%\IslandBar` → 起 bar 看相关日志行 → 本地提交。**不推 GitHub**，等你测。
 

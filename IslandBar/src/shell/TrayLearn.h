@@ -47,6 +47,10 @@ struct TrayLearnResult {
     // the log reads "the module loaded in 0" on a machine that is fully covered.
     int appsAlreadyWatched = 0;
     int captured = 0;      // registrations seen (NIM_ADD / NIM_MODIFY), duplicates included
+    // Set when the module is publishing on a different ABI than this bar reads. It is a field rather than only
+    // a log line because "no registrations arrived" and "they arrived in a language this build cannot read"
+    // are different answers, and only one of them is worth waiting for (see platform/TrayRing.h).
+    bool ringAbiMismatch = false;
     int newEntries = 0;    // lines added to the callback cache
     int covered = 0;       // icons of the card that have an entry afterwards
     long long ms = 0;      // how long the whole thing took

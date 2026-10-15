@@ -11722,3 +11722,45 @@ preview: resting on a task icon shows a live thumbnail
 两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；起 bar 后媒体会话、托盘、通知、声音页、预览、天气全部照常工作，日志前缀与改动前逐字相同（`  music: [QQMusic.exe] 王睿卓 - 茶花开了 (playing)`、`  native taskbar: restored` 等）。
 
 顺带又看到一次"日志量本身是成本"：媒体状态每秒写一行（`music: … (playing)` 连着一秒一条，直到 `(stopped)`）。这属于 ROADMAP 里"日志降噪"那条，不属本轮。
+
+### 8.128 **F2：模块与主程序之间的通道换成共享内存环 + ABI 版本号** ✅（端到端实测）
+
+#### 8.128.1 换掉了什么，为什么
+
+之前：模块把一行文本**追加到 bar 旁边的文件**，bar 每 5 秒读一次。两处不对：
+
+1. **那次写发生在应用向 shell 注册的同步调用里**（WM_COPYDATA 是同步的，应用要等 shell 处理完），而模块就跑在 shell 里——于是"别人家的应用等我们写磁盘"。8.116 把它从"每行开关一次文件"改成常开句柄，只是把代价从三次系统调用降到一次，没有改变性质。
+2. **"报告里只有本轮的东西"依赖 bar 能删掉那个文件**，而删不删得掉取决于被钉住的模块肯不肯放开——这种耦合会静默失效（8.121 就是这么发现的）。
+
+现在：`platform/TrayRing.h` 一个**共享内存环**（64 条定长记录 + 一个命名事件）+ 文件降级为**bar 写的durable 副本**。
+
+| 谁 | 做什么 |
+|---|---|
+| 模块（在 shell 里） | 解码 → **memcpy 进环 + SetEvent**，同步路径里再没有任何 I/O；诊断行（attach/hook/watch）仍写文件 |
+| bar（自己的 tick 里） | 排空环 → 解析出归属进程与窗口类 → **写下与从前逐字段相同的行**（只是尾部标注 `over the ring`）→ 既有的读取器照旧合并进缓存 |
+
+归属进程与 exe 名不再跨进程传递，而是 **bar 自己用记录里的窗口句柄查**——环里只走"shell 确实告诉过应用的东西"。
+
+**版本在数据里**：环的头部带 magic / ABI / 记录大小 / 容量；ABI 不合的发布端不写（并只报一次），读取端不读（`TrayLearnResult::ringAbiMismatch` 是一条单独的判决，因为"没有注册到达"和"注册用另一种语言到达"是两个不同答案）。
+
+#### 8.128.2 第一次跑失败：新建的共享内存页是**全零**，而零不是合法头部
+
+模块照实报了：`call S NIM_ADD pid 15204: the ring answered with a different ABI -- not publishing`。原因是我从来没写过头部——`CreateFileMappingW` 建出来的页全是 0，magic=0 ≠ `'TRAY'`，于是双方都把刚建的环判成"别的构建的"。
+
+修法：谁先映射谁填头部，**magic 最后写**（它是"就绪"标志；看到它的读者一定也看到了它描述的字段）。诊断时的决定性证据是直接读那段内存：`magic = 0x59415254 ('TRAY')`、`abi = 1`、`record = 304`、`written = 16`——证明模块在发，问题在 bar 的读侧。
+
+#### 8.128.3 验证
+
+| 项 | 结果 |
+|---|---|
+| 两套配置全量重建（/WX） | OK，零告警 |
+| `--self-test` | PASS，新增三条：环开通并声明记录大小（304）；一条注册**原样往返**（`uid=9 msg=0xBEEF tip='ROUND-TRIP'`）；**另一个构建的环被拒绝而不是被读**（`abi seen=2, refused=1`） |
+| `island_smoke` | PASS |
+| **端到端**（bar 在跑 + 对照程序注册） | bar 的 tick 自己排空并写盘：`call S NIM_ADD pid 7412 exe probe-tray-registrar.exe hwnd 0000000000110E02 uid 7 msg 0xABCD version 0 flags 0x7 guid - tip "ISLANDBAR-PROBE-4711" (read in the shell, over the ring)`；缓存得到 `probe-tray-registrar.exe|0xABCD|IslandBarProbeRegistrarWnd|7|both|4`（连随后那条 SETVERSION 的版本 4 也配上了）；日志 `2 registration(s) arrived … 5 of 11 icon(s) have a callback entry now` |
+| 附带收益 | `--tray-learn` 那一遍从环里取回 48 条真实注册，覆盖率 4 → 5（QQ音乐 uid 256 / msg 0x0BD0 被学到） |
+
+自检里的环检查用的是**它自己的环名字**（`Open()` 加了名字参数）：往生产环里发布假记录会污染正在运行的 bar，而 ABI 那一条要故意改坏头部——绝不能对着 bar 正在读的那段做。
+
+#### 8.128.4 留个尾巴
+
+那几条 wire/ring 检查现在被放进了自检里"按状态/页循环"的分支中，于是每次自检会重复跑十几遍（功能上无害，噪声明显）。它与 ROADMAP 里的"日志降噪"（媒体状态每秒一行、声音页每秒约四行）一起，作为收尾项排在下一片。

@@ -43,12 +43,19 @@
 // offsets were measured.
 #include "domain/TrayRegistration.h"
 
+// The channel back to the bar: a shared-memory ring, so that a registration costs a memcpy instead of a disk
+// write inside an application's synchronous call to the shell. See platform/TrayRing.h for the argument.
+#include "platform/TrayRing.h"
+
 // Declared HERE, at file scope, rather than inside the anonymous namespace below: the pin needs an address
 // that is inside this module, and pinning is what stops the loader from ever unloading it. Inside the
 // namespace the definition below would be a second, differently linked function of the same name.
 extern "C" __declspec(dllexport) LRESULT CALLBACK IslandTrayHookProc(int code, WPARAM wparam, LPARAM lparam);
 
 namespace {
+
+// The ring this module publishes on. One per process, opened on the first registration.
+island::TrayRingPublisher g_ring;
 
 CRITICAL_SECTION g_lock;
 bool g_lockReady = false;
@@ -311,26 +318,26 @@ void ReportShellCopy(const wchar_t* channel, HWND receiver, WPARAM wparam, LPARA
         island::DecodeTrayRegistration(data->lpData, data->cbData);
     if (!registration.valid) return;
 
-    GUID guid = {};
-    memcpy(&guid, registration.guid, sizeof(guid));
-    const HWND trayWindow = reinterpret_cast<HWND>(static_cast<uintptr_t>(registration.trayWindow));
-    wchar_t exeLeaf[MAX_PATH] = {};
-    OwnerLeaf(trayWindow, exeLeaf, MAX_PATH);
-    DWORD ownerPid = 0;
-    GetWindowThreadProcessId(trayWindow, &ownerPid);
-    wchar_t guidText[64] = {};
-    if (registration.hasGuid) GuidText(guid, guidText, 64);
-
-    // The version is stated on its own call, never with the registration, and the request to write it down is
-    // the version. Both are reported; the bar's reader pairs them by (exe, uid/guid) exactly as it does for the
-    // in-application path.
-    ReportLine(L"call S %hs pid %lu exe %ls hwnd %p uid %u msg 0x%04X version %u flags 0x%X guid %ls "
-               L"tip \"%ls\" (read in the shell, pid %lu channel %ls)",
-               MessageName(registration.command), ownerPid, exeLeaf[0] ? exeLeaf : L"-", trayWindow,
-               registration.uid, registration.callback, registration.version, registration.flags,
-               guidText[0] ? guidText : L"-", registration.tip, GetCurrentProcessId(), channel);
+    // ... AND IT GOES OUT OVER THE RING, not into a file.
+    //
+    // This function runs INSIDE the shell's message handling, with the registering application waiting for it
+    // to return (WM_COPYDATA is synchronous). Everything that used to happen here -- resolving the window's
+    // owner, formatting a line, opening and writing and closing a file beside the bar -- was work the
+    // application paid for. What is left is a memcpy into a shared ring and an event: the bar does the reading,
+    // the formatting and the writing, on its own time, where nobody is waiting.
+    //
+    // The decoded form travels, not the raw copy: the raw bytes are the shell's private structure at offsets
+    // this module measured, and a reader that had to decode them itself would be a second place for those
+    // offsets to be wrong. See platform/TrayRing.h.
+    g_ring.Publish(registration);
+    if (g_ring.refused && !g_ring.reported) {
+        g_ring.reported = true;
+        ReportLine(L"call S %hs pid %lu: the ring answered with a different ABI -- not publishing (see "
+                   L"platform/TrayRing.h)", MessageName(registration.command), GetCurrentProcessId());
+    }
     (void)receiver;
     (void)wparam;
+    (void)channel;
 }
 
 LRESULT CALLBACK SentProc(int code, WPARAM wparam, LPARAM lparam) {

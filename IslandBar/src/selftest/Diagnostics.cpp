@@ -29,6 +29,7 @@
 #include "core/Log.h"
 #include "domain/MiniJson.h"
 #include "domain/TrayRegistration.h"
+#include "platform/TrayRing.h"     // the channel the module publishes registrations on
 #include "domain/CardLayout.h"
 #include "domain/StatePolicy.h"
 #include "media/Lyrics.h"
@@ -6714,6 +6715,73 @@ void TestMusicCardLayout() {
                         Check(!decoded.valid && !tooSmall.valid,
                               L"a payload that is not the shell's, or too short, is refused rather than read",
                               trayWireDetail);
+                    }
+
+                    // --- THE CHANNEL BETWEEN THE MODULE AND THE BAR -------------------------------------
+                    //
+                    // A registration travels over a shared-memory ring (platform/TrayRing.h): the module
+                    // publishes while an application waits for the shell, the bar drains it on its own time.
+                    // Two things about that are worth a test on this machine: a record survives the round trip
+                    // unchanged, and a ring whose ABI disagrees is REFUSED rather than read -- because the
+                    // failure that produces is a press aimed at the wrong message number, which looks like
+                    // nothing at all.
+                    {
+                        island::TrayRingPublisher publisher;
+                        // A ring of this test's own. Publishing into the production ring would put records in a
+                        // running bar's queue, and the ABI check below deliberately corrupts a header -- which
+                        // must never be done to the ring the bar is reading.
+                        const bool opened = publisher.Open(L"Local\\IslandBar.TrayRing.selftest",
+                                                           L"Local\\IslandBar.TrayRing.selftest.Event");
+                        std::swprintf(trayWireDetail, 256, L"publisher opened=%d abi=%u record=%u",
+                                      opened ? 1 : 0, island::kTrayRingAbi,
+                                      static_cast<unsigned>(sizeof(island::TrayRingRecord)));
+                        Check(opened && publisher.header && publisher.header->recordSize ==
+                                            sizeof(island::TrayRingRecord),
+                              L"the ring opens and states the record size both sides agreed on",
+                              trayWireDetail);
+
+                        if (opened && publisher.header) {
+                            island::TrayRegistration pushed;
+                            pushed.valid = true;
+                            pushed.command = island::kTrayCopyAdd;
+                            pushed.trayWindow = 0x1234;
+                            pushed.uid = 9;
+                            pushed.flags = 0x7;
+                            pushed.callback = 0xBEEF;
+                            wcsncpy_s(pushed.tip, L"ROUND-TRIP", _TRUNCATE);
+                            publisher.Publish(pushed);
+
+                            island::TrayRingReader reader;
+                            unsigned cursor = 0;
+                            island::TrayRingRecord taken[island::kTrayRingCapacity] = {};
+                            reader.Open(L"Local\\IslandBar.TrayRing.selftest",
+                                        L"Local\\IslandBar.TrayRing.selftest.Event");
+                            // Skip everything already in the ring (a bar may be running), then take the record
+                            // this check just pushed: the last one written.
+                            const unsigned all = reader.Drain(cursor, taken, island::kTrayRingCapacity);
+                            const island::TrayRegistration& back =
+                                taken[all > 0 ? all - 1 : 0].registration;
+                            std::swprintf(trayWireDetail, 256, L"took=%u uid=%u msg=0x%04X tip='%ls'",
+                                          all, back.uid, back.callback, back.tip);
+                            Check(all > 0 && back.valid && back.uid == 9 && back.callback == 0xBEEF &&
+                                      back.trayWindow == 0x1234 &&
+                                      std::wcscmp(back.tip, L"ROUND-TRIP") == 0,
+                                  L"a registration survives the ring unchanged", trayWireDetail);
+
+                            // ... and the ABI is refused when it disagrees. Corrupted here on purpose and put
+                            // straight back: this ring belongs to this test process, and the next check below
+                            // is the one that reads it.
+                            const unsigned savedAbi = publisher.header->abi;
+                            publisher.header->abi = savedAbi + 1;
+                            island::TrayRingReader refusing;
+                            const bool refused = !refusing.Open(L"Local\\IslandBar.TrayRing.selftest",
+                                                                L"Local\\IslandBar.TrayRing.selftest.Event");
+                            publisher.header->abi = savedAbi;
+                            std::swprintf(trayWireDetail, 256, L"abi seen=%u, refused=%d",
+                                          refusing.abiSeen, refused ? 1 : 0);
+                            Check(refused && refusing.abiSeen == savedAbi + 1,
+                                  L"a ring from another build is refused, not read", trayWireDetail);
+                        }
                     }
                     Check(page.cells[0].top > trayCard.rect.top + 30.0f,
                           L"the grid starts below the page's heading", trayDetail);
