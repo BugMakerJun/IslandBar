@@ -27,10 +27,25 @@
 //  So the images come from the registry, which needs no taskbar and no Explorer, and
 //  the JSON is not involved at all.
 //
-//  WHICH ONES ARE SHOWN. The registry keeps an entry for every application that has
-//  EVER put an icon in the tray, and most of them are not running: on this machine 27
-//  entries, of which the 12 whose application is running are kept. That filter is the
-//  difference between a tray and a graveyard of old installs.
+//  WHICH ONES ARE SHOWN, and why "the application is running" turned out not to be the
+//  answer.
+//
+//  The registry keeps an entry for every application that has EVER put an icon in the
+//  tray -- that alone is a graveyard of old installs -- and the first filter over it was
+//  "is the executable that subkey names running". That is a different question from "is
+//  there an icon in the tray", and on this machine it is visibly the wrong one
+//  (MEASURED 2026-10-16): thirteen cells against the shell's nine, the surplus being
+//  three NVIDIA entries (NVDisplay.Container.exe is a process that runs all day and
+//  registered nothing in that session) and one dead explorer GUID whose stored picture is
+//  a blank 210-byte PNG.
+//
+//  So the filter is the shell's own answer: an entry is drawn while -- and only while --
+//  one of the registrations the module watched arrive at Shell_TrayWnd names it
+//  (shell/TrayLearn.h keeps that ledger, domain/TrayLedger.h holds the rule). When the
+//  ledger is empty -- no module in the shell yet, or a shell that was just replaced -- the
+//  card falls back to "the executable is running" and says so in the log, because a bar
+//  that draws nothing while it cannot see the tray is worse than one that draws a cell it
+//  is not yet sure about.
 //
 //  AND WHAT EACH ONE *IS*, for pressing it. The same registry entry the icon is drawn from carries the
 //  identity the shell itself uses for that icon -- an IconGuid, or a UID belonging to one of the
@@ -54,6 +69,16 @@ namespace island {
 struct TrayIcon {
     // What the application calls it, or its file name when it never said. Wide, because the tooltip is
     // whatever the application wrote and that is usually a sentence.
+    //
+    // WHICH NAME, in order: the registry's InitialTooltip, then the tip the application sent the shell with
+    // its registration, then the file name. The registration is what saves the icons the registry has no
+    // name for -- InitialTooltip is EMPTY for those the shell registers on somebody else's behalf, which is
+    // how the shell's own Bluetooth icon was drawn here as "explorer.exe" (its registration says 蓝牙设备).
+    //
+    // THE REGISTRY GOES FIRST because a registration's tip is live text, not a label: MEASURED 2026-10-16,
+    // Task Manager re-sends its icon with "CPU 24%\n内存 58%\n磁盘 0%\n网络 0%" as the tip, and Clash
+    // Verge's carries a version and a rule count over several lines. The tray shows that on HOVER; a cell is
+    // one line wide and wants the name.
     wchar_t name[96] = {};
     // The PNG the shell stores for it: not owned by this struct's caller's frame, but held by the list
     // that produced it, which keeps it alive until the next refresh.
@@ -80,7 +105,7 @@ struct TrayIcon {
 // scale of applications starting and stopping.
 class TrayIcons {
 public:
-    // Reads the registry and keeps the icons whose application is running. Returns how many.
+    // Reads the registry and keeps the icons the shell is holding. Returns how many.
     int Refresh();
 
     int Count() const { return static_cast<int>(entries_.size()); }
@@ -100,8 +125,20 @@ public:
     // their applications were running. "No icons" has two very different causes -- an empty registry and
     // a failed process snapshot -- and these are what tell them apart.
     int Examined() const { return examined_; }
-    int RunningApps() const { return runningApps_; }
+    // ... and how many of those entries were kept. "Kept" rather than "running": with the ledger in charge
+    // the two are not the same question, and the number the log needs is the one the card ended up drawing.
+    int Kept() const { return kept_; }
     int ProcessesSeen() const { return processesSeen_; }
+
+    // The registry entries that were NOT drawn, by the file name the entry names, for the log line: "nine
+    // against thirty-one" is a number nobody can check without the names (see TrayIcons.cpp).
+    const std::vector<std::wstring>& NotLive() const { return notLive_; }
+    // False when the ledger was empty this time, i.e. the card fell back to the older rule (see the header).
+    bool LiveFilter() const { return liveFilter_; }
+    // The rest of the log line, from whichever of the two rules decided this list: how many of the
+    // registry's entries the shell is holding, and which ones it is not (see TrayIcons.cpp). Written here
+    // because three call sites print it and a number nobody can check is not a number.
+    std::wstring SourceClause() const;
 
     // Where the icons live, so nothing else has to know the key name.
     static const wchar_t* SettingsKeyPath() { return L"Control Panel\\NotifyIconSettings"; }
@@ -124,10 +161,16 @@ private:
     // that would not decode. Measured, in the draw trace: "icon 1 has a 18374403900871474942 byte PNG".
     std::vector<TrayIcon> list_;
     unsigned long long revision_ = 1;
-    // How many registry entries were looked at and how many were running, for the log.
+    // How many registry entries were looked at and how many were kept, for the log.
     int examined_ = 0;
-    int runningApps_ = 0;
+    int kept_ = 0;
     int processesSeen_ = 0;
+    // The entries the shell is not holding a registration for, and whether the ledger decided that at all.
+    std::vector<std::wstring> notLive_;
+    bool liveFilter_ = false;
+    // The identities already put in the list this pass, so several registry entries naming one icon make one
+    // cell (see TrayIcons.cpp).
+    std::vector<std::wstring> seenIdentities;
 };
 
 } // namespace island

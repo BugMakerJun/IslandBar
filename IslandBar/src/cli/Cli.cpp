@@ -245,12 +245,15 @@ int RunToastDump(int limit) {
 // magic are printed so the answer can be checked against regedit by hand.
 int RunTrayDump() {
     island::TrayIcons icons;
+    // A PASS FIRST, because what the card draws is the shell's own answer and this process has not seen one
+    // (see shell/TrayIcons.h). Without it the dump would print the registry list and call it the tray --
+    // which is the thirteen-against-nine mistake this command exists to make visible.
+    icons.Refresh();
+    island::LearnTrayCallbacks(icons, true);
     const int count = icons.Refresh();
-    island::LogAndPrint(L"tray dump: %d icon(s) with a running application, from %ls\n", count,
-                        island::TrayIcons::SettingsKeyPath());
-    island::LogAndPrint(L"  (looked at %d entr(ies) in the key, %d process(es) in the snapshot, %d of "
-                        L"those matched a running application)\n",
-                        icons.Examined(), icons.ProcessesSeen(), icons.RunningApps());
+    island::LogAndPrint(L"tray dump: %d icon(s) %ls\n", count, icons.SourceClause().c_str());
+    island::LogAndPrint(L"  from %ls (looked at %d entr(ies) in the key, %d of them kept)\n",
+                        island::TrayIcons::SettingsKeyPath(), icons.Examined(), icons.Kept());
     for (int i = 0; i < count; ++i) {
         const island::TrayIcon& icon = icons.At(i);
         island::LogAndPrint(L"  [%d] %ls -- %zu byte PNG, promoted=%d, %ls\n", i, icon.name,

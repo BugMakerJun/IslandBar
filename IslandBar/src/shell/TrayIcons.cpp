@@ -4,6 +4,9 @@
 #include "shell/TrayIcons.h"
 
 #include "core/Log.h"
+// The ledger of registrations the shell is holding: this file is the one place that decides what to draw
+// from it (see the header, and domain/TrayLedger.h for the rule itself).
+#include "shell/TrayLearn.h"
 
 #include <tlhelp32.h>
 // CLSIDFromString, for the registry's textual IconGuid: with WIN32_LEAN_AND_MEAN the COM declarations
@@ -11,6 +14,7 @@
 #include <objbase.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cwchar>
 #include <string>
 
@@ -46,6 +50,42 @@ bool IsRunning(const std::vector<std::wstring>& running, const std::wstring& exe
         if (candidate == name) return true;
     }
     return false;
+}
+
+// The file name of a path, spelled as the path spells it. The log line names the entries the shell is not
+// holding, and a name that has been lower-cased for a comparison is not the name to print.
+std::wstring FileName(const std::wstring& path) {
+    const wchar_t* slash = std::wcsrchr(path.c_str(), L'\\');
+    return slash ? std::wstring(slash + 1) : path;
+}
+
+// The first line of a tooltip, and nothing after it. A cell is one line wide, and an application is free to
+// put a whole status block in its tooltip -- Task Manager's is "CPU 24%\n内存 58%\n磁盘 0%\n网络 0%" and
+// Clash Verge's is several lines of version and rule counts (MEASURED 2026-10-16). The tray shows that text
+// when the pointer rests on the icon; a label is not a hover, so the label gets the first line.
+std::wstring FirstLine(const std::wstring& text) {
+    const size_t cut = text.find_first_of(L"\r\n");
+    std::wstring line = cut == std::wstring::npos ? text : text.substr(0, cut);
+    while (!line.empty() && (line.back() == L' ' || line.back() == L'\t')) line.pop_back();
+    return line;
+}
+
+// The identity of one registration, as a key: the same identity the liveness question is asked with (a guid
+// on its own, otherwise the executable and the uid together).
+//
+// WHY IT IS NEEDED AT ALL: the registry is not a set. MEASURED 2026-10-16: the probe registrar leaves TWO
+// entries that are identical down to the PNG bytes and NVIDIA's container leaves three, while the tray draws
+// ONE icon for all of them -- so a card built from the entries alone draws two or three cells for one icon.
+std::wstring IdentityKey(bool hasGuid, const GUID& guid, const std::wstring& exeLeaf, unsigned uid) {
+    if (hasGuid) {
+        const unsigned char* bytes = reinterpret_cast<const unsigned char*>(&guid);
+        wchar_t text[40] = {};
+        for (int i = 0; i < 16; ++i) {
+            _snwprintf_s(text + i * 2, 40 - static_cast<size_t>(i) * 2, _TRUNCATE, L"%02X", bytes[i]);
+        }
+        return std::wstring(L"g:") + text;
+    }
+    return std::wstring(L"u:") + exeLeaf + L"|" + std::to_wstring(uid);
 }
 
 void ReadStringValue(HKEY key, const wchar_t* name, std::wstring* out) {
@@ -105,19 +145,24 @@ int TrayIcons::Refresh() {
     std::vector<std::wstring> running;
     RunningProcessNames(&running);
     processesSeen_ = static_cast<int>(running.size());
+    // Whether this pass draws what the shell is holding, or falls back to the older rule (see the header).
+    // The pass has to have finished once: before that the ledger is only what happened to arrive so far.
+    liveFilter_ = LiveTraySeeded() && LiveTrayCount() > 0;
+    notLive_.clear();
+    seenIdentities.clear();
 
     HKEY root = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, SettingsKeyPath(), 0, KEY_READ, &root) != ERROR_SUCCESS) {
         entries_.clear();
         list_.clear();
         examined_ = 0;
-        runningApps_ = 0;
+        kept_ = 0;
         return 0;
     }
 
     std::vector<Entry> fresh;
     examined_ = 0;
-    runningApps_ = 0;
+    kept_ = 0;
 
     DWORD index = 0;
     wchar_t subKeyName[256] = {};
@@ -177,23 +222,50 @@ int TrayIcons::Refresh() {
         // Only a PNG is drawn: the value is documented by measurement (see the header), and a future
         // Windows that changes the format must show nothing rather than a grey rectangle.
         if (entry.png.size() < 8 || entry.png[0] != 0x89 || entry.png[1] != 0x50) continue;
-        if (!IsRunning(running, entry.exePath)) continue;
-        ++runningApps_;
+
+        // THE FILTER, which is the whole point of this file: is the shell holding this registration now?
+        // A guid identifies one on its own; a uid needs the executable to agree with it (two applications
+        // register uid 3 on this machine -- see domain/TrayLedger.h).
+        const std::wstring leaf = FileName(entry.exePath);
+        std::wstring wanted = leaf;
+        std::transform(wanted.begin(), wanted.end(), wanted.begin(), ::towlower);
+        std::wstring liveTip;
+        if (liveFilter_) {
+            // The guid goes over as its 16 BYTES: that is what the registration carried across the ring, and
+            // the registry's "{...}" string was parsed back into the same layout (see TrayLearn.cpp).
+            if (!LiveTrayFind(wanted.c_str(), entry.icon.uid, entry.icon.hasGuid,
+                              reinterpret_cast<const unsigned char*>(&entry.icon.guid), &liveTip)) {
+                notLive_.push_back(leaf);
+                continue;
+            }
+        } else if (!IsRunning(running, entry.exePath)) {
+            continue;
+        }
+
+        // ... AND ONE CELL PER IDENTITY: entries that name the same icon ARE the same icon (see IdentityKey).
+        const std::wstring identity =
+            IdentityKey(entry.icon.hasGuid, entry.icon.guid, wanted, entry.icon.uid);
+        if (std::find(seenIdentities.begin(), seenIdentities.end(), identity) != seenIdentities.end()) {
+            continue;
+        }
+        seenIdentities.push_back(identity);
+        ++kept_;
 
         // The name: what the application called itself, or failing that its file name. Read after the
         // filter so the registry is not walked twice for icons nobody will see.
+        //
+        // The name: the registry's, then the registration's own tip, then the file name -- see TrayIcon for
+        // why the stable one goes first. Read after the filter so the registry is not walked twice for icons
+        // nobody will see.
         std::wstring tooltip;
-        {
-            HKEY subKeyAgain = nullptr;
-            if (RegOpenKeyExW(root, subKeyName, 0, KEY_READ, &subKeyAgain) == ERROR_SUCCESS) {
-                ReadStringValue(subKeyAgain, L"InitialTooltip", &tooltip);
-                RegCloseKey(subKeyAgain);
-            }
+        HKEY subKeyAgain = nullptr;
+        if (RegOpenKeyExW(root, subKeyName, 0, KEY_READ, &subKeyAgain) == ERROR_SUCCESS) {
+            ReadStringValue(subKeyAgain, L"InitialTooltip", &tooltip);
+            RegCloseKey(subKeyAgain);
         }
-        if (tooltip.empty()) {
-            const wchar_t* slash = std::wcsrchr(entry.exePath.c_str(), L'\\');
-            tooltip = slash ? std::wstring(slash + 1) : entry.exePath;
-        }
+        if (tooltip.empty()) tooltip = liveTip;
+        if (tooltip.empty()) tooltip = leaf;
+        tooltip = FirstLine(tooltip);
         wcsncpy_s(entry.icon.name, 96, tooltip.c_str(), _TRUNCATE);
         entry.icon.pngSize = entry.png.size();
         entry.writtenAt = KeyLastWriteTime(subKeyName);
@@ -236,6 +308,38 @@ int TrayIcons::Refresh() {
 
     if (changed) ++revision_;
     return Count();
+}
+
+// The rest of the log line, from whichever rule decided the list (see the header).
+//
+// BOTH HALVES ARE STATED because "the card shows nine" and "the card shows nine because the shell is holding
+// nine" are different claims, and the second one is the only one worth checking. MEASURED 2026-10-16, and
+// the reason this clause exists: thirteen cells against the shell's nine, and nothing in the log said which
+// four were surplus or why.
+std::wstring TrayIcons::SourceClause() const {
+    wchar_t text[640] = {};
+    if (!liveFilter_) {
+        _snwprintf_s(text, 640, _TRUNCATE,
+                     L"-- the shell has not been asked for its registrations yet, so the registry list is "
+                     L"drawn as it always was (%d entr(ies), %d process(es) seen)",
+                     examined_, processesSeen_);
+        return text;
+    }
+    std::wstring names;
+    const size_t shown = 6;
+    for (size_t i = 0; i < notLive_.size() && i < shown; ++i) {
+        if (!names.empty()) names += L", ";
+        names += notLive_[i];
+    }
+    if (notLive_.size() > shown) {
+        wchar_t more[64] = {};
+        _snwprintf_s(more, 64, _TRUNCATE, L" and %d more", static_cast<int>(notLive_.size() - shown));
+        names += more;
+    }
+    if (names.empty()) names = L"nothing";
+    _snwprintf_s(text, 640, _TRUNCATE, L"-- %d live of %d registry entr(ies) (not shown: %ls)", kept_,
+                 examined_, names.c_str());
+    return text;
 }
 
 } // namespace island

@@ -1046,8 +1046,11 @@ unsigned long long lastMusicMeterMs = 0;
     // changes when applications start and stop, which is a scale of seconds, not frames.
 
     const int trayAtStart = systems.trayIcons.Refresh();
-    island::LogAndPrint("  tray: %d icon(s) from the registry (%d entr(ies), %d process(es) seen)",
-                        trayAtStart, systems.trayIcons.Examined(), systems.trayIcons.ProcessesSeen());
+    // THE ONE LINE THAT SAYS WHICH LIST THIS IS. The card draws what the shell is HOLDING, not what the
+    // registry remembers (see shell/TrayIcons.h). At this point in the startup the module has not reported
+    // from the shell yet, so what prints here is the fallback clause; the frame loop's tick prints the real
+    // one as soon as the ledger fills, which is a few seconds later.
+    island::LogAndPrint(L"  tray: %d icon(s) %ls", trayAtStart, systems.trayIcons.SourceClause().c_str());
     std::fflush(stdout);
 
     // --- learning every tray callback, on a worker, once a session --------------------------------
@@ -3852,12 +3855,16 @@ float musicWavePhase = 0.0f;
                 if (GetTickCount64() - bar.lastTrayRefresh >= kTrayRefreshMs) {
                     bar.lastTrayRefresh = GetTickCount64();
                     frameWork |= kWorkTrayRefresh;
+                    // The other half of "is the shell holding this one": a registration whose window has
+                    // gone belongs to an application that exited without saying so, which the registry
+                    // cannot see either (see shell/TrayLearn.h). Swept BEFORE the refresh, so the list the
+                    // card is about to draw has already lost it.
+                    island::ForgetDeadTrayWindows();
                     const int trayNow = systems.trayIcons.Refresh();
                     if (trayNow != bar.lastTrayCount) {
                         bar.lastTrayCount = trayNow;
-                        island::LogAndPrint("  tray: %d icon(s) (%d of %d registered applications are "
-                                            "running)",
-                                            trayNow, systems.trayIcons.RunningApps(), systems.trayIcons.Examined());
+                        island::LogAndPrint(L"  tray: %d icon(s) %ls", trayNow,
+                                            systems.trayIcons.SourceClause().c_str());
                         std::fflush(stdout);
                     }
 
@@ -3898,6 +3905,11 @@ float musicWavePhase = 0.0f;
                         GetTickCount64() - bar.lastLearnAttempt >= 15000) {
                         bar.lastShellPid = shellNow;
                         bar.lastLearnAttempt = GetTickCount64();
+                        // THE NEW SHELL HOLDS NONE OF THEM. Every registration the old one was holding died
+                        // with it, so the ledger is emptied before the module is offered again: until it
+                        // reports back the card falls back to the registry list (see shell/TrayIcons.h)
+                        // instead of drawing registrations no shell is holding any more.
+                        island::ResetLiveTray();
                         bar.learnInFlight->store(true);
                         island::LogAndPrint("  tray learn: the shell is a new process (pid %lu) -- offering "
                                             "the module to it again (background)\n",

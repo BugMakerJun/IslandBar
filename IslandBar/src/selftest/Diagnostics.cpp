@@ -29,6 +29,7 @@
 #include "core/Log.h"
 #include "domain/MiniJson.h"
 #include "domain/TrayRegistration.h"
+#include "domain/TrayLedger.h"     // which registrations the shell is holding (see the tray checks)
 #include "platform/TrayRing.h"     // the channel the module publishes registrations on
 #include "domain/CardLayout.h"
 #include "domain/StatePolicy.h"
@@ -8593,6 +8594,77 @@ int RunSelfTest() {
         Check(island::PlanTrayClick(version4, uid, true, x, y).first.wParam !=
                   island::PlanTrayClick(0, uid, true, x, y).first.wParam,
               L"the two protocols must never produce the same first message");
+    }
+
+    // THE RULE THAT DECIDES WHICH CELLS EXIST (2026-10-16, round 45).
+    //
+    // The registry keeps an entry for every icon an application has EVER registered, and the card was built
+    // from that plus "is the executable running" -- thirteen cells against the nine the shell was actually
+    // holding, the surplus being three NVIDIA entries (its container process runs all day and registered
+    // nothing that session) and one dead explorer GUID whose stored picture is a blank 210-byte PNG. The
+    // replacement is this ledger, and its behaviour is asserted here with no shell, no tray and no
+    // application in the room: what an ADD, a MODIFY, a DELETE, a dead window and a dead process each do,
+    // and why a uid on its own is not an identity (ChatGPT and RazerAppEngine both register uid 3 on this
+    // machine, which is exactly the collision a uid-only match would have got wrong).
+    Section(L"tray live ledger");
+    {
+        const unsigned char bluetooth[16] = {0x6D, 0xA6, 0x8F, 0x06};
+        const unsigned char otherGuid[16] = {0x78, 0x20, 0xAE, 0x78};
+        island::TrayLedger ledger;
+
+        Check(ledger.Count() == 0 && ledger.Find(L"chatgpt.exe", 3, false, nullptr) == nullptr,
+              L"nothing is held until something registers");
+
+        ledger.Apply(island::kTrayCopyAdd, 100, 0x2001, 3, false, nullptr, L"ChatGPT", L"chatgpt.exe");
+        const island::TrayLiveRegistration* live = ledger.Find(L"chatgpt.exe", 3, false, nullptr);
+        Check(ledger.Count() == 1 && live != nullptr && std::wcscmp(live->tip, L"ChatGPT") == 0,
+              L"an ADD is held, with the tip the application sent");
+        Check(ledger.Find(L"razerappengine.exe", 3, false, nullptr) == nullptr,
+              L"uid 3 belongs to the application that used it, not to any of them");
+
+        ledger.Apply(island::kTrayCopyModify, 100, 0x2001, 3, false, nullptr, L"", L"chatgpt.exe");
+        Check(ledger.Count() == 1, L"a MODIFY refreshes that registration instead of adding one");
+        Check(std::wcscmp(ledger.At(0).tip, L"ChatGPT") == 0,
+              L"... and a MODIFY carrying no tip does not erase the name");
+
+        ledger.Apply(island::kTrayCopyAdd, 101, 0x2002, 3, false, nullptr, L"Razer", L"razerappengine.exe");
+        Check(ledger.Count() == 2, L"the same uid from another application is a second registration");
+
+        // A registration whose tray window was already gone when the bar resolved its owner arrives with no
+        // executable at all (measured: the probe registering uid 7). The uid is then the only thing left, and
+        // refusing to match it would drop an icon the shell is holding.
+        ledger.Apply(island::kTrayCopyAdd, 103, 0x2004, 7, false, nullptr, L"ISLANDBAR-PROBE-4711", L"");
+        Check(ledger.Find(L"probe-tray-registrar.exe", 7, false, nullptr) != nullptr,
+              L"a registration with no executable name still matches by uid");
+        ledger.ForgetWindow(0x2004);
+
+        ledger.Apply(island::kTrayCopyAdd, 102, 0x2003, 0, true, bluetooth, L"蓝牙设备", L"explorer.exe");
+        Check(ledger.Find(nullptr, 0, true, bluetooth) != nullptr,
+              L"a guid identifies a registration on its own");
+        Check(ledger.Find(nullptr, 0, true, otherGuid) == nullptr, L"... and another guid is not it");
+
+        ledger.Apply(island::kTrayCopyDelete, 101, 0x2002, 3, false, nullptr, L"", L"");
+        Check(ledger.Count() == 2 && ledger.Find(L"razerappengine.exe", 3, false, nullptr) == nullptr,
+              L"a DELETE takes away exactly the registration it names");
+
+        ledger.Apply(island::kTrayCopyDelete, 999, 0x9999, 7, false, nullptr, L"", L"");
+        Check(ledger.Count() == 2, L"a DELETE for something nobody held changes nothing");
+
+        ledger.ForgetWindow(0x2001);
+        Check(ledger.Count() == 1 && ledger.Find(L"chatgpt.exe", 3, false, nullptr) == nullptr,
+              L"a window that has gone takes its registration with it");
+        ledger.ForgetProcess(102);
+        Check(ledger.Count() == 0, L"a process that has gone takes every registration of its own");
+
+        for (int i = 0; i < island::kTrayLedgerCapacity + 5; ++i) {
+            ledger.Apply(island::kTrayCopyAdd, 200, static_cast<unsigned long long>(0x3000 + i),
+                         static_cast<unsigned>(i), false, nullptr, L"", L"spammer.exe");
+        }
+        Check(ledger.Count() == island::kTrayLedgerCapacity && ledger.Refused() == 5,
+              L"an application that re-registers in a loop is capped, and the refusals are counted");
+
+        ledger.Reset();
+        Check(ledger.Count() == 0 && ledger.Refused() == 0, L"a replaced shell starts from nothing");
     }
 
     {

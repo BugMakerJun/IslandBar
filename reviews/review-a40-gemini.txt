@@ -1,0 +1,83 @@
+Gemini 说
+
+针对 IslandBar 灵动岛卡片里的“托盘”与 Windows 系统托盘做到底层一致的核心痛点，结合你梳理的实机数据与架构约束，以下是针对 Q1～Q6 的完整架构结论与工程决策。
+
+一、 核心结论（Q1）：选 c）A 为主 + B 仅在疑点/初始化时校验
+
+为什么选 c）：
+
+只信 A（纯钩子） 的致命缺陷在于漏掉“钩子挂上之前已经存在”或“经历 TaskbarCreated 重建”的应用。
+
+只信 B（纯轮询 GetRect） 需要周期性隐身唤醒任务栏并强开溢出面板，这在视觉上极易造成闪烁、抢夺焦点，且无法区分“隐藏在溢出面板里的图标”和“压根不存在/死掉的幽灵图标”（因为两者在没开溢出面板时 GetRect 都返回箭头格或无效矩形）。
+
+c) 的运作逻辑：以 A（活体记账 + 状态机）作为实时生命周期管理的主干。ADD 进、DELETE/进程死掉出。用注册表作为静态资产包（拿图标 PNG、初始 Tooltip、UID/GUID 兜底），而 B（GetRect + 阶段性状态机探测） 仅用来做静态兜底和状态对齐（例如在冷启动、或者检测到 A 长期没有覆盖到但注册表怀疑存在的条目时，按需隐式校准）。
+
+“隐藏进溢出面板”与“Shell 自己的图标”怎么处理：
+
+溢出面板图标：在用户的直觉里，溢出面板里的图标是“活着并存在的”。A 的账本只要收到了 NIM_ADD 就是活的，不能因为它们在溢出面板里就裁掉。
+
+Shell 自己的图标（蓝牙、音量、网络等 explorer 代注册）：它们的宿主是 explorer.exe，走的是 Shell_NotifyIcon。在 A 的账本里，它们表现为 pid 属于 explorer、带有特定 uCallbackMessage 和 UID/GUID 的有效条目。它们必须在卡片里展示，不能擅自过滤。
+
+二、 名字来源与去重（Q2 & Q3）
+
+Q2（名字来源）：A 的实时 tip 优先，注册表 InitialTooltip 兜底
+
+注册表的 InitialTooltip 经常为空（如蓝牙）。A 在捕获 NIM_ADD / NIM_MODIFY 时能拿到实时的 tip 字符串（如 "蓝牙设备", "扬声器: 12%"）。因此，名字字段采用：A_runtime_tip.empty() ? registry_InitialTooltip : A_runtime_tip，如果都为空则回落到 exe 文件名。
+
+Q3（去重键）：采用 (exe, uid/guid) 复合主键，拒绝盲目按 PNG 哈希去重
+
+NVIDIA 产生 3 条注册表记录但 PNG 相同、uid 相同，属于典型的注册表冗余。但确实存在“同一个 exe 注册了两个不同 uid 的图标”的合法场景。
+
+去重规则：以 (exe, uid) 或 guid（若 NIF_GUID 有效）为唯一标识。NVIDIA 那三条由于 uid 相同且属于同一进程，在合并时应当被归一化收敛为 1 个实例；而不同 uid 的独立图标保留多格。
+
+三、 Shell 自己的图标与按压语义（Q4）
+
+卡片里要不要画？
+
+要画。蓝牙、音量等由 explorer 代注册的系统图标，在用户眼里就是托盘的一部分。
+
+按压语义是什么？
+
+普通应用：POST 自己的 uCallbackMessage。
+
+Explorer 代注册项（如蓝牙、音量）：它们的 uCallbackMessage 是 shell 内部的私有逻辑，盲目 POST 到外壳进程通常无效。
+
+处理方案：在 TrayPress.cpp 中对这类项走特化逻辑——不走应用自身的 uCallbackMessage，而是调用 Windows 对应的系统面板 API（例如蓝牙直接触发 bthprops.cpl 或调用对应的 Shell 动作，音量拉起系统音量合成器），或者直接使用 Shell_NotifyIconGetRect 拿到的真实坐标在对应位置模拟一次左键点击。
+
+四、 开销、刷新与工程参数（Q5）
+
+架构分层硬约束：
+
+纯逻辑与账本状态维护放在 domain/TrayRegistration.h/.cpp（严禁出现任何 Win32 API）。
+
+平台层（platform/ 或 shell/）负责对接 WH_GETMESSAGE、共享内存及 Shell_NotifyIconGetRect。
+
+刷新与记账策略：
+
+记账存储：由 A 模块在共享内存环中维护一个内存态的 std::vector<LiveTrayItem>。
+
+Explorer 重启的处理：监听 RegisterWindowMessage("TaskbarCreated") 消息。一旦收到该消息，清空 A 的实时账本，并触发一次全量重新对齐（重新从注册表加载资产，等待应用通过 NIM_ADD 重新签到）。
+
+资源预算：CPU 开销控制在 0.1% 以下（纯内存比对，无频繁字符串检索）；内存消耗控制在 4KB 以内。
+
+五、 验收标准与日志规范（Q6）
+
+数字 + 一行日志验收法：
+
+格数要求：灵动岛卡片格数 == 系统托盘真实应用图标数（本机 9）。
+
+日志格式：严格输出形如以下的一行审计日志：
+
+Plaintext
+tray: 9 icon(s) -- 9 live registration(s) of 31 registry entr(ies) (not displayed: nvcontainer, NVDisplay x2, explorer)
+
+
+按压联动：
+
+将“按下去真的有反应”纳入回归。9 个活体图标中，非法的空响应按压视为未达标。
+
+六、 我们最容易忽略的风险
+
+进程生命周期与 UID 复用滞后：当某个常驻后台的应用悄悄崩溃、或者被 Windows 强行回收后，其残留的 NIM_ADD 记录如果仅靠进程快照判断（由于存在大量共享同名宿主进程如 svchost.exe 或 nvcontainer.exe 的多实例场景），极易发生“幽灵残留”。
+
+规避手段：在 A 的账本里，必须把 hwnd（托盘窗口句柄）和 pid 绑定校验。当句柄对应的窗口已经 IsWindow() 失效，或者进程 GetExitCodeProcess 确认退出时，必须立即从活体列表中剔除，不能单靠 exe 名字存在就放行。

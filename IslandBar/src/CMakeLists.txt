@@ -28,6 +28,7 @@ add_library(island_domain STATIC
     domain/MiniJson.cpp
     domain/Motion.cpp
     domain/PurityCheck.cpp
+    domain/TrayLedger.cpp
 )
 target_include_directories(island_domain PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 

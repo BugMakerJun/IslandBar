@@ -21,13 +21,16 @@
 
 // The channel the module publishes on, and the wire format of one record (see platform/TrayRing.h).
 #include "domain/TrayRegistration.h"
+#include "domain/TrayLedger.h"
 #include "platform/TrayRing.h"
 
 #include <psapi.h>   // GetProcessMemoryInfo: which of an application's processes carries its tray icon
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -39,6 +42,10 @@ namespace island {
 // returns how many it took. Declared here (and not inside the anonymous namespace below, which is where its
 // callers live) because its definition is a public function of this module; see platform/TrayRing.h.
 int DrainTrayRing(TrayLearnResult* result);
+
+// Defined with the ledger further down, and called by the pass when it has asked every application to
+// register again -- which is the moment the ledger stops being a partial picture (see TrayLearn.h).
+void MarkLiveTraySeeded();
 
 namespace {
 
@@ -862,6 +869,11 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
 
     HarvestReport(&result);
 
+    // THE LEDGER CAN BE BELIEVED FROM HERE: every running tray application has just been asked to register
+    // again, and everything that answered has been drained above. Until this line the card draws the
+    // registry list instead of a ledger that only holds whatever happened to arrive first (see TrayLearn.h).
+    MarkLiveTraySeeded();
+
     result.covered = CountCoveredIcons(icons);
     result.ms = static_cast<long long>(GetTickCount64() - start);
     return result;
@@ -999,6 +1011,83 @@ struct ReportAppender {
     }
 };
 
+// --- THE LEDGER OF WHAT THE SHELL IS HOLDING RIGHT NOW -------------------------------------------------
+//
+// Written by the drain below, read by the card on its own refresh tick, and those are two threads (the frame
+// loop drains when nothing is being learned, the worker drains during a pass -- see main.cpp), so it is
+// locked. The lock is held for one lookup at a time and never across a registry walk or a window call.
+//
+// WHY IT IS HERE rather than next to the card: this file owns the ring the registrations arrive on, so it is
+// the only place that can keep a ledger up to date without inventing a second poll. See domain/TrayLedger.h
+// for the rule, and shell/TrayIcons.cpp for the one place it decides what to draw.
+std::mutex g_liveTrayLock;
+TrayLedger g_liveTray;
+bool g_liveTraySeeded = false;
+
+void FeedLiveTray(const TrayRegistration& registration, unsigned ownerPid, const wchar_t* exeLeaf) {
+    std::lock_guard<std::mutex> lock(g_liveTrayLock);
+    g_liveTray.Apply(static_cast<TrayCopyCommand>(registration.command), ownerPid,
+                     static_cast<unsigned long long>(registration.trayWindow), registration.uid,
+                     registration.hasGuid, registration.guid, registration.tip, exeLeaf);
+}
+
+bool LiveTrayFind(const wchar_t* exeLeaf, unsigned uid, bool hasGuid, const unsigned char* guid,
+                  std::wstring* tipOut) {
+    std::lock_guard<std::mutex> lock(g_liveTrayLock);
+    const TrayLiveRegistration* live = g_liveTray.Find(exeLeaf, uid, hasGuid, guid);
+    if (!live) return false;
+    if (tipOut) *tipOut = live->tip;
+    return true;
+}
+
+int LiveTrayCount() {
+    std::lock_guard<std::mutex> lock(g_liveTrayLock);
+    return g_liveTray.Count();
+}
+
+int LiveTrayRefused() {
+    std::lock_guard<std::mutex> lock(g_liveTrayLock);
+    return g_liveTray.Refused();
+}
+
+void ResetLiveTray() {
+    std::lock_guard<std::mutex> lock(g_liveTrayLock);
+    g_liveTray.Reset();
+    g_liveTraySeeded = false;
+}
+
+bool LiveTraySeeded() {
+    std::lock_guard<std::mutex> lock(g_liveTrayLock);
+    return g_liveTraySeeded;
+}
+
+// Called by the pass itself once it has asked every application to register again: until then the ledger is
+// a partial picture and the card is not allowed to use it (see the header).
+void MarkLiveTraySeeded() {
+    std::lock_guard<std::mutex> lock(g_liveTrayLock);
+    g_liveTraySeeded = true;
+}
+
+void ForgetDeadTrayWindows() {
+    // Copied out first: `IsWindow` is a call into the window manager and there is no reason to keep the
+    // ledger locked across it. The entries are then matched back by window, which is what they were copied
+    // by.
+    std::vector<TrayLiveRegistration> items;
+    {
+        std::lock_guard<std::mutex> lock(g_liveTrayLock);
+        items.reserve(static_cast<size_t>(g_liveTray.Count()));
+        for (int i = 0; i < g_liveTray.Count(); ++i) items.push_back(g_liveTray.At(i));
+    }
+    for (const TrayLiveRegistration& item : items) {
+        const HWND window = reinterpret_cast<HWND>(static_cast<uintptr_t>(item.window));
+        // A registration names the window that receives its callbacks; an application that has exited has
+        // no windows left, and one that never had a readable window is not something to draw either.
+        if (window != nullptr && IsWindow(window)) continue;
+        std::lock_guard<std::mutex> lock(g_liveTrayLock);
+        g_liveTray.ForgetWindow(item.window);
+    }
+}
+
 // WHAT THE MODULE READ IN THE SHELL, TAKEN OUT OF THE RING AND WRITTEN DOWN.
 //
 // The module publishes one record per registration into shared memory and nothing else: it runs inside the
@@ -1081,6 +1170,10 @@ int DrainTrayRing(TrayLearnResult* result) {
         DWORD ownerPid = 0;
         GetWindowThreadProcessId(trayWindow, &ownerPid);
         const std::wstring exe = ownerPid ? ExeLeafForPid(ownerPid) : std::wstring();
+
+        // INTO THE LEDGER AS WELL AS ONTO DISK: this is the same registration, and it is what the card asks
+        // about before it draws a cell (see the note on the ledger above, and domain/TrayLedger.h).
+        FeedLiveTray(registration, ownerPid, exe.c_str());
 
         std::wstring guidText;
         if (registration.hasGuid) {

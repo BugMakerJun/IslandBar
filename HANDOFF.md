@@ -12860,3 +12860,75 @@ case WM_TRAYICON:
 | RazerAppEngine（栏为前台） | 62 ms 成功 | **62 ms 成功，无回退** |
 
 自检与 `island_smoke` 全过；Release 已部署。
+
+---
+
+## 8.151 **卡片和系统托盘显示同一批图标：注册表给图，观察账本给"现在真的注册着"**（2026-10-16 06:2x）
+
+用户先看到差异（「看一下 系统托盘里的应用数和我们托盘里的不一样」），然后给出目标：「和系统托盘显示的一致」。
+方案经用户点头（「按这个做」）后落地的就是这一节。
+
+### 8.151.1 评审（第 45 轮）：Gemini 答了，ChatGPT 这一轮没谈成
+
+* 问题原文 `reviews/review-q40.txt`，答复 `reviews/review-a40-gemini.txt`。
+* **ChatGPT 缺一份**：内置浏览器里那个会话每次都回 `Model not found`（新开会话、重试都一样），与第 28 轮记录过的
+  同一个毛病；没有去动用户的账号设置，所以这一轮只有一份评审。
+* Gemini 的结论是 **c)**：以我们自己的钩子账本为主干（`NIM_ADD` 进、`NIM_DELETE`／进程死掉出），注册表降级成
+  "图标 PNG ＋ 兜底名字"的静态资产包，`Shell_NotifyIconGetRect` 只在冷启动/疑点时校验；**溢出面板里的图标算活着**；
+  shell 自己的图标要画；名字用实时 tip 优先；去重键取 (exe, uid) 或 guid。
+* **没有照抄的两条**（写在这里，免得下一个人以为是漏了）：① 它给的资源预算（CPU < 0.1%、内存 4 KB）没有采用，
+  预算按实测给（见 8.151.4）；② 蓝牙/音量那类 shell 自己的格子"按下去做什么"，本轮不做——那会与产品自己的
+  系统面板重叠，属于范围外。
+* **实测推翻了它的一条**：名字"实时 tip 优先"不行。任务管理器每次刷新发的是 `NIM_MODIFY`，tip 是
+  `"CPU 24%\n内存 58%\n磁盘 0%\n网络 0%"`，Clash Verge 的 tip 是好几行的版本与规则数——那是**悬停文本**，
+  不是标签。最终口径：**注册表的 `InitialTooltip` 优先，注册的 tip 兜底，最后兜到文件名，并且只取第一行**。
+  蓝牙那一格仍靠 tip 救回来（它的 `InitialTooltip` 是空的）。
+
+### 8.151.2 改之前的差异（实机，2026-10-16 05:2x）
+
+* 系统托盘真实显示 **9** 个应用图标：ChatGPT、Wallpaper Engine、Steam、Clash Verge、任务管理器、QQ音乐、
+  蓝牙设备、Windows 安全中心、Razer（第 44 轮 UIA 实测，本轮 hook 捕获的 `NIM_ADD` 一一对上）。
+* 卡片 **13** 格 = 那 9 个 ＋ `nvcontainer.exe` 与 `NVDisplay.Container.exe` ×2（三条注册表条目，PNG 哈希完全相同，
+  同一个"NVIDIA 设置"图标；NVDisplay.Container 是常驻进程，所以永远过得了"exe 在跑"这一条）＋
+  `explorer.exe{7820AE78}`（shell 留下的空记录，210 字节白板）。
+* 并且那 9 格里有一格名字是错的：`explorer.exe{6DA68F06}` 实际是 shell 代 `bthprops.cpl` 注册的"蓝牙设备"
+  （`InitialTooltip` 为空，于是按文件名画成了 explorer.exe）。
+
+### 8.151.3 规则与改动
+
+一句话：**注册表给"图和身份"，观察账本给"现在是否真的活着"，两边都有才画一格。**
+
+| 文件 | 改动 | 为什么 |
+|---|---|---|
+| `src/domain/TrayLedger.h/.cpp`（新） | 纯逻辑账本：`Apply(command, pid, hwnd, uid/guid, tip, exe)`、`ForgetWindow`、`ForgetProcess`、`Reset`、`Find`。键＝guid 优先，否则 `(窗口, uid)`；`MODIFY` 也当"进"（钩子装上之前就注册的应用只会发这个）；空 tip 不覆盖已有名字；超过 128 条即拒绝并计数 | 存活判定是纯逻辑，必须能被自检直接测；放 domain 就不许碰 Win32（`PurityCheck.cpp` 的清单守着） |
+| `src/shell/TrayLearn.h/.cpp` | 排空共享内存环的同一处把每条注册喂给账本；新增 `LiveTrayFind/LiveTrayCount/LiveTraySeeded/ResetLiveTray/ForgetDeadTrayWindows`；`std::mutex` 保护（帧循环与学习趟是两条线程） | 环已经在这里排空，账本是第二个消费者，不新开线程、不新增轮询源 |
+| `src/shell/TrayIcons.h/.cpp` | 过滤条件从"exe 同名进程在跑"换成"账本里有这条身份"；名字口径见 8.151.1；**同一身份只画一格**；账本没就绪时退回原来的注册表列表 | 这是唯一的尺子；"exe 同名"正是 NVIDIA 三格常驻幽灵的成因 |
+| `src/main.cpp`、`src/cli/Cli.cpp` | 启动行与帧循环的 `tray:` 行、`--tray-dump` 换成新口径，一行里带上"注册表有、账本没有"的名字；帧循环里加一次 `ForgetDeadTrayWindows()`；shell 换进程时 `ResetLiveTray()` | 仓库依赖的命令必须同口径，否则日志会骗人 |
+| `src/selftest/Diagnostics.cpp` | 新增 `[tray live ledger]` 一节 **15 条**断言 | 纯逻辑必须有断言 |
+
+### 8.151.4 验收（Release，本机）
+
+* 自检 **976 → 1001 条全过**（`RESULT: PASS`）；`island_smoke` PASS；Debug 与 Release 零告警（`/WX` 生效）。
+* 一行日志（验收口径，栏自己的说法）：
+  `tray: 9 icon(s) -- 9 live of 32 registry entr(ies) (not shown: OneDrive.exe, OnScreen Control.exe, cc-switch.exe, QQMusicUp.exe, Weixin.exe, YY.exe and 16 more)`
+* 名字（`--tray-dump`，同一口径）：`Windows 安全中心 - 建议的操作。` / `ChatGPT` / **`蓝牙设备`** /
+  `Wallpaper Engine` / `Steam - 正在同步` / `Clash Verge 2.5.8` / **`任务管理器`** / `QQ音乐 听我想听` /
+  `RazerAppEngine.exe`——蓝牙那格不再是 explorer.exe，任务管理器那格不再是 CPU/内存那一块。
+* 启动序列：**12（第一趟学习完成前照旧用注册表列表）→ 9，一步到位**。没加这道闸门时实测见过 `tray: 1 icon(s)`
+  再涨回来——账本在广播完成前只装着"碰巧先到的那几条"，那不是托盘的样子。
+* 重注册过程中的 8/7 抖动是**应用自己的**：广播后它们普遍是 `NIM_DELETE` → `NIM_ADD`（实测 chatgpt/clash/steam
+  各三对、steam 有一次间隔 62 条记录），这几秒里 shell 里确实没有那个图标；稳定后 9。
+* 开销（同一台机、改动前后各一次启动，不是严格对照）：工作集 **107 MB → 100 MB**；帧 55/s、avg 14.1 ms、
+  worst 83.0 ms、hitch 1 → 88–124/s、avg 11.7–12.1 ms、worst 27–28 ms、hitch 0。稳态 CPU 30 s 采样 4.19 s
+  ≈ 单核 14%（当时正在放歌、有歌词与缩略图活动）。逻辑上刷新比原来更便宜：原来是每条注册表条目在 ~300 个
+  进程名里线性找一遍，现在是账本查表；新增的只有"每条注册 O(1) 记账"和"每 5 秒对每条 IsWindow 一次"。
+
+### 8.151.5 如实记的边界
+
+1. **账本只知道自己看见的**。模块没落地、或 explorer 刚重启时，账本会偏少——所以"第一趟学习跑完之前"用注册表
+   列表兜底，`--tray-dump` 也会自己做一趟（它和栏是两个进程，账本在内存里）。
+2. **解析不出属主的注册会被清扫掉**：实测我们自己的 `probe-tray-registrar.exe` 注册完就销毁窗口，环上到达时是
+   `pid 0 exe -`，于是它没有窗口可查、也没有进程可点名，那张卡片上不会出现它（shell 要到那个进程退出才移除图标）。
+   这条写在 `TrayLearn.h` 的 `ForgetDeadTrayWindows` 注释上。
+3. 账本用 gui 之外的口径问存活，**不回答"按下去有没有反应"**：那 4 格幽灵消失之后，剩下的 9 格本来就有回调
+   （`tray learn: 9 of 12 icon(s) have a callback entry`）。

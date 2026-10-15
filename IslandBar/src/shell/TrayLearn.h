@@ -127,6 +127,42 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast);
 // read, no injection, no waiting -- safe to call from the frame loop's tray-refresh tick.
 int HarvestLearnedCallbacks();
 
+// --- WHICH REGISTRATIONS THE SHELL IS HOLDING RIGHT NOW ------------------------------------------------
+//
+// The card draws a registry entry only while one of these says the shell still holds that registration
+// (shell/TrayIcons.cpp), because the registry alone keeps a subkey for every icon an application has EVER
+// registered and "the executable is running" is not the same question as "there is an icon in the tray".
+// MEASURED 2026-10-16: thirteen cells against the shell's nine -- three NVIDIA entries (its container
+// process runs all day and registered nothing that session) and one dead explorer GUID with a blank
+// picture. The rule itself lives in domain/TrayLedger.h; the registrations arrive on the ring this module
+// drains, which is why the ledger is kept and read from here.
+//
+// `exeLeaf` is lower case and without its directory -- the caller has it from the registry, and the ledger
+// has it from the process that owns the tray window. A guid identifies a registration on its own; a uid does
+// NOT (ChatGPT and RazerAppEngine both register uid 3 here), so a uid counts only with the executable's name.
+bool LiveTrayFind(const wchar_t* exeLeaf, unsigned uid, bool hasGuid, const unsigned char* guid,
+                  std::wstring* tipOut);
+// How many registrations are held. Zero is the fallback: the card then draws what the registry holds, as it
+// did before this existed, rather than showing nothing at all.
+int LiveTrayCount();
+// Whether a pass has finished asking every application to register again -- which is the moment the ledger
+// can be believed. MEASURED 2026-10-16: before that pass finishes the ledger holds only whatever happened to
+// arrive, so a card that trusted it showed ONE cell for the seconds the pass takes and then filled up. Until
+// then the card draws the registry list, as it always did.
+bool LiveTraySeeded();
+// Registrations refused past the ledger's ceiling, so an application that re-registers in a loop shows up.
+int LiveTrayRefused();
+// The shell process was replaced, so nothing it held is registered in the new one.
+void ResetLiveTray();
+// Drops the registrations whose tray window is gone: an application that died without saying so, which the
+// registry cannot see either. Called from the frame loop's tray tick.
+//
+// WHAT IT CANNOT DO: a registration whose tray window could not be resolved to a process at all -- the window
+// was already gone when the bar looked it up, as our own registrar probe's is (it registers and then destroys
+// its window) -- has no window to check and no process to name, so it keeps no cell. The shell, which removes
+// an icon when its PROCESS exits, may still be showing it for as long as that process lives.
+void ForgetDeadTrayWindows();
+
 // The applications of the card's icons that still have NO callback entry, as one comma-joined, sorted
 // string. The frame loop compares it with the string from its previous attempt and only tries again when it
 // CHANGED: retrying the same four unreachable applications every few seconds would spend the whole session

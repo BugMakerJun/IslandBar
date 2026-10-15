@@ -1,0 +1,108 @@
+第 45 轮评审请求（2026-10-16 05:4x，IslandBar / Windows 11 26220，实机数据）
+
+用户的原话只有一句：「和系统托盘显示的一致」。也就是：灵动岛卡片里的那一页"托盘"，
+格子和 Windows 系统托盘里显示的应用图标必须对上。现在是 13 格对 9 个，多出来的是幽灵。
+
+─ 1. 我们的托盘现在是怎么来的（代码事实，不是推测）
+
+* src/shell/TrayIcons.cpp：读注册表 HKCU\Control Panel\NotifyIconSettings\<hash>，
+  每个条目取 ExecutablePath / IconSnapshot(PNG) / InitialTooltip / IsPromoted / UID 或 IconGuid。
+* 它保留的条件只有两条：① IconSnapshot 是一张有效的 PNG；② ExecutablePath 的文件名
+  能在当前进程快照（CreateToolhelp32Snapshot）里找到同名进程。**没有任何一条问过 shell：
+  这个图标现在真的注册着吗。**
+* 名字用 InitialTooltip，为空则回落到 exe 文件名。
+* 刷新在帧循环的定时器上（秒级），集合变化才重绘。
+* 本机现状：31 个注册表条目 → 13 格。
+* 按压（src/shell/TrayPress.cpp）用条目里的 UID / IconGuid 走 shell：
+  Shell_NotifyIconGetRect 问位置 + POST 应用自己的 uCallbackMessage。
+
+─ 2. 今天量到的差异（2026-10-16 05:2x，同一台机器）
+
+系统托盘真实显示 9 个应用图标：ChatGPT、Wallpaper Engine、Steam、Clash Verge、任务管理器、
+QQ音乐、蓝牙设备、Windows 安全中心、Razer（第 44 轮 UIA 实测：溢出面板里 9 个 NormalButton，
+名字为空的那个是 RazerAppEngine）。
+
+我们 13 格 = 那 9 个 + 4 个幽灵：
+  * nvcontainer.exe(uid 1051) 与 NVDisplay.Container.exe(uid 1051) ×2 —— 三条注册表条目，
+    PNG 哈希完全相同（同一个"NVIDIA 设置"图标）。NVDisplay.Container.exe 是常驻进程，
+    所以永远过得了我们的"exe 在跑"这一条。本轮我们广播 TaskbarCreated 之后，NVIDIA 一条注册都没有。
+  * explorer.exe{7820AE78-…} —— shell 留下的一条空记录：IconSnapshot 210 字节，导出来是一张白板；
+    本轮它没有注册。
+而且那 9 格里有一格名字是错的：explorer.exe{6DA68F06-…} 实际是 shell 代 bthprops.cpl 注册的
+"蓝牙设备"（InitialTooltip 为空），于是我们按文件名画成 "explorer.exe"。
+
+我们自己的观察模块本轮捕获到的 NIM_ADD 只有这些：
+  explorer（蓝牙设备 {6DA68F06}、扬声器 {7820AE73} uid 100）、chatgpt.exe(uid 3)、
+  qqmusic.exe(uid 256)、taskmgr.exe、razerappengine.exe(uid 3)、clash-verge.exe(uid 2)、
+  wallpaper64.exe(uid 1000)、steam.exe(uid 1)，另有 securityhealthsystray 的一条 NIM_MODIFY。
+
+─ 3. 我们手上已经有的两样"活体"信息（不需要新造机制）
+
+A. **观察模块**（我们自己写的，已经跑在 explorer 里）：WH_GETMESSAGE 钩住托盘线程 +
+   把 Shell_NotifyIcon 的导入槽和 GetProcAddress 的回答接到自己的 detour，
+   把每一次 NIM_ADD / NIM_MODIFY / NIM_SETVERSION / NIM_DELETE 写进共享内存环，bar 每帧排空。
+   每条记录含：pid、exe、command、托盘窗口句柄、uid、flags(NIF_GUID)、**uCallbackMessage**、
+   version、**guid**、**tip（128 wchar）**。格式在 domain/TrayRegistration.h，解码是纯逻辑、有自检。
+
+B. **Shell_NotifyIconGetRect(身份)**：问 shell"这个图标在哪"。已实测的坑（第 30 轮）：
+   **任务栏藏着、溢出面板从没被打开过时，shell 对每个图标都返回"溢出箭头那一格"的矩形**
+   （实测 16 个全是 2416,0）；把溢出面板打开一次再问，12/16 有真矩形，
+   剩下 4 个（正是 NVIDIA×3 + explorer×1）**从来不答**。产品里已有 TrayStage 状态机：
+   需要真矩形时把任务栏"存在但不可见"地显示（WS_EX_LAYERED + alpha 0），必要时开一次溢出面板。
+
+─ 4. 已经排除 / 说好不做的路（不必再论证）
+
+* UIA 只在任务栏可见时答得准，而我们把任务栏藏了 —— 它只能用于按压，不能用于绘制；
+* 读 explorer 内存拿托盘项列表：不可靠，第 43/44 轮已判为不做；
+* 真实点击（移动指针点真托盘）：用户明确否决。
+
+─ 5. 我要问的
+
+Q1（核心）「和系统托盘一致」的判定用哪个来源？
+  a) 只信 A：活着的 = ADD −（DELETE / 进程消失 / 窗口销毁）。不用 shell 配合、不用开面板；
+     缺点是钩子装上之前就注册好、又不理会 TaskbarCreated 的应用会漏一格。
+  b) 只信 B：每格问一次 GetRect。以 shell 的答案为准，但溢出面板没打开过时它撒谎，
+     而为了问准就得周期性"隐身显示任务栏 + 开一次溢出面板"——会不会闪、会不会抢焦点、
+     每几秒做一次是否可接受？
+  c) A 为主 + B 只在有疑点时校验（某条身份在 A 里没有记录，或 A 说活但 GetRect 答的是箭头格）。
+  d) 我们没想到的口径。
+  请明确选哪一条，并说明它**为什么最不容易把"隐藏进溢出面板的图标"误判成不存在**
+  （在用户的直觉里，溢出面板里的图标也是"显示着的"）。
+
+Q2 名字：注册表的 InitialTooltip 常为空（蓝牙那条就是空的），而 A 的捕获里有 shell 收到的 tip
+  （"蓝牙设备"、"扬声器: 12%"）。名字来源要不要改成 A 的 tip 优先、注册表兜底？
+
+Q3 去重：同一个图标在注册表里有多条条目（NVIDIA 三条、同一个 PNG、同一个 uid 1051）。
+  合并键取 (exe, uid) 还是 guid？会不会把"一个 exe 真的注册了两个不同 uid 的图标"误合并成一条
+  （那种情况系统托盘里就是两格，我们应当也画两格）？
+
+Q4 shell 自己的图标：蓝牙设备、扬声器（explorer 代注册）在系统托盘里是存在的
+  （蓝牙在溢出面板里，音量常驻角落）。"一致"是否意味着我们卡片也要有一格"蓝牙设备"？
+  如果要，那一格按下去该是什么语义（它是 explorer 的窗口和回调，我们现在的按压路线是
+  "POST 应用自己的 uCallbackMessage"）？还是说这一类属于"我们自己的系统面板该管的事"，
+  卡片里如实不画？
+
+Q5 开销与刷新：现在是秒级的全量遍历（注册表 + 进程快照）。若改成 A 的活体记账，
+  刷新周期按什么定？记账存哪里（跨帧的集合状态），explorer 重启后怎么重学？
+  请给资源预算的门槛（CPU 目标、内存上限、多少格以内不算退化）。
+
+Q6 验收：按仓库规矩，一次改动要有一个数字 + 一行日志。我倾向
+  **卡片格数 == 系统托盘应用图标数（本机 9）**，日志一行形如
+  `tray: 9 icon(s) -- 9 live registration(s) of 31 registry entr(ies) (not displayed: nvcontainer, NVDisplay x2, explorer)`
+  即每个"注册表有、托盘没有"的都要带名字出现在同一行。够不够硬？
+  要不要把"按下去真的有反应"也纳入验收（现在那 4 格按下去只会写日志）？
+
+─ 6. 约束（仓库规范，请在这个框子里给建议）
+
+* 分层：domain / core / app / render / media / shell / platform / services / cli；
+  domain 层不许出现 Win32；纯逻辑要有断言。
+* Debug 与 Release 都要编过且**零告警**（/WX 生效）；--self-test 与 island_smoke 都要过。
+* 不引入无用代码，不为"以后可能用得上"留抽象；每处改动要能用一句话说清它解决了什么。
+* 已知架构债：main.cpp 偏大、模块间靠文件轮询、托盘按压没有自动化回归。
+
+─ 7. 请给我
+
+* 一个明确的结论（a / b / c / d），
+* 理由里单独交代"隐藏进溢出面板的图标"和"shell 自己的图标"这两类怎么处理，
+* 如果方案里要加 B，请给工程参数：多久问一次、什么条件下才问、超时与失败怎么记，
+* 以及你认为我们最容易忽略的那个风险。
