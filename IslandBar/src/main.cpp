@@ -715,6 +715,74 @@ static void ApplyNativeTaskbarMode(bool hideNativeTaskbar, bool keepNativeTray,
     }
 }
 
+// --- the window, and the strip the desktop gives up for it ---
+//
+// Moved out of RunBar verbatim, with one deliberate exception: creating the window can fail, and what to do
+// about that -- say so, put the taskbar back, leave -- stays in RunBar with the startup's other exits, so
+// this returns false instead of returning 1 from a nested function. Nothing between the failing Create and
+// the GetLastError() in RunBar calls into Windows again, which is what keeps that number meaningful.
+static bool CreateBarWindowAndClaimAppBar(bool claimAppBar, const island::MonitorGeometry& monitor,
+                                          LONG barThicknessPx, island::BarSystems& systems) {
+    // --- the AppBar: claim the strip so the desktop gives up the space -----
+    //
+    // This is what makes the island a TASKBAR rather than a floating decoration. Without it a
+    // maximized window still covers the top of the screen and the island sits on its title bar;
+    // with it the work area starts below the island, exactly as it does for the real taskbar.
+    //
+    // Claimed AFTER the window exists (the shell needs an HWND that is a real top-level window)
+    // but the window is NOT repositioned afterwards: the pill is anchored to the window's own
+    // top edge and does not read the work area, so a later work-area change cannot move it. That
+    // independence is deliberate -- it is why the tests can assert the pill's position without
+    // knowing anything about bars.
+    // `barThicknessPx` is RunBar's: it is the same measurement the full-screen exit re-claims with, so it
+    // stays where both uses can see it and comes in as a parameter (see the call).
+    if (!systems.window.Create(monitor, /*show=*/true)) return false;
+
+    systems.window.SetAppBar(&systems.appBar);
+
+    if (!claimAppBar) {
+        // Off by default, and that is a deliberate safety decision rather than an unfinished
+        // feature.
+        //
+        // Registering as an AppBar rewrites the desktop's work area, and every maximized window
+        // follows it. A first attempt at this moved every window on the machine -- including the
+        // island, because the window positioned itself from the work area it was changing -- to
+        // the bottom of the screen, and no error was reported anywhere. It cannot be reproduced
+        // from the development sandbox, where the request is refused outright as
+        // "access denied" before it can do anything.
+        //
+        // So it is opt-in until it has been seen to work on a real desktop, and the code that
+        // performs it verifies the resulting work area and gives the space back if it did not land
+        // where it was asked to. --appbar turns it on.
+        island::LogAndPrint("  appbar: not claimed (pass --appbar to claim the strip; the space"
+                            " is only reserved when asked)");
+    } else {
+        // This block is only reached when the native bar is being hidden -- the
+        // --keep-taskbar case skips the branch above entirely -- so there is no guard here.
+        //
+        // Claiming the strip while the shell's own taskbar is on screen cannot work: it already
+        // owns the top edge. A refusal is reported rather than retried, because retrying cannot
+        // change the answer.
+        systems.appBarResult = systems.appBar.Claim(systems.window.Handle(), island::DockEdge::Top, barThicknessPx);
+        island::LogAndPrint("  appbar: %ls -- %ls", island::AppBarResultName(systems.appBarResult),
+                            systems.appBar.LastDetail());
+
+        // Each outcome needs a different response, which is why they are distinguished rather
+        // than collapsed into a bool. SpaceNotGranted is the interesting one: the registration
+        // stands, so the space may become available once the shell's own bar is gone, and the
+        // shell says so with ABN_POSCHANGED.
+        if (systems.appBarResult == island::AppBarResult::NotRegistered) {
+            island::LogAndPrint("    The shell refused to register another bar on this edge;");
+            island::LogAndPrint("    that is expected while the native taskbar still owns it.");
+        } else if (systems.appBarResult == island::AppBarResult::SpaceNotGranted) {
+            island::LogAndPrint("    Registered, but the desktop did not give up the strip yet.");
+            island::LogAndPrint("    It is claimed again automatically on ABN_POSCHANGED.");
+        }
+        std::fflush(stdout);
+    }
+    return true;
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -803,71 +871,21 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // anyway, so the mode alone cannot be relied on here.
     std::fflush(stdout);
 
-    // --- the AppBar: claim the strip so the desktop gives up the space -----
+    // The window, and the AppBar: the strip the desktop gives up for it. The phase lives above RunBar and
+    // the order is unchanged; the failure path stays here, where the startup's other exits are.
     //
-    // This is what makes the island a TASKBAR rather than a floating decoration. Without it a
-    // maximized window still covers the top of the screen and the island sits on its title bar;
-    // with it the work area starts below the island, exactly as it does for the real taskbar.
-    //
-    // Claimed AFTER the window exists (the shell needs an HWND that is a real top-level window)
-    // but the window is NOT repositioned afterwards: the pill is anchored to the window's own
-    // top edge and does not read the work area, so a later work-area change cannot move it. That
-    // independence is deliberate -- it is why the tests can assert the pill's position without
-    // knowing anything about bars.
     // kReservedBarHeightDip, not margin + collapsed height: the reservation has to cover the whole
-    // chrome, and the two differ by the pill's own height. See the constant.
+    // chrome, and the two differ by the pill's own height. See the constant. Kept here because the
+    // full-screen exit re-claims with the same number (search for barThicknessPx below).
     const LONG barThicknessPx =
         island::DipToPixels(island::kReservedBarHeightDip, monitor.dpi);
-    if (!systems.window.Create(monitor, /*show=*/true)) {
+    if (!CreateBarWindowAndClaimAppBar(claimAppBar, monitor, barThicknessPx, systems)) {
         island::LogAndPrint("FATAL: could not create the window (error %lu)\n", GetLastError());
         std::fflush(stdout);
         // The taskbar was already hidden by this point, so it must not be left
         // that way because startup failed.
         systems.taskbar.Restore();
         return 1;
-    }
-
-    systems.window.SetAppBar(&systems.appBar);
-
-    if (!claimAppBar) {
-        // Off by default, and that is a deliberate safety decision rather than an unfinished
-        // feature.
-        //
-        // Registering as an AppBar rewrites the desktop's work area, and every maximized window
-        // follows it. A first attempt at this moved every window on the machine -- including the
-        // island, because the window positioned itself from the work area it was changing -- to
-        // the bottom of the screen, and no error was reported anywhere. It cannot be reproduced
-        // from the development sandbox, where the request is refused outright as
-        // "access denied" before it can do anything.
-        //
-        // So it is opt-in until it has been seen to work on a real desktop, and the code that
-        // performs it verifies the resulting work area and gives the space back if it did not land
-        // where it was asked to. --appbar turns it on.
-        island::LogAndPrint("  appbar: not claimed (pass --appbar to claim the strip; the space"
-                            " is only reserved when asked)");
-    } else {
-        // This block is only reached when the native bar is being hidden -- the
-        // --keep-taskbar case skips the branch above entirely -- so there is no guard here.
-        //
-        // Claiming the strip while the shell's own taskbar is on screen cannot work: it already
-        // owns the top edge. A refusal is reported rather than retried, because retrying cannot
-        // change the answer.
-        systems.appBarResult = systems.appBar.Claim(systems.window.Handle(), island::DockEdge::Top, barThicknessPx);
-        island::LogAndPrint("  appbar: %ls -- %ls", island::AppBarResultName(systems.appBarResult),
-                            systems.appBar.LastDetail());
-
-        // Each outcome needs a different response, which is why they are distinguished rather
-        // than collapsed into a bool. SpaceNotGranted is the interesting one: the registration
-        // stands, so the space may become available once the shell's own bar is gone, and the
-        // shell says so with ABN_POSCHANGED.
-        if (systems.appBarResult == island::AppBarResult::NotRegistered) {
-            island::LogAndPrint("    The shell refused to register another bar on this edge;");
-            island::LogAndPrint("    that is expected while the native taskbar still owns it.");
-        } else if (systems.appBarResult == island::AppBarResult::SpaceNotGranted) {
-            island::LogAndPrint("    Registered, but the desktop did not give up the strip yet.");
-            island::LogAndPrint("    It is claimed again automatically on ABN_POSCHANGED.");
-        }
-        std::fflush(stdout);
     }
 
     // --- the strip the work area reserves: give it back ----------------------

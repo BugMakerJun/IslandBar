@@ -49,13 +49,16 @@ New-Item -ItemType Directory -Force -Path $Baseline | Out-Null
 $Strict = @(
     'theme:', 'monitor ', 'native taskbar:', 'work area:', 'notifications: ', 'music: reading',
     'music: player window titles', 'volume: reading', 'sound: audio sessions', 'lyrics: on demand',
-    'weather: position', 'preview: ', 'start: account', 'tray: \d+ icon'
+    'weather: position', 'preview: ', 'start: account'
 )
 
 # Lines that are only measurements of the machinery, never of what the bar did.
 $Dropped = @(
     'interval \[', 'throttle:', 'redraws:', 'window region:', 'messages/s:', 'slow frame:',
-    'tray ring:', 'tray hook:', 'draw ', 'anim:', 'loop:', 'mem\[', 'icon decode'
+    'tray ring:', 'tray hook:', 'draw ', 'anim:', 'loop:', 'mem\[', 'icon decode',
+    # Machine-dependent events: which of the user's applications opened a window, and which taskbar
+    # buttons exist right now. They change when the user does anything at all.
+    'wechat: window appeared', 'taskbar icon: hwnd'
 )
 
 # Lines written by a worker thread: content matters, order does not (see the note above).
@@ -68,6 +71,14 @@ function Convert-Line([string]$line) {
     if (-not $trimmed) { return '' }
     # The leading "[hh:mm:ss.mmm] " stamp is always noise.
     $text = $trimmed -replace '^\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s*', ''
+    # THREE FRAGMENTS THAT DESCRIBE THE MACHINE AND NOT THE BAR, dropped before the line is classified:
+    # how many processes are running (it moves when anything at all starts, including this script), how many
+    # entries the tray's registry key holds (installing an app changes it), and the "not shown" list (which
+    # is the machine's application set). MEASURED: the first baseline went stale between two runs because
+    # the process count read 305 and then 310.
+    $text = $text -replace '\s*\(not shown:[^)]*\)', ''
+    $text = $text -replace '\d+\s+entr\(ies\)', 'entr(ies)'
+    $text = $text -replace '\d+\s+process\(es\) seen', 'process(es) seen'
     foreach ($pattern in $Dropped) { if ($text -match $pattern) { return '' } }
     foreach ($pattern in $Strict) {
         if ($text -match $pattern) { return 'STRICT ' + ($text -replace '\s+', ' ') }
@@ -85,21 +96,25 @@ function Test-Unordered([string]$text) {
     return $false
 }
 
-$ordered = New-Object System.Collections.Generic.List[string]
-$unordered = New-Object System.Collections.Generic.List[string]
+# THE NAMES ARE NOT FREE: PowerShell variable names are case-insensitive, so a bucket called `$unordered`
+# would overwrite the pattern list `$Unordered` -- which is exactly what happened, and it made the unordered
+# bucket permanently empty while the weather line (a worker thread's) sat in the timeline and moved between
+# runs. MEASURED 2026-10-16, the day the baseline was first written.
+$orderedLines = New-Object System.Collections.Generic.List[string]
+$unorderedLines = New-Object System.Collections.Generic.List[string]
 foreach ($line in [System.IO.File]::ReadAllLines($In)) {
     $converted = Convert-Line $line
     if (-not $converted) { continue }
-    if (Test-Unordered $line) { $unordered.Add($converted) } else { $ordered.Add($converted) }
+    if (Test-Unordered $line) { $unorderedLines.Add($converted) } else { $orderedLines.Add($converted) }
 }
 
 # The file is written with the ordered part first and a marker, so a reader can see which half is a timeline
 # and which half is a set. Both halves are compared.
 $normalized = New-Object System.Collections.Generic.List[string]
 $normalized.Add('=== ordered (the timeline) ===')
-foreach ($line in $ordered) { $normalized.Add($line) }
+foreach ($line in $orderedLines) { $normalized.Add($line) }
 $normalized.Add('=== unordered (worker threads; content only) ===')
-foreach ($line in ($unordered | Sort-Object)) { $normalized.Add($line) }
+foreach ($line in ($unorderedLines | Sort-Object)) { $normalized.Add($line) }
 
 $target = Join-Path $Baseline "${Name}.txt"
 $written = Join-Path $Out "${Name}.txt"

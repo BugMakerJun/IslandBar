@@ -6,8 +6,6 @@ SHAPE  integrity: same as the shell's -- this process may act on Explorer
 STRICT theme: 示例青 (from themes\) -- ink contrast 17.6:1
 STRICT theme: 1 theme(s) loaded from themes\
 STRICT theme: 玻璃 (remembered by theme.txt) -- ink contrast 8.1:1
-SHAPE  system status: <N> keyboard layout(s) installed
-SHAPE  system status: WLAN client open (version <N>)
 SHAPE  IslandBar
 STRICT monitor 2560x1440, work 2560x1408, 96 dpi, taskbar inset 32 px
 SHAPE  move the pointer onto the pill to spread it; click to open the card
@@ -20,45 +18,38 @@ SHAPE  icon hover: none (pointer local <N>,<N>, <N> icons)
 SHAPE  appbar: not claimed (pass --appbar to claim the strip; the space is only reserved when asked)
 STRICT work area: left alone (--keep-taskbar)
 STRICT notifications: listening on \\.\pipe\IslandBar.Notify
-SHAPE  toasts: reading '<PATH>
 SHAPE  music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were playing)
 STRICT music: player window titles DISABLED
-STRICT volume: reading the default output endpoint
-SHAPE  volume: peak meter acquired
-SHAPE  sound page: <N> device(s), default '扬声器', <N> session(s) [devices=<N> sessions=<N>]
 STRICT sound: audio sessions are being read (for the mixer and the WeChat channel)
 STRICT lyrics: on demand, NetEase then QQ Music
-STRICT weather: position from Windows, forecast from Open-Meteo (weather.txt can pin a city instead)
 STRICT preview: resting on a task icon shows a live thumbnail
-STRICT tray: 12 icon(s) -- the shell has not been asked for its registrations yet, so the registry list is drawn as it always was (32 entr(ies), 305 process(es) seen)
-SHAPE  tray learn: <N> of <N> icon(s) known; asking the applications to register again (background)
+SHAPE  tray: <N> icon(s) -- the shell has not been asked for its registrations yet, so the registry list is drawn as it always was (entr(ies), process(es) seen)
 STRICT start: account picture 240x240 -> 96263 byte PNG from C:\Users\Public\AccountPictures\S-1-5-21-3724115957-4217350439-2169926584-1001\{D4F37FA7-A375-424C-A59E-07AE55C960C7}-Image240.jpg
 SHAPE  
 SHAPE  start: <N> pinned application(s) from <PATH>
 SHAPE  frame pacing: waitable
-SHAPE  toasts: starting after id <N>
-SHAPE  wechat: window appeared <N> pid=<N> 'Chrome_WidgetWin_<N>' '' (<N>,<N>) <N><H> visible=<N> -> NOT a notification
-SHAPE  wechat: window appeared <N> pid=<N> 'Base_PowerMessageWindow' '' (<N>,<N>) <H> visible=<N> -> NOT a notification
-SHAPE  wechat: window appeared <N> pid=<N> 'IME' 'Default IME' (<N>,<N>) <H> visible=<N> -> NOT a notification
 SHAPE  wechat: audio baseline -- sessions <N> (was <N>), active <N> (was <N>), running <N>
-STRICT weather: position from Windows -> 41.775621, 123.441200
-STRICT tray: 12 icon(s) -- the shell has not been asked for its registrations yet, so the registry list is drawn as it always was (32 entr(ies), 305 process(es) seen)
-SHAPE  system status: bluetooth present=<N> on=<N> name='MAKER'
+SHAPE  tray: <N> icon(s) -- the shell has not been asked for its registrations yet, so the registry list is drawn as it always was (entr(ies), process(es) seen)
 SHAPE  start: <N> application(s) in shell:AppsFolder
-SHAPE  weather: <N>.<N> C, code <N> -> 晴 <N>°
 SHAPE  brightness: DDC/CI on 'Generic PnP Monitor', range <N>..<N>, now <N>
 SHAPE  brightness: the panel gets a brightness row (now <N>%)
 SHAPE  taskbar: state=collapsed, <N> buttons from <N> windows listed (<N> listed of <N>: <N> invisible, <N> cloaked, <N> untitled, <N> owned, <N> tool, <N> shell, <N> self)
 SHAPE  glass: grain built, <N>x<N>, mean <N> (deterministic seed <H>)
 SHAPE  strip says: date (state collapsed, resting collapsed, cardUp <N>, intoPill <N>, box <N>..<N>)
-SHAPE  taskbar icon: hwnd <N>D<N> -> ok
-SHAPE  taskbar icon: hwnd <N>F<N>A -> ok
-SHAPE  taskbar icon: hwnd <N>E<N>B<N>A -> ok
-SHAPE  taskbar icon: hwnd <N>B<N>AC<N> -> ok
-SHAPE  taskbar icon: hwnd <N>E -> ok
-SHAPE  taskbar icon: hwnd <N>CA -> ok
-SHAPE  row: hovered=-<N>, <N> icons on the right [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>]
+SHAPE  row: hovered=-<N>, <N> icons on the right [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>]
 SHAPE  start button: island x [<N>, <N>] -> button x [<N>, <N>] y [<N>, <N>], fill.a <N>.<N>, opacity <N>.<N>, context <N>
-SHAPE  tray learn: the shell (<N> process(es) offered) was already carrying the module, <N> registration(s) captured, <N> new entr(ies) -- <N> of <N> icon(s) have a callback entry (in <N> ms) -- observer did not report in <N> ms (<N> of the hooked threads took the message that loads the module)
-STRICT tray: 9 icon(s) -- 9 live of 32 registry entr(ies) (not shown: OneDrive.exe, OnScreen Control.exe, cc-switch.exe, QQMusicUp.exe, Weixin.exe, YY.exe and 16 more)
+SHAPE  tray: <N> icon(s) -- <N> live of <N> registry entr(ies)
 === unordered (worker threads; content only) ===
+SHAPE  sound page: <N> device(s), default '扬声器', <N> session(s) [devices=<N> sessions=<N>]
+SHAPE  system status: <N> keyboard layout(s) installed
+SHAPE  system status: bluetooth present=<N> on=<N> name='MAKER'
+SHAPE  system status: WLAN client open (version <N>)
+SHAPE  toasts: reading '<PATH>
+SHAPE  toasts: starting after id <N>
+SHAPE  tray learn: <N> of <N> icon(s) known; asking the applications to register again (background)
+SHAPE  tray learn: the shell (<N> process(es) offered) was already carrying the module, <N> registration(s) captured, <N> new entr(ies) -- <N> of <N> icon(s) have a callback entry (in <N> ms) -- observer did not report in <N> ms (<N> of the hooked threads took the message that loads the module)
+SHAPE  volume: peak meter acquired
+SHAPE  weather: <N>.<N> C, code <N> -> 晴 <N>°
+STRICT volume: reading the default output endpoint
+STRICT weather: position from Windows -> 41.775621, 123.441200
+STRICT weather: position from Windows, forecast from Open-Meteo (weather.txt can pin a city instead)
