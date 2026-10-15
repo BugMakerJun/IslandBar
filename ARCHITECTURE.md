@@ -39,16 +39,35 @@ scripts/            build.ps1 / capture-*.ps1 / snapshot.ps1
 
 ## 3. 依赖方向（唯一一条不许违反的规则）
 
+**一句话：一层只能包含它下面的层。** 真正是一条链，不是一张网：
+
 ```
-island_bar.exe（main.cpp：组装 + 消息泵）
-   |-- app/ render/ media/ shell/ platform/ services/
-   |      （这些之间可以互相调用，但共用的类型都来自 core/）
-   +-- island_domain（纯逻辑：布局、动画、命中、状态策略、JSON）
-   +-- core/（共用基础设施：日志、进程指标）
+      island_bar.exe（main.cpp + selftest：只负责组装）
+                    |
+                  cli/
+                    |
+                  app/
+                    |
+                 render/
+                    |
+   services/ ---- shell/          （shell 在 services 之上、render 之下）
+                    |
+                 media/
+                    |
+                platform/
+                    |
+                  core/           共用基础设施：日志、进程指标、纯度检查
+                    |
+                 domain/          纯逻辑：布局、动画、命中、状态策略、JSON、观察账本
 ```
 
+顺序：`domain → core → platform → media → services → shell → render → app → cli`。
+每一层是 `src/CMakeLists.txt` 里**一个静态库目标**，只向下链接。另外两个不在链上的：
+`trayhook/`（要进别的进程的模块，只许用 domain/core/platform）、`selftest/`（属于 exe，可以包含全部）。
+
 - **`src/domain/` 不许包含 `<windows.h>`**。它只做几何、布局、动画、状态策略这些能脱离桌面运行的东西——`--self-test` 能在不开窗口的情况下跑完 900+ 条断言，靠的就是这条规则真的成立。
-- 这条规则**不靠自觉**，有两层：① `src/domain/PurityCheck.cpp` 是一个只做一件事的翻译单元——包含 `domain/` 下所有头文件，然后 `#ifdef _WINDOWS_ #error`；② `island_domain` 这个目标**不链接任何库**，所以纯逻辑里出现 Win32 调用会先在编译期就被拦住。
+- 纯度检查在 **`src/core/PurityCheck.cpp`**（2026-10-16 从 `domain/` 挪过来的：它要包含 core 的头去证明那个头也是纯的，而"只能包含下面的层"不允许 domain 反向包含 core；检查本身一个字没改）。
+- 这条规则**不靠自觉**，现在有三层：① `core/PurityCheck.cpp` 是一个只做一件事的翻译单元——包含 `domain/` 下所有头文件，然后 `#ifdef _WINDOWS_ #error`；`island_domain` 仍然**不链接任何库**，所以纯逻辑里出现 Win32 调用会先在编译期被拦住。② **链接图**：某一层调用了它没有链接的层，链接器会报未定义符号。③ **include 那一半由构建系统每一步检查**：`scripts/check-layers.ps1` 在每次构建时跑，按一张"每层允许包含哪些层"的表扫 `src/`，指向上面就构建失败。**为什么需要 ③**（实测 2026-10-16）：include 根是 `src/`，所以 `shell/` 里写一句 `#include "render/Renderer.h"` 照样编得过、链得过——把检查器从默认构建里临时摘掉验证过，编译器和链接器都不会说话。
 - 需要 Win32 类型的地方（例如 `LONG`/`UINT` 的像素换算）放在 `platform/` 或各模块自己的头里，不放 `domain/`。
 - 反向依赖（`domain/` 去依赖 `shell/`、`platform/`、`render/`，或 `island_domain` 去链接它们）在评审里直接拒绝。
 
@@ -97,7 +116,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 
 ## 7. 已知的架构债（写在明处，不是等人发现）
 
-- **只有 `core/` 的边界被构建系统强制**：`island_domain` 是独立静态库，`domain/` 里不许出现 `<windows.h>`（编译期护栏）。`shell/`、`render/`、`media/`、`platform/` 之间仍是同一个目标里的翻译单元，互相 include 的门槛很低——下一步是按依赖方向再切静态库目标，逐层往上锁。
+- **层的边界已经锁住（2026-10-16）**：`domain/` 的纯度是编译期护栏，其余各层是"一个静态库 + 只向下链接"，include 那一半由 `scripts/check-layers.ps1` 在每次构建时检查（见第 3 节）。**还欠的是"层内"**：一层内部的文件之间没有约定——`render/TextRenderer.*` 想拿 `shell/` 的什么就拿、`shell/` 内部各文件互相拿类型。要收紧得靠更小的目标或前置声明，目前没做。
 - **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（5.9k / 9.0k 行，2026-10-16）。已经搬出去的三块：托盘的行为去了 `shell/TrayMenu.*`（10-15 曾随托盘一起删掉，10-16 托盘回来后重写，现在 275 行）、代替岛运行的那些命令去了 `cli/Cli.cpp`（约 950 行）、`RunBar` 里跨帧状态去了 `app/BarState.h`。
   `main.cpp` 剩下的主体仍是 `RunBar`——约 5,000 行的帧循环，装着窗口、渲染、媒体、通知、天气和系统面板的全部驱动逻辑。**状态迁移是"一组一组来"的**：每组搬完都全量重建两套配置 + 自检 + 冒烟 + 部署，这样出错一定归因到刚搬的那组（整块机械替换的风险是"静默用了外层状态"，编译器抓不住）。顺序：面板与声音页那组 → 通知与媒体那组 → 对象组（window / renderer / text / 会话）。等这些搬完，`RunBar` 才谈得上按相位切成函数。
 - **已还的债**（留着这几行是为了说明它们不再是问题）：`core/` 已抽成 `island_domain` 独立静态库（编译期护栏见第 3 节）；模块↔主程序的通道是**共享内存环 + ABI 版本号**（`platform/TrayRing.h`），同步路径里没有磁盘 I/O；安装器的载荷里带 `island_tray_hook.dll`（构建输出那行 `Copying island_bar.exe and island_tray_hook.dll into the setup payload`）。

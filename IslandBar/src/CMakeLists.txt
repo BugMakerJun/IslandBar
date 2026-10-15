@@ -27,54 +27,64 @@
 add_library(island_domain STATIC
     domain/MiniJson.cpp
     domain/Motion.cpp
-    domain/PurityCheck.cpp
     domain/TrayLedger.cpp
 )
 target_include_directories(island_domain PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
-add_executable(island_bar
-    main.cpp
-
-    # --- app: the window, and what hangs off it ----------------------
-    app/AppBar.cpp
-    app/IslandWindow.cpp
-    app/PlayerWindow.cpp
-
-    # --- cli: the commands that run instead of the bar ----------------
-    cli/Cli.cpp
-
-    # --- core: the plumbing everything shares ------------------------
+# --- one target per layer, linked only downwards ---------------------------------------
+#
+#  WHY THE SOURCES ARE NOT ALL IN ONE add_executable ANY MORE. The layers used to be directory names and a
+#  paragraph in ARCHITECTURE.md, and that paragraph said the modules "may call each other". They may not:
+#  the direction is domain -> core -> platform -> media -> services -> shell -> render -> app -> cli, and it
+#  is now a target graph, so the link stops a call that reaches a layer this one is not allowed to see.
+#
+#  WHAT THE LINK GRAPH DOES NOT CATCH, said plainly: an INCLUDE. The include root is src/ for every target
+#  (the project's form is "module/File.h"), so a file in shell/ that includes render/Renderer.h compiles and
+#  links exactly as if nothing had happened -- MEASURED 2026-10-16 by doing it on purpose. The include half
+#  of the rule is check-layers.ps1, wired in below and run on every build.
+#
+#  island_domain is still the special one: it links nothing, and no header under it may include <windows.h>
+#  (core/PurityCheck.cpp is the compile-time proof of that; it lives in core/ because it includes a core
+#  header, and a layer may only include the ones below it).
+add_library(island_core STATIC
     core/Log.cpp
     core/ProcessMetrics.cpp
+    core/PurityCheck.cpp
+)
+target_link_libraries(island_core PUBLIC island_domain)
 
-    # --- media: what is playing, and what it looks like --------------
-    media/AudioVolume.cpp
-    media/Lyrics.cpp
-    media/MusicSession.cpp
-    media/SoundOutput.cpp
-    media/WicImage.cpp
-
-    # --- platform: the Win32 and shell APIs the bar stands on --------
+add_library(island_platform STATIC
     platform/DisplayBrightness.cpp
     platform/Monitor.cpp
     platform/NativeTaskbar.cpp
     platform/ThumbnailPreview.cpp
     platform/WindowList.cpp
+)
+target_link_libraries(island_platform PUBLIC island_core)
 
-    # --- render: everything that puts pixels on the composition ------
-    render/GlassMaterial.cpp
-    render/Renderer.cpp
-    render/TextRenderer.cpp
-    render/Theme.cpp
+add_library(island_media STATIC
+    media/AudioVolume.cpp
+    media/Lyrics.cpp
+    media/MusicSession.cpp
+    media/SoundOutput.cpp
+    media/WicImage.cpp
+)
+target_link_libraries(island_media PUBLIC island_platform)
+# C++/WinRT, for the system media controls (Windows.Media.Control). Applied to the layer that uses it
+# rather than to the executable: the include directory and /await are PRIVATE, so nothing above this layer
+# can see the projection.
+islandbar_enable_cppwinrt(island_media)
 
-    # --- services: the channels that bring things in -----------------
+add_library(island_services STATIC
     services/Notification.cpp
     services/NotificationIcon.cpp
     services/NotificationPipe.cpp
     services/ToastStore.cpp
     services/WeChatWatch.cpp
+)
+target_link_libraries(island_services PUBLIC island_media)
 
-    # --- shell: the shell's own controls, mirrored -------------------
+add_library(island_shell STATIC
     shell/StartApps.cpp
     shell/StartMenu.cpp
     shell/SystemStatus.cpp
@@ -85,23 +95,52 @@ add_executable(island_bar
     shell/TrayPress.cpp
     shell/TrayUia.cpp
     shell/Weather.cpp
+)
+target_link_libraries(island_shell PUBLIC island_services)
+islandbar_enable_cppwinrt(island_shell)   # SystemToggles and Weather read the projection directly
 
-    # --- selftest: the runtime assertions (-self-test) ---------------
+add_library(island_render STATIC
+    render/GlassMaterial.cpp
+    render/Renderer.cpp
+    render/TextRenderer.cpp
+    render/Theme.cpp
+)
+target_link_libraries(island_render PUBLIC island_shell)
+
+add_library(island_app STATIC
+    app/AppBar.cpp
+    app/IslandWindow.cpp
+    app/PlayerWindow.cpp
+)
+target_link_libraries(island_app PUBLIC island_render)
+
+add_library(island_cli STATIC
+    cli/Cli.cpp
+)
+target_link_libraries(island_cli PUBLIC island_app)
+
+# --- the layer rule, checked on every build --------------------------------------------
+#
+#  The half a link line cannot see: an include that points upwards (see the note above). The script holds
+#  the rule in one readable table and names the file when it fails.
+if(WIN32)
+    add_custom_target(islandbar_layers ALL
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
+                "${CMAKE_SOURCE_DIR}/scripts/check-layers.ps1"
+        COMMENT "checking that no layer includes one above it"
+        VERBATIM
+    )
+endif()
+
+# --- the executable: main.cpp, the self-test, and the assembly -------------------------
+#
+#  src/ is the include root, and it arrives through the chain above (island_domain carries it as PUBLIC);
+#  Diagnostics.cpp is the -self-test entry point, so it belongs to the exe and may include every layer.
+add_executable(island_bar
+    main.cpp
     selftest/Diagnostics.cpp
 )
-
-# src/ is the include root: the modules are directories under it, and every
-# `#include "module/Name.h"` is resolved from here.
-target_include_directories(island_bar PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-
-# --- C++/WinRT, for the system media controls (Windows.Media.Control) ---------
-# island_bar, gsmtcprobe and geoprobe all need it, so it lives in one place.
-islandbar_enable_cppwinrt(island_bar)
-
-# The bar links the pure-logic library, which is what makes the layering visible in the build rather than
-# only in the directory names: `island_domain` has no include of <windows.h> anywhere (PurityCheck.cpp
-# enforces it) and links nothing, so a Win32 call written into it stops the build here.
-target_link_libraries(island_bar PRIVATE island_domain)
+target_link_libraries(island_bar PRIVATE island_cli)
 
 # --- the application manifest ------------------------------------------------
 #
@@ -147,8 +186,10 @@ endif()
 # off by default. Linking it here only when it exists keeps the default build free
 # of the dependency.
 if(TARGET sqlite3)
-    target_link_libraries(island_bar PRIVATE sqlite3)
-    target_compile_definitions(island_bar PRIVATE ISLANDBAR_HAVE_SQLITE=1)
+    # ... and it is the services layer that reads that database, so it is this target that carries the
+    # link and the define -- the executable only assembles.
+    target_link_libraries(island_services PRIVATE sqlite3)
+    target_compile_definitions(island_services PRIVATE ISLANDBAR_HAVE_SQLITE=1)
 endif()
 
 # --- the module that lives inside other applications -------------------------

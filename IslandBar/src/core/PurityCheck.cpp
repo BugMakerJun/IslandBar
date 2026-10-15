@@ -1,6 +1,12 @@
 // =====================================================================
 //  PurityCheck.cpp -- ONE COMPILE-TIME RULE, ENFORCED BY THE COMPILER
 //
+//  WHY IT LIVES IN core/ AND NOT in domain/ (2026-10-16): it includes core/ProcessMetrics.h to prove that
+//  header is pure too, so it was the ONE include in the project that pointed at a layer above its own --
+//  which made the layer rule "every layer may include only the ones below it" untrue. The check itself is
+//  unchanged: it is compiled one target later, and a domain header that grows a <windows.h> still fails the
+//  build.
+//
 //  WHAT IT IS. This translation unit includes the program's pure-logic headers and then fails to compile if
 //  <windows.h> has arrived with them. It has no runtime behaviour and no other job.
 //
