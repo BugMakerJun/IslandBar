@@ -1,6 +1,27 @@
 ISLANDBAR - READ THIS FIRST
 ===========================
 
+START HERE, IN THIS ORDER
+-------------------------
+
+    ARCHITECTURE.md  -- how the code is laid out, which way the dependencies point,
+                        where a feature lives, and how to build, test and verify it.
+                        Rules that the compiler enforces are stated here.
+
+    ROADMAP.md       -- what is being worked on now, in what order, and what counts
+                        as done. Also lists the open functional items.
+
+    Then, only when a specific fact is needed (a measurement, a failure and its
+    cause, a decision and who made it), go to:
+
+    FEATURES.md      -- WHAT IS ACTUALLY DONE, every feature marked A/B/C/D with
+                        its evidence. ..\README.md overstates progress.
+    HANDOFF.md       -- the full record, in Chinese: every round of work, every
+                        measured number, including the attempts that failed.
+    TESTING.md       -- how to reproduce each kind of measurement.
+    reviews/         -- the transcripts of the outside reviews (ChatGPT, Gemini)
+                        that every change is researched against.
+
 Full cross-session handoff document:
 
     FEATURES.md  (same folder) -- WHAT IS ACTUALLY DONE. Read this first.

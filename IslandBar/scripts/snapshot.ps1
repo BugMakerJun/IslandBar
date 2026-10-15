@@ -4,10 +4,15 @@
 #      powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\snapshot.ps1
 #      ... -Label before-pointer-refactor
 #
-#  There is no version control on this machine (git is not installed), and a
-#  source file was deleted during a routine clean-up with nothing to recover it
-#  from. It had to be rebuilt from memory. That is the reason this exists: a
-#  snapshot costs a second and is the only undo available.
+#  THIS FILE IS NO LONGER THE BASELINE, AND ITS ORIGINAL REASON IS GONE. It was written when this machine
+#  appeared to have no version control -- git is installed, the repository has been under it for a long time,
+#  and the rule is now "commit locally before a risky change" (see ROADMAP.md and AGENTS.md). Corrected here
+#  rather than deleted, because a script that claims something false about the machine is worse than no
+#  script: the next session reads this comment and believes it.
+#
+#  What it is still good for: a copy of the SOURCES on disk, outside the repository, for the case where a
+#  working tree gets mangled in a way git cannot recover from (a bad bulk rewrite that was never committed).
+#  Committing first is the cheaper reflex -- use that one first.
 #
 #  Copies the SOURCE only -- not build output, which is large and regenerable.
 #
