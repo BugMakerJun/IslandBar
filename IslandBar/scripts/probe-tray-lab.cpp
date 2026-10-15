@@ -12,6 +12,7 @@
 //      probe-tray-lab.exe --traycom [watch <secs>]  does CLSID_TrayNotify exist, and what interfaces does it answer to?
 //      probe-tray-lab.exe --traynotify <secs>  register a callback with the shell's own tray and watch it
 //      probe-tray-lab.exe --traywindow <secs> [x y]  a tray of OUR OWN: our window, our drawing, the shell pressing
+//      probe-tray-lab.exe --traysample <secs> [x y] a look at what a tray of our own would be: real icons, our style
 //
 //  WHY THESE THREE. The tray is not an API: it is a WINDOW inside the shell's process, and
 //  Shell_NotifyIcon is shell32 handing a registration to it (measured 2026-10-15: a synchronous
@@ -647,6 +648,50 @@ int RunUia(const wchar_t* invokeName) {
             chosen->Release();
         }
     }
+
+    // ... AND THE OVERFLOW, which is where the APPLICATIONS' icons live: the strip that is always on
+    // screen holds the shell's own buttons only (measured). The overflow is a separate top-level window,
+    // so it is a separate walk -- and the question this answers is whether its icons are in the tree
+    // BEFORE the panel is opened, because a tray of ours has to list them without showing the panel.
+    HRESULT overflowHr = S_OK;
+    ComPtr<IUIAutomationCondition> overflowClass;
+    VARIANT overflowValue = {};
+    overflowValue.vt = VT_BSTR;
+    overflowValue.bstrVal = SysAllocString(L"TopLevelWindowForOverflowXamlIsland");
+    overflowHr = automation->CreatePropertyCondition(UIA_ClassNamePropertyId, overflowValue,
+                                                     overflowClass.Put());
+    ComPtr<IUIAutomationElement> overflow;
+    if (SUCCEEDED(overflowHr)) {
+        const HRESULT found = desktop->FindFirst(TreeScope_Descendants, overflowClass.Get(),
+                                                 overflow.Put());
+        Log(L"UIA: overflow window (TopLevelWindowForOverflowXamlIsland) -> %ls (0x%08lX)",
+            overflow ? L"found" : L"NOT found", static_cast<unsigned long>(found));
+    }
+    if (overflow) {
+        ComPtr<IUIAutomationElementArray> inside;
+        if (SUCCEEDED(overflow->FindAll(TreeScope_Descendants, buttons.Get(), inside.Put())) && inside) {
+            int insideCount = 0;
+            inside->get_Length(&insideCount);
+            Log(L"UIA: %d button(s) inside the overflow window", insideCount);
+            for (int i = 0; i < insideCount && i < 24; ++i) {
+                ComPtr<IUIAutomationElement> element;
+                if (FAILED(inside->GetElement(i, element.Put())) || !element) continue;
+                const std::wstring name = ElementText(element.Get(), UIA_NamePropertyId);
+                const std::wstring cls = ElementText(element.Get(), UIA_ClassNamePropertyId);
+                BOOL offscreen = FALSE;
+                element->get_CurrentIsOffscreen(&offscreen);
+                RECT box = {};
+                element->get_CurrentBoundingRectangle(&box);
+                ComPtr<IUIAutomationInvokePattern> invoke;
+                const bool hasInvoke = SUCCEEDED(element->GetCurrentPatternAs(
+                    UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern),
+                    reinterpret_cast<void**>(invoke.Put()))) && invoke;
+                Log(L"UIA:   overflow[%d] '%.60ls' class='%ls' offscreen=%d rect=%ld,%ld %ldx%ld invoke=%d",
+                    i, name.c_str(), cls.c_str(), offscreen ? 1 : 0, box.left, box.top,
+                    box.right - box.left, box.bottom - box.top, hasInvoke ? 1 : 0);
+            }
+        }
+    }
     CoUninitialize();
     return 0;
 }
@@ -1055,7 +1100,9 @@ bool RegistryPicture(const std::wstring& cellName, std::wstring* exeOut, HICON* 
             continue;
         }
         SHFILEINFOW info = {};
-        if (!SHGetFileInfoW(exe, 0, &info, sizeof(info), SHGFI_ICON | SHGFI_SMALLICON) || !info.hIcon) {
+        // LARGEICON (32x32) rather than SMALLICON: the cell draws it at about 23 DIP, and scaling a 16
+        // pixel icon up is the difference between an icon and a smudge.
+        if (!SHGetFileInfoW(exe, 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON) || !info.hIcon) {
             continue;
         }
         *exeOut = exe;
@@ -1285,6 +1332,378 @@ int RunTrayWindow(int seconds, int x, int y) {
 
 } // namespace
 
+// --- E9, THE SAMPLE: what a tray of ours would look like, with the real icons in it -----------------
+//
+//  Everything measured so far, dressed as the thing itself. The taskbar is clipped away (no native pixel
+//  on screen), the icons come from the two automation trees -- the strip's own buttons and, in the
+//  overflow window, the APPLICATIONS' icons, which is where they actually live -- the pictures come from
+//  the shell's registry records, the cells are drawn in the bar's own material, a left click is handed to
+//  the shell through UIA, and a right click opens a menu of ours.
+//
+//  It is a SAMPLE, and says so: the five shell buttons are drawn as text glyphs rather than as art (they
+//  have no image source and would be drawn by the bar's own code in the real thing), the menu offers only
+//  what actually works here, and nothing is saved.
+namespace {
+
+constexpr int kSampleMax = 32;
+constexpr int kSampleCell = 34;
+constexpr int kSampleGap = 4;
+constexpr int kSamplePad = 8;
+
+struct SampleItem {
+    std::wstring name;         // flattened, for the menu and the log
+    bool shellButton = false;  // one of the shell's own, drawn as a glyph
+    wchar_t glyph[8] = {};     // ... that glyph
+    HICON icon = nullptr;      // or the application's icon, from the registry match
+    std::wstring exe;
+    std::wstring registryTip;  // what the registry record was called, when one matched
+    IUIAutomationElement* element = nullptr;
+};
+
+SampleItem g_sample[kSampleMax];
+int g_sampleCount = 0;
+int g_sampleHover = -1;
+HWND g_sampleWindow = nullptr;
+HWND g_samplePanel = nullptr;   // the shell's overflow panel, clipped while this sample reads it
+
+RECT SampleCellRect(int index) {
+    RECT box = {};
+    const int pitch = kSampleCell + kSampleGap;
+    box.left = kSamplePad + index * pitch;
+    box.top = kSamplePad;
+    box.right = box.left + kSampleCell;
+    box.bottom = box.top + kSampleCell;
+    return box;
+}
+
+int SampleCellAt(int x, int y) {
+    for (int i = 0; i < g_sampleCount; ++i) {
+        const RECT box = SampleCellRect(i);
+        if (x >= box.left && x < box.right && y >= box.top && y < box.bottom) return i;
+    }
+    return -1;
+}
+
+void SampleInvoke(int index) {
+    if (index < 0 || index >= g_sampleCount || !g_sample[index].element) return;
+    ComPtr<IUIAutomationInvokePattern> pattern;
+    const bool got = SUCCEEDED(g_sample[index].element->GetCurrentPatternAs(
+        UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern),
+        reinterpret_cast<void**>(pattern.Put()))) && pattern;
+    const HRESULT invoked = got ? pattern->Invoke() : E_FAIL;
+    Log(L"TRAYSAMPLE: pressed '%ls' -> Invoke hr=0x%08lX", g_sample[index].name.c_str(),
+        static_cast<unsigned long>(invoked));
+}
+
+LRESULT CALLBACK SampleProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint = {};
+            HDC dc = BeginPaint(hwnd, &paint);
+            RECT client = {};
+            GetClientRect(hwnd, &client);
+            // The bar's own material: one dark rounded surface, cells a shade lighter on it.
+            HBRUSH surface = CreateSolidBrush(RGB(30, 30, 36));
+            HPEN edge = CreatePen(PS_SOLID, 1, RGB(70, 70, 80));
+            HGDIOBJ oldBrush = SelectObject(dc, surface);
+            HGDIOBJ oldPen = SelectObject(dc, edge);
+            RoundRect(dc, client.left, client.top, client.right, client.bottom, 14, 14);
+            SelectObject(dc, oldBrush);
+            SelectObject(dc, oldPen);
+            DeleteObject(surface);
+            DeleteObject(edge);
+            SetBkMode(dc, TRANSPARENT);
+            for (int i = 0; i < g_sampleCount; ++i) {
+                const RECT box = SampleCellRect(i);
+                HBRUSH cell = CreateSolidBrush(i == g_sampleHover ? RGB(64, 64, 76) : RGB(44, 44, 52));
+                HPEN noPen = CreatePen(PS_NULL, 0, RGB(0, 0, 0));
+                oldBrush = SelectObject(dc, cell);
+                oldPen = SelectObject(dc, noPen);
+                RoundRect(dc, box.left, box.top, box.right, box.bottom, 8, 8);
+                SelectObject(dc, oldBrush);
+                SelectObject(dc, oldPen);
+                DeleteObject(cell);
+                DeleteObject(noPen);
+                const int inner = kSampleCell - 11;
+                if (g_sample[i].icon) {
+                    DrawIconEx(dc, box.left + (kSampleCell - inner) / 2,
+                               box.top + (kSampleCell - inner) / 2, g_sample[i].icon, inner, inner, 0,
+                               nullptr, DI_NORMAL);
+                } else {
+                    SetTextColor(dc, RGB(226, 226, 234));
+                    SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+                    DrawTextW(dc, g_sample[i].glyph, -1, const_cast<RECT*>(&box),
+                              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            const int cell = SampleCellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (cell != g_sampleHover) {
+                g_sampleHover = cell;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                const wchar_t* tip = cell >= 0 ? g_sample[cell].name.c_str() : L"";
+                Log(L"TRAYSAMPLE: hovering '%ls'", tip);
+            }
+            return 0;
+        }
+        case WM_LBUTTONDOWN:
+            SampleInvoke(SampleCellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)));
+            return 0;
+        case WM_RBUTTONUP: {
+            const int cell = SampleCellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (cell < 0) return 0;
+            POINT at = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ClientToScreen(hwnd, &at);
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, 1, L"打开（左键那一下）");
+            AppendMenuW(menu, MF_STRING, 2, L"打开文件位置");
+            SetForegroundWindow(hwnd);
+            const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, at.x, at.y, 0, hwnd,
+                                              nullptr);
+            DestroyMenu(menu);
+            Log(L"TRAYSAMPLE: menu for '%ls' returned %d", g_sample[cell].name.c_str(), chosen);
+            if (chosen == 1) {
+                SampleInvoke(cell);
+            } else if (chosen == 2) {
+                if (g_sample[cell].exe.empty()) {
+                    Log(L"TRAYSAMPLE: no executable is known for that one");
+                } else {
+                    std::wstring argument = L"/select,\"" + g_sample[cell].exe + L"\"";
+                    const HINSTANCE run = ShellExecuteW(nullptr, L"open", L"explorer.exe",
+                                                        argument.c_str(), nullptr, SW_SHOWNORMAL);
+                    Log(L"TRAYSAMPLE: opened the location of '%ls' -> %p", g_sample[cell].exe.c_str(),
+                        reinterpret_cast<void*>(run));
+                }
+            }
+            return 0;
+        }
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+int RunTraySample(int seconds, int x, int y) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) return 1;
+
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    const HWND tray = taskbar ? FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
+    RECT barRect = {}, trayRect = {};
+    if (taskbar && tray) {
+        GetWindowRect(taskbar, &barRect);
+        GetWindowRect(tray, &trayRect);
+        ShowWindow(taskbar, SW_SHOWNA);
+        Sleep(150);
+        HRGN sliver = CreateRectRgn(trayRect.left - barRect.left, trayRect.top - barRect.top,
+                                    trayRect.left - barRect.left + 1, trayRect.top - barRect.top + 1);
+        SetWindowRgn(taskbar, sliver, TRUE);
+        Sleep(250);
+    }
+
+    ComPtr<IUIAutomation> automation;
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(automation.Put()))) ||
+        !automation) {
+        Log(L"TRAYSAMPLE: no automation client");
+        return 1;
+    }
+    ComPtr<IUIAutomationElement> desktop;
+    automation->GetRootElement(desktop.Put());
+    VARIANT buttonType = {};
+    buttonType.vt = VT_I4;
+    buttonType.lVal = UIA_ButtonControlTypeId;
+    ComPtr<IUIAutomationCondition> buttons;
+    automation->CreatePropertyCondition(UIA_ControlTypePropertyId, buttonType, buttons.Put());
+
+    // The shell's own five, first, because a real tray puts them last and we want the applications
+    // first where the eye lands -- and each is drawn as a glyph, not as an icon.
+    auto collect = [&](const wchar_t* rootClass, bool shellButtons) {
+        ComPtr<IUIAutomationCondition> byClass;
+        VARIANT value = {};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(rootClass);
+        if (FAILED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value, byClass.Put()))) {
+            return;
+        }
+        ComPtr<IUIAutomationElement> root;
+        if (FAILED(desktop->FindFirst(TreeScope_Descendants, byClass.Get(), root.Put())) || !root) {
+            Log(L"TRAYSAMPLE: no '%ls' in the tree", rootClass);
+            return;
+        }
+        ComPtr<IUIAutomationElementArray> list;
+        if (FAILED(root->FindAll(TreeScope_Descendants, buttons.Get(), list.Put())) || !list) return;
+        int count = 0;
+        list->get_Length(&count);
+        for (int i = 0; i < count && g_sampleCount < kSampleMax; ++i) {
+            ComPtr<IUIAutomationElement> element;
+            if (FAILED(list->GetElement(i, element.Put())) || !element) continue;
+            const std::wstring cls = ElementText(element.Get(), UIA_ClassNamePropertyId);
+            const bool fromStrip = cls == L"SystemTray.AccentButton";
+            const bool fromOverflow = cls == L"SystemTray.NormalButton";
+            if (!fromStrip && !fromOverflow) continue;
+            if (shellButtons != fromStrip) continue;      // one pass for each of the two groups
+            SampleItem& item = g_sample[g_sampleCount];
+            item.name = Flattened(ElementText(element.Get(), UIA_NamePropertyId));
+            item.shellButton = fromStrip;
+            if (item.name.empty()) item.name = L"(no name)";
+            element.Get()->AddRef();
+            item.element = element.Get();
+            if (fromStrip) {
+                // Our own glyphs: these five have no image source, and in the real thing the bar draws
+                // its own volume, network and clock already.
+                if (item.name.find(L"显示隐藏") != std::wstring::npos) wcscpy_s(item.glyph, L"\u22EF");
+                else if (item.name.find(L"输入") != std::wstring::npos) wcscpy_s(item.glyph, L"\u4E2D");
+                else if (item.name.find(L"网络") != std::wstring::npos) wcscpy_s(item.glyph, L"\u7F51");
+                else if (item.name.find(L"音量") != std::wstring::npos) wcscpy_s(item.glyph, L"\u97F3");
+                else wcscpy_s(item.glyph, L"\u65F6");
+            } else {
+                std::wstring exe;
+                HICON icon = nullptr;
+                if (RegistryPicture(item.name, &exe, &icon)) {
+                    item.icon = icon;
+                    item.exe = exe;
+                } else {
+                    // No picture for this one. A cell that draws NOTHING reads as a bug rather than as
+                    // "we have no image", so the first character of the shell's own name stands in --
+                    // and the real thing would do the same until the icon arrives.
+                    item.glyph[0] = item.name.empty() || item.name[0] == L'(' ? L'?' : item.name[0];
+                    item.glyph[1] = L'\0';
+                }
+            }
+            Log(L"TRAYSAMPLE: [%d] %ls '%ls'%ls", g_sampleCount, fromStrip ? L"shell" : L"app ",
+                item.name.c_str(),
+                item.icon ? L" (icon from the registry record)" : L" (drawn as a glyph)");
+            ++g_sampleCount;
+        }
+    };
+
+    // THE OVERFLOW PANEL IS LAZY, AND A TRAY OF OURS MUST NOT SHOW IT. Measured: the applications' icons
+    // live in TopLevelWindowForOverflowXamlIsland, that window does not exist until the panel has been
+    // opened once in the session, and the shell tears it down again afterwards. So the sample asks for it
+    // with the same Invoke a click on the chevron performs, and then HIDES it again: the buttons stay in
+    // the automation tree, and the shell's own panel is not left on screen while we read it.
+    auto findOverflow = [&](IUIAutomationElement** out) {
+        *out = nullptr;
+        ComPtr<IUIAutomationCondition> byClass;
+        VARIANT value = {};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(L"TopLevelWindowForOverflowXamlIsland");
+        if (FAILED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value, byClass.Put()))) {
+            return;
+        }
+        desktop->FindFirst(TreeScope_Descendants, byClass.Get(), out);
+    };
+    ComPtr<IUIAutomationElement> overflow;
+    findOverflow(overflow.Put());
+    if (!overflow) {
+        ComPtr<IUIAutomationCondition> trayClass;
+        VARIANT value = {};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(L"Shell_TrayWnd");
+        ComPtr<IUIAutomationElement> trayRoot;
+        if (SUCCEEDED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value,
+                                                          trayClass.Put()))) {
+            desktop->FindFirst(TreeScope_Descendants, trayClass.Get(), trayRoot.Put());
+        }
+        if (trayRoot) {
+            ComPtr<IUIAutomationElementArray> strip;
+            if (SUCCEEDED(trayRoot->FindAll(TreeScope_Descendants, buttons.Get(), strip.Put())) &&
+                strip) {
+                int count = 0;
+                strip->get_Length(&count);
+                for (int i = 0; i < count; ++i) {
+                    ComPtr<IUIAutomationElement> element;
+                    if (FAILED(strip->GetElement(i, element.Put())) || !element) continue;
+                    if (Flattened(ElementText(element.Get(), UIA_NamePropertyId)).find(L"显示隐藏") ==
+                        std::wstring::npos) {
+                        continue;
+                    }
+                    ComPtr<IUIAutomationInvokePattern> invoke;
+                    if (SUCCEEDED(element->GetCurrentPatternAs(
+                            UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern),
+                            reinterpret_cast<void**>(invoke.Put()))) &&
+                        invoke) {
+                        Log(L"TRAYSAMPLE: asking the shell for its overflow panel -> Invoke 0x%08lX",
+                            static_cast<unsigned long>(invoke->Invoke()));
+                    }
+                    break;
+                }
+            }
+        }
+        Sleep(900);
+        findOverflow(overflow.Put());
+        Log(L"TRAYSAMPLE: overflow window after asking -> %ls", overflow ? L"there" : L"still absent");
+        if (overflow) {
+            UIA_HWND native = nullptr;
+            if (SUCCEEDED(overflow->get_CurrentNativeWindowHandle(&native)) && native) {
+                const HWND panel = reinterpret_cast<HWND>(native);
+                g_samplePanel = panel;
+                // CLIPPED, NOT HIDDEN, and that is the whole lesson: measured twice now, a window hidden
+                // with SW_HIDE leaves the automation tree (the taskbar's tray disappears from it, and so
+                // does this panel's icon list), while a window clipped to one pixel stays in it and stays
+                // invokable. So the shell's panel gets the same treatment the shell's taskbar gets.
+                HRGN sliver = CreateRectRgn(0, 0, 1, 1);
+                Log(L"TRAYSAMPLE: clipped the shell's panel to a sliver (not hidden) -> %d",
+                    SetWindowRgn(panel, sliver, TRUE));
+                Sleep(500);
+            }
+        }
+    }
+
+    collect(L"TopLevelWindowForOverflowXamlIsland", /*shellButtons=*/false);
+    const int separatorAfter = g_sampleCount;
+    collect(L"Shell_TrayWnd", /*shellButtons=*/true);
+    Log(L"TRAYSAMPLE: %d cell(s) -- %d application(s) then %d of the shell's own", g_sampleCount,
+        separatorAfter, g_sampleCount - separatorAfter);
+    if (g_sampleCount == 0) return 0;
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = SampleProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"TrayLabSample";
+    RegisterClassExW(&wc);
+    const int width = kSamplePad * 2 + g_sampleCount * kSampleCell + (g_sampleCount - 1) * kSampleGap;
+    const int height = kSamplePad * 2 + kSampleCell;
+    g_sampleWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"TrayLabSample",
+                                     L"tray sample", WS_POPUP | WS_VISIBLE, x, y, width, height,
+                                     nullptr, nullptr, wc.hInstance, nullptr);
+    Log(L"TRAYSAMPLE: window %p at %d,%d %dx%d -- click a cell, right-click for our menu",
+        reinterpret_cast<void*>(g_sampleWindow), x, y, width, height);
+
+    const ULONGLONG until = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+    MSG msg = {};
+    while (GetTickCount64() < until) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(20);
+    }
+    DestroyWindow(g_sampleWindow);
+    for (int i = 0; i < g_sampleCount; ++i) {
+        if (g_sample[i].icon) DestroyIcon(g_sample[i].icon);
+        if (g_sample[i].element) g_sample[i].element->Release();
+    }
+    if (taskbar) SetWindowRgn(taskbar, nullptr, TRUE);
+    if (g_samplePanel && IsWindow(g_samplePanel)) {
+        SetWindowRgn(g_samplePanel, nullptr, TRUE);   // the panel goes back to its own shape
+        ShowWindow(g_samplePanel, SW_HIDE);           // ... and away, as the shell leaves it when closed
+        g_samplePanel = nullptr;
+    }
+    Log(L"TRAYSAMPLE: closed and the taskbar's region cleared");
+    CoUninitialize();
+    return 0;
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
     OpenLog();
     if (argc < 2) {
@@ -1335,6 +1754,12 @@ int main(int argc, char** argv) {
         const int x = (argc > 3) ? std::atoi(argv[3]) : 1180;
         const int y = (argc > 4) ? std::atoi(argv[4]) : 60;
         return RunTrayWindow(seconds > 0 ? seconds : 30, x, y);
+    }
+    if (std::strcmp(argv[1], "--traysample") == 0) {
+        const int seconds = (argc > 2) ? std::atoi(argv[2]) : 45;
+        const int x = (argc > 3) ? std::atoi(argv[3]) : 1700;
+        const int y = (argc > 4) ? std::atoi(argv[4]) : 6;
+        return RunTraySample(seconds > 0 ? seconds : 45, x, y);
     }
     Log(L"unknown command");
     return 2;
