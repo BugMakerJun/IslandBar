@@ -1,6 +1,15 @@
 ISLANDBAR - READ THIS FIRST
 ===========================
 
+THE RULES MOVED (2026-10-16)
+----------------------------
+
+This file is now the entry point and the command reference, and nothing else. Every rule it used
+to carry below -- the integrity trap, ASCII-only scripts, no pwsh 7, IDCompositionEffectGroup, the
+push gate, the ACL trap, the D2D brush type, the cmd `&` trap, UIPI on taskbar actions -- has been
+consolidated into AGENTS.md, which is read automatically at the start of every session and is the
+single authority. If the two disagree anywhere, AGENTS.md wins and the text below is history.
+
 START HERE, IN THIS ORDER
 -------------------------
 
