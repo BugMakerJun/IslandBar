@@ -1798,7 +1798,7 @@ int RunTraySample(int seconds, int x, int y) {
 //            capability exists at all, not as a design.
 namespace {
 
-int RunRightClick(const wchar_t* wanted, bool sendInput, bool keepPanelVisible) {
+int RunRightClick(const wchar_t* wanted, bool sendInput, bool keepPanelVisible, bool byKeyboard) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(com) && com != RPC_E_CHANGED_MODE) return 1;
     ComPtr<IUIAutomation> automation;
@@ -1933,6 +1933,39 @@ int RunRightClick(const wchar_t* wanted, bool sendInput, bool keepPanelVisible) 
     }
 
     const POINT middle = {(box.left + box.right) / 2, (box.top + box.bottom) / 2};
+
+    // --- the keyboard route, which needs neither pixels nor the pointer ---------------------------------
+    //
+    //  A tray icon is a handled control: in the real tray, giving it focus and pressing the context-menu key
+    //  opens its menu -- the shell does it, so an application's own entries appear. Neither half of that
+    //  costs what a real click costs: the keyboard does not need the icon to be under the pointer, and it
+    //  does not need the icon to be ON SCREEN at all as far as hit testing is concerned. Whether the shell's
+    //  XAML tray honours it -- and whether SetFocus can reach another process's element at all -- is the
+    //  question this answers.
+    if (byKeyboard) {
+        const HRESULT focus = match->SetFocus();
+        Sleep(150);
+        UIA_HWND native = nullptr;
+        match->get_CurrentNativeWindowHandle(&native);
+        HWND target = reinterpret_cast<HWND>(native);
+        if (!target) target = FindWindowW(L"Shell_TrayWnd", nullptr);
+        const HWND focused = GetFocus();
+        const HWND foreground = GetForegroundWindow();
+        Log(L"RIGHTCLICK: SetFocus -> 0x%08lX; our focus %p, foreground %p, target %p",
+            static_cast<unsigned long>(focus), reinterpret_cast<void*>(focused),
+            reinterpret_cast<void*>(foreground), reinterpret_cast<void*>(target));
+        PostMessageW(target, WM_KEYDOWN, VK_APPS, 0);
+        PostMessageW(target, WM_KEYUP, VK_APPS, 0);
+        Sleep(200);
+        PostMessageW(target, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(target),
+                     (middle.y << 16) | (middle.x & 0xFFFF));
+        Log(L"RIGHTCLICK: posted the context-menu key and WM_CONTEXTMENU to %p", target);
+        Sleep(1200);
+        match->Release();
+        CoUninitialize();
+        return 0;
+    }
+
     // A REAL CLICK NEEDS REAL PIXELS, and the panel may still be clipped from an earlier run of this probe
     // (a window region outlives the process that set it). So the panel is put back on screen here, after
     // the search rather than during it -- the search can succeed while the panel is one invisible pixel.
@@ -2064,7 +2097,8 @@ int main(int argc, char** argv) {
         const bool sendInput = (argc > 3) && (std::strcmp(argv[3], "send") == 0 ||
                                               std::strcmp(argv[3], "sendvisible") == 0);
         const bool keepPanelVisible = (argc > 3) && std::strcmp(argv[3], "sendvisible") == 0;
-        return RunRightClick(wanted, sendInput, keepPanelVisible);
+        const bool byKeyboard = (argc > 3) && std::strcmp(argv[3], "keys") == 0;
+        return RunRightClick(wanted, sendInput, keepPanelVisible, byKeyboard);
     }
     Log(L"unknown command");
     return 2;
