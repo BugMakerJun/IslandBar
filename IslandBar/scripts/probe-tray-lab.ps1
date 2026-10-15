@@ -22,6 +22,14 @@ $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $PSScriptRoot 'probe-tray-lab.cpp'
 $outDir = Join-Path $env:USERPROFILE 'IslandBar\traylab'
 $outExe = Join-Path $outDir 'probe-tray-lab.exe'
+$observerSource = Join-Path $PSScriptRoot 'probe-tray-observer.cpp'
+# A NEW NAME FOR EVERY BUILD, and that is not tidiness: the module pins itself inside Explorer (see its
+# header -- an unloadable module there is how Explorer was crashed), so the file Explorer holds stays locked
+# and the next build cannot overwrite it. A stamped name means a rebuild never needs Explorer to restart;
+# the price is that Explorer keeps every build it has seen pinned until it restarts, which one Explorer
+# restart clears.
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$outObserver = Join-Path $outDir ("probe-tray-observer-$stamp.dll")
 
 if (-not (Test-Path $source)) { throw "no source at $source" }
 
@@ -32,10 +40,20 @@ if (-not $cl) { throw "cl.exe is not available -- env.ps1 did not find a Visual 
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
+# The observer module: it goes INSIDE explorer, so it is its own DLL and the probe loads it. See the
+# header of probe-tray-observer.cpp for why it pins itself and what it is allowed to do (read, nothing else).
+if (Test-Path $observerSource) {
+    Write-Host "[lab] compiling the observer module"
+    & cl.exe /nologo /W4 /EHsc /O2 /utf-8 /LD /Fo:(Join-Path $outDir 'probe-tray-observer.obj') `
+        /Fe:$outObserver $observerSource /link user32.lib
+    if ($LASTEXITCODE -ne 0) { throw "the observer module did not build ($LASTEXITCODE)" }
+    Write-Host "[lab] built: $outObserver"
+}
+
 $obj = Join-Path $outDir 'probe-tray-lab.obj'
 Write-Host "[lab] compiling $source"
 & cl.exe /nologo /W4 /EHsc /O2 /utf-8 /Fo:$obj /Fe:$outExe $source `
-    /link user32.lib shell32.lib gdi32.lib advapi32.lib ole32.lib oleaut32.lib uiautomationcore.lib
+    /link user32.lib shell32.lib gdi32.lib advapi32.lib ole32.lib oleaut32.lib uiautomationcore.lib dwmapi.lib
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with $LASTEXITCODE" }
 
 Write-Host "[lab] built: $outExe"
@@ -50,3 +68,4 @@ Write-Host "  & '$outExe' --crop off           # E2: put the whole taskbar back"
 Write-Host "  & '$outExe' --reparent           # E3: can the shell's tray window move?"
 
 if (-not $KeepExe) { Remove-Item -LiteralPath $obj -Force -ErrorAction SilentlyContinue }
+

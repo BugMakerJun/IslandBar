@@ -14,6 +14,12 @@
 //      probe-tray-lab.exe --traywindow <secs> [x y]  a tray of OUR OWN: our window, our drawing, the shell pressing
 //      probe-tray-lab.exe --traysample <secs> [x y] a look at what a tray of our own would be: real icons, our style
 //      probe-tray-lab.exe --rightclick <name> [post|send]  can an icon's OWN right-click menu be reached?
+//      probe-tray-lab.exe --appbar <x> <y> [secs]  the user's idea: can the taskbar be MOVED (AppBar, not SetWindowPos)?
+//      probe-tray-lab.exe --thumbdump <x> <y> <w> <h> [clip]  the REAL tray drawn inside our own window
+//      probe-tray-lab.exe --observe <secs> [broadcast]  route A, step 1: watch the registrations in explorer
+//      probe-tray-lab.exe --sendright <name> <x> <y> [v4|v3|all]  route A, step 2: its own right click
+//      probe-tray-lab.exe --traylive [x y]  THE CASE TO LOOK AT: our cells, the applications' own behaviour
+//      probe-tray-lab.exe --dump <name>   what does the SHELL really send that application? (real click)
 //
 //  WHY THESE THREE. The tray is not an API: it is a WINDOW inside the shell's process, and
 //  Shell_NotifyIcon is shell32 handing a registration to it (measured 2026-10-15: a synchronous
@@ -55,6 +61,7 @@
 #include <cstring>
 #include <cwchar>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -2026,6 +2033,1300 @@ int RunRightClick(const wchar_t* wanted, bool sendInput, bool keepPanelVisible, 
 
 } // namespace
 
+// --- E11, CAN THE TASKBAR BE MOVED AT ALL? (the user's idea needs this) ---------------------------
+//
+//  THE IDEA: crop the shell's taskbar down to its tray and put THAT inside a card of ours. Then the tray
+//  inside the card is the REAL tray -- real pixels, real clicks, real application menus -- and none of the
+//  expensive routes (a module in Explorer, or being the shell) are needed.
+//
+//  WHAT IT NEEDS, AND WHAT HAS ALREADY BEEN MEASURED:
+//    * the taskbar does get clipped to the tray (measured, E2), and clicks in the clipped-away part fall
+//      through to the desktop;
+//    * SetWindowPos on the taskbar REPORTS SUCCESS AND DOES NOTHING (measured, E4) -- the shell puts its
+//      own rectangle straight back;
+//    * re-parenting the tray window is accepted, but its PIXELS stay where the shell paints them, because
+//      Windows 11 paints this taskbar from a composition surface belonging to the whole bar (measured,
+//      E3b).
+//
+//  So the one lever left is the API the shell's own taskbar uses to place itself: the AppBar message
+//  ABM_SETPOS. If the taskbar is positioned by that, a third party may be able to ask for a new rectangle
+//  and have it stick. This mode asks, reports the rectangle the shell granted, watches whether the window
+//  actually moves, and then asks for the original rectangle back.
+//
+//  MEASURED: IT DOES NOT MOVE. ABM_SETPOS returns 1 and answers with the requested rectangle, and 250 ms
+//  later the taskbar is exactly where it was -- the shell puts its own position straight back, the same way
+//  it does for SetWindowPos. So the real tray cannot be MOVED into a card.
+//
+//  WHICH LEAVES THE IMAGE. A DWM thumbnail can be told which part of a source window to draw, and where to
+//  draw it, which is exactly what "the tray's pixels, inside my card" needs -- the bar already uses this for
+//  its window previews. It is a picture: clicks do not follow, so what it can and cannot give is worth
+//  knowing before anything is designed around it.
+#include <shellapi.h>
+
+#include <dwmapi.h>
+
+// A CARD THAT LETS THE CLICK THROUGH. The one thing the whole idea turns on: if a topmost window of ours
+// covers the shell's tray, does a click land on OUR window (in which case the real tray is unreachable), or
+// does it reach the shell underneath (in which case the real tray keeps every one of its behaviours and we
+// only have to dress it). WS_EX_TRANSPARENT + WS_EX_LAYERED is Windows' own way of saying "not here".
+LRESULT CALLBACK CoverProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_ERASEBKGND) {
+        RECT client = {};
+        GetClientRect(hwnd, &client);
+        HBRUSH wash = CreateSolidBrush(RGB(40, 120, 200));
+        FillRect(reinterpret_cast<HDC>(wparam), &client, wash);
+        DeleteObject(wash);
+        return 1;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+int RunCover(int x, int y, int width, int height, int seconds) {
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = CoverProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"TrayLabCover";
+    RegisterClassExW(&wc);
+    const HWND cover = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                                       L"TrayLabCover", L"cover", WS_POPUP | WS_VISIBLE, x, y, width,
+                                       height, nullptr, nullptr, wc.hInstance, nullptr);
+    SetLayeredWindowAttributes(cover, 0, 150, LWA_ALPHA);
+    Log(L"COVER: our click-through card %p over %d,%d %dx%d (alpha 150 so it is visible in a photo)",
+        reinterpret_cast<void*>(cover), x, y, width, height);
+    HWND under = WindowFromPoint(POINT{(x + width) / 2, (y + height) / 2});
+    wchar_t cls[128] = {};
+    if (under) GetClassNameW(under, cls, 128);
+    DWORD pid = 0;
+    if (under) GetWindowThreadProcessId(under, &pid);
+    Log(L"COVER: the window under the middle of it is %p '%ls' (pid %lu) -- that is what a click would hit",
+        reinterpret_cast<void*>(under), cls, pid);
+    Sleep(static_cast<DWORD>(seconds) * 1000);
+    DestroyWindow(cover);
+    Log(L"COVER: gone");
+    return 0;
+}
+
+int RunThumbDump(int x, int y, int width, int height, bool clipTaskbar) {
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    const HWND tray = taskbar ? FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
+    if (!taskbar || !tray) {
+        Log(L"THUMB: no taskbar/tray");
+        return 1;
+    }
+    RECT bar = {}, trayRect = {};
+    GetWindowRect(taskbar, &bar);
+    GetWindowRect(tray, &trayRect);
+    if (clipTaskbar) {
+        ShowWindow(taskbar, SW_SHOWNA);
+        Sleep(200);
+        HRGN sliver = CreateRectRgn(trayRect.left - bar.left, trayRect.top - bar.top,
+                                    trayRect.left - bar.left + 1, trayRect.top - bar.top + 1);
+        SetWindowRgn(taskbar, sliver, TRUE);
+        Sleep(300);
+        Log(L"THUMB: the taskbar is clipped to one pixel -- nothing of it is on screen");
+    } else {
+        Log(L"THUMB: the taskbar is as it is (visible=%d)", IsWindowVisible(taskbar) ? 1 : 0);
+    }
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"TrayLabThumb";
+    wc.hbrBackground = CreateSolidBrush(RGB(24, 24, 30));
+    RegisterClassExW(&wc);
+    const HWND card = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"TrayLabThumb", L"thumb",
+                                      WS_POPUP | WS_VISIBLE, x, y, width, height, nullptr, nullptr,
+                                      wc.hInstance, nullptr);
+    Log(L"THUMB: our card %p at %d,%d %dx%d", reinterpret_cast<void*>(card), x, y, width, height);
+
+    // THE POINT: the source rectangle is the TRAY's own rectangle inside the taskbar, and the destination is
+    // our whole card -- so the card shows exactly those pixels of the shell's bar and nothing else.
+    HTHUMBNAIL thumbnail = nullptr;
+    const HRESULT registered = DwmRegisterThumbnail(card, taskbar, &thumbnail);
+    Log(L"THUMB: DwmRegisterThumbnail -> 0x%08lX, handle %p", static_cast<unsigned long>(registered),
+        reinterpret_cast<void*>(thumbnail));
+    if (!thumbnail) return 1;
+    DWM_THUMBNAIL_PROPERTIES properties = {};
+    properties.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY | DWM_TNP_VISIBLE;
+    properties.rcSource.left = trayRect.left - bar.left;
+    properties.rcSource.top = trayRect.top - bar.top;
+    properties.rcSource.right = trayRect.right - bar.left;
+    properties.rcSource.bottom = trayRect.bottom - bar.top;
+    properties.rcDestination.left = 0;   // our card's client area
+    properties.rcDestination.top = 0;
+    properties.rcDestination.right = width;
+    properties.rcDestination.bottom = height;
+    properties.opacity = 255;
+    properties.fVisible = TRUE;
+    const HRESULT set = DwmUpdateThumbnailProperties(thumbnail, &properties);
+    Log(L"THUMB: source %ld,%ld %ldx%ld -> destination %dx%d, DwmUpdateThumbnailProperties 0x%08lX",
+        properties.rcSource.left, properties.rcSource.top,
+        properties.rcSource.right - properties.rcSource.left,
+        properties.rcSource.bottom - properties.rcSource.top, width, height,
+        static_cast<unsigned long>(set));
+    RedrawWindow(card, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+
+    Log(L"THUMB: holding 12 s -- photograph the card now");
+    Sleep(12000);
+    DwmUnregisterThumbnail(thumbnail);
+    DestroyWindow(card);
+    if (clipTaskbar) SetWindowRgn(taskbar, nullptr, TRUE);
+    Log(L"THUMB: unregistered and put back");
+    return 0;
+}
+
+// --- E12, ROUTE A: watch the registrations, then send an application its own click -------------------
+//
+//  STEP ONE, --observe: load the observer module into explorer with a WH_CALLWNDPROC hook on the thread that
+//  owns the shell's taskbar, optionally broadcast TaskbarCreated so applications re-register (that message
+//  is how the shell tells them the taskbar was rebuilt, and the applications we need to hear from registered
+//  before we were listening), then read the file the module writes.
+//
+//  STEP TWO, --sendright: find that application's registration in the file, and send it exactly the message
+//  its own tray icon would receive -- WM_RBUTTONDOWN then WM_RBUTTONUP with the uid in wParam -- from a
+//  process that is NOT the shell. Whether the application answers, and whether its menu appears where the
+//  pointer is, is the whole question.
+namespace {
+
+std::wstring ObservedFilePath() {
+    wchar_t profile[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) == 0) return {};
+    std::wstring path = profile;
+    path += L"\\IslandBar\\tray_observed.txt";
+    return path;
+}
+
+int RunObserve(int seconds, bool broadcast) {
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring directory = exe;
+    const size_t slash = directory.find_last_of(L'\\');
+    directory = directory.substr(0, slash + 1);
+
+    // The newest build of the observer, because the build script stamps every build with a new name (the copy
+    // Explorer holds is pinned and locked, so a fixed name could never be rebuilt).
+    std::wstring dllPath;
+    WIN32_FIND_DATAW found = {};
+    const std::wstring pattern = directory + L"probe-tray-observer*.dll";
+    HANDLE search = FindFirstFileW(pattern.c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        FILETIME newest = {};
+        do {
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (CompareFileTime(&found.ftLastWriteTime, &newest) >= 0) {
+                newest = found.ftLastWriteTime;
+                dllPath = directory + found.cFileName;
+            }
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
+    if (dllPath.empty()) {
+        Log(L"OBSERVE: no observer module in '%ls' -- run scripts\\probe-tray-lab.ps1 first",
+            directory.c_str());
+        return 1;
+    }
+
+    const HMODULE module = LoadLibraryW(dllPath.c_str());
+    Log(L"OBSERVE: LoadLibrary('%ls') -> %p (error %lu)", dllPath.c_str(),
+        reinterpret_cast<void*>(module), module ? 0UL : GetLastError());
+    if (!module) return 1;
+    const auto proc = reinterpret_cast<HOOKPROC>(GetProcAddress(module, "IslandTrayObserverProc"));
+    if (!proc) {
+        Log(L"OBSERVE: the module has no IslandTrayObserverProc");
+        return 1;
+    }
+
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!taskbar) {
+        Log(L"OBSERVE: no Shell_TrayWnd to find the shell's thread from");
+        return 1;
+    }
+    DWORD pid = 0;
+    const DWORD thread = GetWindowThreadProcessId(taskbar, &pid);
+    Log(L"OBSERVE: the shell's taskbar is pid %lu thread %lu", pid, thread);
+
+    SetLastError(0);
+    const HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, proc, module, thread);
+    Log(L"OBSERVE: SetWindowsHookEx(WH_CALLWNDPROC, thread %lu) -> %p (error %lu)", thread,
+        reinterpret_cast<void*>(hook), hook ? 0UL : GetLastError());
+    if (!hook) return 1;
+
+    if (broadcast) {
+        // What the shell sends when its taskbar is rebuilt. Applications answer it by registering their
+        // icons again -- which is the only way to hear from one that registered before we were listening.
+        const UINT created = RegisterWindowMessageW(L"TaskbarCreated");
+        PostMessageW(HWND_BROADCAST, created, 0, 0);
+        Log(L"OBSERVE: broadcast TaskbarCreated (0x%04X) and waiting for registrations", created);
+    }
+
+    Log(L"OBSERVE: watching for %d s -- start or restart a tray application now", seconds);
+    Sleep(static_cast<DWORD>(seconds) * 1000);
+
+    UnhookWindowsHookEx(hook);
+    Log(L"OBSERVE: hook removed (the module stays pinned in the shell until it restarts)");
+    return 0;
+}
+
+// One registration, as the observer file holds it.
+struct ObservedRegistration {
+    unsigned pid = 0;          // the receiver of the registration: the shell. Useless, and kept so the log
+                               // shows that it is: the sender's identity lives in windowPid.
+    unsigned uid = 0;
+    unsigned callback = 0;
+    unsigned window = 0;
+    unsigned command = 0;
+    unsigned windowPid = 0;    // the process that actually registered the icon
+    unsigned version = 0;      // uVersion, non-zero only on the NIM_SETVERSION line
+    std::wstring windowClass;
+    std::wstring tip;
+};
+
+bool ParseObserved(const std::wstring& line, ObservedRegistration* out) {
+    int pid = 0, command = 0, uid = 0, callback = 0, window = 0, windowPid = 0, version = 0;
+    unsigned flags = 0;
+    wchar_t windowClass[65] = {};
+    wchar_t tip[129] = {};
+    // The tail matches the observer's current format; lines written before it existed fail to parse and are
+    // skipped rather than mis-read (a wrong field silently produces a wrong experiment).
+    if (swscanf_s(line.c_str(),
+                  L"[%*d:%*d:%*d.%*d] registration from pid %d: command=%d uid=%d flags=0x%X "
+                  L"callback=0x%X window=0x%X windowPid=%d windowClass='%64[^']' version=%d tip='%128[^']'",
+                  &pid, &command, &uid, &flags, &callback, &window, &windowPid, windowClass, 65, &version,
+                  tip, 129) < 10) {
+        return false;
+    }
+    out->pid = static_cast<unsigned>(pid);
+    out->command = static_cast<unsigned>(command);
+    out->uid = static_cast<unsigned>(uid);
+    out->callback = static_cast<unsigned>(callback);
+    out->window = static_cast<unsigned>(window);
+    out->windowPid = static_cast<unsigned>(windowPid);
+    out->version = static_cast<unsigned>(version);
+    out->windowClass = windowClass;
+    out->tip = tip;
+    return true;
+}
+
+// --- screen evidence: a full-screen grab, a difference, and a file ----------
+//
+// The question "did the application show its menu" has to be answered by pixels, not by the return value of
+// SendMessage (a window procedure returning 0 says nothing at all). So every attempt is bracketed by grabs:
+// two before the first attempt establish the noise floor (this machine has an animated bar in the top strip),
+// and one after each attempt shows whether anything appeared and where.
+struct ScreenShot {
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> pixels;   // 32 bpp BGRA, top-down
+};
+
+bool CaptureScreen(ScreenShot* shot) {
+    const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const int originX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int originY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    if (width <= 0 || height <= 0) return false;
+
+    HDC screen = GetDC(nullptr);
+    if (!screen) return false;
+    HDC memory = CreateCompatibleDC(screen);
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;      // negative: rows come out top-down
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    bool ok = false;
+    if (bitmap && bits) {
+        HGDIOBJ previous = SelectObject(memory, bitmap);
+        ok = BitBlt(memory, 0, 0, width, height, screen, originX, originY, SRCCOPY) != FALSE;
+        SelectObject(memory, previous);
+        if (ok) {
+            shot->width = width;
+            shot->height = height;
+            shot->pixels.assign(static_cast<unsigned char*>(bits),
+                                static_cast<unsigned char*>(bits) + (static_cast<size_t>(width) * height * 4));
+        }
+    }
+    if (bitmap) DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    return ok;
+}
+
+// How many pixels changed by more than a hair, and where the change is. A menu is thousands of pixels; the
+// bar's own animation is the noise floor and is measured before anything is sent.
+long long ShotDiff(const ScreenShot& a, const ScreenShot& b, RECT* box) {
+    if (a.width != b.width || a.height != b.height || a.pixels.empty()) return -1;
+    long long changed = 0;
+    RECT bounds = {a.width, a.height, -1, -1};
+    for (int y = 0; y < a.height; ++y) {
+        const unsigned char* rowA = a.pixels.data() + static_cast<size_t>(y) * a.width * 4;
+        const unsigned char* rowB = b.pixels.data() + static_cast<size_t>(y) * b.width * 4;
+        for (int x = 0; x < a.width; ++x) {
+            const unsigned char* pa = rowA + x * 4;
+            const unsigned char* pb = rowB + x * 4;
+            const int d = std::abs(pa[0] - pb[0]) + std::abs(pa[1] - pb[1]) + std::abs(pa[2] - pb[2]);
+            if (d > 24) {
+                ++changed;
+                if (x < bounds.left) bounds.left = x;
+                if (x > bounds.right) bounds.right = x;
+                if (y < bounds.top) bounds.top = y;
+                if (y > bounds.bottom) bounds.bottom = y;
+            }
+        }
+    }
+    if (box) *box = bounds;
+    return changed;
+}
+
+bool SaveShotBmp(const ScreenShot& shot, const std::wstring& path) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || !file) return false;
+    const unsigned rowBytes = static_cast<unsigned>(shot.width) * 4;
+    const unsigned imageBytes = rowBytes * static_cast<unsigned>(shot.height);
+    BITMAPFILEHEADER header = {};
+    BITMAPINFOHEADER info = {};
+    header.bfType = 0x4D42;
+    header.bfOffBits = sizeof(header) + sizeof(info);
+    header.bfSize = header.bfOffBits + imageBytes;
+    info.biSize = sizeof(info);
+    info.biWidth = shot.width;
+    info.biHeight = -shot.height;    // negative: the rows are stored top-down, and a file that says
+                                     // otherwise opens upside down (measured, and it was confusing)
+    info.biPlanes = 1;
+    info.biBitCount = 32;
+    info.biCompression = BI_RGB;
+    info.biSizeImage = imageBytes;
+    const bool ok = std::fwrite(&header, sizeof(header), 1, file) == 1 &&
+                    std::fwrite(&info, sizeof(info), 1, file) == 1 &&
+                    std::fwrite(shot.pixels.data(), imageBytes, 1, file) == 1;
+    std::fclose(file);
+    return ok;
+}
+
+// The mandatory level of a process' token: the number that decides whether a message from us is delivered at
+// all. An application running higher than us is silently deaf to every message we send (UIPI), which looks
+// exactly like "the application ignored the message".
+std::wstring IntegrityOf(unsigned pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return L"unreadable";
+    HANDLE token = nullptr;
+    std::wstring result = L"unreadable";
+    if (OpenProcessToken(process, TOKEN_QUERY, &token)) {
+        DWORD size = 0;
+        GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &size);
+        std::vector<unsigned char> buffer(size);
+        if (size && GetTokenInformation(token, TokenIntegrityLevel, buffer.data(), size, &size)) {
+            const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buffer.data());
+            const unsigned char count = *GetSidSubAuthorityCount(label->Label.Sid);
+            const DWORD rid = *GetSidSubAuthority(label->Label.Sid, count - 1);
+            result = (rid >= SECURITY_MANDATORY_SYSTEM_RID)     ? L"System"
+                     : (rid >= SECURITY_MANDATORY_HIGH_RID)     ? L"High"
+                     : (rid >= SECURITY_MANDATORY_MEDIUM_RID)   ? L"Medium"
+                     : (rid >= SECURITY_MANDATORY_LOW_RID)      ? L"Low"
+                                                                : L"Untrusted";
+        }
+        CloseHandle(token);
+    }
+    CloseHandle(process);
+    return result;
+}
+
+// What an application puts on the screen is a WINDOW, and a window can be listed, named and measured. That
+// is a far better answer to "did its menu appear, and where" than a pixel count: a pixel count cannot tell a
+// menu apart from any other window that happened to open at the same moment (which is not hypothetical --
+// it happened on the first run of this experiment, and the only reason it was visible was a screenshot).
+struct WindowInfo {
+    HWND handle = nullptr;
+    std::wstring className;
+    std::wstring title;
+    RECT rect = {};
+    bool visible = false;
+    bool topLevel = true;
+};
+
+struct WindowEnumContext {
+    DWORD pid = 0;
+    std::vector<WindowInfo>* out = nullptr;
+};
+
+BOOL CALLBACK CollectWindow(HWND handle, LPARAM parameter) {
+    auto* context = reinterpret_cast<WindowEnumContext*>(parameter);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(handle, &pid);
+    if (context->pid != 0 && pid != context->pid) return TRUE;   // pid 0 means "every process"
+    {
+        // Only windows somebody could see: a menu that never becomes visible is not a menu, and the
+        // hidden helper windows of an Electron application would otherwise drown the report.
+        if (!IsWindowVisible(handle)) return TRUE;
+        RECT box = {};
+        GetWindowRect(handle, &box);
+        if (box.right - box.left <= 0 || box.bottom - box.top <= 0) return TRUE;
+    }
+    WindowInfo info;
+    info.handle = handle;
+    wchar_t text[256] = {};
+    GetClassNameW(handle, text, 256);
+    info.className = text;
+    text[0] = L'\0';
+    GetWindowTextW(handle, text, 256);
+    info.title = text;
+    GetWindowRect(handle, &info.rect);
+    info.visible = IsWindowVisible(handle) != FALSE;
+    context->out->push_back(info);
+    return TRUE;
+}
+
+void ListWindows(DWORD pid, std::vector<WindowInfo>* out) {
+    out->clear();
+    WindowEnumContext context;
+    context.pid = pid;
+    context.out = out;
+    EnumWindows(CollectWindow, reinterpret_cast<LPARAM>(&context));
+}
+
+const WindowInfo* FindWindowInfo(const std::vector<WindowInfo>& list, HWND handle) {
+    for (const WindowInfo& info : list) {
+        if (info.handle == handle) return &info;
+    }
+    return nullptr;
+}
+
+// Compares two listings and writes what is new and what changed visibility. Silence is the interesting case:
+// it means the application answered nothing at all.
+int ReportWindowDelta(const std::vector<WindowInfo>& before, const std::vector<WindowInfo>& after,
+                      const wchar_t* label) {
+    int reported = 0;
+    for (const WindowInfo& info : after) {
+        const WindowInfo* was = FindWindowInfo(before, info.handle);
+        const bool isNew = was == nullptr;
+        const bool appeared = was && !was->visible && info.visible;
+        const bool moved = was && (was->rect.left != info.rect.left || was->rect.top != info.rect.top ||
+                                   was->rect.right != info.rect.right || was->rect.bottom != info.rect.bottom);
+        if (!isNew && !appeared && !moved) continue;
+        Log(L"SENDRIGHT: %ls window 0x%X %ls class '%ls' title '%ls' rect %ld,%ld..%ld,%ld (%lux%lu)%s",
+            label, static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(info.handle)),
+            isNew ? L"NEW" : (appeared ? L"APPEARED" : L"MOVED"), info.className.c_str(), info.title.c_str(),
+            info.rect.left, info.rect.top, info.rect.right, info.rect.bottom,
+            static_cast<unsigned long>(info.rect.right - info.rect.left),
+            static_cast<unsigned long>(info.rect.bottom - info.rect.top), info.visible ? L"" : L" (hidden)");
+        ++reported;
+    }
+    for (const WindowInfo& info : before) {
+        const WindowInfo* now = FindWindowInfo(after, info.handle);
+        if (now && info.visible == now->visible) continue;
+        if (!now) {
+            Log(L"SENDRIGHT: %ls window 0x%X GONE class '%ls' title '%ls'",
+                label, static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(info.handle)), info.className.c_str(),
+                info.title.c_str());
+            ++reported;
+        }
+    }
+    if (reported == 0) Log(L"SENDRIGHT: %ls no window of that process appeared, moved or went away", label);
+    return reported;
+}
+
+int RunSendRight(const wchar_t* wanted, int x, int y, const std::wstring& mode) {
+    const std::wstring path = ObservedFilePath();
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"r, ccs=UTF-8") != 0 || !file) {
+        Log(L"SENDRIGHT: cannot read '%ls' -- run --observe first", path.c_str());
+        return 1;
+    }
+    ObservedRegistration last;
+    bool found = false;
+    // EVERY registration that matches, not only the last one: an application can leave more than one
+    // window registered under the same name (Electron apps do), and sending to the wrong one of them looks
+    // exactly like "the application ignored the click". Mode 'scan' walks all of them.
+    std::vector<ObservedRegistration> matches;
+    wchar_t line[1024] = {};
+    while (std::fgetws(line, 1024, file)) {
+        ObservedRegistration candidate;
+        if (!ParseObserved(line, &candidate)) continue;
+        if (wanted && *wanted && candidate.tip.find(wanted) == std::wstring::npos) continue;
+        last = candidate;        // the LAST one wins: a later registration is the current one
+        bool duplicate = false;
+        for (const ObservedRegistration& seen : matches) {
+            if (seen.window == candidate.window && seen.uid == candidate.uid) duplicate = true;
+        }
+        if (!duplicate) matches.push_back(candidate);
+        found = true;
+    }
+    std::fclose(file);
+    if (!found) {
+        Log(L"SENDRIGHT: nothing in the file matches '%ls'", wanted);
+        return 1;
+    }
+    if (mode != L"scan") {
+        matches.clear();
+        matches.push_back(last);
+    }
+    Log(L"SENDRIGHT: %zu registration(s) match, trying them all", matches.size());
+    POINT saved = {};
+    GetCursorPos(&saved);
+    bool anySignal = false;
+    for (const ObservedRegistration& chosen : matches) {
+    Log(L"SENDRIGHT: registration uid %u callback 0x%04X window 0x%X windowPid %u class '%ls' version %u "
+        L"tip '%ls' (recorded receiver pid %u -- the shell, that field is expected to be useless)",
+        chosen.uid, chosen.callback, chosen.window, chosen.windowPid, chosen.windowClass.c_str(),
+        chosen.version, chosen.tip.c_str(), chosen.pid);
+    const HWND target = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(chosen.window));
+    if (!IsWindow(target)) {
+        // A dead handle means the record is stale: the application restarted and its window is a new one.
+        // Sending to it would be sending nowhere, and the log would read "the application ignored us".
+        Log(L"SENDRIGHT: window 0x%X is gone -- the record is stale, run --observe again", chosen.window);
+        continue;
+    }
+    DWORD targetPid = 0;
+    GetWindowThreadProcessId(target, &targetPid);
+    wchar_t targetClass[64] = {};
+    GetClassNameW(target, targetClass, 64);
+    Log(L"SENDRIGHT: the window is alive: pid %u class '%ls' integrity %ls (this probe is %ls)",
+        targetPid, targetClass, IntegrityOf(targetPid).c_str(), IntegrityOf(GetCurrentProcessId()).c_str());
+
+    // WHICH ENCODING. The shell and the application agree on a callback *protocol* through uVersion, and the
+    // two protocols put the same click in different places:
+    //   classic (version 0/3):  wParam = uid,  lParam = the mouse message
+    //   version 4:              HIWORD(wParam) = the event (NIN_SELECT / WM_CONTEXTMENU), lParam = packed x,y
+    // The observer cannot always see the version (it only appears on the application's own NIM_SETVERSION
+    // line, and several applications never send one), so all of them are tried and the screen says which one
+    // the application acts on. There is no other way to find out: a window procedure that ignores a message
+    // returns exactly the same thing as one that acts on it.
+    struct Variant {
+        const wchar_t* name;
+        UINT event;
+        bool version4;
+        bool withDown;
+    };
+    std::vector<Variant> variants;
+    if (mode == L"all") {
+        variants = {{L"v4-contextmenu", WM_CONTEXTMENU, true, false},
+                    {L"v4-rbuttonup", WM_RBUTTONUP, true, false},
+                    {L"v3-rbuttonup", WM_RBUTTONUP, false, true},
+                    {L"v3-contextmenu", WM_CONTEXTMENU, false, true},
+                    {L"v4-select", NIN_SELECT, true, false}};
+    } else if (mode == L"v4") {
+        variants = {{L"v4-contextmenu", WM_CONTEXTMENU, true, false}};
+    } else if (mode == L"v3") {
+        variants = {{L"v3-rbuttonup", WM_RBUTTONUP, false, true}};
+    } else if (mode == L"scan") {
+        // The two right-click candidates, for every window that answered to that name.
+        variants = {{L"v4-contextmenu", WM_CONTEXTMENU, true, false},
+                    {L"v3-rbuttonup", WM_RBUTTONUP, false, true}};
+    } else {
+        Log(L"SENDRIGHT: unknown mode '%ls' (v4 | v3 | all | scan)", mode.c_str());
+        return 2;
+    }
+
+    // Evidence first: two grabs 400 ms apart give this machine's noise floor (the bar animates), so a change
+    // afterwards can be read as ours and not as the bar's.
+    ScreenShot baseline, before, after;
+    CaptureScreen(&baseline);
+    Sleep(400);
+    CaptureScreen(&before);
+    RECT noiseBox = {};
+    const long long noise = ShotDiff(baseline, before, &noiseBox);
+    Log(L"SENDRIGHT: noise floor over 400 ms: %lld pixel(s)", noise);
+
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring prefix = exe;
+    const size_t slash = prefix.find_last_of(L'\\');
+    prefix = prefix.substr(0, slash + 1) + L"sendright-";
+    SaveShotBmp(before, prefix + L"before.bmp");
+
+    const HWND foregroundBefore = GetForegroundWindow();
+    SetCursorPos(x, y);
+    Sleep(150);
+    Log(L"SENDRIGHT: the pointer is parked at %d,%d -- a cell of ours would be there -- and the application "
+        L"is sent its own message. Foreground before: 0x%X", x, y,
+        static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(foregroundBefore)));
+
+    const UINT packed = MAKELONG(static_cast<WORD>(x), static_cast<WORD>(y));
+    for (const Variant& variant : variants) {
+        std::vector<WindowInfo> windowsBefore;
+        ListWindows(targetPid, &windowsBefore);
+        std::vector<WindowInfo> anyBefore;
+        if (mode == L"scan") ListWindows(0, &anyBefore);   // the screen is what matters, not the pid
+
+        LARGE_INTEGER frequency = {}, start = {}, stop = {};
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&start);
+        // A TIMEOUT, never a plain SendMessage: the application is allowed to run a modal menu loop inside
+        // this call (measured: one application held it for 10.4 seconds), and a tray that freezes while an
+        // application thinks is not a tray. The call is abandoned, not cancelled -- the application keeps
+        // working, exactly as it does when the shell itself sends it this message.
+        ULONG_PTR answer = 0;
+        const auto deliver = [&](WPARAM wparam, LPARAM lparam) {
+            return SendMessageTimeoutW(target, chosen.callback, wparam, lparam,
+                                       SMTO_ABORTIFHUNG | SMTO_BLOCK, 250, &answer);
+        };
+        LRESULT delivered = 0;
+        if (variant.version4) {
+            if (variant.withDown) {
+                delivered = deliver(MAKELONG(static_cast<WORD>(chosen.uid),
+                                             static_cast<WORD>(WM_RBUTTONDOWN)),
+                                    packed);
+            }
+            delivered = deliver(MAKELONG(static_cast<WORD>(chosen.uid), static_cast<WORD>(variant.event)),
+                                packed);
+        } else {
+            if (variant.withDown) {
+                deliver(chosen.uid, WM_RBUTTONDOWN);
+                Sleep(40);
+            }
+            delivered = deliver(chosen.uid, variant.event);
+        }
+        QueryPerformanceCounter(&stop);
+        // A procedure that acts on the message takes measurable time (it builds a window); one that ignores it
+        // returns in microseconds. This is the only clue the return value cannot give: both answer 0.
+        Log(L"SENDRIGHT: '%ls' -> delivered=%ls, the window was busy for %.1f ms (answer %llu)",
+            variant.name, delivered ? L"yes" : L"NO (timed out or blocked)",
+            (stop.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart,
+            static_cast<unsigned long long>(answer));
+
+        Sleep(600);
+        std::vector<WindowInfo> windowsAfter;
+        ListWindows(targetPid, &windowsAfter);
+        const int appeared = ReportWindowDelta(windowsBefore, windowsAfter, variant.name);
+        if (mode == L"scan") {
+            std::vector<WindowInfo> anyAfter;
+            ListWindows(0, &anyAfter);
+            ReportWindowDelta(anyBefore, anyAfter, L"ANY PROCESS:");
+        }
+
+        if (!CaptureScreen(&after)) {
+            Log(L"SENDRIGHT: the screen grab failed");
+            break;
+        }
+        RECT box = {};
+        const long long changed = ShotDiff(before, after, &box);
+        Log(L"SENDRIGHT: '%ls' -> %lld pixel(s) differ from the state before it, at %ld,%ld..%ld,%ld "
+            L"(noise floor was %lld)", variant.name, changed, box.left, box.top, box.right, box.bottom, noise);
+        std::wstring shot = prefix + variant.name + L".bmp";
+        SaveShotBmp(after, shot);
+        Log(L"SENDRIGHT: saved '%ls'; foreground window is 0x%X", shot.c_str(),
+            static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(GetForegroundWindow())));
+        if (appeared > 0 || changed > noise * 3 + 3000) anySignal = true;
+
+        // ... and does it stay? A menu that closes by itself is not a menu.
+        if (mode == L"scan") continue;      // the scan is about which encoding works, not about duration
+        Sleep(2500);
+        std::vector<WindowInfo> windowsLater;
+        ListWindows(targetPid, &windowsLater);
+        ReportWindowDelta(windowsAfter, windowsLater, L"three seconds later:");
+    }
+    }
+    SetCursorPos(saved.x, saved.y);
+    Log(L"SENDRIGHT: done -- %ls; the pointer is back at %ld,%ld", anySignal ? L"SOMETHING APPEARED" : L"nothing appeared",
+        saved.x, saved.y);
+    return 0;
+}
+
+// --- E13, THE LIVE TRAY: our cells and the applications' OWN behaviour -----------------------------
+//
+//  THIS IS THE THING TO LOOK AT. Everything this round measured, put on screen: a strip of cells drawn by
+//  us, each carrying the registration the read-only module read out of the shell (window, uid,
+//  uCallbackMessage, uVersion, tip). A click is delivered as the message that application's own tray icon
+//  would receive, chosen by ONE rule -- uVersion -- and nothing else is learned per application:
+//
+//      version 4 : wParam = MAKELONG(uid, event), lParam = MAKELONG(x, y)
+//      otherwise : wParam = uid,                  lParam = the mouse message
+//
+//  Left click  -> the application's own left click (NIN_SELECT / WM_LBUTTONDOWN+UP)
+//  Right click -> the application's OWN menu (WM_CONTEXTMENU / WM_RBUTTONUP) at the pointer, which is on
+//                 the cell, so it opens where a user right-clicked and the pointer never moves.
+//  Escape      -> close.
+//
+//  The shell's own cells (network, volume, clock) are deliberately NOT here: they are the shell's own
+//  icons with no application behind them, and this sample is about applications.
+
+constexpr int kLiveCell = 40;
+constexpr int kLiveGap = 4;
+constexpr int kLivePad = 8;
+constexpr int kLiveLabel = 24;
+constexpr int kLiveMax = 24;
+constexpr UINT kLiveTimeout = 250;      // milliseconds; see the modal-menu note below
+
+struct LiveCell {
+    std::wstring name;      // the application's own tooltip, flattened
+    HICON icon = nullptr;
+    wchar_t glyph[4] = {};
+    HWND target = nullptr;
+    UINT callback = 0;
+    UINT uid = 0;
+    UINT version = 0;
+    DWORD pid = 0;
+};
+
+LiveCell g_live[kLiveMax];
+int g_liveCount = 0;
+int g_liveHover = -1;
+HWND g_liveWindow = nullptr;
+bool g_liveQuit = false;
+
+RECT LiveCellRect(int index) {
+    RECT box = {};
+    const int pitch = kLiveCell + kLiveGap;
+    box.left = kLivePad + index * pitch;
+    box.top = kLivePad;
+    box.right = box.left + kLiveCell;
+    box.bottom = box.top + kLiveCell;
+    return box;
+}
+
+int LiveCellAt(int x, int y) {
+    for (int i = 0; i < g_liveCount; ++i) {
+        const RECT box = LiveCellRect(i);
+        if (x >= box.left && x < box.right && y >= box.top && y < box.bottom) return i;
+    }
+    return -1;
+}
+
+// The process behind a registration, and its executable: the picture for a cell comes from the executable
+// (SHGetFileInfo asks the shell for the icon the file itself carries). Reading a path is a limited query and
+// works across integrity levels -- measured, it answers for the elevated Task Manager too.
+std::wstring ExeOfProcess(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return {};
+    wchar_t path[1024] = {};
+    DWORD size = 1024;
+    const bool ok = QueryFullProcessImageNameW(process, 0, path, &size) != FALSE;
+    CloseHandle(process);
+    return ok ? std::wstring(path) : std::wstring();
+}
+
+void LiveDeliver(int index, bool rightClick) {
+    const LiveCell& cell = g_live[index];
+    if (!cell.target || !IsWindow(cell.target)) {
+        Log(L"TRAYLIVE: '%ls' has no window any more -- the application has restarted; press the cell "
+            L"again after the strip is reopened", cell.name.c_str());
+        return;
+    }
+    // WHERE THE POINTER IS, NOT WHERE WE THINK IT IS: the user has just clicked the cell, so the pointer is
+    // on it, and that is the coordinate the application is told about -- which is how its menu ends up under
+    // the cell instead of somewhere else. Nothing here moves the pointer.
+    POINT at = {};
+    GetCursorPos(&at);
+    const LPARAM packed = MAKELONG(static_cast<WORD>(at.x), static_cast<WORD>(at.y));
+
+    LARGE_INTEGER frequency = {}, started = {}, finished = {};
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&started);
+    ULONG_PTR answer = 0;
+    LRESULT delivered = 0;
+    wchar_t encoding[48] = {};
+    if (cell.version >= 4) {
+        const UINT event = rightClick ? WM_CONTEXTMENU : NIN_SELECT;
+        delivered = SendMessageTimeoutW(cell.target, cell.callback,
+                                        MAKELONG(static_cast<WORD>(cell.uid), static_cast<WORD>(event)),
+                                        packed, SMTO_ABORTIFHUNG | SMTO_BLOCK, kLiveTimeout, &answer);
+        _snwprintf_s(encoding, 48, _TRUNCATE, L"version 4, event 0x%04X", event);
+    } else {
+        const UINT down = rightClick ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+        const UINT up = rightClick ? WM_RBUTTONUP : WM_LBUTTONUP;
+        SendMessageTimeoutW(cell.target, cell.callback, static_cast<WPARAM>(cell.uid), down,
+                            SMTO_ABORTIFHUNG | SMTO_BLOCK, kLiveTimeout, &answer);
+        Sleep(30);
+        delivered = SendMessageTimeoutW(cell.target, cell.callback, static_cast<WPARAM>(cell.uid), up,
+                                        SMTO_ABORTIFHUNG | SMTO_BLOCK, kLiveTimeout, &answer);
+        _snwprintf_s(encoding, 48, _TRUNCATE, L"classic, message 0x%04X", up);
+    }
+    QueryPerformanceCounter(&finished);
+    // A TIMEOUT, NOT A BLOCKING SEND. An application is allowed to run its menu loop inside this call
+    // (measured: 10.4 seconds for one of them), and inside that loop our strip must still answer the mouse.
+    Log(L"TRAYLIVE: %ls click -> '%ls' uid=%u callback=0x%04X window=0x%X pid=%u (%ls): delivered=%ls, "
+        L"the application was busy %.1f ms",
+        rightClick ? L"right" : L"left", cell.name.c_str(), cell.uid, cell.callback,
+        static_cast<unsigned>(reinterpret_cast<ULONG_PTR>(cell.target)), cell.pid, encoding,
+        delivered ? L"yes" : L"NO", (finished.QuadPart - started.QuadPart) * 1000.0 / frequency.QuadPart);
+}
+
+LRESULT CALLBACK LiveProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint = {};
+            HDC dc = BeginPaint(hwnd, &paint);
+            RECT client = {};
+            GetClientRect(hwnd, &client);
+            HBRUSH surface = CreateSolidBrush(RGB(30, 30, 36));
+            HPEN edge = CreatePen(PS_SOLID, 1, RGB(70, 70, 80));
+            HGDIOBJ oldBrush = SelectObject(dc, surface);
+            HGDIOBJ oldPen = SelectObject(dc, edge);
+            RoundRect(dc, client.left, client.top, client.right, client.bottom, 14, 14);
+            SelectObject(dc, oldBrush);
+            SelectObject(dc, oldPen);
+            DeleteObject(surface);
+            DeleteObject(edge);
+            SetBkMode(dc, TRANSPARENT);
+            for (int i = 0; i < g_liveCount; ++i) {
+                const RECT box = LiveCellRect(i);
+                HBRUSH cell = CreateSolidBrush(i == g_liveHover ? RGB(64, 64, 76) : RGB(44, 44, 52));
+                HPEN noPen = CreatePen(PS_NULL, 0, RGB(0, 0, 0));
+                oldBrush = SelectObject(dc, cell);
+                oldPen = SelectObject(dc, noPen);
+                RoundRect(dc, box.left, box.top, box.right, box.bottom, 8, 8);
+                SelectObject(dc, oldBrush);
+                SelectObject(dc, oldPen);
+                DeleteObject(cell);
+                DeleteObject(noPen);
+                const int inner = kLiveCell - 11;
+                if (g_live[i].icon) {
+                    DrawIconEx(dc, box.left + (kLiveCell - inner) / 2, box.top + (kLiveCell - inner) / 2,
+                               g_live[i].icon, inner, inner, 0, nullptr, DI_NORMAL);
+                } else {
+                    SetTextColor(dc, RGB(226, 226, 234));
+                    SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+                    DrawTextW(dc, g_live[i].glyph, -1, const_cast<RECT*>(&box),
+                              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+            if (g_liveHover >= 0 && g_liveHover < g_liveCount) {
+                RECT line = client;
+                line.left += kLivePad;
+                line.right -= kLivePad;
+                line.top = kLivePad + kLiveCell + 2;
+                HBRUSH prompt = CreateSolidBrush(RGB(22, 22, 28));
+                HPEN noPen = CreatePen(PS_NULL, 0, RGB(0, 0, 0));
+                HGDIOBJ oldBrush2 = SelectObject(dc, prompt);
+                HGDIOBJ oldPen2 = SelectObject(dc, noPen);
+                RoundRect(dc, line.left, line.top, line.right, line.bottom, 8, 8);
+                SelectObject(dc, oldBrush2);
+                SelectObject(dc, oldPen2);
+                DeleteObject(prompt);
+                DeleteObject(noPen);
+                SetTextColor(dc, RGB(210, 210, 220));
+                SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+                wchar_t caption[256] = {};
+                _snwprintf_s(caption, 256, _TRUNCATE, L"%ls   uid %u, callback 0x%04X, version %u",
+                             g_live[g_liveHover].name.c_str(), g_live[g_liveHover].uid,
+                             g_live[g_liveHover].callback, g_live[g_liveHover].version);
+                RECT text = line;
+                text.left += 8;
+                text.right -= 8;
+                DrawTextW(dc, caption, -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (wparam == VK_ESCAPE) {
+                Log(L"TRAYLIVE: Escape -- closing");
+                g_liveQuit = true;
+            }
+            return 0;
+        case WM_MOUSEMOVE: {
+            const int cell = LiveCellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (cell != g_liveHover) {
+                g_liveHover = cell;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            if (cell >= 0) {
+                TRACKMOUSEEVENT leave = {};
+                leave.cbSize = sizeof(leave);
+                leave.dwFlags = TME_LEAVE;
+                leave.hwndTrack = hwnd;
+                TrackMouseEvent(&leave);
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            g_liveHover = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONDOWN: {
+            const int cell = LiveCellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (cell >= 0) LiveDeliver(cell, /*rightClick=*/false);
+            return 0;
+        }
+        case WM_RBUTTONUP: {
+            const int cell = LiveCellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (cell >= 0) LiveDeliver(cell, /*rightClick=*/true);
+            return 0;
+        }
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+long long FileSizeOf(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data = {};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return 0;
+    return (static_cast<long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+}
+
+// Reads what was appended to the observer's file since the offset -- the records from BEFORE this run are
+// not evidence: an application that restarted has a different window, and its old record points at nothing.
+std::wstring ReadAppended(const std::wstring& path, long long from) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || !file) return {};
+    if (_fseeki64(file, from, SEEK_SET) != 0) {
+        std::fclose(file);
+        return {};
+    }
+    std::string bytes;
+    char buffer[4096] = {};
+    size_t got = 0;
+    while ((got = std::fread(buffer, 1, sizeof(buffer), file)) > 0) bytes.append(buffer, got);
+    std::fclose(file);
+    if (bytes.empty()) return {};
+    const int count = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()),
+                                          nullptr, 0);
+    if (count <= 0) return {};
+    std::wstring text(static_cast<size_t>(count), L'\0');
+    // &text[0], not text.data(): this probe is built without /std:c++17, where a non-const std::wstring
+    // still hands out a const pointer from data() and the call does not compile.
+    MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), &text[0], count);
+    return text;
+}
+
+// --- E14, THE MESSAGE DUMP: what does the SHELL actually send that application? ---------------------
+//
+//  WHY THIS EXISTS. A registration tells us the callback number, not the wire format the application
+//  expects back. Two applications on this machine answered the message we composed (QQ音乐's own menu, the
+//  elevated Task Manager's real Win32 menu) and one did not: ChatGPT's host window takes the message, spends
+//  30-50 ms, and shows nothing -- while a REAL right click on its real icon shows a WinUI menu raised by a
+//  different process of the same application. So the shell must be sending it something else, and the only
+//  honest way to learn what is to listen inside that application while a real click is performed on its
+//  real tray icon.
+//
+//  It watches and nothing else: the module passes every message on with CallNextHookEx unchanged.
+int RunTrayMessageDump(const wchar_t* wanted) {
+    const std::wstring path = ObservedFilePath();
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"r, ccs=UTF-8") != 0 || !file) {
+        Log(L"DUMP: cannot read '%ls' -- run --observe first", path.c_str());
+        return 1;
+    }
+    ObservedRegistration chosen;
+    bool found = false;
+    wchar_t line[1024] = {};
+    while (std::fgetws(line, 1024, file)) {
+        ObservedRegistration candidate;
+        if (!ParseObserved(line, &candidate)) continue;
+        if (wanted && *wanted && candidate.tip.find(wanted) == std::wstring::npos) continue;
+        if (candidate.callback == 0) continue;
+        chosen = candidate;
+        found = true;
+    }
+    std::fclose(file);
+    if (!found) {
+        Log(L"DUMP: nothing in the file matches '%ls'", wanted);
+        return 1;
+    }
+    const HWND target = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(chosen.window));
+    if (!IsWindow(target)) {
+        Log(L"DUMP: window 0x%X is gone -- the record is stale, run --observe again", chosen.window);
+        return 1;
+    }
+    DWORD pid = 0;
+    const DWORD thread = GetWindowThreadProcessId(target, &pid);
+    Log(L"DUMP: '%ls' lives in pid %u thread %u (callback 0x%04X, version %u, class '%ls')",
+        chosen.tip.c_str(), pid, thread, chosen.callback, chosen.version, chosen.windowClass.c_str());
+
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring directory = exe;
+    const size_t slash = directory.find_last_of(L'\\');
+    directory = directory.substr(0, slash + 1);
+    std::wstring modulePath;
+    WIN32_FIND_DATAW found2 = {};
+    const std::wstring pattern = directory + L"probe-tray-observer*.dll";
+    HANDLE search = FindFirstFileW(pattern.c_str(), &found2);
+    if (search != INVALID_HANDLE_VALUE) {
+        FILETIME newest = {};
+        do {
+            if (found2.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (CompareFileTime(&found2.ftLastWriteTime, &newest) >= 0) {
+                newest = found2.ftLastWriteTime;
+                modulePath = directory + found2.cFileName;
+            }
+        } while (FindNextFileW(search, &found2));
+        FindClose(search);
+    }
+    const HMODULE module = modulePath.empty() ? nullptr : LoadLibraryW(modulePath.c_str());
+    const auto proc = module ? reinterpret_cast<HOOKPROC>(GetProcAddress(module,
+                                                                        "IslandTrayMessageDumpProc"))
+                             : nullptr;
+    if (!proc) {
+        Log(L"DUMP: the module beside this exe has no IslandTrayMessageDumpProc -- rebuild it");
+        return 1;
+    }
+    SetLastError(0);
+    const HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, proc, module, thread);
+    Log(L"DUMP: watching that process' messages -> hook %p (error %lu)", reinterpret_cast<void*>(hook),
+        hook ? 0UL : GetLastError());
+    if (!hook) return 1;
+    Sleep(400);
+
+    // Now the real thing, exactly as a user does it: the shell's overflow panel on screen, the pointer on
+    // the icon, a genuine right press and release. Whatever arrives in the watched process is the answer.
+    Log(L"DUMP: performing a real right click on the real tray icon of '%ls' (the pointer moves for it)", wanted);
+    const int clicked = RunRightClick(wanted, /*sendInput=*/true, /*keepPanelVisible=*/true,
+                                      /*byKeyboard=*/false);
+    Sleep(2000);
+    UnhookWindowsHookEx(hook);
+    Log(L"DUMP: done (the click returned %d); the messages that arrived are the lines starting with "
+        L"'message ' in the observer's file", clicked);
+    return 0;
+}
+
+int RunTrayLive(int x, int y) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) return 1;
+
+    // --- the read-only module goes into the shell, and the applications are asked to register again ------
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring directory = exe;
+    const size_t slash = directory.find_last_of(L'\\');
+    directory = directory.substr(0, slash + 1);
+    std::wstring modulePath;
+    WIN32_FIND_DATAW found = {};
+    const std::wstring pattern = directory + L"probe-tray-observer*.dll";
+    HANDLE search = FindFirstFileW(pattern.c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        FILETIME newest = {};
+        do {
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (CompareFileTime(&found.ftLastWriteTime, &newest) >= 0) {
+                newest = found.ftLastWriteTime;
+                modulePath = directory + found.cFileName;
+            }
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
+    if (modulePath.empty()) {
+        Log(L"TRAYLIVE: no observer module beside this exe -- build it first");
+        return 1;
+    }
+    const std::wstring observed = ObservedFilePath();
+    const long long mark = FileSizeOf(observed);
+    const HMODULE module = LoadLibraryW(modulePath.c_str());
+    const auto proc = module ? reinterpret_cast<HOOKPROC>(GetProcAddress(module,
+                                                                        "IslandTrayObserverProc"))
+                             : nullptr;
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!module || !proc || !taskbar) {
+        Log(L"TRAYLIVE: the module or the shell's taskbar is not reachable (module %ls, taskbar %p)",
+            module ? L"loaded" : L"missing", reinterpret_cast<void*>(taskbar));
+        if (module) FreeLibrary(module);
+        return 1;
+    }
+    DWORD shellPid = 0;
+    GetWindowThreadProcessId(taskbar, &shellPid);
+    const DWORD thread = GetWindowThreadProcessId(taskbar, nullptr);
+    const HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, proc, module, thread);
+    if (!hook) {
+        Log(L"TRAYLIVE: could not watch the shell's registrations (error %lu)", GetLastError());
+        FreeLibrary(module);
+        return 1;
+    }
+    const UINT created = RegisterWindowMessageW(L"TaskbarCreated");
+    PostMessageW(HWND_BROADCAST, created, 0, 0);
+    Log(L"TRAYLIVE: asked every running application to register again (0x%04X); collecting for 4 s", created);
+    Sleep(4000);
+
+    // --- what registered ---------------------------------------------------------------------------------
+    const std::wstring appended = ReadAppended(observed, mark);
+    std::vector<ObservedRegistration> records;
+    size_t start = 0;
+    while (start < appended.size()) {
+        size_t end = appended.find(L'\n', start);
+        if (end == std::wstring::npos) end = appended.size();
+        const std::wstring line = appended.substr(start, end - start);
+        start = end + 1;
+        if (line.find(L"registration from") == std::wstring::npos) continue;
+        ObservedRegistration record;
+        if (ParseObserved(line, &record)) records.push_back(record);
+    }
+    Log(L"TRAYLIVE: %zu registration line(s) arrived in that window", records.size());
+
+    // The newest record per (window, uid) wins, except that a callback of 0 means "this message did not
+    // carry one" (a modify or a delete usually does not) and must not erase a callback that did.
+    struct Key {
+        unsigned window = 0;
+        unsigned uid = 0;
+    };
+    std::vector<Key> order;
+    std::vector<ObservedRegistration> chosen;
+    for (const ObservedRegistration& record : records) {
+        if (record.window == 0) continue;
+        Key key;
+        key.window = record.window;
+        key.uid = record.uid;
+        size_t at = order.size();
+        for (size_t i = 0; i < order.size(); ++i) {
+            if (order[i].window == key.window && order[i].uid == key.uid) {
+                at = i;
+                break;
+            }
+        }
+        if (record.command == 2) {                      // NIM_DELETE: the icon is gone
+            if (at < order.size()) {
+                order.erase(order.begin() + static_cast<long>(at));
+                chosen.erase(chosen.begin() + static_cast<long>(at));
+            }
+            continue;
+        }
+        if (at < order.size()) {
+            if (record.callback != 0) chosen[at] = record;
+            if (!record.tip.empty()) chosen[at].tip = record.tip;
+            continue;
+        }
+        if (record.callback == 0) continue;             // nothing to send a click to
+        order.push_back(key);
+        chosen.push_back(record);
+    }
+
+    for (const ObservedRegistration& record : chosen) {
+        if (g_liveCount >= kLiveMax) break;
+        if (record.windowPid == 0 || record.windowPid == shellPid) continue;   // the shell's own icons
+        const HWND target = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(record.window));
+        if (!IsWindow(target)) continue;
+        std::wstring name = Flattened(record.tip);
+        if (name.empty()) name = ExeOfProcess(record.windowPid);
+        const size_t lastSlash = name.find_last_of(L'\\');
+        if (lastSlash != std::wstring::npos) name = name.substr(lastSlash + 1);
+        if (name.empty()) name = L"(no name)";
+        LiveCell& cell = g_live[g_liveCount];
+        cell.name = name;
+        cell.target = target;
+        cell.callback = record.callback;
+        cell.uid = record.uid;
+        cell.version = record.version;
+        cell.pid = record.windowPid;
+        const std::wstring executable = ExeOfProcess(record.windowPid);
+        if (!executable.empty()) {
+            SHFILEINFOW info = {};
+            if (SHGetFileInfoW(executable.c_str(), 0, &info, sizeof(info),
+                               SHGFI_ICON | SHGFI_LARGEICON) &&
+                info.hIcon) {
+                cell.icon = info.hIcon;
+            }
+        }
+        if (!cell.icon) {
+            cell.glyph[0] = name.empty() ? L'?' : name[0];
+            cell.glyph[1] = L'\0';
+        }
+        Log(L"TRAYLIVE: cell %d '%ls' uid=%u callback=0x%04X version=%u pid=%u%s", g_liveCount,
+            cell.name.c_str(), cell.uid, cell.callback, cell.version, cell.pid,
+            cell.icon ? L"" : L" (no icon -- drawn as a glyph)");
+        ++g_liveCount;
+    }
+    if (g_liveCount == 0) {
+        Log(L"TRAYLIVE: nothing registered with a callback while we were listening");
+        UnhookWindowsHookEx(hook);
+        return 1;
+    }
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = LiveProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"TrayLabLive";
+    RegisterClassExW(&wc);
+    const int width = kLivePad * 2 + g_liveCount * kLiveCell + (g_liveCount - 1) * kLiveGap;
+    const int height = kLivePad * 2 + kLiveCell + kLiveLabel;
+    g_liveWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"TrayLabLive", L"tray live",
+                                   WS_POPUP | WS_VISIBLE, x, y, width, height, nullptr, nullptr,
+                                   wc.hInstance, nullptr);
+    Log(L"TRAYLIVE: %d cell(s) at %d,%d %dx%d -- LEFT click = the application's own left click, RIGHT "
+        L"click = the application's own menu, Escape closes. The pointer is never moved.",
+        g_liveCount, x, y, width, height);
+
+    MSG msg = {};
+    while (!g_liveQuit) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(20);
+    }
+    DestroyWindow(g_liveWindow);
+    for (int i = 0; i < g_liveCount; ++i) {
+        if (g_live[i].icon) DestroyIcon(g_live[i].icon);
+    }
+    UnhookWindowsHookEx(hook);
+    Log(L"TRAYLIVE: closed; the shell is left exactly as it was found (the module stays pinned in it until "
+        L"the shell restarts)");
+    CoUninitialize();
+    return 0;
+}
+
+} // namespace
+
+int RunAppBarMove(int x, int y, int seconds) {
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!taskbar) {
+        Log(L"APPBAR: no Shell_TrayWnd");
+        return 1;
+    }
+    RECT before = {};
+    GetWindowRect(taskbar, &before);
+    Log(L"APPBAR: taskbar at %ld,%ld %ldx%ld before anything", before.left, before.top,
+        before.right - before.left, before.bottom - before.top);
+
+    APPBARDATA query = {};
+    query.cbSize = sizeof(query);
+    query.hWnd = taskbar;
+    const UINT_PTR state = SHAppBarMessage(ABM_GETSTATE, &query);
+    APPBARDATA position = {};
+    position.cbSize = sizeof(position);
+    position.hWnd = GetForegroundWindow();   // "our" appbar: this process owns no AppBar window
+    const UINT_PTR got = SHAppBarMessage(ABM_GETTASKBARPOS, &position);
+    Log(L"APPBAR: ABM_GETSTATE -> 0x%llX | ABM_GETTASKBARPOS -> %llu, edge %lu rect %ld,%ld %ldx%ld",
+        static_cast<unsigned long long>(state), static_cast<unsigned long long>(got),
+        static_cast<unsigned long>(position.uEdge), position.rc.left, position.rc.top,
+        position.rc.right - position.rc.left, position.rc.bottom - position.rc.top);
+
+    // The ask: move the SHELL's taskbar by x,y. hWnd has to name the appbar whose position is being set,
+    // and for the shell's taskbar that is the taskbar's own window.
+    APPBARDATA move = {};
+    move.cbSize = sizeof(move);
+    move.hWnd = taskbar;
+    move.uEdge = position.uEdge ? position.uEdge : ABE_TOP;
+    move.rc.left = before.left + x;
+    move.rc.top = before.top + y;
+    move.rc.right = before.right + x;
+    move.rc.bottom = before.bottom + y;
+    const UINT_PTR moved = SHAppBarMessage(ABM_SETPOS, &move);
+    Log(L"APPBAR: ABM_SETPOS asked for %ld,%ld -- granted %llu, rect now %ld,%ld %ldx%ld",
+        move.rc.left, move.rc.top, static_cast<unsigned long long>(moved), move.rc.left, move.rc.top,
+        move.rc.right - move.rc.left, move.rc.bottom - move.rc.top);
+
+    for (int i = 0; i < seconds * 4; ++i) {
+        Sleep(250);
+        RECT now = {};
+        GetWindowRect(taskbar, &now);
+        if (i == 0 || i == 3) {
+            Log(L"APPBAR: after %d ms the taskbar is at %ld,%ld %ldx%ld", (i + 1) * 250, now.left,
+                now.top, now.right - now.left, now.bottom - now.top);
+        }
+    }
+
+    APPBARDATA restore = {};
+    restore.cbSize = sizeof(restore);
+    restore.hWnd = taskbar;
+    restore.uEdge = move.uEdge;
+    restore.rc = before;
+    SHAppBarMessage(ABM_SETPOS, &restore);
+    RECT after = {};
+    GetWindowRect(taskbar, &after);
+    Log(L"APPBAR: asked for the original rectangle back -- taskbar is at %ld,%ld %ldx%ld (was %ld,%ld)",
+        after.left, after.top, after.right - after.left, after.bottom - after.top, before.left,
+        before.top);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     OpenLog();
     if (argc < 2) {
@@ -2099,6 +3400,64 @@ int main(int argc, char** argv) {
         const bool keepPanelVisible = (argc > 3) && std::strcmp(argv[3], "sendvisible") == 0;
         const bool byKeyboard = (argc > 3) && std::strcmp(argv[3], "keys") == 0;
         return RunRightClick(wanted, sendInput, keepPanelVisible, byKeyboard);
+    }
+    if (std::strcmp(argv[1], "--observe") == 0) {
+        const int seconds = (argc > 2) ? std::atoi(argv[2]) : 20;
+        const bool broadcast = (argc > 3) && std::strcmp(argv[3], "broadcast") == 0;
+        return RunObserve(seconds > 0 ? seconds : 20, broadcast);
+    }
+    if (std::strcmp(argv[1], "--sendright") == 0 && argc > 4) {
+        wchar_t wanted[128] = {};
+        int wideCount = 0;
+        LPWSTR* wideArgs = CommandLineToArgvW(GetCommandLineW(), &wideCount);
+        if (wideArgs && wideCount > 2) wcsncpy_s(wanted, wideArgs[2], _TRUNCATE);
+        if (wideArgs) LocalFree(wideArgs);
+        const int x = std::atoi(argv[3]);
+        const int y = std::atoi(argv[4]);
+        std::wstring mode = L"v4";
+        if (argc > 5) {
+            wchar_t wideMode[32] = {};
+            MultiByteToWideChar(CP_ACP, 0, argv[5], -1, wideMode, 32);
+            mode = wideMode;
+        }
+        return RunSendRight(wanted, x, y, mode);
+    }
+    if (std::strcmp(argv[1], "--traylive") == 0) {
+        // The demo: our cells, the applications' own clicks and menus. Placed below the native taskbar by
+        // default so that both are visible and can be compared side by side.
+        const int x = (argc > 2) ? std::atoi(argv[2]) : 1080;
+        const int y = (argc > 3) ? std::atoi(argv[3]) : 64;
+        return RunTrayLive(x, y);
+    }
+    if (std::strcmp(argv[1], "--dump") == 0 && argc > 2) {
+        wchar_t wanted[128] = {};
+        int wideCount = 0;
+        LPWSTR* wideArgs = CommandLineToArgvW(GetCommandLineW(), &wideCount);
+        if (wideArgs && wideCount > 2) wcsncpy_s(wanted, wideArgs[2], _TRUNCATE);
+        if (wideArgs) LocalFree(wideArgs);
+        return RunTrayMessageDump(wanted);
+    }
+    if (std::strcmp(argv[1], "--cover") == 0 && argc > 5) {
+        const int x = std::atoi(argv[2]);
+        const int y = std::atoi(argv[3]);
+        const int w = std::atoi(argv[4]);
+        const int h = std::atoi(argv[5]);
+        const int seconds = (argc > 6) ? std::atoi(argv[6]) : 10;
+        return RunCover(x, y, w, h, seconds > 0 ? seconds : 10);
+    }
+    if (std::strcmp(argv[1], "--thumbdump") == 0 && argc > 5) {
+        const int x = std::atoi(argv[2]);
+        const int y = std::atoi(argv[3]);
+        const int w = std::atoi(argv[4]);
+        const int h = std::atoi(argv[5]);
+        const bool clip = (argc > 6) && std::strcmp(argv[6], "clip") == 0;
+        return RunThumbDump(x, y, w, h, clip);
+    }
+    if (std::strcmp(argv[1], "--appbar") == 0 && argc > 3) {
+        const int x = std::atoi(argv[2]);
+        const int y = std::atoi(argv[3]);
+        const int seconds = (argc > 4) ? std::atoi(argv[4]) : 3;
+        return RunAppBarMove(x, y, seconds > 0 ? seconds : 3);
     }
     Log(L"unknown command");
     return 2;

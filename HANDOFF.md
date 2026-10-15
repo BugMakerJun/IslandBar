@@ -12189,3 +12189,164 @@ preview: resting on a task icon shows a live thumbnail
 * Gemini：断言 **win32k 给"官方 shell"UIPI 豁免**，因此"让 explorer 侧那个模块代发"对 High 应用合法；我们自己发仍会被挡。
 
 两条**不冲突**：能不能对提权应用弹菜单，要靠实验定，不能靠假设。如果只有模块代发才行，那 A 的模块就不只是"观察"，还要"代发右键"。
+
+---
+
+## 8.140 **路线 A 实测打通：把消息发回应用，应用自己的菜单当场弹出** ✅（探针 `--observe` + `--sendright`，三边一致）
+
+用户：「接着做验证」。8.139 把结论定在 **D + A（C 兜底）**，但 A 的两条前置条件——「拿得到回调号」和
+「投递在目标权限级别下可靠」——当时只有理论。这一轮把两条都测了，并且都通过。
+
+### 8.140.1 第一步：回调号是真的，uVersion 也在里面
+
+只读观察模块（`scripts/probe-tray-observer.cpp`）装进 explorer、广播一次 `TaskbarCreated`，一次拿到全部在跑
+应用的注册（`%USERPROFILE%\IslandBar\tray_observed.txt`）：
+
+| 应用 | uid | uCallbackMessage | 托盘窗口类 | uVersion |
+|---|---|---|---|---|
+| 微信 | 0 | **0x8385** | `Qt51514WxTrayIconMessageWindowClass` | **4** |
+| QQ音乐 | 256 | 0x0BD0 | `ATL:5AADBDA0` | 0 |
+| Steam | 1 | 0x0401 | `vguiPopupWindow` | 0 |
+| ChatGPT | 3 | 0x8001 | `Electron_NotifyIconHostWindow` | 0 |
+| 任务管理器 | 0xFFFFFFFF | 0x0465 | `TrayiconMessageWindow` | 0 |
+| 蓝牙设备 | 0 | 0x0403 | `BluetoothNotificationAreaIconWindowClass` | 0 |
+
+两个坑（都修了，都记在这里）：`+0x328` 的 uVersion 以前没读，而**它决定后面用哪种编码**；注册行里的
+`pid` 永远是 explorer（广播是 shell 转发的），**真正注册的进程要从载荷里的窗口句柄反查**（现在记在
+`windowPid` / `windowClass` 两列）。
+
+### 8.140.2 第二步：发回去，菜单出来了，而且就在我们格子的位置
+
+`--sendright <名字> <x> <y> [v4|v3|all]`：把指针停在格子位置（产品里用户本来就在那里点击），按 uVersion
+选编码把消息发回应用，前后枚举目标进程的顶层窗口做证据（像素差只作辅助——它第一次就被一个无关弹窗骗过）。
+
+| 目标 | 编码 | 结果 |
+|---|---|---|
+| QQ音乐（uVersion 0） | `SendMessageTimeout(hwnd, 0x0BD0, wParam=uid, lParam=WM_RBUTTONUP)` | 窗口忙 **86 ms**，自己的菜单窗口 `TXGuiFoundation` 出现在 **1250,60..1460,434（210x374）= 我们格子的位置** |
+| 任务管理器（**High 完整性**） | 同一条经典编码 | 窗口忙 **297.9 ms**，出现真正的 Win32 菜单 **`#32768` 1250,60..1427,127（177x67）** + SysShadow，同样在格子位置 |
+| 微信（uVersion **4**） | `wParam=MAKELONG(uid, WM_CONTEXTMENU)`、`lParam=MAKELONG(x,y)` | 窗口忙 **10.4 秒**（模态菜单循环的典型形状）；同刻一个无关对话框污染了像素证据，这一格要用窗口级证据复测 |
+| QQ音乐，先试的 4 种 v4 编码 | 打包 CONTEXTMENU / 打包 RBUTTONUP / 打包坐标 / 经典 CONTEXTMENU | 全部 **0.0 ms + 什么都没出现** |
+
+结论三条：
+
+1. **协议由 uVersion 决定**，不是猜的：v0 用 `wParam=uid, lParam=WM_RBUTTONUP`，v4 用 `wParam=MAKELONG(uid, WM_CONTEXTMENU)` + 打包坐标。
+2. **UIPI 没有挡提权应用**，8.139.3 里两条相反的说法都作废：托盘回调号全部 **>= WM_USER**（0x0465/0x0401/0x0BD0/0x8001/0x8385），而 UIPI 只过滤 **< WM_USER** 的消息。所以"官方 shell 豁免"（Gemini）不是必要条件，"必须由 explorer 模块代发"（Gemini）也不需要。
+3. **菜单出现在指针所在的位置**（两个应用都是 1250,60）。产品里用户右键的就是格子，指针本来就在那儿——**不需要移动指针**。
+
+发送一律用 `SendMessageTimeout(..., 250 ms)`：应用会在处理里跑模态菜单循环（实测一次 10.4 秒），托盘不能因此卡住。
+
+### 8.140.3 探针这一轮的两处工程修正
+
+* **观察模块每次构建换文件名**（`probe-tray-observer-<时间戳>.dll`）。它 PIN 在 explorer 里，文件被锁，固定名字
+  会让下一次构建直接 `LNK1104`——第一次改它的时候就撞上了。代价：explorer 会一直持有每一份它见过的副本，
+  重启 explorer 清掉。
+* **BMP 取证的方向**：DIB 是自上而下，`biHeight` 写正数就得到一张上下颠倒的图（实测看了一次才明白）。
+
+### 8.140.4 三边结论（ChatGPT 第 40 轮 / Gemini 第 40 轮 / 本机实测）
+
+* ChatGPT：**同意把 A 升为主通路**，正式采用 **D + A**；左键 UIA 兜底，C 保留为故障回退；反对把"右键成功"
+  扩大解释成"所有托盘行为已兼容"，反对扩大 explorer 内模块的职责，反对现在启动完整 Shell 重写。
+* Gemini：**完全同意**，并**自我更正**上一轮的 UIPI 判断（承认只过滤 < WM_USER 的消息）；同样要求 explorer 内
+  模块保持最小（PIN 住、只读、不建线程），并且**明确反对**现在做双击 / 键盘选择 / 气泡通知，MVP 只做左键单击
+  与右键菜单。
+* 本机实测：见上面两张表。
+
+### 8.140.5 还没钉死的一格
+
+微信（uVersion 4）那一格需要复测：第一次跑出 10.4 秒的模态忙等，但截屏被无关对话框污染，随后微信退出
+（事件日志里没有应用崩溃记录）。复测需要微信在跑——本轮两次从这个会话启动 `Weixin.exe` 都**不创建任何窗口**
+（进程活着、116 MB、无顶层窗口），所以这一格要等用户手动拉起微信。**这一格通过之前，v4 编码只算"高置信推断"。**
+
+### 8.140.6 案例给用户看时暴露出来的那一格：Codex 自己的托盘图标（`--traylive` 实测）
+
+用户跑 `--traylive`（自绘条 + 发回声）后说：「chargtp 右键为什么不好用啊」。查下来的结论是**不是我们的问题**，
+而且证据链很干净：
+
+1. 这台机器上叫 `ChatGPT` 的那个托盘图标，其实属于 **Codex 自己**：`OpenAI.Codex_26.1007.9446.0`，exe 是
+   `WindowsApps\...\app\ChatGPT.exe`，产品名 `Codex`，图标由 pid 24112 的
+   `OwlElectron_NotifyIconHostWindow` 注册（uid=3，cb=0x8001，version=0）。
+2. 用户点那格时日志里每条都是 `delivered=yes`，应用的窗口忙 30–46 ms —— 消息到了、它在处理。
+3. 新做的**消息转储钩子**（`probe-tray-observer.cpp` 的第二个导出 `IslandTrayMessageDumpProc` +
+   `probe-tray-lab --dump <name>`：先在目标进程里挂 WH_CALLWNDPROC，再对真实图标做一次**真实**右键）拿到了
+   shell 的原话：
+   ```
+   message 0x8001 hwnd=0xE0B32 class='OwlElectron_NotifyIconHostWindow' wParam=0x3 lParam=0x204
+   message 0x8001 hwnd=0xE0B32 class='OwlElectron_NotifyIconHostWindow' wParam=0x3 lParam=0x205
+   ```
+   —— 这正是我们发的那两条（经典编码、uid 进 wParam、lParam 是鼠标消息）。**逐字节一致。**
+4. 五种编码（v4 打包 CONTEXTMENU / v4 打包 RBUTTONUP / 经典 RBUTTONUP / 经典 CONTEXTMENU / v4 NIN_SELECT）
+   在它身上全试过，同时监视**任意进程**新出现的可见窗口：一个都没有。
+5. 对照：同一套"真实右键真实图标"的手法在 **QQ音乐** 上立刻弹出它自己的菜单（`TXGuiFoundation`），
+   在**任务管理器**（High 完整性）上弹出真正的 `#32768` 菜单；而在 Codex 这个图标上，**真实右键同样什么都不弹**
+   （截图 `captures/realclick-chatgpt.png`，窗口集合前后差为零）。
+
+所以：**这个图标在这台机器上对真实右键就是不弹菜单**，与我们的实现无关。用户提供了另一台机器上同一个应用的
+托盘菜单照片（Running / Recent / More / New Chat / Send Feedback / Exit），说明它在别的版本/状态下是有菜单的。
+一个待验证的猜想：今晚 23:50 屏幕上出现过 Codex 的**"安全模式"恢复对话框**，安全模式下托盘菜单可能被禁；
+把应用完全退出再正常启动一次即可验证。
+
+这一轮顺带得到一个对产品有用的诊断工具：**以后任何一格"发过去没反应"，用 `--dump` 抓它真实收到的两条消息，
+和我们的发送逐字节对比**，就能立刻分清"应用的毛病"还是"我们的毛病"。
+
+---
+
+## 8.141 **重启前存档：现在到哪里了、重启后从哪继续**（2026-10-16 00:30）
+
+用户：「你先记录一下 我重启一下电脑」。下面是恢复现场需要的全部内容。
+
+### 状态一句话
+
+**路线 A 已经被实测打通**（D + A 就是选定架构，三边一致），**产品代码一行没动**——在等用户对方案的两点答复。
+眼下有一个可以跑给用户看的案例，和一个还没复测的微信 v4 格子、一个还没解释的 Codex 托盘图标格子。
+
+### 重启后按顺序做这三件事
+
+1. **微信 v4 复测**（8.140.5 一直欠着的那一格）。微信必须**用户手动启动**（本会话启动 `Weixin.exe` 只会得到
+   一个没有窗口的进程）。跑：
+   `probe-tray-lab.exe --observe 12 broadcast` → `probe-tray-lab.exe --sendright 微信 1250 60 all`；
+   判据是窗口级证据里出现它自己的菜单窗口（Qt 的 `TXGuiFoundation` 类），以及 `10.4 秒忙等`那条不再出现。
+   顺手把**左键**也测了：v4 左键按文档是 `wParam=MAKELONG(uid, NIN_SELECT)`，这一条本轮**没有实测过**。
+2. **Codex 托盘图标那一格**（8.140.6）。重启后 Codex 是全新启动、不在安全模式。判据：
+   `probe-tray-lab.exe --dump ChatGPT`（它在目标进程里挂只读钩子，然后对**真实图标**做一次真实右键）
+   + 一次真实右键的窗口前后对比。菜单回来了 → 实锤是它当时的状态问题；还是不回来 → 要那台机器的版本号。
+3. **等用户答复两点，然后开始产品实现**：
+   ① 没有菜单的应用要不要兜底弹我们自己的菜单（250 ms 内没有新窗口出现就弹）；
+   ② AGENTS.md 里"托盘模块可以在 shell 进程内做事"的授权（往 explorer 放一个只读模块）。
+   答复一到就按 8.139/8.140 的文件清单动手：`src/tray/TrayRegistry.*`、`src/tray/TrayInteraction.*`、
+   `src/tray/TrayView.*`、`src/platform/TrayObserver.*`、`modules/tray_observer/`、`--tray off|self|native`。
+
+### 重启会替我们清掉的东西（不用手动清）
+
+* 观察模块被 **PIN 在 explorer 里**（每构建一份都占着），重启后自然消失；文件被锁的问题也随之消失。
+* 探针可能给任务栏留过窗口区域（裁切）；重启后任务栏恢复原状。
+* `island_bar.exe` 会自己起来（用户的启动方式），托盘演示 `--traylive` 不碰任务栏。
+
+### 复现这一轮实测的最短路径
+
+```powershell
+# 构建（装到 %USERPROFILE%\IslandBar\traylab，项目树里的 exe 会被降权起不来）
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\probe-tray-lab.ps1
+# 观察注册（只读模块进 explorer + 广播 TaskbarCreated）
+& "$env:USERPROFILE\IslandBar\traylab\probe-tray-lab.exe" --observe 12 broadcast
+# 把应用自己的消息发回去（经典编码 / v4 编码 / 六种全试 / 每个同名窗口都试）
+& "$env:USERPROFILE\IslandBar\traylab\probe-tray-lab.exe" --sendright 微信 1250 60 all
+& "$env:USERPROFILE\IslandBar\traylab\probe-tray-lab.exe" --sendright ChatGPT 1250 60 scan
+# 案例：我们的格子 + 应用自己的左键与菜单（用户看的那个）
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\PROJECT\Taskbar\IslandBar\scripts\run-tray-live.ps1
+# 诊断：某个应用的菜单不弹时，抓它真实收到的那两条消息
+& "$env:USERPROFILE\IslandBar\traylab\probe-tray-lab.exe" --dump ChatGPT
+```
+
+证据文件：日志 `%USERPROFILE%\IslandBar\traylab\probe-tray-lab.log`、注册与消息
+`%USERPROFILE%\IslandBar\tray_observed.txt`、截图 `IslandBar\captures\`（`routeA2-taskmgr-menu.png`、
+`realclick-qqmusic.png`、`realclick-chatgpt.png`、`chatgpt-real-menus.png`）。
+
+### 这一轮踩过、下次别重踩的坑
+
+* 观察模块 DLL **每次构建换文件名**（它 PIN 在 explorer 里、文件被锁，固定名字会 `LNK1104`）。
+* BMP 取证：DIB 自上而下，`biHeight` 写正数会得到一张**上下颠倒**的图；转换时**不要再** `RotateNoneFlipY`。
+* 应用会在处理托盘消息时跑**模态菜单循环**（实测最长 10.4 秒），所以一律 `SendMessageTimeout(250 ms)`。
+* 顶层窗口枚举**看不到 message-only 窗口**（Electron 的 `NotifyIconHostWindow` 就是），判"菜单有没有出现"要
+  枚举**可见**窗口并做前后差，或者用 `--dump` 直接听。
+* 命令行里的应用名（`微信`）要经 `CommandLineToArgvW` 取宽参数；PowerShell 5.1 会把非 ASCII 参数转成 ANSI。
+* `.ps1` 纯 ASCII；探针源码也用 `\uXXXX` 写字形，不写字面中文。
