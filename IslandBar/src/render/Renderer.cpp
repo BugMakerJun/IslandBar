@@ -3,7 +3,7 @@
 // =====================================================================
 #include "render/Renderer.h"
 #include "render/Theme.h"   // the material: two stops, a highlight, a hairline, an accent and an ink
-#include "platform/GlassMaterial.h"   // the shadow under the shape and the grain over it
+#include "render/GlassMaterial.h"   // the shadow under the shape and the grain over it
 
 #include "core/Log.h"
 // Reused rather than reimplemented, so the music card's source icon and a taskbar button's icon

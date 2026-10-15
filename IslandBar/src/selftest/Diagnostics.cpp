@@ -52,7 +52,7 @@
 #include "platform/NativeTaskbar.h"   // the three answers to "what happens to the shell's taskbar"
 #include "shell/SystemToggles.h"
 #include "render/Theme.h"
-#include "platform/GlassMaterial.h"
+#include "render/GlassMaterial.h"
 #include "shell/Weather.h"   // SkyMarkForCode: the word and the mark come from the same WMO code
 #include "domain/Motion.h"
 #include "render/Renderer.h"

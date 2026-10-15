@@ -1,0 +1,103 @@
+第 46 轮评审请求（2026-10-16，IslandBar / Windows 11 26220，实机 + 实测代码结构）
+
+用户的指令：「长期架构债 做了」。也就是要把 ARCHITECTURE.md 第 7 节里那些**写在明处的债**真的还掉，
+不是再记一遍。下面是现状的实测，以及我打算怎么切；请对顺序、切法、验收逐条表态。
+
+─ 1. 债的现状（全部是实测，不是印象）
+
+**A. 分层只锁住了一层。** `island_domain` 是独立静态库，`domain/` 里不许出现 `<windows.h>`
+（`domain/PurityCheck.cpp` 编译期护栏 + 该目标不链接任何库）。其余 `app/ render/ media/ shell/
+platform/ services/ cli/` **都在同一个 exe 目标里**：ARCHITECTURE.md 第 3 节甚至写明"这些之间可以互相
+调用，但共用的类型都来自 core/"——所以现在**没有任何东西**阻止一条反向 include 进来。
+
+我扫了一遍真实的跨层 include（源文件与头文件都扫了），依赖图是这样（箭头＝"包含"）：
+
+```
+app    -> platform, render, media, services, shell
+render -> media, services, shell, platform      (TextRenderer 要 shell/TrayIcons.h、shell/StartApps.h)
+shell  -> media, platform, domain
+services -> media, domain
+media  -> domain
+platform -> domain
+core   -> (无)
+domain -> (无)
+```
+
+**唯一的回边**：`platform/GlassMaterial.h` 包含 `render/Theme.h`（它是那条"阴影 + 颗粒 + 高光"的画法，
+用的是 Theme 里的材质常量），而 render 侧（`Renderer.cpp` / `TextRenderer.cpp`）又包含
+`platform/GlassMaterial.h`。除此之外 platform/media/services/shell/core/domain **没有一处**包含 render/。
+所以"按依赖方向切静态库目标"这条路，只差把 GlassMaterial 挪到 render/ 这一件事（`render/Theme.h` 自己只
+包含 windows.h / d2d1_3.h / string，不会把回边带回来）。
+
+**B. `RunBar` 是一个 5857 行文件里的一个 5200 行函数。** `main.cpp` 5857 行，`int RunBar(...)` 从第 635 行
+一直到文件末尾，**没有第二个函数**。状态已经搬出去过了（`app/BarState.h` 25+26+20 个字段、`app/BarSystems.h`
+22 个对象——ROADMAP 第 1 节的 10 片全 ✅），所以现在剩下的是**一个函数里的相位**，注释已经把它们分好了：
+材质 / AppBar / strip 归还 / 本地推送通道 / 正在播什么 / 不发布会话的播放器 / 歌词 / 输出音量 /
+声音输出页 / 天气 / 悬停预览 / 系统托盘 / 托盘学习 / 开始卡片 / 任务条窗口列表 / 显示策略 / 内存行 /
+节流行 / 诊断注入 / 通知 / 全屏判定 / 按下与拖动 / 悬停与状态 / 动画推进 / 绘制 …
+主循环从 1578 行开始（`while (true)`），前面 900 多行是**一次性构造**（每个模块的 Open/Start/Create）。
+
+**C. 没有任何自动化回归。** `--self-test` 只能测纯逻辑（1001 条），栏的真实行为靠人看。托盘那条链路尤其
+没有：8.144.4 里留了一句"缓存合并与判定规则那两段还没有用例"，到现在还是这样。
+
+**D. `selftest/Diagnostics.cpp` 8968 行**，一个文件装 1000+ 条断言。
+
+─ 2. 我打算这么切（一次一片，每片单独验收）
+
+| 片 | 内容 | 风险 |
+|---|---|---|
+| 1 | `platform/GlassMaterial.*` → `render/GlassMaterial.*`（纯搬文件 + 改 include 路径） | 几乎为零，无行为变化 |
+| 2 | 按依赖方向切静态库目标：`domain → core → platform → media → services → shell → render → app`，exe 只做 `main.cpp` + 组装 | 构建期风险（链接顺序/包含目录），**运行时零风险** |
+| 3 | `RunBar` 按相位切成函数（分子片，一片一个相位；先切一次性构造那 900 行） | 这是唯一有"静默用错状态"风险的片 |
+| 4 | `selftest/Diagnostics.cpp` 按节拆文件 | 低 |
+| 5 | 托盘按压的回归用例（纯逻辑：缓存合并、`PlanTrayRightShape`/`NextTrayRightNote` 的判定规则） | 低 |
+
+─ 3. 我要问的
+
+**Q1 顺序**：你同意 1→2→3→4→5 吗？特别是——**先切库还是先拆 RunBar**？我倾向先切库，理由是它零行为
+风险、而且切完之后 3 的每一步都被链接器量着（一个相位如果偷偷摸了不该摸的东西，直接编不过）。反过来
+（先拆 RunBar）会在我还没有回归网的时候动最危险的那一处。你怎么看？
+
+**Q2 切库这件事**：① 把 GlassMaterial 从 platform 挪到 render 是正解吗（它在概念上是"材质怎么画"，
+而不是"平台能力"，而且它本来就包含 render/Theme.h），还是有更该做的（例如把材质常量下沉到 domain）？
+② 阶梯顺序 `domain → core → platform → media → services → shell → render → app` 有没有我漏掉的回边？
+③ 验收：我打算**故意加一条反向 include，构建必须失败**，然后撤掉——这条够不够硬？
+
+**Q3 RunBar 怎么拆**（这是我最不确定的一处）。候选：
+  a) **自由函数 + 显式参数**：相位写成 `void UpdateWeather(BarState&, BarSystems&, FrameState&, ...)`。
+     好处是漏传一个东西就编不过；坏处是参数会很长，而且 RunBar 里有几百个**局部**状态（定时器、缓存、
+     上一次的值），它们要么一路传下去，要么搬进 BarState。
+  b) **搬进一个 `BarRunner` 类**：相位变成成员函数，局部状态变成成员。状态归属最清楚，但这等于**再动一次
+     状态归属**——而这个仓库已经记过四次"字段设晚了/同名的外层变量"的教训，正是这一步最容易出事。
+  c) 你建议的第三种。
+  另外：**子片怎么切**才算"出错一定归因到刚才那一片"？一次一个相位？还是先按"一次性构造 vs 帧循环"切成
+  两大块？
+
+**Q4 回归网**：在动 RunBar 之前要不要先建一个**日志回归**骨架？做法我想的是：固定一条脚本驱动
+（`--demo` + 现有 `ISLANDBAR_*` 开关）跑固定秒数，把 `state:` / `draw` / `tray:` / `music:` 这类行做规范化
+（去掉时间戳、行号、耗时、内存数字）后与一份基线 diff。这样"拆相位"这种纯结构改动就有了机器判据。
+问题是：**基线怎么定才不会被无关抖动弄脏**（歌词行号、播放进度、慢帧告警都会抖）？以及这份骨架放哪
+（`scripts/`？是不是该进仓库）？值不值得先做？
+
+**Q5 验收**（仓库规矩：一个数字 + 一行日志）。对"纯结构改动"我准备的验收是：两套配置零告警（`/WX` 生效）
++ `--self-test` **1001 条**全过 + `island_smoke` PASS + 部署起来跑一段、日志里指定的那几行与改动前逐字一致。
+够不够？你认为对第 3 片该额外验什么？
+
+**Q6 边界**：我打算**不动**这些——domain 的分层（已锁住）、`app/BarState.h` 与 `app/BarSystems.h` 的归属
+（第 3 片里尽量只传不变）、渲染路径的性能（ARCHITECTURE 的"明确不做"里写了）、以及任何需要装新依赖的
+做法。你还有要加的"不要动"吗？
+
+─ 4. 约束（照仓库规范，请在这个框子里给建议）
+
+* 分层目标：`domain / core / app / render / media / shell / platform / services / cli`；domain 不许出现 Win32。
+* Debug 与 Release 都要编过且**零告警**（`/WX` 生效）；`--self-test` 与 `island_smoke` 都要过；纯逻辑要有断言。
+* 不引入无用代码、不为"以后可能用得上"留抽象；每处改动要能用一句话说清它解决了什么。
+* 一次一片：每片都全量重建 + 自检 + 冒烟 + 部署 + 日志，**出错必须能归因到刚做完的那一片**。
+* 已知事实：单 exe + 一个模块 DLL；`main.cpp` 5857 行、`Diagnostics.cpp` 8968 行；模块↔主程序走共享内存环。
+
+─ 5. 请给我
+
+* 对 Q1 顺序的明确表态（同意／反对／换序，并说理由）；
+* 对 Q3 的明确选择（a / b / c），以及你建议的子片切法；
+* 对 Q4 的表态：先建日志回归网，还是直接开始拆（如果建，基线怎么定）；
+* 你在这套改动里**最担心的那个静默故障**是什么，以及怎么在验收里把它抓住。

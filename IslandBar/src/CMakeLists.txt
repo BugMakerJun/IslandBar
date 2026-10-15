@@ -56,13 +56,13 @@ add_executable(island_bar
 
     # --- platform: the Win32 and shell APIs the bar stands on --------
     platform/DisplayBrightness.cpp
-    platform/GlassMaterial.cpp
     platform/Monitor.cpp
     platform/NativeTaskbar.cpp
     platform/ThumbnailPreview.cpp
     platform/WindowList.cpp
 
     # --- render: everything that puts pixels on the composition ------
+    render/GlassMaterial.cpp
     render/Renderer.cpp
     render/TextRenderer.cpp
     render/Theme.cpp

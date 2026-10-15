@@ -3,7 +3,7 @@
 // =====================================================================
 #include "render/TextRenderer.h"
 #include "render/Theme.h"   // the material: the card's surface, the edge, the accent and the ink
-#include "platform/GlassMaterial.h"   // the shadow under a card and the grain over it
+#include "render/GlassMaterial.h"   // the shadow under a card and the grain over it
 #include "shell/Weather.h"   // SkyMark: the weather mark the status line draws, per WMO code
 
 #include "media/WicImage.h"   // DecodeImage, for the mixer's application icons

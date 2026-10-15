@@ -1,7 +1,7 @@
 // =====================================================================
 //  GlassMaterial.cpp -- see the header for what belongs here and what does not.
 // =====================================================================
-#include "platform/GlassMaterial.h"
+#include "render/GlassMaterial.h"
 
 #include "core/Log.h"
 

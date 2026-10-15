@@ -12,6 +12,11 @@
 //
 //  WHAT IS DELIBERATELY NOT HERE: any kind of CPU blur, screenshot, or GDI path. The brief forbids those
 //  and this project does too -- everything below is Direct2D primitives on the GPU.
+//
+//  WHY IT LIVES IN render/ (2026-10-16): it is drawing -- Direct2D primitives for a surface -- and it
+//  already depends on render/Theme.h for the constants it uses. It sat in platform/ for a while, and that
+//  single include was the ONLY back edge in the layer graph (platform -> render while render -> platform),
+//  which is what kept the layers from being locked with static libraries. See ARCHITECTURE.md section 7.
 // =====================================================================
 #pragma once
 
