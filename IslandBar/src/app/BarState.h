@@ -21,7 +21,9 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>   // uint8_t: the account picture the Start card's footer draws
 #include <memory>
+#include <vector>    // the Start card's lists, its icon pointers and its per-item springs
 
 #include <windows.h>
 
@@ -32,7 +34,51 @@
 
 namespace island {
 
+// One spring per item of the Start card's three lists, so a highlight fades in and out instead of switching
+// (see FrameState::pinWashes). Sized to the list, which is a handful of tiles, up to 121 picker rows and five
+// power rows. It is declared here rather than nested inside BarState because the loops that step the springs
+// name the type in a lambda signature (see main.cpp).
+struct WashSlot {
+    float value = 0.0f;
+    float velocity = 0.0f;
+};
 struct BarState {
+
+    // --- the Start card's own state (slice 5) --------------------------------------------------------
+    //
+    // Moved 2026-10-15, comments and all. The pins are the user's, from a text file beside the bar (see
+    // StartApps); the account picture and name are read once, because they are the card's footer and change
+    // about as often as the user changes his picture. The six wash vectors are one spring per item of the
+    // card's three lists, plus the values they were drawn at, and the last three fields exist so a CHANGE in
+    // where the pointer is can ask for a redraw (the card's highlight is not a state the loop already watches).
+    bool startPageOpen = false;
+    int startPageState = 0;        // 0 = the pins, 1 = the picker, 2 = the power list
+    int startPickerScroll = 0;
+    int startPowerConfirm = -1;
+    std::vector<uint8_t> accountAvatarPng;
+    wchar_t accountName[64] = {};
+    // Rebuilt per frame for the frame's icon pointers (see below), and kept here so the storage outlives
+    // the frame that points into it.
+    std::vector<const uint8_t*> startIconPointers;
+    std::vector<size_t> startIconSizes;
+    // One spring per item of the Start card's three lists, so a highlight fades in and out instead of
+    // switching: see FrameState::pinWashes. Sized to the list, which is a handful of tiles, up to 121
+    // picker rows and five power rows.
+    std::vector<WashSlot> startPinWashes;
+    std::vector<WashSlot> startRowWashes;
+    std::vector<WashSlot> startPowerWashes;
+    std::vector<float> startPinWashValues;
+    std::vector<float> startRowWashValues;
+    std::vector<float> startPowerWashValues;
+    bool startWashAnimating = false;
+    int startPinCount = 0;
+    int startAppCount = 0;
+    // The pointer's position in the card, remembered so a CHANGE can ask for a redraw: the card's
+    // highlight is not a state the loop already watches (see needDraw), and without this the highlight
+    // moved only on the next clock tick -- up to a second late.
+    int lastStartHitTarget = 0;
+    int lastStartHitIndex = -2;
+    int lastStartScrollDip = -1;
     // --- the system panel's card, and the tray's level of it --------------------------------
     //
     // The tray page and the panel's tiles are two levels of ONE card, which is why their flags are read

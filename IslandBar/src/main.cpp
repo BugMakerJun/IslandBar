@@ -1102,38 +1102,6 @@ unsigned long long lastMusicMeterMs = 0;
     // name are read once: they are the two things in the card's footer and they change about as often as
     // the user changes his picture.
     island::StartApps startApps;
-    bool startPageOpen = false;
-    int startPageState = 0;        // 0 = the pins, 1 = the picker, 2 = the power list
-    int startPickerScroll = 0;
-    int startPowerConfirm = -1;
-    std::vector<uint8_t> accountAvatarPng;
-    wchar_t accountName[64] = {};
-    // Rebuilt per frame for the frame's icon pointers (see below), and kept here so the storage outlives
-    // the frame that points into it.
-    std::vector<const uint8_t*> startIconPointers;
-    std::vector<size_t> startIconSizes;
-    // One spring per item of the Start card's three lists, so a highlight fades in and out instead of
-    // switching: see FrameState::pinWashes. Sized to the list, which is a handful of tiles, up to 121
-    // picker rows and five power rows.
-    struct WashSlot {
-        float value = 0.0f;
-        float velocity = 0.0f;
-    };
-    std::vector<WashSlot> startPinWashes;
-    std::vector<WashSlot> startRowWashes;
-    std::vector<WashSlot> startPowerWashes;
-    std::vector<float> startPinWashValues;
-    std::vector<float> startRowWashValues;
-    std::vector<float> startPowerWashValues;
-    bool startWashAnimating = false;
-    int startPinCount = 0;
-    int startAppCount = 0;
-    // The pointer's position in the card, remembered so a CHANGE can ask for a redraw: the card's
-    // highlight is not a state the loop already watches (see needDraw), and without this the highlight
-    // moved only on the next clock tick -- up to a second late.
-    int lastStartHitTarget = 0;
-    int lastStartHitIndex = -2;
-    int lastStartScrollDip = -1;
     std::thread([&startApps]() {
         const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         startApps.RefreshList();
@@ -1145,14 +1113,14 @@ unsigned long long lastMusicMeterMs = 0;
         wchar_t user[128] = {};
         DWORD userSize = sizeof(user);
         if (GetUserNameW(user, &userSize)) {
-            wcsncpy_s(accountName, 64, user, _TRUNCATE);
+            wcsncpy_s(bar.accountName, 64, user, _TRUNCATE);
         }
         // GetUserNameEx(NameDisplay) is the full name the shell shows in its own footer, which on this
         // machine is not the account name at all; the account name is the fallback.
         wchar_t display[128] = {};
         ULONG displaySize = 128;
         if (GetUserNameExW(NameDisplay, display, &displaySize) && display[0] != L'\0') {
-            wcsncpy_s(accountName, 64, display, _TRUNCATE);
+            wcsncpy_s(bar.accountName, 64, display, _TRUNCATE);
         }
         wchar_t sidText[128] = {};
         HANDLE token = nullptr;
@@ -1216,17 +1184,17 @@ unsigned long long lastMusicMeterMs = 0;
         island::DecodedImage avatar;
         if (!fileBytes.empty() && island::DecodeImage(fileBytes.data(), fileBytes.size(), &avatar) &&
             avatar.pixels && avatar.width > 0) {
-            accountAvatarPng.resize(512 * 1024);
+            bar.accountAvatarPng.resize(512 * 1024);
             const size_t size = island::EncodeBgraToPng(avatar.pixels, avatar.width, avatar.height,
-                                                       accountAvatarPng.data(),
-                                                       accountAvatarPng.size());
-            accountAvatarPng.resize(size);
+                                                       bar.accountAvatarPng.data(),
+                                                       bar.accountAvatarPng.size());
+            bar.accountAvatarPng.resize(size);
             island::LogAndPrint("  start: account picture %dx%d -> %zu byte PNG from %ls", avatar.width,
                                 avatar.height, size, picture);
         } else {
             island::LogAndPrint("  start: no account picture (%ls)", picture);
         }
-        island::LogAndPrint("  start: footer name '%ls'", accountName);
+        island::LogAndPrint("  start: footer name '%ls'", bar.accountName);
         startApps.LoadPins();
         std::fflush(stdout);
     }
@@ -1501,10 +1469,10 @@ float musicWavePhase = 0.0f;
             // control this machine's scripting cannot press, so without this there is no way to photograph
             // it. The value IS the page: 0 the pins, 1 the picker, 2 the power list.
             if (GetEnvironmentVariableW(L"ISLANDBAR_START_PAGE", setting, 32) > 0) {
-                startPageState = static_cast<int>(wcstol(setting, nullptr, 10));
-                startPageOpen = true;
+                bar.startPageState = static_cast<int>(wcstol(setting, nullptr, 10));
+                bar.startPageOpen = true;
                 bar.systemPanelOpen = true;
-                island::LogAndPrint("  diagnostic: the Start card is opened on page %d\n", startPageState);
+                island::LogAndPrint("  diagnostic: the Start card is opened on page %d\n", bar.startPageState);
                 std::fflush(stdout);
             }
             if (GetEnvironmentVariableW(L"ISLANDBAR_SOUND_SCROLL", setting, 32) > 0) {
@@ -2153,7 +2121,7 @@ float musicWavePhase = 0.0f;
                 bar.soundPageOpen = false;
                 // ... and the Start card, which is the fourth level of the same card and has to go with it
                 // for the same reason (see the note above about every level being cleared).
-                startPageOpen = false;
+                bar.startPageOpen = false;
                 // ... AND the tray's page, which is the third level of the same card. It used to be left
                 // set, which was harmless while the level was read from the request and is not now: a card
                 // put away by a click outside must take every level with it, exactly as a click on the
@@ -2300,15 +2268,15 @@ float musicWavePhase = 0.0f;
                     island::LogAndPrint("  sound page: wheel %d -> scroll %.0f\n", wheelNotches,
                                         bar.soundPageScroll);
                     std::fflush(stdout);
-                } else if (startPageOpen && startPageState == 1 &&
+                } else if (bar.startPageOpen && bar.startPageState == 1 &&
                            window.TakeSoundWheel(&wheelNotches)) {
                     // The picker scrolls one NOTCH per row, not in pixels: 121 applications at 34 DIP a row
                     // is 4,114 DIP of list, and a pixel-per-notch wheel would take a minute to reach the
                     // end alphabetically. Clamped so the last screenful is the last thing reachable.
                     window.ScrollStartPicker(wheelNotches);
-                    startPickerScroll = window.StartPickerScroll();
+                    bar.startPickerScroll = window.StartPickerScroll();
                     island::LogAndPrint("  start: picker wheel %d -> row %d of %d\n", wheelNotches,
-                                        startPickerScroll, startAppCount);
+                                        bar.startPickerScroll, bar.startAppCount);
                     std::fflush(stdout);
                 }
             }
@@ -2495,15 +2463,15 @@ float musicWavePhase = 0.0f;
                     // 的". The system menu is not gone -- the Windows key and Ctrl+Esc still open it -- it is
                     // simply no longer what THIS button does, and that is one line in the log rather than a
                     // silent change of behaviour: "start click: the bar's own card".
-                    startPageOpen = !startPageOpen;
-                    bar.systemPanelOpen = startPageOpen;
-                    startPageState = 0;
-                    startPickerScroll = 0;
-                    startPowerConfirm = -1;
+                    bar.startPageOpen = !bar.startPageOpen;
+                    bar.systemPanelOpen = bar.startPageOpen;
+                    bar.startPageState = 0;
+                    bar.startPickerScroll = 0;
+                    bar.startPowerConfirm = -1;
                     bar.trayPageOpen = false;
                     bar.soundPageOpen = false;
                     island::LogAndPrint("  start click: the bar's own card %ls\n",
-                                        startPageOpen ? L"open" : L"closed");
+                                        bar.startPageOpen ? L"open" : L"closed");
                     std::fflush(stdout);
                 } else if (trayIcons.Count() > 0 && window.TrayButtonAtScreen(cursor)) {
                     // THE TRAY BUTTON, at the other end of the bar from the system button, and a toggle
@@ -2536,7 +2504,7 @@ float musicWavePhase = 0.0f;
                     const island::IslandWindow::StartHit startHit = window.StartHitHovered();
                     switch (startHit.target) {
                         case island::IslandWindow::StartHitTarget::Pin: {
-                            if (startHit.index >= 0 && startHit.index < startPinCount) {
+                            if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
                                 const island::StartApp& app = startApps.PinAt(startHit.index);
                                 island::LogAndPrint("  start: launching pinned '%ls'\n", app.name);
                                 island::LaunchStartApp(app.target);
@@ -2545,7 +2513,7 @@ float musicWavePhase = 0.0f;
                             break;
                         }
                         case island::IslandWindow::StartHitTarget::PickerRow: {
-                            if (startHit.index >= 0 && startHit.index < startAppCount) {
+                            if (startHit.index >= 0 && startHit.index < bar.startAppCount) {
                                 const island::StartApp& app = startApps.ListAt(startHit.index);
                                 // The shortcut is NAMED after the application, which is also what the tile
                                 // will show: renaming the file in Explorer renames the tile.
@@ -2555,8 +2523,8 @@ float musicWavePhase = 0.0f;
                                                     startApps.PinCount());
                                 // Back to the pins, which is where the new one just appeared: staying in a
                                 // list of 121 with no sign of what happened is how a click reads as a dud.
-                                startPageState = 0;
-                                startPowerConfirm = -1;
+                                bar.startPageState = 0;
+                                bar.startPowerConfirm = -1;
                             }
                             break;
                         }
@@ -2564,16 +2532,16 @@ float musicWavePhase = 0.0f;
                             const int row = startHit.index;
                             if (row >= 0 && row <= 4) {
                                 const PowerAction action = static_cast<PowerAction>(row);
-                                if (PowerActionLosesWork(action) && startPowerConfirm != row) {
+                                if (PowerActionLosesWork(action) && bar.startPowerConfirm != row) {
                                     // Armed, not done: the list appears above a button the user was already
                                     // reaching for, and a mis-click there must not sign him out.
-                                    startPowerConfirm = row;
+                                    bar.startPowerConfirm = row;
                                     island::LogAndPrint("  power: '%ls' armed (a second press does it)\n",
                                                         PowerActionName(action));
                                 } else {
                                     island::LogAndPrint("  power: '%ls' pressed\n",
                                                         PowerActionName(action));
-                                    startPowerConfirm = -1;
+                                    bar.startPowerConfirm = -1;
                                     dismissPanel();
                                     RunPowerAction(action);
                                 }
@@ -2581,21 +2549,21 @@ float musicWavePhase = 0.0f;
                             break;
                         }
                         case island::IslandWindow::StartHitTarget::PowerButton: {
-                            if (startPageState == 1) {
-                                startPageState = 0;   // the × on the picker: back to the pins
+                            if (bar.startPageState == 1) {
+                                bar.startPageState = 0;   // the × on the picker: back to the pins
                             } else {
-                                startPageState = startPageState == 2 ? 0 : 2;
+                                bar.startPageState = bar.startPageState == 2 ? 0 : 2;
                             }
-                            startPowerConfirm = -1;
+                            bar.startPowerConfirm = -1;
                             break;
                         }
                         case island::IslandWindow::StartHitTarget::EmptyGrid: {
                             // The empty upper area is the way to fill it, which is what "上面的应该可以让用户
                             // 手动添加" asks for: the card itself is the control.
-                            startPageState = 1;
-                            startPickerScroll = 0;
+                            bar.startPageState = 1;
+                            bar.startPickerScroll = 0;
                             island::LogAndPrint("  start: picker open (%d application(s))\n",
-                                                startAppCount);
+                                                bar.startAppCount);
                             break;
                         }
                         case island::IslandWindow::StartHitTarget::None:
@@ -3182,16 +3150,16 @@ float musicWavePhase = 0.0f;
                 POINT rightCursor = {};
                 GetCursorPos(&rightCursor);
                 const island::IslandWindow::StartHit startHit = window.StartHitHovered();
-                if (startPageOpen && bar.systemPanelOpen &&
+                if (bar.startPageOpen && bar.systemPanelOpen &&
                     startHit.target == island::IslandWindow::StartHitTarget::Pin) {
                     // A pinned tile, right-clicked: that is how it comes off again. Unpinning from the
                     // CARD rather than from a settings file is the whole point of the card being the
                     // user's own -- he said the upper area should be his to fill.
-                    if (startHit.index >= 0 && startHit.index < startPinCount) {
+                    if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
                         const island::StartApp& app = startApps.PinAt(startHit.index);
                         island::LogAndPrint("  start: unpinning '%ls'\n", app.name);
                         startApps.Unpin(startHit.index);
-                        startPowerConfirm = -1;
+                        bar.startPowerConfirm = -1;
                     }
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
                            window.TrayCellHovered() >= 0 &&
@@ -3841,13 +3809,13 @@ float musicWavePhase = 0.0f;
             {
                 const island::IslandWindow::StartHit hit = window.StartHitHovered();
                 const int target = static_cast<int>(hit.target);
-                startHoverChanged = island::StartCardAsksForFrame(target, hit.index, startPickerScroll,
-                                                                 lastStartHitTarget,
-                                                                 lastStartHitIndex,
-                                                                 lastStartScrollDip);
-                lastStartHitTarget = target;
-                lastStartHitIndex = hit.index;
-                lastStartScrollDip = startPickerScroll;
+                startHoverChanged = island::StartCardAsksForFrame(target, hit.index, bar.startPickerScroll,
+                                                                 bar.lastStartHitTarget,
+                                                                 bar.lastStartHitIndex,
+                                                                 bar.lastStartScrollDip);
+                bar.lastStartHitTarget = target;
+                bar.lastStartHitIndex = hit.index;
+                bar.lastStartScrollDip = bar.startPickerScroll;
             }
 
             const bool needDraw = animating || clockChanged || notificationChanged ||
@@ -3860,7 +3828,7 @@ float musicWavePhase = 0.0f;
                                   // this loop watches anywhere else, and without them the highlight and the
                                   // list moved only on the next clock tick -- measured, that is ONE redraw
                                   // per second while idle, which is what "鼠标移上去卡卡的" was.
-                                  startHoverChanged || startWashAnimating ||
+                                  startHoverChanged || bar.startWashAnimating ||
                                   !haveDrawn;
             if (needDraw) {
                 // Which condition forced this redraw, counted per report interval.
@@ -3880,7 +3848,7 @@ float musicWavePhase = 0.0f;
                 if (progressChanged) ++whyProgress;
                 if (statusStripAnimating || weatherChanged) ++whyStatusStrip;
                 if (startHoverChanged) ++whyStartHover;
-                if (startWashAnimating) ++whyStartWash;
+                if (bar.startWashAnimating) ++whyStartWash;
                 if (!haveDrawn) ++whyFirst;
 
                 haveDrawn = true;
@@ -3913,7 +3881,7 @@ float musicWavePhase = 0.0f;
                 // `outerCardUp` is: a field set after the thing that reads it is a field one frame stale
                 // (see the note below, and the four times this project has paid for that lesson).
                 bar.panelLevel = island::NextPanelLevel(bar.panelLevel, frame.outerCardUp, bar.systemPanelOpen,
-                                                    bar.trayPageOpen, bar.soundPageOpen, startPageOpen);
+                                                    bar.trayPageOpen, bar.soundPageOpen, bar.startPageOpen);
                 const bool trayPageShown = bar.panelLevel == island::PanelLevel::Tray;
                 const bool soundPageShown = bar.panelLevel == island::PanelLevel::Sound;
                 const bool startPageShown = bar.panelLevel == island::PanelLevel::Start;
@@ -4085,8 +4053,8 @@ float musicWavePhase = 0.0f;
                         // highlights are sized, so a pin that was just added has a spring of its own in the
                         // frame it appears in -- sizing them from the previous frame's counts left the
                         // newest tile the one tile with no highlight.
-                        startPinCount = startApps.PinCount();
-                        startAppCount = startApps.ListCount();
+                        bar.startPinCount = startApps.PinCount();
+                        bar.startAppCount = startApps.ListCount();
                         const island::IslandWindow::StartHit hover = window.StartHitHovered();
                         const int pinHover = hover.target == island::IslandWindow::StartHitTarget::Pin
                                                  ? hover.index
@@ -4097,40 +4065,40 @@ float musicWavePhase = 0.0f;
                         const int powerHover =
                             hover.target == island::IslandWindow::StartHitTarget::PowerRow ? hover.index
                                                                                            : -1;
-                        const auto resize = [](std::vector<WashSlot>& slots,
+                        const auto resize = [](std::vector<island::WashSlot>& slots,
                                                std::vector<float>& values, int count) {
                             if (static_cast<int>(slots.size()) != count) {
-                                slots.assign(static_cast<size_t>(count), WashSlot{});
+                                slots.assign(static_cast<size_t>(count), island::WashSlot{});
                                 values.assign(static_cast<size_t>(count), 0.0f);
                             }
                         };
-                        resize(startPinWashes, startPinWashValues, startPinCount);
-                        resize(startRowWashes, startRowWashValues, startAppCount);
-                        resize(startPowerWashes, startPowerWashValues, 5);
-                        startWashAnimating = false;
-                        const auto step = [&](std::vector<WashSlot>& slots,
+                        resize(bar.startPinWashes, bar.startPinWashValues, bar.startPinCount);
+                        resize(bar.startRowWashes, bar.startRowWashValues, bar.startAppCount);
+                        resize(bar.startPowerWashes, bar.startPowerWashValues, 5);
+                        bar.startWashAnimating = false;
+                        const auto step = [&](std::vector<island::WashSlot>& slots,
                                               std::vector<float>& values, int hovered) {
                             for (int i = 0; i < static_cast<int>(slots.size()); ++i) {
                                 if (island::ControlWashStep(&slots[static_cast<size_t>(i)].value,
                                                             &slots[static_cast<size_t>(i)].velocity,
                                                             i == hovered ? 1.0f : 0.0f, dt)) {
-                                    startWashAnimating = true;
+                                    bar.startWashAnimating = true;
                                 }
                                 values[static_cast<size_t>(i)] = slots[static_cast<size_t>(i)].value;
                             }
                         };
-                        step(startPinWashes, startPinWashValues, pinHover);
-                        step(startRowWashes, startRowWashValues, rowHover);
-                        step(startPowerWashes, startPowerWashValues, powerHover);
+                        step(bar.startPinWashes, bar.startPinWashValues, pinHover);
+                        step(bar.startRowWashes, bar.startRowWashValues, rowHover);
+                        step(bar.startPowerWashes, bar.startPowerWashValues, powerHover);
                     }
                     const island::IslandWindow::StartHit startHit = window.StartHitHovered();
                     island::TextRenderer::StartCardText& card = frame.startCard;
-                    card.pins = startPinCount > 0 ? &startApps.PinAt(0) : nullptr;
-                    card.pinCount = startPinCount;
-                    card.list = startAppCount > 0 ? &startApps.ListAt(0) : nullptr;
-                    card.listCount = startAppCount;
-                    card.pickerScrollRow = startPickerScroll;
-                    card.page = startPageState;
+                    card.pins = bar.startPinCount > 0 ? &startApps.PinAt(0) : nullptr;
+                    card.pinCount = bar.startPinCount;
+                    card.list = bar.startAppCount > 0 ? &startApps.ListAt(0) : nullptr;
+                    card.listCount = bar.startAppCount;
+                    card.pickerScrollRow = bar.startPickerScroll;
+                    card.page = bar.startPageState;
                     card.hoveredPin =
                         startHit.target == island::IslandWindow::StartHitTarget::Pin ? startHit.index : -1;
                     card.hoveredPickerRow =
@@ -4143,32 +4111,32 @@ float musicWavePhase = 0.0f;
                             : -1;
                     card.powerButtonHovered =
                         startHit.target == island::IslandWindow::StartHitTarget::PowerButton;
-                    card.powerConfirmRow = startPowerConfirm;
-                    card.pinWashes = startPinWashValues.empty() ? nullptr : startPinWashValues.data();
-                    card.rowWashes = startRowWashValues.empty() ? nullptr : startRowWashValues.data();
+                    card.powerConfirmRow = bar.startPowerConfirm;
+                    card.pinWashes = bar.startPinWashValues.empty() ? nullptr : bar.startPinWashValues.data();
+                    card.rowWashes = bar.startRowWashValues.empty() ? nullptr : bar.startRowWashValues.data();
                     card.powerWashes =
-                        startPowerWashValues.empty() ? nullptr : startPowerWashValues.data();
-                    card.accountName = accountName;
-                    card.avatarPng = accountAvatarPng.empty() ? nullptr : accountAvatarPng.data();
-                    card.avatarPngSize = accountAvatarPng.size();
+                        bar.startPowerWashValues.empty() ? nullptr : bar.startPowerWashValues.data();
+                    card.accountName = bar.accountName;
+                    card.avatarPng = bar.accountAvatarPng.empty() ? nullptr : bar.accountAvatarPng.data();
+                    card.avatarPngSize = bar.accountAvatarPng.size();
 
                     // One array of icon pointers, rebuilt here because the frame carries pointers and must
                     // not carry a vector of them: the renderer walks `pinIcons[i]` against `pins[i]`, and
                     // the two have to be the same length in the same order.
-                    startIconPointers.clear();
-                    startIconSizes.clear();
-                    for (int i = 0; i < startPinCount; ++i) {
+                    bar.startIconPointers.clear();
+                    bar.startIconSizes.clear();
+                    for (int i = 0; i < bar.startPinCount; ++i) {
                         size_t size = 0;
                         const uint8_t* png = startApps.PinIconPng(i, &size);
-                        startIconPointers.push_back(png);
-                        startIconSizes.push_back(size);
+                        bar.startIconPointers.push_back(png);
+                        bar.startIconSizes.push_back(size);
                     }
-                    card.pinIcons = startIconPointers.empty() ? nullptr : startIconPointers.data();
-                    card.pinIconSizes = startIconSizes.empty() ? nullptr : startIconSizes.data();
+                    card.pinIcons = bar.startIconPointers.empty() ? nullptr : bar.startIconPointers.data();
+                    card.pinIconSizes = bar.startIconSizes.empty() ? nullptr : bar.startIconSizes.data();
                 }
                 // ... and the window, which answers "what is the pointer on" with the same geometry.
-                window.SetStartState(startPageShown, startPageState, startPinCount, startAppCount,
-                                     startPickerScroll);
+                window.SetStartState(startPageShown, bar.startPageState, bar.startPinCount, bar.startAppCount,
+                                     bar.startPickerScroll);
 
                 // Who owns the card for this frame. The panel keeps it until the card is gone.
                 //

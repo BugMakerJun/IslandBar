@@ -11653,3 +11653,18 @@ uninstaller written: ...  shortcut written: ...  registered under Settings > App
 #### 8.124.2 验证
 
 两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；起 bar 后自报那条路照常：`taskbar: state=music-strip, 4 buttons from 4 windows listed …`、`state: music-strip (pointer inside=0, resting=music-strip)`（这两行正是 `lastReportedState` / `lastReportedButtons` 把住的门）。
+
+### 8.125 **BarState 第 5 片：开始卡片（20 个字段 + `WashSlot`）** ✅（截图验证卡片画得对）
+
+`main.cpp` **5,876 → 5,844 行**。
+
+搬的是整段连续代码（原 1105–1136 行，32 行）：图钉/选择器/电源列表的状态（`startPageOpen` / `startPageState` / `startPickerScroll` / `startPowerConfirm`）、账号头像与名字（`accountAvatarPng` / `accountName`）、每帧重建的图标指针与尺寸（`startIconPointers` / `startIconSizes`）、六个 wash 弹簧与它们被画出来的值、`startWashAnimating` / `startPinCount` / `startAppCount`，以及"指针在卡片里的位置"那三个用来触发重绘的记忆值。
+
+两个附带决定：
+
+1. **`WashSlot` 从函数内的局部类型提到 `namespace island` 作用域**（放在 `struct BarState` 上面）。原因是它出现在 main.cpp 里 lambda 的形参签名上（`std::vector<WashSlot>&`），藏在函数里就搬不出去；现在那些签名写 `island::WashSlot`。
+2. 头文件补齐 `<cstdint>` 与 `<vector>` —— 结构体带着 `uint8_t` 和六个 vector 之后，**它自己要把依赖说清楚**（第 3 片已经开过这个头，这次是第二回）。
+
+`startApps`（对象）留在 `RunBar`，它下面那个后台线程的 `[&startApps]` 捕获照旧。
+
+**验证**：两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；然后用开始按钮自己的诊断开关（`ISLANDBAR_START_MS`）让它按下去并截图——图钉列表（15 个）、底部账号头像与名字、被指针指到那一项的高亮（wash 值 > 0）全部正常，日志里 `start button: island x [1170, 1390] -> button x [1132, 1162]…`、`start: 124 application(s) in shell:AppsFolder`、`start menu: Ctrl+Esc was sent` 都对得上。
