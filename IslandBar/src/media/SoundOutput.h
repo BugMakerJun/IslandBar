@@ -134,6 +134,16 @@ private:
 
     SoundOutputSnapshot snapshot_{};
     volatile long revision_ = 0;
+
+    // What the last REPORTED reading said, so the line below is written when the page's contents CHANGE rather
+    // than once per reading. The reading runs four times a second, so "once per reading" was four lines a
+    // second of the same sentence -- and a log nobody reads is the same as no log at all, which is the opposite
+    // of why these lines exist (see ReadAll).
+    int loggedDeviceCount_ = -1;
+    int loggedSessionCount_ = -1;
+    int loggedDevicesReadable_ = -1;
+    int loggedSessionsReadable_ = -1;
+    wchar_t loggedDefaultName_[128] = {};
     bool haveReading_ = false;
 
     // Pending writes, set by the frame loop and taken by the worker.

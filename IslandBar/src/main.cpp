@@ -701,12 +701,12 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // place for that.
 
     island::LogAndPrint("IslandBar\n");
-    island::LogAndPrint("  monitor %ldx%ld, work %ldx%ld, %u dpi, systems.taskbar inset %ld px\n",
+    island::LogAndPrint("  monitor %ldx%ld, work %ldx%ld, %u dpi, taskbar inset %ld px\n",
                 island::ScreenWidth(monitor), island::ScreenHeight(monitor),
                 island::WorkWidth(monitor), island::WorkHeight(monitor),
                 monitor.dpi, island::TaskbarThickness(monitor));
     island::LogAndPrint("  move the pointer onto the pill to spread it; click to open the card\n");
-    island::LogAndPrint("  close the systems.window to exit\n");
+    island::LogAndPrint("  close the window to exit\n");
 
     // Hiding the shell's taskbar is the point of the exercise, but it is also the
     // only thing this program does that the user can see outside its own window,
@@ -728,27 +728,27 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
             const bool hidden = systems.taskbar.Hide();
 
             if (hidden && !blocked) {
-                island::LogAndPrint("  native systems.taskbar: hidden");
+                island::LogAndPrint("  native taskbar: hidden");
                 island::LogAndPrint("  (restored on exit; if this process is killed"
                                     " instead, restart Explorer)");
             } else if (blocked) {
-                island::LogAndPrint("  native systems.taskbar: CANNOT BE HIDDEN from this process");
+                island::LogAndPrint("  native taskbar: CANNOT BE HIDDEN from this process");
                 island::LogAndPrint("    island_bar.exe runs at a LOWER integrity level than the");
-                island::LogAndPrint("    shell's systems.taskbar, so Windows drops the request silently");
+                island::LogAndPrint("    shell's taskbar, so Windows drops the request silently");
                 island::LogAndPrint("    (UIPI: no error, the call just returns 0).");
                 island::LogAndPrint("    FIX: start island_bar.exe from your own shell -- Win+R, or a");
-                island::LogAndPrint("    PowerShell/cmd systems.window opened from the Start menu -- NOT from");
+                island::LogAndPrint("    PowerShell/cmd window opened from the Start menu -- NOT from");
                 island::LogAndPrint("    inside a sandbox, an IDE, or a restricted launcher.");
-                island::LogAndPrint("    Confirm with --probe-systems.taskbar there before starting the bar.");
+                island::LogAndPrint("    Confirm with --probe-taskbar there before starting the bar.");
             } else {
-                island::LogAndPrint("  native systems.taskbar: could NOT be hidden (reason unknown;"
-                                    " try --probe-systems.taskbar)");
+                island::LogAndPrint("  native taskbar: could NOT be hidden (reason unknown;"
+                                    " try --probe-taskbar)");
             }
         } else {
-            island::LogAndPrint("  native systems.taskbar: not found (nothing to hide)");
+            island::LogAndPrint("  native taskbar: not found (nothing to hide)");
         }
     } else {
-        island::LogAndPrint("  native systems.taskbar: left alone (--keep-systems.taskbar)");
+        island::LogAndPrint("  native taskbar: left alone (--keep-taskbar)");
     }
     // Flushed explicitly rather than left to the buffer: this process runs for
     // hours and is then killed, and a killed process discards whatever the
@@ -772,7 +772,7 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     const LONG barThicknessPx =
         island::DipToPixels(island::kReservedBarHeightDip, monitor.dpi);
     if (!systems.window.Create(monitor, /*show=*/true)) {
-        island::LogAndPrint("FATAL: could not create the systems.window (error %lu)\n", GetLastError());
+        island::LogAndPrint("FATAL: could not create the window (error %lu)\n", GetLastError());
         std::fflush(stdout);
         // The taskbar was already hidden by this point, so it must not be left
         // that way because startup failed.
@@ -815,7 +815,7 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
         // shell says so with ABN_POSCHANGED.
         if (systems.appBarResult == island::AppBarResult::NotRegistered) {
             island::LogAndPrint("    The shell refused to register another bar on this edge;");
-            island::LogAndPrint("    that is expected while the native systems.taskbar still owns it.");
+            island::LogAndPrint("    that is expected while the native taskbar still owns it.");
         } else if (systems.appBarResult == island::AppBarResult::SpaceNotGranted) {
             island::LogAndPrint("    Registered, but the desktop did not give up the strip yet.");
             island::LogAndPrint("    It is claimed again automatically on ABN_POSCHANGED.");
@@ -838,10 +838,10 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // Skipped when the AppBar above claims the strip: that claim is the same strip, reserved on purpose,
     // and releasing it would put maximized windows on top of the space just asked for.
     if (!hideNativeTaskbar) {
-        island::LogAndPrint("  work area: left alone (--keep-systems.taskbar)");
+        island::LogAndPrint("  work area: left alone (--keep-taskbar)");
     } else if (keepStrip) {
         island::LogAndPrint("  work area: the strip is NOT released (--keep-strip);");
-        island::LogAndPrint("    a maximized systems.window will keep the band the shell's systems.taskbar reserves");
+        island::LogAndPrint("    a maximized window will keep the band the shell's taskbar reserves");
     } else if (systems.appBarResult == island::AppBarResult::Registered) {
         island::LogAndPrint("  work area: the strip stays reserved (the AppBar above claims it)");
     } else {
@@ -857,13 +857,13 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
             const int nudged =
                 island::NudgeStaleMaximizedWindows(monitor.screen, release.before, release.after);
             if (nudged) {
-                island::LogAndPrint("  work area: %d already-maximized systems.window(s) brought to the full "
+                island::LogAndPrint("  work area: %d already-maximized window(s) brought to the full "
                                     "screen", nudged);
             }
         } else if (release.released) {
             island::LogAndPrint("  work area: nothing to release (it is already the whole monitor)");
         } else {
-            island::LogAndPrint("  work area: NOT released -- the shell's systems.taskbar is not hidden by "
+            island::LogAndPrint("  work area: NOT released -- the shell's taskbar is not hidden by "
                                 "this process, so its strip is not ours to give back");
         }
         std::fflush(stdout);
@@ -886,8 +886,8 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // rather than refused. A failure here is reported and the bar keeps working:
     // the clock and the hover states do not depend on notifications.
     const bool listening = systems.notificationServer.Start();
-    island::LogAndPrint(listening ? "  systems.notifications: listening on \\\\.\\pipe\\%ls"
-                                  : "  systems.notifications: DISABLED (could not create the pipe)",
+    island::LogAndPrint(listening ? "  notifications: listening on \\\\.\\pipe\\%ls"
+                                  : "  notifications: DISABLED (could not create the pipe)",
                         island::kPipeName);
 
     // The SECOND notification channel: Windows' own toasts, read out of the database the notification centre
@@ -896,7 +896,7 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // as it was, because the push channel does not depend on it.
     const bool toastsAvailable = systems.toasts.Start();
     if (!toastsAvailable) {
-        island::LogAndPrint("  systems.notifications: system systems.toasts are NOT being read (see above)");
+        island::LogAndPrint("  notifications: system toasts are NOT being read (see above)");
     }
 
     // The THIRD channel: WeChat, which tells Windows nothing at all and shows its own popup instead.
@@ -929,13 +929,13 @@ unsigned long long lastMusicMeterMs = 0;
                            noSessionSetting[0] == L'1';
     const bool musicAvailable = !noMedia && !noSession && systems.music.Start();
     island::LogAndPrint(musicAvailable
-                            ? "  systems.music: reading the system media session"
-                            : (noMedia ? "  systems.music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were"
+                            ? "  music: reading the system media session"
+                            : (noMedia ? "  music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were"
                                          " playing)"
-                                       : (noSession ? "  systems.music: the session reader is DISABLED BY"
-                                                      " ISLANDBAR_NO_SESSION (the systems.window-title source"
+                                       : (noSession ? "  music: the session reader is DISABLED BY"
+                                                      " ISLANDBAR_NO_SESSION (the window-title source"
                                                       " below is what is left)"
-                                                    : "  systems.music: DISABLED (the media API is"
+                                                    : "  music: DISABLED (the media API is"
                                                       " unavailable)")));
     std::fflush(stdout);
 
@@ -950,9 +950,9 @@ unsigned long long lastMusicMeterMs = 0;
     // screenshot depends on that meaning exactly what it says.
     const bool playerWindowAvailable = !noMedia && systems.playerWindow.Start();
     island::LogAndPrint(playerWindowAvailable
-                            ? "  systems.music: player systems.window titles are watched too (used only while no"
+                            ? "  music: player window titles are watched too (used only while no"
                               " session exists)"
-                            : "  systems.music: player systems.window titles DISABLED");
+                            : "  music: player window titles DISABLED");
     std::fflush(stdout);
 
     // --- lyrics ---
@@ -965,8 +965,8 @@ unsigned long long lastMusicMeterMs = 0;
     // for tens of milliseconds; blocking the frame loop is exactly what the stutter reports
     // were about.
     const bool volumeAvailable = systems.volume.Start();
-    island::LogAndPrint(volumeAvailable ? "  systems.volume: reading the default output endpoint"
-                                        : "  systems.volume: DISABLED (no audio endpoint)");
+    island::LogAndPrint(volumeAvailable ? "  volume: reading the default output endpoint"
+                                        : "  volume: DISABLED (no audio endpoint)");
     std::fflush(stdout);
 
     // --- the 声音输出 page's own data -------------------------------------
@@ -990,8 +990,8 @@ unsigned long long lastMusicMeterMs = 0;
 
     const bool lyricsAvailable = systems.lyrics.Start();
     island::LogAndPrint(lyricsAvailable
-                            ? "  systems.lyrics: on demand, NetEase then QQ Music"
-                            : "  systems.lyrics: DISABLED (the worker could not start)");
+                            ? "  lyrics: on demand, NetEase then QQ Music"
+                            : "  lyrics: DISABLED (the worker could not start)");
     std::fflush(stdout);
 
     // --- the weather on the status strip ----------------------------------
@@ -1004,9 +1004,9 @@ unsigned long long lastMusicMeterMs = 0;
     // the time without a reading, which is what it is designed to do.
     const bool weatherAvailable = systems.weather.Start();
     island::LogAndPrint(weatherAvailable
-                            ? "  systems.weather: position from Windows, forecast from Open-Meteo "
-                              "(systems.weather.txt can pin a city instead)"
-                            : "  systems.weather: DISABLED (the worker could not start)");
+                            ? "  weather: position from Windows, forecast from Open-Meteo "
+                              "(weather.txt can pin a city instead)"
+                            : "  weather: DISABLED (the worker could not start)");
     std::fflush(stdout);
 
     // --- the hover preview ---------------------------------------------------
@@ -1017,8 +1017,8 @@ unsigned long long lastMusicMeterMs = 0;
     // Owned by the bar's window, so it can never be covered by it (see Create).
     const bool previewReady = systems.preview.Create(systems.window.Handle());
     island::LogAndPrint(previewReady
-                            ? "  systems.preview: resting on a task icon shows a live thumbnail"
-                            : "  systems.preview: DISABLED (the systems.preview systems.window could not be created)");
+                            ? "  preview: resting on a task icon shows a live thumbnail"
+                            : "  preview: DISABLED (the preview window could not be created)");
     std::fflush(stdout);
 
     // --- the system tray ------------------------------------------------------
@@ -1193,7 +1193,7 @@ unsigned long long lastMusicMeterMs = 0;
     // can refresh between frames, and a frame that pointed into the list would read freed entries.
 
     if (!renderOk) {
-        island::LogAndPrint("WARNING: composition surface unavailable; the systems.window stays empty\n");
+        island::LogAndPrint("WARNING: composition surface unavailable; the window stays empty\n");
         std::fflush(stdout);
     } else {
         // Frame pacing. The compositor clock drives this when available, so an
@@ -1579,7 +1579,7 @@ float musicWavePhase = 0.0f;
                 // never layered -- and TrayPressInFlight, TrayPressCleanupPending and TrayPressFinishCleanup
                 // are gone with the route that needed them.
                 if (systems.taskbar.EnsureHidden()) {
-                    island::LogAndPrint("  native systems.taskbar: re-hidden (the shell put it back)\n");
+                    island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
                 }
                 // ... and the same question for the work area the hide used to reserve. The shell
@@ -1600,7 +1600,7 @@ float musicWavePhase = 0.0f;
                         const int nudged = island::NudgeStaleMaximizedWindows(monitor.screen,
                                                                              again.before, again.after);
                         if (nudged) {
-                            island::LogAndPrint("  work area: %d already-maximized systems.window(s) brought to "
+                            island::LogAndPrint("  work area: %d already-maximized window(s) brought to "
                                                 "the full screen\n", nudged);
                         }
                         std::fflush(stdout);
@@ -1654,7 +1654,7 @@ float musicWavePhase = 0.0f;
                 frameWork |= kWorkToastPoll;
                 const int arrived = systems.toasts.Poll(&systems.notifications);
                 if (arrived > 0) {
-                    island::LogAndPrint("  systems.toasts: %d new system toast(s), %d taken in total", arrived,
+                    island::LogAndPrint("  toasts: %d new system toast(s), %d taken in total", arrived,
                                         systems.toasts.Taken());
                     std::fflush(stdout);
                     // A message from another application deserves the same attention as one pushed here --
@@ -1668,7 +1668,7 @@ float musicWavePhase = 0.0f;
                 bar.lastWeChatPoll = GetTickCount64();
                 frameWork |= kWorkWeChatScan;
                 if (systems.wechat.Poll(&systems.notifications, GetTickCount64()) > 0) {
-                    island::LogAndPrint("  systems.wechat: %d message announcement(s) so far", systems.wechat.Announced());
+                    island::LogAndPrint("  wechat: %d message announcement(s) so far", systems.wechat.Announced());
                     std::fflush(stdout);
                     systems.window.SetState(island::IslandState::NoticeStrip);
                 }
@@ -1784,10 +1784,31 @@ float musicWavePhase = 0.0f;
                             MultiByteToWideChar(CP_UTF8, 0,
                                                 island::PlaybackStateName(nowPlaying.state), -1,
                                                 wideState, 64);
-                            island::LogAndPrint(L"  systems.music: [%ls] %ls - %ls (%ls)",
-                                                wideApp[0] ? wideApp : L"?",
-                                                wideArtist[0] ? wideArtist : L"?",
-                                                wideTitle[0] ? wideTitle : L"?", wideState);
+                            // ... AND ONLY WHEN IT IS A DIFFERENT TRACK OR A DIFFERENT STATE.
+                            //
+                            // This line is above a reader that fires whenever the session's revision moves, and
+                            // the revision moves for every POSITION update -- about once a second. So the same
+                            // sentence was written every second for as long as the bar ran: measured in the log
+                            // before this change, 3,600 lines an hour of "the same song is still playing". What
+                            // the line is for is noticing that it changed, which is also what makes it worth
+                            // keeping a copy of what was last written (app, artist, title, state).
+                            const bool musicIdentityChanged =
+                                !bar.haveLoggedMusic ||
+                                std::strcmp(bar.lastLoggedMusicApp, nowPlaying.app) != 0 ||
+                                std::strcmp(bar.lastLoggedMusicArtist, nowPlaying.artist) != 0 ||
+                                std::strcmp(bar.lastLoggedMusicTitle, nowPlaying.title) != 0 ||
+                                bar.lastLoggedMusicState != nowPlaying.state;
+                            if (musicIdentityChanged) {
+                                island::LogAndPrint(L"  music: [%ls] %ls - %ls (%ls)",
+                                                    wideApp[0] ? wideApp : L"?",
+                                                    wideArtist[0] ? wideArtist : L"?",
+                                                    wideTitle[0] ? wideTitle : L"?", wideState);
+                                bar.haveLoggedMusic = true;
+                                bar.lastLoggedMusicState = nowPlaying.state;
+                                strncpy_s(bar.lastLoggedMusicApp, nowPlaying.app, _TRUNCATE);
+                                strncpy_s(bar.lastLoggedMusicArtist, nowPlaying.artist, _TRUNCATE);
+                                strncpy_s(bar.lastLoggedMusicTitle, nowPlaying.title, _TRUNCATE);
+                            }
                         }
                         std::fflush(stdout);
 
@@ -1801,7 +1822,7 @@ float musicWavePhase = 0.0f;
                         // published something this bar could not decode, and it published a cover that is
                         // on the card right now.
                         if (sessionTrackChanged) {
-                            island::LogAndPrint("  systems.music: cover %s (%zu bytes, revision %llu)\n",
+                            island::LogAndPrint("  music: cover %s (%zu bytes, revision %llu)\n",
                                                 nowPlaying.artworkSize > 0 ? "present" : "NONE",
                                                 nowPlaying.artworkSize, nowPlaying.artworkRevision);
                             std::fflush(stdout);
@@ -1828,7 +1849,7 @@ float musicWavePhase = 0.0f;
                 // fills against when the session publishes no timeline (see Lyrics::trackDurationMs), and
                 // a number that reaches the screen without ever reaching the log is a number nobody can
                 // check. Zero means the service did not say.
-                island::LogAndPrint("  systems.lyrics: %s (%d lines, the catalogue says %lld ms)",
+                island::LogAndPrint("  lyrics: %s (%d lines, the catalogue says %lld ms)",
                                     currentLyrics ? "loaded" : "none",
                                     currentLyrics ? currentLyrics->count : 0,
                                     currentLyrics ? currentLyrics->trackDurationMs : 0);
@@ -1906,7 +1927,7 @@ float musicWavePhase = 0.0f;
                             MultiByteToWideChar(CP_UTF8, 0, bar.playerWindowNow.title, -1, wideTitle,
                                                 static_cast<int>(island::kPlayerWindowTitleCapacity));
                             island::LogAndPrint(
-                                L"  systems.music: [%ls] %ls - %ls (from its systems.window title -- this player"
+                                L"  music: [%ls] %ls - %ls (from its window title -- this player"
                                 L" publishes no session)\n",
                                 wideApp, wideArtist, wideTitle);
                             std::fflush(stdout);
@@ -1915,7 +1936,7 @@ float musicWavePhase = 0.0f;
                         // Nothing to put on the pill any more: no session AND no player window. Logged
                         // because the pill is about to go back to its clock and, with both sources silent,
                         // the log is the only witness that it was not a mistake.
-                        island::LogAndPrint(L"  systems.music: nothing is playing (no session and no player systems.window"
+                        island::LogAndPrint(L"  music: nothing is playing (no session and no player window"
                                             L" title) -- the pill goes back to its clock\n");
                         std::fflush(stdout);
                     }
@@ -2106,7 +2127,7 @@ float musicWavePhase = 0.0f;
                         // and "it only moved twice" can be told apart in the log.
                         if (std::fabs(fraction - bar.lastLoggedVolumeFraction) >= 0.03f) {
                             bar.lastLoggedVolumeFraction = fraction;
-                            island::LogAndPrint("  systems.volume: dragging -> %.0f%%\n",
+                            island::LogAndPrint("  volume: dragging -> %.0f%%\n",
                                                 fraction * 100.0f);
                             std::fflush(stdout);
                         }
@@ -2125,10 +2146,10 @@ float musicWavePhase = 0.0f;
                     } else {
                         float finalLevel = 0.0f;
                         if (systems.volume.Get(&finalLevel)) {
-                            island::LogAndPrint("  systems.volume: drag ended at %.0f%%\n",
+                            island::LogAndPrint("  volume: drag ended at %.0f%%\n",
                                                 finalLevel * 100.0f);
                         } else {
-                            island::LogAndPrint("  systems.volume: drag ended\n");
+                            island::LogAndPrint("  volume: drag ended\n");
                         }
                     }
                     bar.panelSliderDragRow = 0;
@@ -2244,7 +2265,7 @@ float musicWavePhase = 0.0f;
                                 bar.lastAppliedVolumeFraction = hit.fraction;
                                 systems.volume.SetLevel(hit.fraction);
                                 bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
-                                island::LogAndPrint("  systems.volume: press on the slider -> %.0f%%\n",
+                                island::LogAndPrint("  volume: press on the slider -> %.0f%%\n",
                                                     hit.fraction * 100.0f);
                                 std::fflush(stdout);
                             }
@@ -2267,7 +2288,7 @@ float musicWavePhase = 0.0f;
                     bar.mixerSliderDragRow = -1;
                     bar.mixerSliderDragPid = 0;
                     island::LogAndPrint("  %ls: drag ended by the release\n",
-                                        wasMixer ? L"mixer" : L"systems.volume");
+                                        wasMixer ? L"mixer" : L"volume");
                     std::fflush(stdout);
                     continue;
                 }
@@ -2592,7 +2613,7 @@ float musicWavePhase = 0.0f;
                             island::LogAndPrint(
                                 "  sound page: %ls -> ms-settings:sound (result %lld)\n",
                                 soundHit.target == island::SoundPageTarget::Footer
-                                    ? L"more systems.volume settings"
+                                    ? L"more volume settings"
                                     : L"mixer gear",
                                 static_cast<long long>(reinterpret_cast<INT_PTR>(opened)));
                             // The settings page is opening, so the card steps aside -- the same rule the
@@ -2671,7 +2692,7 @@ float musicWavePhase = 0.0f;
                         systems.volume.SetLevel(panelHit.fraction);
                         bar.panelSliderDrag = true;   // and keep following the pointer while the button is held
                         bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
-                        island::LogAndPrint("  systems.volume: set to %.0f%% (drag begins)\n",
+                        island::LogAndPrint("  volume: set to %.0f%% (drag begins)\n",
                                             panelHit.fraction * 100.0f);
                         std::fflush(stdout);
                     }
@@ -2681,7 +2702,7 @@ float musicWavePhase = 0.0f;
                     if (volumeAvailable) {
                         systems.volume.ToggleMute();
                         bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
-                        island::LogAndPrint("  systems.volume: %ls\n",
+                        island::LogAndPrint("  volume: %ls\n",
                                             systems.volume.IsMuted() ? L"muted" : L"unmuted");
                         std::fflush(stdout);
                     }
@@ -2963,7 +2984,7 @@ float musicWavePhase = 0.0f;
                         name = "next";
                     }
                     if (systems.music.RequestTransport(action)) {
-                        island::LogAndPrint("  systems.music: %s requested", name);
+                        island::LogAndPrint("  music: %s requested", name);
                         std::fflush(stdout);
                     }
                 } else if (systems.window.State() == island::IslandState::NoticeStrip) {
@@ -3001,7 +3022,7 @@ float musicWavePhase = 0.0f;
                     // ENDING, which the watcher detects and reports.
                     const int marked = systems.notifications.MarkAllReadExcept(systems.wechat.CallNotificationId());
                     if (marked > 0) {
-                        island::LogAndPrint("  systems.notifications: %d marked read (click)", marked);
+                        island::LogAndPrint("  notifications: %d marked read (click)", marked);
                         std::fflush(stdout);
                         // Recompute immediately so the same frame reflects the click
                         // instead of waiting for the next tick to notice.
@@ -3039,7 +3060,7 @@ float musicWavePhase = 0.0f;
                 systems.window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
                 bar.trayQuitArmed = false;   // a new menu starts unarmed
                 wchar_t flatMenuName[128] = {};
-                island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: systems.window=%d path=%d callback=%d)\n",
+                island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d callback=%d)\n",
                                     island::FlatName(systems.trayIcons.At(bar.trayMenuCell).name, flatMenuName, 128),
                                     bar.trayMenuActionCount, facts.hasWindow ? 1 : 0,
                                     facts.hasExePath ? 1 : 0, facts.hasCallback ? 1 : 0);
@@ -3582,7 +3603,7 @@ float musicWavePhase = 0.0f;
                                                 static_cast<int>(island::kLyricLineCapacity));
                             if (bar.track.fromSession) {
                                 island::LogAndPrint(
-                                    L"  systems.lyrics: line %d at %lld ms (the session last reported %lld ms): "
+                                    L"  lyrics: line %d at %lld ms (the session last reported %lld ms): "
                                     L"%ls\n",
                                     index, sungMs, nowPlaying.positionMs, wideLine);
                             } else if (bar.activeFromSession) {
@@ -3591,7 +3612,7 @@ float musicWavePhase = 0.0f;
                                 // with the singing. Measured on NetEase Cloud Music, which reports
                                 // `Position 00:00` for the whole song.
                                 island::LogAndPrint(
-                                    L"  systems.lyrics: line %d at %lld ms (counted by the bar -- this session"
+                                    L"  lyrics: line %d at %lld ms (counted by the bar -- this session"
                                     L" reports no position): %ls\n",
                                     index, sungMs, wideLine);
                             } else {
@@ -3599,7 +3620,7 @@ float musicWavePhase = 0.0f;
                                 // source's own count from the moment the window title appeared, which is
                                 // exactly what has to be checked when the words look out of step.
                                 island::LogAndPrint(
-                                    L"  systems.lyrics: line %d at %lld ms (counted from the player's systems.window"
+                                    L"  lyrics: line %d at %lld ms (counted from the player's window"
                                     L" title -- there is no session): %ls\n",
                                     index, sungMs, wideLine);
                             }
@@ -4607,7 +4628,7 @@ float musicWavePhase = 0.0f;
                         if (!bar.previewReported) {
                             bar.previewReported = true;
                             island::LogAndPrint(
-                                "  systems.preview: hwnd %p -> card %ld,%ld %ldx%ld, picture %ldx%ld "
+                                "  preview: hwnd %p -> card %ld,%ld %ldx%ld, picture %ldx%ld "
                                 "(compositor says %ldx%ld), shown=%d, hr=0x%08llX",
                                 reinterpret_cast<void*>(wanted), placement.card.left,
                                 placement.card.top, placement.card.right - placement.card.left,
@@ -4626,7 +4647,7 @@ float musicWavePhase = 0.0f;
                     // a second would drown the log.
                     if (systems.preview.Refusals() != bar.previewLastRefusals) {
                         bar.previewLastRefusals = systems.preview.Refusals();
-                        island::LogAndPrint("  systems.preview: the compositor refused a thumbnail of hwnd %p "
+                        island::LogAndPrint("  preview: the compositor refused a thumbnail of hwnd %p "
                                             "(0x%08llX)",
                                             reinterpret_cast<void*>(wanted), systems.preview.LastResult());
                         std::fflush(stdout);
@@ -4682,7 +4703,7 @@ float musicWavePhase = 0.0f;
                     frame.state != bar.lastReportedState) {
                     bar.lastReportedButtons = frame.taskButtonCount;
                     bar.lastReportedState = frame.state;
-                    island::LogAndPrint("  systems.taskbar: state=%ls, %d buttons from %d windows listed "
+                    island::LogAndPrint("  taskbar: state=%ls, %d buttons from %d windows listed "
                                         "(%ls)",
                                         island::StateName(frame.state), frame.taskButtonCount,
                                         systems.taskWindows.Count(), systems.taskWindows.LastSummary());
@@ -4847,7 +4868,7 @@ float musicWavePhase = 0.0f;
                                                                    &callIconHeight)) {
                                 ++callIconRevision;
                                 island::LogAndPrint(
-                                    L"  systems.wechat: call icon from '%ls' -> %dx%d\n", source, callIconWidth,
+                                    L"  wechat: call icon from '%ls' -> %dx%d\n", source, callIconWidth,
                                     callIconHeight);
                                 std::fflush(stdout);
                             }
@@ -5006,7 +5027,7 @@ float musicWavePhase = 0.0f;
                         // THE ONE CASE THE LINE ABOVE CANNOT TELL: bytes arrived and would not decode. A cover
                         // that never appears looks exactly like a cover that was never sent (`music: cover
                         // NONE`), and this is the line that tells the two apart.
-                        island::LogAndPrint("  systems.music: cover %ls %dx%d\n",
+                        island::LogAndPrint("  music: cover %ls %dx%d\n",
                                             artworkPixels ? L"decoded" : L"COULD NOT DECODE",
                                             artworkWidth, artworkHeight);
                         std::fflush(stdout);
@@ -5075,7 +5096,7 @@ float musicWavePhase = 0.0f;
                     backgroundWidth = 0;
                     backgroundHeight = 0;
                     waveAccent = island::AccentColour{};
-                    island::LogAndPrint("  systems.music: cover dropped (the new bar.track has none yet)\n");
+                    island::LogAndPrint("  music: cover dropped (the new bar.track has none yet)\n");
                     std::fflush(stdout);
                 }
 
@@ -5163,9 +5184,9 @@ float musicWavePhase = 0.0f;
                 if (lastWork & kWorkStatusSample) add("status-sample");
                 if (lastWork & kWorkTrayRefresh) add("tray-refresh");
                 if (lastWork & kWorkToastPoll) add("toast-poll");
-                if (lastWork & kWorkWeChatScan) add("systems.wechat-scan");
-                if (lastWork & kWorkWeChatSound) add("systems.wechat-sound");
-                if (lastWork & kWorkTaskbarCheck) add("systems.taskbar-check");
+                if (lastWork & kWorkWeChatScan) add("wechat-scan");
+                if (lastWork & kWorkWeChatSound) add("wechat-sound");
+                if (lastWork & kWorkTaskbarCheck) add("taskbar-check");
                 if (lastWork & kWorkThumbnail) add("thumbnail");
                 if (lastWork & kWorkDraw) add("draw");
                 island::LogAndPrint("  slow frame: %.1f ms -- work: %s%s\n", intervalMs,
@@ -5234,8 +5255,8 @@ float musicWavePhase = 0.0f;
                 liveStats.Describe(intervalSummary, 256);
                 island::LogAndPrint("  interval [%ls] %ls", island::StateName(systems.window.State()),
                                     intervalSummary);
-                island::LogAndPrint("  redraws: animating=%d clock=%d notify=%d systems.music=%d "
-                                    "systems.lyrics=%d progress=%d strip=%d first=%d startHover=%d "
+                island::LogAndPrint("  redraws: animating=%d clock=%d notify=%d music=%d "
+                                    "lyrics=%d progress=%d strip=%d first=%d startHover=%d "
                                     "startWash=%d",
                                     whyAnimating, whyClock, whyNotification, whyMusic,
                                     whyLyrics, whyProgress, whyStatusStrip, whyFirst,
@@ -5246,7 +5267,7 @@ float musicWavePhase = 0.0f;
                 // paid for them, and "one per state change" means it did not.
                 {
                     const unsigned long long applied = systems.window.RegionApplications();
-                    island::LogAndPrint("  systems.window region: %llu applied in total (%llu in the last 4 s)",
+                    island::LogAndPrint("  window region: %llu applied in total (%llu in the last 4 s)",
                                         applied, applied - lastRegionApplications);
                     lastRegionApplications = applied;
                 }
@@ -5332,7 +5353,7 @@ float musicWavePhase = 0.0f;
     // hidden, so the wider condition costs nothing.
     if (hideNativeTaskbar) {
         systems.taskbar.Restore();
-        island::LogAndPrint("  native systems.taskbar: restored\n");
+        island::LogAndPrint("  native taskbar: restored\n");
         // The work area went back with it, inside Restore() and BEFORE the taskbar was shown: showing
         // the taskbar makes the shell re-derive the work area from it, so this order leaves one answer,
         // not two. Its own line is written there.

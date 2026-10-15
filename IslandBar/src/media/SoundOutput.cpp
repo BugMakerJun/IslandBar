@@ -278,13 +278,28 @@ void SoundOutput::ReadAll() {
     haveReading_ = true;
     LeaveCriticalSection(&lock_);
 
-    // Reported once per reading, because the page's own contents are the one thing about it that cannot be
-    // walked backwards from the screen: "the mixer is empty" and "the mixer could not be read" look the same
-    // in a screenshot, and the two need opposite fixes.
-    if (devices || sessions) {
+    // Reported ONCE PER CHANGE, because the page's own contents are the one thing about it that cannot be walked
+    // backwards from the screen: "the mixer is empty" and "the mixer could not be read" look the same in a
+    // screenshot, and the two need opposite fixes.
+    //
+    // It used to be once per READING, which is four times a second, so the same sentence arrived four times a
+    // second for as long as the bar ran. A log nobody can read is worth no more than no log (the same argument
+    // the tray's own reporting settled on), and what these lines are FOR -- noticing that the mixer went empty,
+    // or that a device list stopped answering -- is a change, so a change is what is reported.
+    const bool changed = fresh.deviceCount != loggedDeviceCount_ ||
+                         fresh.sessionCount != loggedSessionCount_ ||
+                         (devices ? 1 : 0) != loggedDevicesReadable_ ||
+                         (sessions ? 1 : 0) != loggedSessionsReadable_ ||
+                         wcscmp(fresh.defaultDeviceName, loggedDefaultName_) != 0;
+    if ((devices || sessions) && changed) {
         LogLine(L"  sound page: %d device(s), default '%ls', %d session(s) [devices=%d sessions=%d]",
                 fresh.deviceCount, fresh.defaultDeviceName, fresh.sessionCount, devices ? 1 : 0,
                 sessions ? 1 : 0);
+        loggedDeviceCount_ = fresh.deviceCount;
+        loggedSessionCount_ = fresh.sessionCount;
+        loggedDevicesReadable_ = devices ? 1 : 0;
+        loggedSessionsReadable_ = sessions ? 1 : 0;
+        wcsncpy_s(loggedDefaultName_, fresh.defaultDeviceName, _TRUNCATE);
     }
 }
 

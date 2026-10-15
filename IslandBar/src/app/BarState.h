@@ -374,6 +374,16 @@ int rowSlotCount = 0;
     float lastReportedHoverAmount = -1.0f;
     int   lastReportedPointed = -2;
     bool  lastReportedAnimating = false;
+
+    // The last music line written to the log, so that "what is playing" is reported when it CHANGES rather than
+    // whenever the session tells the bar something -- which is about once a second. The session's revision moves
+    // for every position update, so the reader that logs on a revision change was writing the same sentence
+    // every second for as long as the bar ran; the identity below is what a reader actually wants to see move.
+    char lastLoggedMusicApp[island::kMusicAppCapacity] = {};
+    char lastLoggedMusicArtist[island::kMusicArtistCapacity] = {};
+    char lastLoggedMusicTitle[island::kMusicTitleCapacity] = {};
+    island::PlaybackState lastLoggedMusicState = island::PlaybackState::Closed;
+    bool haveLoggedMusic = false;
     unsigned long long lastTaskRefresh = 0;
 };
 

@@ -28,7 +28,8 @@
 | 6 | 应用行、状态行与悬停预览（26 个字段，含局部类型 `RowSlot`与被搬走的 `kMaxTaskButtons`） | ✅ 已完成（跑起来验证） |
 | 7 | 对象组：22 个对象进 `app/BarSystems.h`（window / renderer / text / 会话 / 通知 / 托盘 / 任务列表…），成员的声明顺序与源码逐行相同 | ✅ 已完成（跑起来验证） |
 | 8 | ~~F2：模块↔主程序通道换共享内存 + ABI 版本号~~ | ✅ 已完成：`platform/TrayRing.h`（共享内存环 + 命名事件 + 头部里的 magic/ABI/记录大小/容量），模块只 publish（同步路径里再无磁盘 I/O），bar 在自己的 tick 里排空并写盘；ABI 不匹配双方都拒绝并有日志。自检三条（开通/往返/拒绝）。**实测**：对照程序的注册经环到达，bar 写下 `(read in the shell, over the ring)`，缓存得到 `probe-tray-registrar.exe|0xABCD|…|7|both|4` |
-| 9 | 收尾项：日志降噪（媒体状态每秒一行、声音页每秒约四行）、自检里那几条 wire/ring 检查被重复执行（它们被放进了按状态/页循环的分支里） | 下一片 |
+| 9 | ~~日志降噪~~ | ✅ 已完成（40 秒实测：`music:` 40 → 9 行、`sound page:` 160 → 1 行；另修回 42 处被我自己污染的日志前缀） |
+| 10 | 收尾项：自检里那几条 wire/ring 检查被放进了"按状态/页循环"的分支，每轮重复跑十几遍 | 下一片 |
 
 **每片的验收（缺一不可）**：两套配置全量重建（`/WX` 生效）零告警 → `--self-test` PASS → `island_smoke` PASS → 该片涉及的命令逐条手跑 → 部署到 `%USERPROFILE%\IslandBar` → 起 bar 看相关日志行 → 本地提交。**不推 GitHub**，等你测。
 
