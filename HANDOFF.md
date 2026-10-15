@@ -11442,3 +11442,32 @@ Windows 安全中心 …      | SystemTray.NormalButton | invoke=True | 2374,89,
 1. 把 `core/` 抽成独立静态库目标（`island_domain`），并**禁止它链接 user32/dwmapi/d3d11/d2d1**——比编译期护栏更强的保证。
 2. `main.cpp` 里那 1,300 行命令行子命令先搬出去（`src/cli/`），它是 god-file 里最干净的一块。
 3. 模块与主程序之间的通道从文件轮询换成共享内存/管道，并给模块加 ABI 版本；安装器补上 DLL。
+
+### 8.117 **架构改造第二步：托盘的行为从 main.cpp 搬进 shell/TrayMenu** ✅（已部署，含一次真实右击验证）
+
+#### 8.117.1 搬了什么
+
+`main.cpp` 里那一簇"托盘格子的行为"整体搬进 `src/shell/TrayMenu.{h,cpp}`，共 **234 行连续代码 + 独立的头文件**，`main.cpp` 从 7,365 行降到 7,131 行：
+
+`MakeTrayPressRequest`（把图标变成一次按压请求）、`FlatName`（把多行 tooltip 压平，否则日志会被截断成"看起来没有回答"）、`BaseNameOf`、`SameImage`、`TerminateProcessesOfImage`（结束应用那条强制路径）、`WindowOfImageInList`、`TrayMenuFactsFor`（菜单该给哪些行）、`RunTrayMenuAction`（执行其中一行）、`StartTrayPress`（在工作线程上发起按压）。
+
+它们只有两个调用者：帧循环（用户点了一格）和 `--tray-*` 命令（脚本发起的一次按压）——都不该住在"程序组装文件"里。
+
+顺带把一个**跨线程交接的变量**也归了位：`trayMenuRequestCell`（工作线程把一个按不动的格子留给拥有窗口的主线程，下一帧由它打开本栏菜单）以前定义在 `main.cpp` 的匿名 namespace 里，`StartTrayPress` 搬走后就必须跟着走，于是它在 `TrayMenu.h` 里 `extern`、在 `TrayMenu.cpp` 里定义。这类"谁拥有状态"的错位正是强耦合的典型症状，不搬出来看不见。
+
+#### 8.117.2 搬的过程中撞到的两件事（都记下来）
+
+1. **我自己用正则删声明时留下了半截行**（多行声明的第二行没删掉），于是那两个孤儿行成了 namespace 作用域的声明，把所有叫 `out` / `action` 的形参都变成"遮蔽全局声明"——一次刷出十几条 C4459 告警。教训：机械改写之后要看编译器的第一条错误，不要看最后一条。
+2. **我一度怀疑 `/WX` 没生效**，因为生成的 `.vcxproj` 里搜不到 `WX`。查证结果：CMake 把它映射成 MSBuild 属性 `TreatWarningAsError=true`，**它一直是生效的**，而且 `CMakeCache.txt` 里 `ISLANDBAR_WARNINGS_AS_ERRORS:BOOL=ON`。所以上一轮"零告警是强制的"这个说法成立，这次的 C4459 确实是我改坏的。
+
+#### 8.117.3 验证
+
+| 项 | 结果 |
+|---|---|
+| Release 全量重建（/WX 生效） | OK，零告警 |
+| Debug 全量重建（/WX 生效） | OK，零告警 |
+| `--self-test` | PASS |
+| `island_smoke` | PASS |
+| `--tray-surface` | 3 of 10 可按，无退化 |
+| **`--tray-press 0 --right --fire`（真实右击 ChatGPT）** | `pressed: its own callback (press 1984 ms)` —— 搬走之后的菜单/按压链路端到端可用 |
+| 部署 + 重启 bar | pid 3756，正常 |

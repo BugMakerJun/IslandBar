@@ -77,6 +77,7 @@ add_executable(island_bar
     shell/SystemToggles.cpp
     shell/TrayIcons.cpp
     shell/TrayLearn.cpp
+    shell/TrayMenu.cpp
     shell/TrayPress.cpp
     shell/Weather.cpp
 
