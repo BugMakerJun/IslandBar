@@ -12728,9 +12728,7 @@ before)' elapsed_ms=47`
 
 ### 8.147.5 还没做
 
-1. **第 3 步（只读重测托盘元素的自动化能力）没做**：它需要托盘短暂可见（`SW_HIDE` 会让 UIA 树空掉，
-   裁到 1 像素才保留），会闪一下，所以我停下来等你决定要不要做。它要回答的是"有没有比消息更好的、
-   不闪的 shell 侧入口"，目前**没有证据说有**。
+1. **第 3 步（只读重测托盘元素的自动化能力）做完了，见 8.148。**
 2. 微信那一格复测（需要用户先登录微信）。
 
 ### 8.147.6 还没解决的那几格，现在的行为（诚实版）
@@ -12739,3 +12737,50 @@ before)' elapsed_ms=47`
   "应用菜单（本机拿不到）"。
 * NVIDIA 那几格、系统自己的按钮：从来没有注册过，没有回调可学 → 同样只给我们自己的菜单。
 * 其余（Razer、QQ音乐、clash-verge、Wallpaper Engine 等）：按各自的形状直接弹出**它自己的菜单**。
+
+### 8.147.7 第 3 步的结论（2026-10-16 04:25，见 8.148）
+
+托盘元素在 UIA 里**只暴露 `Invoke`**（＝左键），没有任何上下文菜单能力；而 UIA 只在任务栏**可见**时才
+看得见这些元素。所以"请 shell 出手弹应用自己的菜单"这条不闪的路**不存在**——第 4 步（如实降级）是那几格
+唯一诚实的答案。
+
+---
+
+## 8.148 **只读实测：托盘元素到底暴露了什么**（2026-10-16 04:25）
+
+第 44 轮方案的第 3 步。做法：停掉栏并**显式 `ShowWindow(Shell_TrayWnd, SW_SHOW)`**（第一次量的坑：
+我用 `Stop-Process -Force` 杀栏，它没跑"退出时恢复任务栏"那段，任务栏一直藏着，树里自然什么都没有），
+然后用 UIA（`System.Windows.Automation`）枚举、打印每个元素的类名/名字/offscreen/矩形/**`GetSupportedPatterns()`**；
+量完把栏起回来。
+
+### 8.148.1 结果（本机，Windows 11 26220 这一版）
+
+* 任务栏可见时，`Shell_TrayWnd` **是**一个 UIA 元素（Pane，2560x32），它的后代里有
+  `Taskbar.TaskbarFrameAutomationPeer`、`ToggleButton`（小组件/开始/搜索/任务视图）、
+  `Taskbar.TaskListButtonAutomationPeer`（任务按钮）等。
+* **托盘图标**：shell 自己的 5 个是 `SystemTray.AccentButton`（显示隐藏的图标 / 输入指示 / 网络 / 音量 / 时钟），
+  另有 `SystemTray.ShowDesktopButton`（显示桌面）。
+* **应用图标要先把溢出面板打开**（invoke 那个 chevron）才进树：打开后出现
+  `SystemTray.NormalButton` × 9 —— ChatGPT、Wallpaper Engine、Steam、Clash Verge、任务管理器、
+  QQ音乐、蓝牙设备、Windows 安全中心，外加一个**名字为空**的（RazerAppEngine 那一格就是它：
+  它自己没给名字，这也解释了产品按名字找元素时为什么找不到 Razer）。
+* **每一个元素的 pattern 都只有 `[Invoke, ScrollItem]`** —— 没有上下文菜单、没有 ExpandCollapse、
+  没有 LegacyIAccessible 可用动作。`Invoke` 等于"左键"。
+
+### 8.148.2 结论
+
+1. **右键在 UIA 侧没有任何入口**（`ShowContextMenu` 只存在于 `IUIAutomationTextRange2/3`，现场再次确认；
+   元素本身也没有别的可用 pattern）。要让 shell 去弹应用自己的菜单，**只能真的在图标上点一下**——
+   这条用户已经明确否决。
+2. **左键的 shell 路线仍然成立但有代价**：`Invoke` 需要任务栏**可见**（`SW_HIDE` 时树是空的；
+   当年"裁到 1 像素"那招在产品里也不成立，因为**栏自己会把任务栏再藏回去**——实测：`ShowWindow` +
+   `SetWindowRgn(1 像素)` 之后 500 ms，`Shell_TrayWnd` 已经是 `visible=False`）。这也是产品把 UIA
+   兜底放在"没人应答的消息路线之后"、并给一个开关（`ISLANDBAR_NO_TRAY_UIA=1`）的原因。
+3. 所以第 44 轮方案的第 4 步（那几格如实标注"本机拿不到"）是唯一诚实的答案，**不是**权宜之计。
+
+### 8.148.3 顺带量到的两件事（对产品有用）
+
+* **RazerAppEngine 的托盘元素名字是空的**：产品按名字找元素（`TrayUia`）时对它注定失败；
+  它现在走的是消息路线（63 ms 成功），所以不影响。若将来需要 UIA 兜底，得按类名+位置找。
+* chevron（`显示隐藏的图标`）可以用 `Invoke` 打开/关闭溢出面板而不动指针——产品现在就是这么做的
+  （`TrayUia` 的 `openedOverflow`）。
