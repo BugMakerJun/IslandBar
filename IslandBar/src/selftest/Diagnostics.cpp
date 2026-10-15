@@ -8521,9 +8521,22 @@ int RunSelfTest() {
         const island::TrayClickPlan classicRight = island::PlanTrayClick(0, uid, true, x, y);
         Check(!classicRight.version4 && classicRight.first.wParam == uid,
               L"v0 right click: the uid goes in wParam");
+        // THE PAIR, and in this order: down, then up (2026-10-16, HANDOFF 8.142 -- the shell itself was
+        // caught sending exactly this to an application on a real right click, and the probe that brought up
+        // ChatGPT's own menu sends the same pair). It is asserted because a single POSTED message stood here
+        // for a round and was never what the shell sends.
         Check(classicRight.first.lParam == island::kTrayMouseRightDown && classicRight.hasSecond &&
                   classicRight.second.lParam == island::kTrayMouseRightUp,
               L"v0 right click: down and then up, both in lParam");
+        Check(classicRight.sent, L"v0 right click: the pair is SENT, not posted");
+
+        // ... and the delivery is part of the shape: the version-4 context-menu notification is POSTED (what
+        // clash-verge answered in 78 ms and WeChat in HANDOFF 8.104), while every other press is sent.
+        Check(!island::PlanTrayClick(version4, uid, true, x, y).sent,
+              L"v4 right click: the context-menu notification is POSTED");
+        Check(island::PlanTrayClick(version4, uid, false, x, y).sent &&
+                  island::PlanTrayClick(0, uid, false, x, y).sent,
+              L"a left click is sent, in both protocols");
 
         const island::TrayClickPlan classicLeft = island::PlanTrayClick(3, uid, false, x, y);
         Check(classicLeft.first.lParam == island::kTrayMouseLeftDown &&

@@ -5662,8 +5662,25 @@ int main(int argc, char** argv) {
         // first, and that route is gone (see TrayPress.h).
         if (std::strcmp(argv[i], "--tray-press") == 0 && i + 1 < argc) {
             const int wanted = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
-            const bool fire = (i + 1 < argc) && std::strcmp(argv[i + 1], "--fire") == 0;
-            const bool right = (i + 2 < argc) && std::strcmp(argv[i + 2], "--right") == 0;
+            // THE FLAGS ARE READ WHEREVER THEY ARE WRITTEN (2026-10-16). They used to be read at fixed
+            // positions -- `--fire` at the first slot, `--right` only in the second -- so `--tray-press 1
+            // --right` was accepted, reported as a press, and performed a LEFT press in silence. That is the
+            // kind of wrong answer this project keeps paying for: measured while verifying the right-click
+            // fix, when a scripted right press returned "pressed" and had in fact pressed the left button.
+            bool fire = false;
+            bool right = false;
+            int consumed = i;
+            for (int k = i + 1; k < argc; ++k) {
+                if (std::strcmp(argv[k], "--fire") == 0) {
+                    fire = true;
+                } else if (std::strcmp(argv[k], "--right") == 0) {
+                    right = true;
+                } else {
+                    break;
+                }
+                consumed = k;
+            }
+            i = consumed;
             const int pressResult = island::RunTrayPress(wanted, fire, right);
             island::CloseLog();
             return pressResult;

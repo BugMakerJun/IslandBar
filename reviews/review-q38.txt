@@ -1,0 +1,69 @@
+第 43 轮评审（文件序列 q38）：**"应用菜单"这一行，对 Electron 系应用按不出来**。
+请明确表态：同意 / 反对 / 修正，并指出你认为哪个判断是错的。请给出你推荐的改法与理由。
+
+【一、症状（今天实测，可以直接复现）】
+
+同一次会话里，同一个应用（RazerAppEngine，Electron）：
+
+* **左键**（"打开"）：成功。日志
+  `tray press: gave 0x8001 to class 'Electron_NotifyIconHostWindow' of pid 21912 (given its own
+  callback, not a click), the pointer was NOT moved (anchor 1424,199) -- the application answered`，
+  随后它自己的窗口 `Chrome_WidgetWin_1 at 2190,0 360x400` 出现，总耗时 235 ms。
+* **右键**（"应用菜单"）：失败。日志
+  `tray press: gave 0x8001 to class 'Electron_NotifyIconHostWindow' of pid 21912 (given its own
+  callback, not a click) and the application did nothing with it (nothing of its own appeared, and the
+  foreground did not move to it, in 1500 ms)`，总耗时 1984 ms。
+  同一个形状在 ChatGPT 那一格也出现（`OwlElectron_NotifyIconHostWindow`，pid 29284 的窗口确实存在、
+  类名与缓存里的完全一致）。
+
+【二、产品现在怎么发右键（`shell/TrayPress.cpp` 的 attempts 列表）】
+
+version 0/3 的应用，右键依次尝试：
+
+1. **Post** 一条 `WM_RBUTTONUP`（wParam=uid，lParam=WM_RBUTTONUP）；
+2. **Send**（同步）`WM_RBUTTONDOWN` + `WM_RBUTTONUP` 一对；
+
+version 4 的应用：先 post 打包的 `CONTEXTMENU`（`wParam=MAKELONG(x,y)`、`lParam=MAKELONG(事件,uid)`），
+再同步发那一对（v3 与 v4 拼法各一次）。每次 `SendMessageTimeout(..., 250 ms)`，两次尝试之间观察窗口基线。
+
+【三、而我们仓库里**实测能弹出菜单**的写法不是这两个（都是探针实测，写在 HANDOFF 8.140.2 / 8.142.3）】
+
+* QQ音乐（uVersion 0）：`SendMessageTimeout(hwnd, 0x0BD0, wParam=uid, lParam=WM_RBUTTONUP)` —— **同步、单发一条 UP**：
+  窗口忙 86 ms，它自己的菜单 `TXGuiFoundation` 出现在指针所在位置。
+* 任务管理器（High 完整性，uVersion 0）：同一条 → 窗口忙 297.9 ms，真正的 Win32 菜单 `#32768` 出现。
+* ChatGPT/Codex 那一格（uVersion 0）：`--sendright ChatGPT 1250 60 scan` 里发 **v3-rbuttonup（同步单发 UP）**
+  → `delivered=yes`、窗口忙 43.5 ms，它自己的 `Chrome_WidgetWin_1 1226,48..1521,443 (295x395)` 出现在格子位置，
+  前台也变成了它。而同一个应用在今天的**产品**右键路径里什么都不做（上面第一节）。
+* clash-verge 与微信（uVersion 4）：**post** 一条打包 `CONTEXTMENU` 才有效（8.104 实测）。
+
+也就是说：**"同步单发 UP"这条被三次实测证明有效的写法，产品的右键路径里没有**。
+
+【四、要你们回答的问题】
+
+Q1 你同意"右键 v0/v3 应当先试**同步单发 WM_RBUTTONUP**、而不是先 post 单发、也不是同步发 DOWN+UP 那一对"
+   这个判断吗？如果不同意，请说明你认为 Electron（Chromium）在收到这三种形状时各自会做什么。
+
+Q2 "同步发一对（DOWN+UP）"对 Electron 系应用无效、而"同步单发 UP"有效，机制上你认为是什么？
+   这是否意味着**左键和右键的写法规则是不一样的**（左键=shell 发的那一对，右键=单发一条 UP）？
+
+Q3 还有一类格子**任何消息都弹不出来**（我们目前唯一确认的是：菜单由**另一个进程**弹的 WinUI/XAML 应用，
+   例如 ChatGPT 那个 WinUI 菜单；以及 shell 自己的网络/音量/时钟按钮——它们根本不是应用）。
+   要让这些格子也能弹出"它自己的菜单"，你推荐哪条路，为什么：
+
+   (a) **UI Automation 的 `IUIAutomationElement::ShowContextMenu()`**（我们仓库里从未测过；UIA 里没有右键
+       pattern，但这是理论上对应"弹出上下文菜单"的那一个调用）；
+   (b) **真实右键**：把 shell 的托盘那一小块临时露出来几百毫秒（清窗口区域）→ 指针瞬移右键 → 还原指针 →
+       再把区域收回去。这条路 2026-10-15 实测过：微信自己的菜单（含"退出微信"）真的弹出来了；
+       代价是**屏幕上会闪一下**，而且用户 8.138 明确说过他不想要这种闪；
+   (c) 保持现状：这类格子右键永远只开我们自己的四行菜单（在菜单里如实说明"应用自己的菜单拿不到"）；
+   (d) 你的方案。
+
+Q4 无论走哪条路，这个改动的**验收指标（一个数字 + 一行日志）**你建议怎么写？注意这台机器上可复现的格子有限
+   （ChatGPT、Razer、DeepSeek 都是 Electron；NVIDIA 与 shell 自己的按钮没有回调可学；微信需要用户先登录）。
+
+【五、约束（不能用"先能跑"破规矩）】
+
+* 不许把错编码发给应用：微信曾被我们发错的 v4 编码**打崩过一次**（HANDOFF 8.142.4），用户要重新登录。
+* 用户的原话（2026-10-15）：「把真实点击这个去掉不要 … 我就想要 MyDockFinder 一样的效果」——所以**默认行为
+  不能闪**；任何有可见代价的做法必须是显式的、用户按下去才付代价的那一项。
+* 一次按压里"没人应答"的应用**不该被反复打扰**：缓存里已经用 `none` / `right` / 拼法字段记录过判定。

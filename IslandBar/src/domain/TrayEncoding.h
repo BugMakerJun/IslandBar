@@ -50,9 +50,16 @@ struct TrayMessage {
 
 // One click as the application expects to receive it.
 //
-//   version 0/3:  a PAIR of messages -- down, then up -- with the uid in wParam and the mouse message
-//                 in lParam.
-//   version 4:    a SINGLE message whose wParam is the POINTER POSITION and whose lParam carries the
+//   version 0/3, LEFT:   a PAIR of messages -- down, then up -- with the uid in wParam and the mouse message
+//                        in lParam.
+//   version 0/3, RIGHT:  a PAIR -- WM_RBUTTONDOWN, a short gap, then WM_RBUTTONUP -- which is what the
+//                        SHELL ITSELF was caught sending to an application on a real right click (HANDOFF
+//                        8.142: `0x8001` with lParam `0x204` and then `0x205`), and what the probe that
+//                        brought up ChatGPT's own menu sent (its "v3-rbuttonup" variant sends the down
+//                        first -- the label names only the second message). The product sent a POSTED
+//                        single message first and this pair second; a right press now sends the pair and
+//                        nothing else, so an application is never handed a shape the shell never sends.
+//   version 4:           a SINGLE message whose wParam is the POINTER POSITION and whose lParam carries the
 //                 event in its low word and the uid in its high word.
 struct TrayClickPlan {
     TrayMessage first;
@@ -60,6 +67,11 @@ struct TrayClickPlan {
     TrayMessage second;
     // Which protocol went out, so the log can tell "a message was sent" from "the right message was sent".
     bool version4 = false;
+    // WHETHER THE ONE DELIVERY IS SENT OR POSTED, which is part of the measured shape and not a detail of the
+    // caller: a left press is SENT (the pair the shell itself sends, HANDOFF 8.109), a classic right press is
+    // SENT, and a version-4 right press is POSTED -- measured working on clash-verge (78 ms) and WeChat in
+    // HANDOFF 8.104, and sending that one synchronously is not what those applications answer.
+    bool sent = true;
 };
 
 // One message, encoded. This is the form the press code needs, because a press is allowed to TRY more than
@@ -83,6 +95,7 @@ constexpr TrayClickPlan PlanTrayClick(unsigned version, unsigned uid, bool right
     if (plan.version4) {
         const unsigned event = rightClick ? kTrayMouseContextMenu : kTraySelect;
         plan.first = EncodeTrayMessage(true, uid, event, x, y);
+        plan.sent = !rightClick;
     } else {
         plan.first = EncodeTrayMessage(false, uid, rightClick ? kTrayMouseRightDown : kTrayMouseLeftDown, x, y);
         plan.hasSecond = true;

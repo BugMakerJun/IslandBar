@@ -604,6 +604,9 @@ BOOL DeliverMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam, boo
 // clicked rather than at the application's own icon in the screen's corner. (On WeChat this is measured: the
 // menu came up at exactly the coordinates passed in.)
 bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPressOutcome* outcome) {
+    // The clock for the ONE line a right press owes the reader (see the two exits below): which shape went
+    // out, whether the application answered with its own menu, and how long that took.
+    const ULONGLONG rightPressStart = GetTickCount64();
     const std::vector<TrayCallback> entries = ReadTrayCallbacks();
     const std::wstring exe = BaseNameLower(request.exePath);
     const TrayCallback* entry = nullptr;
@@ -723,21 +726,25 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     int attemptCount = 0;
     const bool v4 = entry->version >= 4;
     if (rightClick) {
-        // The right press's job is the application's own menu, and a posted message is MEASURED to do it:
-        // clash-verge's menu came up 78 ms after a post, with no pointer movement, and WeChat's did the same
-        // (HANDOFF 8.104). That stays the FIRST attempt, unchanged.
-        //
-        // ... AND THE SHELL'S OWN PAIR IS THE SECOND, because the first one does not always land. Measured
-        // 2026-10-15: a posted WM_RBUTTONUP to ChatGPT.exe produced no menu at all, while the SENT pair the
-        // shell itself uses (WM_RBUTTONDOWN then WM_RBUTTONUP) is what makes that same application's LEFT
-        // press work -- so the pair is tried here too, and for a v4 application the documented spelling as
-        // well. A press nobody answered has had no effect, so trying a second spelling cannot open two menus.
-        attempts[attemptCount++] = Attempt{static_cast<unsigned>(v4 ? WM_CONTEXTMENU : WM_RBUTTONUP),
-                                           false, false, v4};
-        attempts[attemptCount++] = Attempt{WM_RBUTTONUP, true, true, false};
-        if (v4) {
-            attempts[attemptCount++] = Attempt{WM_RBUTTONUP, true, true, true};
-        }
+        // THE SHAPE THE PLAN NAMES, AND NOTHING ELSE: a right press sends the pair the SHELL sends -- a
+        // synchronous WM_RBUTTONDOWN, a short gap, then WM_RBUTTONUP (HANDOFF 8.142 caught the shell doing
+        // exactly that on a real right click, and the probe that brought up ChatGPT's own menu sends the same
+        // pair). The POSTED single message the product used to try FIRST is gone: it is a shape the shell
+        // never sends, its failure was what the press spent a round discovering, and a press that is handed
+        // two shapes in a row is a press whose behaviour depends on the first one failing tidily.
+        const island::TrayClickPlan plan =
+            island::PlanTrayClick(entry->version, entry->uid, true, anchor.x, anchor.y);
+        Attempt only = {};
+        only.v4Packing = plan.version4;
+        // The event is READ BACK out of the message the plan built rather than written a second time here: a
+        // second place that decides the spelling is how the v4 note came to be written down backwards. For
+        // the pair it is the UP -- the message that carries the intent -- and for v4 the notification packed
+        // into lParam.
+        only.notify = plan.version4 ? island::TrayLow(plan.first.lParam)
+                                    : (plan.hasSecond ? plan.second.lParam : plan.first.lParam);
+        only.downFirst = !plan.version4 && plan.hasSecond;
+        only.sent = plan.sent;
+        attempts[attemptCount++] = only;
     } else if (entry->leftSpelling == TrayCallback::LeftSpelling::Select) {
         attempts[attemptCount++] = Attempt{NIN_SELECT, false, true, true};
     } else if (entry->leftSpelling == TrayCallback::LeftSpelling::DownThenUp4) {
@@ -882,6 +889,18 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
             outcome->route = rightClick ? L"its own menu did not come up" : L"its callback is ignored (recorded)";
             wcsncpy_s(outcome->target, sizeof(outcome->target) / sizeof(wchar_t), target, _TRUNCATE);
         }
+        // ON THE RIGHT BUTTON, ONE LINE SAYS THE WHOLE STORY: the shape that was sent, that it was sent ONCE,
+        // and that the application answered with nothing. `own_menu` is the caller's answer to this (the card
+        // opens THIS BAR's menu over that cell), and it is logged there rather than here because this function
+        // does not own the card.
+        if (rightClick) {
+            LogAndPrint(L"  tray context-menu: app=%ls version=%u strategy=%ls attempts=%d outcome=failed "
+                        L"evidence='%ls' elapsed_ms=%lld\n",
+                        BaseNameLower(request.exePath).c_str(), entry->version,
+                        v4 ? L"v4-post-contextmenu" : L"v3-sent-down-up", attemptCount,
+                        outcome ? outcome->answer : L"no answer", MillisSince(rightPressStart));
+            std::fflush(stdout);
+        }
         return false;
     }
 
@@ -896,6 +915,17 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
                 entry->message, target, anchor.x, anchor.y,
                 answered ? L"answered" : L"has not been seen to answer yet, and nothing else was done about "
                                        L"it (pressing twice would be worse)");
+    // ... and the same one line for the right press that DID bring up the application's own menu. `evidence`
+    // is the window or menu the observer caught appearing, because a right press that merely moves the
+    // foreground is not an answer to "show me your menu".
+    if (rightClick) {
+        LogAndPrint(L"  tray context-menu: app=%ls version=%u strategy=%ls attempts=%d outcome=native_menu "
+                    L"evidence='%ls' elapsed_ms=%lld\n",
+                    BaseNameLower(request.exePath).c_str(), entry->version,
+                    v4 ? L"v4-post-contextmenu" : L"v3-sent-down-up", attemptCount,
+                    outcome ? outcome->answer : L"answered", MillisSince(rightPressStart));
+        std::fflush(stdout);
+    }
     return true;
 }
 
