@@ -11,6 +11,7 @@
 //      probe-tray-lab.exe --uia [invoke <name>] what does UI Automation see of the tray right now?
 //      probe-tray-lab.exe --traycom [watch <secs>]  does CLSID_TrayNotify exist, and what interfaces does it answer to?
 //      probe-tray-lab.exe --traynotify <secs>  register a callback with the shell's own tray and watch it
+//      probe-tray-lab.exe --traywindow <secs> [x y]  a tray of OUR OWN: our window, our drawing, the shell pressing
 //
 //  WHY THESE THREE. The tray is not an API: it is a WINDOW inside the shell's process, and
 //  Shell_NotifyIcon is shell32 handing a registration to it (measured 2026-10-15: a synchronous
@@ -40,6 +41,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 #include <shellapi.h>
 #include <objbase.h>
 #include <uiautomation.h>
@@ -957,6 +959,332 @@ int RunTrayNotify(int seconds) {
 
 } // namespace
 
+// --- E8, A TRAY OF OUR OWN, END TO END --------------------------------------------------------
+//
+//  THE EXPERIMENT. Everything the design needs, in one process, before any of it goes into the product:
+//
+//    * the native taskbar is kept ALIVE but clipped to a one-pixel sliver, so the shell's tray is not on
+//      screen anywhere (measured: UIA still enumerates it and still offers Invoke in that state);
+//    * the icons come from the UIA tree -- which is the truth about what the shell is showing, the thing
+//      the registry cannot tell us (it lists NVIDIA icons that are not in the tray at all);
+//    * the pictures come from the registry's NotifyIconSettings (the executable path), asked of the shell
+//      for its own icon -- the same source the retired card used for its grid;
+//    * OUR window draws the cells, in our own place, in our own style;
+//    * a LEFT click is handed to the shell: UIA Invoke on that cell's element, so the icon does exactly
+//      what a real left click on it does, with the pointer untouched;
+//    * a RIGHT click opens OUR menu -- the only honest answer, since no callback message number is
+//      obtainable without injecting and ITrayNotify does not carry one.
+//
+//  WHAT IT IS NOT: it is not the product. It draws flat cells with no animation and no paging, it takes
+//  the first registry record whose tooltip matches, and it closes after N seconds and puts everything
+//  back. Its job is to answer "does this chain work at all" with pictures and a log.
+namespace {
+
+constexpr int kMaxCells = 20;
+constexpr int kCellDip = 40;
+constexpr int kCellGapDip = 4;
+constexpr int kMenuOpen = 1;
+constexpr int kMenuShowDesktop = 2;
+
+struct TrayCell {
+    std::wstring name;
+    RECT screen = {};
+    IUIAutomationElement* element = nullptr;
+    HICON icon = nullptr;
+    std::wstring matched;      // the registry record this cell's picture came from
+};
+
+TrayCell g_cells[kMaxCells];
+int g_cellsUsed = 0;
+HWND g_window = nullptr;
+RECT g_windowScreen = {};
+int g_invoked = 0;
+
+std::wstring Flattened(const std::wstring& text) {
+    std::wstring flat;
+    flat.reserve(text.size());
+    bool lastWasSpace = false;
+    for (wchar_t c : text) {
+        const bool space = (c == L'\n' || c == L'\r' || c == L'\t' || c == L' ');
+        if (space) {
+            if (!lastWasSpace && !flat.empty()) flat.push_back(L' ');
+            lastWasSpace = true;
+            continue;
+        }
+        flat.push_back(c);
+        lastWasSpace = false;
+    }
+    while (!flat.empty() && flat.back() == L' ') flat.pop_back();
+    return flat;
+}
+
+// The picture for one cell: the tooltip the shell is showing, looked up in the registry records the
+// shell keeps for the tray, then the executable's own icon asked of the shell. Containment in both
+// directions because neither string is a superset of the other in practice (the shell adds state to
+// its tooltips: "NVIDIA 设置", "Steam - 正在同步").
+bool RegistryPicture(const std::wstring& cellName, std::wstring* exeOut, HICON* iconOut) {
+    HKEY root = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &root) !=
+        ERROR_SUCCESS) {
+        return false;
+    }
+    const std::wstring wanted = Flattened(cellName);
+    DWORD index = 0;
+    wchar_t subkey[256] = {};
+    DWORD subkeyLength = 256;
+    bool found = false;
+    while (!found &&
+           RegEnumKeyExW(root, index++, subkey, &subkeyLength, nullptr, nullptr, nullptr, nullptr) ==
+               ERROR_SUCCESS) {
+        subkeyLength = 256;
+        wchar_t tip[512] = {};
+        DWORD tipBytes = sizeof(tip);
+        if (RegGetValueW(root, subkey, L"InitialTooltip", RRF_RT_REG_SZ, nullptr, tip, &tipBytes) !=
+            ERROR_SUCCESS) {
+            continue;
+        }
+        wchar_t exe[520] = {};
+        DWORD exeBytes = sizeof(exe);
+        if (RegGetValueW(root, subkey, L"ExecutablePath", RRF_RT_REG_SZ, nullptr, exe, &exeBytes) !=
+            ERROR_SUCCESS) {
+            continue;
+        }
+        const std::wstring flatTip = Flattened(tip);
+        if (flatTip.empty() || wanted.empty()) continue;
+        if (flatTip.find(wanted) == std::wstring::npos && wanted.find(flatTip) == std::wstring::npos) {
+            continue;
+        }
+        SHFILEINFOW info = {};
+        if (!SHGetFileInfoW(exe, 0, &info, sizeof(info), SHGFI_ICON | SHGFI_SMALLICON) || !info.hIcon) {
+            continue;
+        }
+        *exeOut = exe;
+        *iconOut = info.hIcon;
+        found = true;
+    }
+    RegCloseKey(root);
+    return found;
+}
+
+// Where a cell is, in THIS window's coordinates.
+RECT CellRect(int index) {
+    RECT box = {};
+    box.left = 8 + index * (kCellDip + kCellGapDip);
+    box.top = 8;
+    box.right = box.left + kCellDip;
+    box.bottom = box.top + kCellDip;
+    return box;
+}
+
+int CellAt(int x, int y) {
+    for (int i = 0; i < g_cellsUsed; ++i) {
+        const RECT box = CellRect(i);
+        if (x >= box.left && x < box.right && y >= box.top && y < box.bottom) return i;
+    }
+    return -1;
+}
+
+void InvokeCell(int index) {
+    if (index < 0 || index >= g_cellsUsed || !g_cells[index].element) return;
+    ComPtr<IUIAutomationInvokePattern> pattern;
+    const bool got = SUCCEEDED(g_cells[index].element->GetCurrentPatternAs(
+        UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern),
+        reinterpret_cast<void**>(pattern.Put()))) && pattern;
+    const HRESULT invoked = got ? pattern->Invoke() : E_FAIL;
+    ++g_invoked;
+    Log(L"TRAYWINDOW: left click on cell %d '%ls' -> Invoke hr=0x%08lX", index,
+        g_cells[index].name.c_str(), static_cast<unsigned long>(invoked));
+}
+
+LRESULT CALLBACK TrayWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;   // painted in WM_PAINT, and erasing first would flicker
+        case WM_PAINT: {
+            PAINTSTRUCT paint = {};
+            HDC dc = BeginPaint(hwnd, &paint);
+            RECT client = {};
+            GetClientRect(hwnd, &client);
+            HBRUSH background = CreateSolidBrush(RGB(28, 28, 34));
+            FillRect(dc, &client, background);
+            DeleteObject(background);
+            for (int i = 0; i < g_cellsUsed; ++i) {
+                const RECT box = CellRect(i);
+                HBRUSH cell = CreateSolidBrush(RGB(48, 48, 58));
+                FillRect(dc, &box, cell);
+                DeleteObject(cell);
+                if (g_cells[i].icon) {
+                    DrawIconEx(dc, box.left + (kCellDip - 16) / 2, box.top + (kCellDip - 16) / 2,
+                               g_cells[i].icon, 16, 16, 0, nullptr, DI_NORMAL);
+                }
+                wchar_t label[8] = {};
+                wsprintfW(label, L"%d", i);
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, RGB(200, 200, 210));
+                TextOutW(dc, box.left + 3, box.bottom - 14, label, static_cast<int>(wcslen(label)));
+            }
+            SetTextColor(dc, RGB(150, 150, 160));
+            TextOutW(dc, 8, kCellDip + 12, L"a tray of our own -- left click: the shell presses it",
+                     static_cast<int>(wcslen(L"a tray of our own -- left click: the shell presses it")));
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_LBUTTONDOWN: {
+            const int cell = CellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            InvokeCell(cell);
+            return 0;
+        }
+        case WM_RBUTTONUP: {
+            const int cell = CellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            if (cell < 0) return 0;
+            Log(L"TRAYWINDOW: right click on cell %d '%ls' -- opening OUR menu", cell,
+                g_cells[cell].name.c_str());
+            POINT at = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ClientToScreen(hwnd, &at);
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, kMenuOpen, L"open (the shell's own left click)");
+            AppendMenuW(menu, MF_STRING, kMenuShowDesktop, L"show the desktop");
+            SetForegroundWindow(hwnd);
+            const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, at.x, at.y, 0, hwnd,
+                                              nullptr);
+            DestroyMenu(menu);
+            Log(L"TRAYWINDOW: our menu returned %d", chosen);
+            if (chosen == kMenuOpen) InvokeCell(cell);
+            return 0;
+        }
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+int RunTrayWindow(int seconds, int x, int y) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) {
+        Log(L"TRAYWINDOW: CoInitializeEx failed");
+        return 1;
+    }
+    // 1. The taskbar stays ALIVE and becomes invisible: one pixel of it is left on screen.
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    const HWND tray = taskbar ? FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
+    RECT barRect = {}, trayRect = {};
+    if (taskbar && tray) {
+        GetWindowRect(taskbar, &barRect);
+        GetWindowRect(tray, &trayRect);
+        ShowWindow(taskbar, SW_SHOWNA);
+        Sleep(150);
+        HRGN sliver = CreateRectRgn(trayRect.left - barRect.left, trayRect.top - barRect.top,
+                                    trayRect.left - barRect.left + 1, trayRect.top - barRect.top + 1);
+        Log(L"TRAYWINDOW: taskbar clipped to a 1-pixel sliver -> %d",
+            SetWindowRgn(taskbar, sliver, TRUE));
+        Sleep(250);
+    }
+
+    // 2. The icons, from the shell's own automation tree.
+    ComPtr<IUIAutomation> automation;
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(automation.Put()))) ||
+        !automation) {
+        Log(L"TRAYWINDOW: no automation client");
+        return 1;
+    }
+    ComPtr<IUIAutomationElement> root;
+    ComPtr<IUIAutomationElement> desktop;
+    automation->GetRootElement(desktop.Put());
+    for (const wchar_t* className : {L"Shell_TrayWnd", L"SystemTray_Main"}) {
+        ComPtr<IUIAutomationCondition> byClass;
+        VARIANT value = {};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(className);
+        if (FAILED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value, byClass.Put()))) {
+            continue;
+        }
+        if (SUCCEEDED(desktop->FindFirst(TreeScope_Descendants, byClass.Get(), root.Put())) && root) break;
+    }
+    if (!root) {
+        Log(L"TRAYWINDOW: the tray is not in the tree");
+        return 1;
+    }
+    VARIANT buttonType = {};
+    buttonType.vt = VT_I4;
+    buttonType.lVal = UIA_ButtonControlTypeId;
+    ComPtr<IUIAutomationCondition> buttons;
+    automation->CreatePropertyCondition(UIA_ControlTypePropertyId, buttonType, buttons.Put());
+    ComPtr<IUIAutomationElementArray> list;
+    if (FAILED(root->FindAll(TreeScope_Descendants, buttons.Get(), list.Put())) || !list) {
+        Log(L"TRAYWINDOW: no buttons under the tray root");
+        return 1;
+    }
+    int total = 0;
+    list->get_Length(&total);
+    for (int i = 0; i < total && g_cellsUsed < kMaxCells; ++i) {
+        ComPtr<IUIAutomationElement> element;
+        if (FAILED(list->GetElement(i, element.Put())) || !element) continue;
+        const std::wstring cls = ElementText(element.Get(), UIA_ClassNamePropertyId);
+        if (cls != L"SystemTray.AccentButton") continue;      // the tray's own items only
+        RECT box = {};
+        element->get_CurrentBoundingRectangle(&box);
+        TrayCell& cell = g_cells[g_cellsUsed];
+        cell.name = Flattened(ElementText(element.Get(), UIA_NamePropertyId));
+        cell.screen = box;
+        element.Get()->AddRef();
+        cell.element = element.Get();
+        std::wstring exe;
+        HICON icon = nullptr;
+        if (RegistryPicture(cell.name, &exe, &icon)) {
+            cell.icon = icon;
+            cell.matched = exe;
+        }
+        Log(L"TRAYWINDOW: cell %d '%ls' at %ld,%ld %ldx%ld -- picture from registry: %ls", g_cellsUsed,
+            cell.name.c_str(), box.left, box.top, box.right - box.left, box.bottom - box.top,
+            cell.matched.empty() ? L"NONE (no icon drawn)" : cell.matched.c_str());
+        ++g_cellsUsed;
+    }
+    Log(L"TRAYWINDOW: %d cell(s) drawn by us", g_cellsUsed);
+    if (g_cellsUsed == 0) return 0;
+
+    // 3. Our window, in our place, with our own look.
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = TrayWindowProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"TrayLabOwnTray";
+    const ATOM ownClass = RegisterClassExW(&wc);
+    Log(L"TRAYWINDOW: RegisterClassExW(TrayLabOwnTray) -> atom %u (error %lu)", ownClass,
+        ownClass ? 0UL : GetLastError());
+    const int width = 16 + g_cellsUsed * (kCellDip + kCellGapDip);
+    SetLastError(0);
+    g_window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"TrayLabOwnTray",
+                               L"tray of our own", WS_POPUP | WS_VISIBLE, x, y, width, kCellDip + 44,
+                               nullptr, nullptr, wc.hInstance, nullptr);
+    Log(L"TRAYWINDOW: CreateWindowExW -> %p (error %lu)", reinterpret_cast<void*>(g_window),
+        g_window ? 0UL : GetLastError());
+    if (g_window) GetWindowRect(g_window, &g_windowScreen);
+
+    const ULONGLONG until = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+    MSG msg = {};
+    while (GetTickCount64() < until) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(20);
+    }
+    Log(L"TRAYWINDOW: closing -- %d left click(s) pressed through the shell", g_invoked);
+    DestroyWindow(g_window);
+    for (int i = 0; i < g_cellsUsed; ++i) {
+        if (g_cells[i].icon) DestroyIcon(g_cells[i].icon);
+        if (g_cells[i].element) g_cells[i].element->Release();
+    }
+    // 4. Everything back: the whole taskbar, and hidden again by the bar if it is running.
+    if (taskbar) SetWindowRgn(taskbar, nullptr, TRUE);
+    Log(L"TRAYWINDOW: taskbar region cleared");
+    CoUninitialize();
+    return 0;
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
     OpenLog();
     if (argc < 2) {
@@ -1001,6 +1329,12 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "--traynotify") == 0) {
         const int seconds = (argc > 2) ? std::atoi(argv[2]) : 20;
         return RunTrayNotify(seconds > 0 ? seconds : 20);
+    }
+    if (std::strcmp(argv[1], "--traywindow") == 0) {
+        const int seconds = (argc > 2) ? std::atoi(argv[2]) : 30;
+        const int x = (argc > 3) ? std::atoi(argv[3]) : 1180;
+        const int y = (argc > 4) ? std::atoi(argv[4]) : 60;
+        return RunTrayWindow(seconds > 0 ? seconds : 30, x, y);
     }
     Log(L"unknown command");
     return 2;
