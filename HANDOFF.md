@@ -11607,3 +11607,15 @@ uninstaller written: ...  shortcut written: ...  registered under Settings > App
 准备这次验证时想删掉 `tray_learned.txt` 重来，发现**删不掉**。原因在 8.116 那次优化里：为了不在同步的 WM_COPYDATA 回调里做 open/close，模块改成"一个进程一个常开句柄"，但共享模式只给了 `FILE_SHARE_READ | FILE_SHARE_WRITE`。**没有 `FILE_SHARE_DELETE` 就意味着任何持有句柄的进程都能阻止删除**，而 bar 的学习轮次正是靠 `DeleteFileW` 清空报告来保证"文件里只有本轮的东西"（TrayLearn.cpp 里那句注释因此悄悄失效了）。
 
 修法是一行的共享模式；机制单独量了一遍：同一个文件，`Read|Write` 下删除**失败**，加上 `Delete` 后**成功**。生效要等 explorer 换上新模块（旧模块被钉在 shell 里，进程不死就不会走）——所以这一条要重启一次 explorer 才能看到。
+
+### 8.122 **BarState 第 2 片：系统面板与声音页（25 个字段）** ✅（截图验证过面板真的照它画）
+
+`main.cpp` **6,031 → 5,939 行**（本轮约 −92 行净减，另有 25 组注释整段搬走）；`app/BarState.h` 到 157 行。
+
+搬的是：面板开关、卡片层级（`panelLevel`）、磁贴页码与起始页、三个滑条的拖动与回显（音量/混音/亮度）、亮度可用性与百分比、面板音量/亮度的回显时限、`shownVolume`、滑条手柄生长、声音页开关与滚动、混音拖动锁定的 (行, PID)、以及两个诊断用的"钉住"开关。**注释随字段一起搬**——这些注释是这个项目最值钱的部分。
+
+一处例外要在代码里说清：`systemPanelOpen` 的初值来自 `RunBar` 的参数（诊断可以要求开机就打开面板），结构体里表达不了，所以定义时给 `false`，紧跟构造之后由 `main.cpp` 赋值，并在两处都写了为什么。
+
+**验证**：两套配置全量重建（/WX）零告警；`--self-test` PASS、`island_smoke` PASS；覆盖率不变（3 of 11）；然后用面板自己的诊断开关（`ISLANDBAR_PANEL_MS` + `ISLANDBAR_PANEL_CLOSE_MS` + `ISLANDBAR_PANEL_LOCK`）把它钉开并截图——Wi-Fi/蓝牙/飞行模式磁贴、辅助功能与投影磁贴、音量与亮度滑条（手柄位置来自 `shownVolume` / `sliderHandleGrowth`）、页码箭头全部正常，说明这 25 个字段的读写接得对。
+
+顺带两条观察记在这里，不属本轮改动：① 日志里 `sound page: 3 device(s) …` 每秒约四行，是声音页读取器在刷（属于 ROADMAP 里"日志降噪"那条）；② 部署目录里的 staged 模块副本已经涨到 20 份（每次部署切一份新的、旧的被 shell 钉住），这是"explorer 重启一次"能一并清掉的东西。

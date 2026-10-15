@@ -70,6 +70,88 @@ struct BarState {
     // of a function that has already returned is a crash waiting for the user to close the bar.
     std::shared_ptr<std::atomic<bool>> learnInFlight = std::make_shared<std::atomic<bool>>(false);
     unsigned long long lastLearnAttempt = 0;
+
+    // --- the system panel, and the 声音输出 page inside it (slice 2) ---------------------------------
+    //
+    // Moved 2026-10-15. These were locals at the top of RunBar with exactly these comments; what they
+    // are for is written where they are now, and one thing is worth stating at the top: the panel is a
+    // CARD that is on screen for the length of its own exit, so the LEVEL it was opened with is also
+    // the level it leaves with (see PanelLevel).
+    // Whether the system panel is open. It is a TOGGLE, like the shell flyout it mirrors.
+    bool systemPanelOpen = false;   // RunBar sets it from its own argument (see main.cpp)
+    // Which level of the panel's card is showing -- the tiles, the 声音输出 page, or the tray page. Held
+    // for the card's whole life, like the owner: the card is on screen for the length of its own exit, so
+    // the level it was opened with is also what it leaves with (see NextPanelLevel, and the three places
+    // that read it: the content, the two page flags, and where the card stands).
+    island::PanelLevel panelLevel = island::PanelLevel::Tiles;
+    // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
+    // the whole set, and the arrows and dots are the controls for it.
+    int systemPanelPage = 0;
+    // Which page to start on, for looking at the second page without a pointer. Diagnostic only.
+    int startPanelPage = 0;
+    // The volume slider, while the pointer has the mouse button down on it.
+    //
+    // A press jumps the handle to where the click landed, and HOLDING it has to keep moving the handle --
+    // a slider that only jumped once per click is not a slider, and the shell's own control follows the
+    // pointer. The state lives out here because the click arrives through the message queue while the
+    // movement is read from the pointer each pass.
+    bool panelSliderDrag = false;
+    // The fraction last actually pushed to the device, so a drag does not re-send the same value every frame.
+    // The handle is drawn from the live reading either way, so nothing is lost by skipping the repeats.
+    float lastAppliedVolumeFraction = -1.0f;
+    float lastAppliedMixerFraction = -1.0f;
+    float lastLoggedVolumeFraction = -1.0f;
+    // --- the brightness row (DDC/CI) ---
+    //
+    // `brightnessAvailable` is only ever made true by a successful read, the same rule as the Bluetooth
+    // probe: a monitor that does not answer must not leave a row on the panel claiming a level. It is
+    // re-checked whenever the bar moves to another display, because a laptop panel answers and the monitor
+    // beside it may not.
+    bool brightnessAvailable = false;
+    int brightnessPercent = 0;
+    // Which slider a drag belongs to: 0 the volume, 1 the brightness (the same numbering as
+    // SystemPanelHit::index, which is where a drag starts).
+    int panelSliderDragRow = 0;
+    // The same two clocks the volume keeps, for the same reasons: DDC/CI writes are not free (they go over
+    // the video cable to the monitor), so they are pushed on a step and never more often than this.
+    int lastAppliedBrightnessPercent = -1;
+    int lastLoggedBrightnessPercent = -1;
+    unsigned long long brightnessWriteNotBefore = 0;
+    unsigned long long panelBrightnessEchoUntil = 0;
+    // Set by a press that started a slider drag, taken by the release that ends it: see the Slider branch.
+    bool sliderPressHandled = false;
+    // The volume the sliders are DRAWN at: the live reading, chased over a tenth of a second.
+    //
+    // "没有动画过渡" -- the handle used to be drawn at whatever the reading was, so every change that did not
+    // come from a drag (a click on the track, a keyboard volume key, the shell's own flyout) was a jump with
+    // no movement in it. The chase is on the DRAWING only: a drag sets the device from the pointer's own
+    // position and is drawn from the same place, so following the pointer stays 1:1 and the pointer never
+    // feels like it is dragging something heavy.
+    //
+    // The music card's own bar was the other reader of this value; it was removed on request ("把音乐卡片里
+    // 右上角的喇叭图标去掉吧"), and this stays because the SYSTEM PANEL's slider is drawn at it.
+    float shownVolume = -1.0f;
+    // How far each slider's handle has grown (0..1), chased towards "this row is the one in hand" for the
+    // same reason the volume itself is chased: the size is an animation, and a handle that jumped 2 DIP in
+    // one frame reads as a glitch rather than as the pointer arriving.
+    float sliderHandleGrowth[2] = {0.0f, 0.0f};
+    // Until when the volume's percentage stays on screen. Set for a moment after any change, so the number
+    // is visible for a moment even when the slider was clicked rather than dragged.
+    unsigned long long panelVolumeEchoUntil = 0;
+    // The "声音输出" page: the shell's second level off the volume row, with the output devices, the spatial
+    // sound row and the per-application mixer. A page INSIDE the card rather than a second card.
+    bool soundPageOpen = false;
+    float soundPageScroll = 0.0f;
+    // The mixer's own sliders, while one of them has the mouse button down. -1 is none; row 0 is the device's
+    // master volume and the rows after it are the applications. The PID is held rather than the row number
+    // alone, because the rows are re-read once a second and a row can be a different application by the time
+    // the pointer comes back to it -- the one the drag started on is the one it must keep moving.
+    int mixerSliderDragRow = -1;
+    unsigned long mixerSliderDragPid = 0;
+    // Diagnostics only: hold the panel open, and the sound page with it, so a photograph of either is not at
+    // the mercy of a click landing somewhere else on the machine. See ISLANDBAR_PANEL_LOCK.
+    bool panelLocked = false;
+    bool lockedSoundPage = false;
 };
 
 } // namespace island

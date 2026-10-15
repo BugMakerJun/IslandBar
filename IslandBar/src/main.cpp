@@ -350,7 +350,7 @@ wchar_t notificationIconSource[260] = {};
 // How long the drawn volume takes to catch up with the reading, in seconds.
 //
 // Short enough that a click feels immediate and long enough that the eye sees the handle travel: this is the
-// "过渡" the volume control was missing. A drag ignores it entirely -- see shownVolume.
+// "过渡" the volume control was missing. A drag ignores it entirely -- see bar.shownVolume.
 constexpr float kVolumeChaseSeconds = 0.12f;
 // The slider handle's own size chase: quicker than the volume's, because it answers the POINTER rather
 // than a device that has to be asked -- a hover that took 0.12 s to show would feel disconnected.
@@ -680,8 +680,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // stopping applications.
     constexpr unsigned long long kTrayRefreshMs = 5000;
 
-    // Whether the system panel is open. It is a TOGGLE, like the shell flyout it mirrors.
-    bool systemPanelOpen = forcedSystemPanel;
     // THE BAR'S OWN STATE, SLICE 1: the tray card, its menu, and the clocks that re-read the tray and
     // learn what it holds. See app/BarState.h for why it is a struct now and what moves in next.
     //
@@ -689,79 +687,9 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // what the first tick must compare against.
     island::BarState bar;
     bar.lastShellPid = island::TrayShellProcessId();
-    // Which level of the panel's card is showing -- the tiles, the 声音输出 page, or the tray page. Held
-    // for the card's whole life, like the owner: the card is on screen for the length of its own exit, so
-    // the level it was opened with is also what it leaves with (see NextPanelLevel, and the three places
-    // that read it: the content, the two page flags, and where the card stands).
-    island::PanelLevel panelLevel = island::PanelLevel::Tiles;
-    // Which page of tiles the panel is showing. The shell's flyout pages through them; a page is a window over
-    // the whole set, and the arrows and dots are the controls for it.
-    int systemPanelPage = 0;
-    // Which page to start on, for looking at the second page without a pointer. Diagnostic only.
-    int startPanelPage = 0;
-    // The volume slider, while the pointer has the mouse button down on it.
-    //
-    // A press jumps the handle to where the click landed, and HOLDING it has to keep moving the handle --
-    // a slider that only jumped once per click is not a slider, and the shell's own control follows the
-    // pointer. The state lives out here because the click arrives through the message queue while the
-    // movement is read from the pointer each pass.
-    bool panelSliderDrag = false;
-    // The fraction last actually pushed to the device, so a drag does not re-send the same value every frame.
-    // The handle is drawn from the live reading either way, so nothing is lost by skipping the repeats.
-    float lastAppliedVolumeFraction = -1.0f;
-    float lastAppliedMixerFraction = -1.0f;
-    float lastLoggedVolumeFraction = -1.0f;
-    // --- the brightness row (DDC/CI) ---
-    //
-    // `brightnessAvailable` is only ever made true by a successful read, the same rule as the Bluetooth
-    // probe: a monitor that does not answer must not leave a row on the panel claiming a level. It is
-    // re-checked whenever the bar moves to another display, because a laptop panel answers and the monitor
-    // beside it may not.
-    bool brightnessAvailable = false;
-    int brightnessPercent = 0;
-    // Which slider a drag belongs to: 0 the volume, 1 the brightness (the same numbering as
-    // SystemPanelHit::index, which is where a drag starts).
-    int panelSliderDragRow = 0;
-    // The same two clocks the volume keeps, for the same reasons: DDC/CI writes are not free (they go over
-    // the video cable to the monitor), so they are pushed on a step and never more often than this.
-    int lastAppliedBrightnessPercent = -1;
-    int lastLoggedBrightnessPercent = -1;
-    unsigned long long brightnessWriteNotBefore = 0;
-    unsigned long long panelBrightnessEchoUntil = 0;
-    // Set by a press that started a slider drag, taken by the release that ends it: see the Slider branch.
-    bool sliderPressHandled = false;
-    // The volume the sliders are DRAWN at: the live reading, chased over a tenth of a second.
-    //
-    // "没有动画过渡" -- the handle used to be drawn at whatever the reading was, so every change that did not
-    // come from a drag (a click on the track, a keyboard volume key, the shell's own flyout) was a jump with
-    // no movement in it. The chase is on the DRAWING only: a drag sets the device from the pointer's own
-    // position and is drawn from the same place, so following the pointer stays 1:1 and the pointer never
-    // feels like it is dragging something heavy.
-    //
-    // The music card's own bar was the other reader of this value; it was removed on request ("把音乐卡片里
-    // 右上角的喇叭图标去掉吧"), and this stays because the SYSTEM PANEL's slider is drawn at it.
-    float shownVolume = -1.0f;
-    // How far each slider's handle has grown (0..1), chased towards "this row is the one in hand" for the
-    // same reason the volume itself is chased: the size is an animation, and a handle that jumped 2 DIP in
-    // one frame reads as a glitch rather than as the pointer arriving.
-    float sliderHandleGrowth[2] = {0.0f, 0.0f};
-    // Until when the volume's percentage stays on screen. Set for a moment after any change, so the number
-    // is visible for a moment even when the slider was clicked rather than dragged.
-    unsigned long long panelVolumeEchoUntil = 0;
-    // The "声音输出" page: the shell's second level off the volume row, with the output devices, the spatial
-    // sound row and the per-application mixer. A page INSIDE the card rather than a second card.
-    bool soundPageOpen = false;
-    float soundPageScroll = 0.0f;
-    // The mixer's own sliders, while one of them has the mouse button down. -1 is none; row 0 is the device's
-    // master volume and the rows after it are the applications. The PID is held rather than the row number
-    // alone, because the rows are re-read once a second and a row can be a different application by the time
-    // the pointer comes back to it -- the one the drag started on is the one it must keep moving.
-    int mixerSliderDragRow = -1;
-    unsigned long mixerSliderDragPid = 0;
-    // Diagnostics only: hold the panel open, and the sound page with it, so a photograph of either is not at
-    // the mercy of a click landing somewhere else on the machine. See ISLANDBAR_PANEL_LOCK.
-    bool panelLocked = false;
-    bool lockedSoundPage = false;
+    // The system panel can be forced open at startup by a diagnostic; that is the only piece of the state
+    // above whose initial value comes from a parameter instead of a constant (see app/BarState.h).
+    bar.systemPanelOpen = forcedSystemPanel;
     // Whether the left button was down the last time the frame loop looked. The edge is what matters: a
     // press that starts outside the bar puts the panel away, and a button already held does not.
     bool leftWasDown = false;
@@ -1578,14 +1506,14 @@ float musicWavePhase = 0.0f;
             }
             // Which page of tiles to open on, so the second page can be photographed without a pointer.
             if (GetEnvironmentVariableW(L"ISLANDBAR_PANEL_PAGE", setting, 32) > 0) {
-                startPanelPage = static_cast<int>(wcstol(setting, nullptr, 10));
-                systemPanelPage = startPanelPage;
+                bar.startPanelPage = static_cast<int>(wcstol(setting, nullptr, 10));
+                bar.systemPanelPage = bar.startPanelPage;
             }
             // Open the panel's second level -- the 声音输出 page -- straight away, so it can be photographed
             // without a pointer, and at a chosen scroll offset so its own second half (the mixer) can be too.
             if (GetEnvironmentVariableW(L"ISLANDBAR_SOUND_PAGE", setting, 32) > 0) {
-                soundPageOpen = wcstol(setting, nullptr, 10) != 0;
-                systemPanelOpen = true;
+                bar.soundPageOpen = wcstol(setting, nullptr, 10) != 0;
+                bar.systemPanelOpen = true;
                 island::LogAndPrint("  diagnostic: the sound page is opened at startup\n");
                 std::fflush(stdout);
             }
@@ -1594,7 +1522,7 @@ float musicWavePhase = 0.0f;
             // there is no way to photograph it.
             if (GetEnvironmentVariableW(L"ISLANDBAR_TRAY_PAGE", setting, 32) > 0) {
                 bar.trayPageOpen = wcstol(setting, nullptr, 10) != 0;
-                systemPanelOpen = bar.trayPageOpen;
+                bar.systemPanelOpen = bar.trayPageOpen;
                 island::LogAndPrint("  diagnostic: the tray page is opened at startup\n");
                 std::fflush(stdout);
             }
@@ -1604,12 +1532,12 @@ float musicWavePhase = 0.0f;
             if (GetEnvironmentVariableW(L"ISLANDBAR_START_PAGE", setting, 32) > 0) {
                 startPageState = static_cast<int>(wcstol(setting, nullptr, 10));
                 startPageOpen = true;
-                systemPanelOpen = true;
+                bar.systemPanelOpen = true;
                 island::LogAndPrint("  diagnostic: the Start card is opened on page %d\n", startPageState);
                 std::fflush(stdout);
             }
             if (GetEnvironmentVariableW(L"ISLANDBAR_SOUND_SCROLL", setting, 32) > 0) {
-                soundPageScroll = wcstof(setting, nullptr);
+                bar.soundPageScroll = wcstof(setting, nullptr);
             }
             // Synthesize ONE click at a screen point, after the bar has settled.
             //
@@ -1634,10 +1562,10 @@ float musicWavePhase = 0.0f;
             // it cannot be undone by a stray click elsewhere on the machine. Debug only, and it says so where
             // it takes effect.
             if (GetEnvironmentVariableW(L"ISLANDBAR_PANEL_LOCK", setting, 32) > 0) {
-                panelLocked = wcstol(setting, nullptr, 10) != 0;
-                lockedSoundPage = soundPageOpen;
+                bar.panelLocked = wcstol(setting, nullptr, 10) != 0;
+                bar.lockedSoundPage = bar.soundPageOpen;
                 island::LogAndPrint("  diagnostic: the panel is held open (lock %d)\n",
-                                    panelLocked ? 1 : 0);
+                                    bar.panelLocked ? 1 : 0);
                 std::fflush(stdout);
             }
             // Separate from the opening time on purpose: with the transition stretched, closing at
@@ -2284,8 +2212,8 @@ float musicWavePhase = 0.0f;
             // is KEPT and the panel is drawn all the way out (see NextCardOwner): the card retracts, and
             // nothing takes its place.
             const auto dismissPanel = [&]() {
-                systemPanelOpen = false;
-                soundPageOpen = false;
+                bar.systemPanelOpen = false;
+                bar.soundPageOpen = false;
                 // ... and the Start card, which is the fourth level of the same card and has to go with it
                 // for the same reason (see the note above about every level being cleared).
                 startPageOpen = false;
@@ -2297,9 +2225,9 @@ float musicWavePhase = 0.0f;
                 // ... and the tray's own menu, which is a thing in front of that page rather than a level
                 // of it, so it cannot outlive the card it was opened over.
                 window.CloseTrayMenu();
-                panelSliderDrag = false;
-                mixerSliderDragRow = -1;
-                mixerSliderDragPid = 0;
+                bar.panelSliderDrag = false;
+                bar.mixerSliderDragRow = -1;
+                bar.mixerSliderDragPid = 0;
                 // TO THE NOTICE STRIP, NOT TO `resting`, WHILE A CALL OR A MESSAGE IS UP.
                 //
                 // `resting` is the ordinary shape -- the lyric strip, or the plain pill -- and putting the
@@ -2327,56 +2255,56 @@ float musicWavePhase = 0.0f;
             // writes a second to the audio endpoint, each of which reopens the device on the worker -- the
             // handle would still follow the pointer, but the level would arrive in a lagging stream behind
             // it, which is half of what "不顺滑" meant.
-            if (panelSliderDrag) {
+            if (bar.panelSliderDrag) {
                 POINT dragPoint = {};
                 GetCursorPos(&dragPoint);
                 // From the pointer's x alone, not from the hit test: see PanelSliderFractionForDrag.
                 float fraction = 0.0f;
-                if (panelSliderDragRow == 1) {
+                if (bar.panelSliderDragRow == 1) {
                     // The brightness row. DDC/CI writes go over the video cable, so they are pushed on a
                     // coarser step than the volume's 0.4% and never more often than the echo deadline
                     // allows: a write per frame would queue up in the monitor and arrive behind the
                     // handle. The value shown follows the pointer either way (see the frame fill).
-                    if (brightnessAvailable &&
+                    if (bar.brightnessAvailable &&
                         window.PanelSliderFractionForDrag(1, dragPoint, &fraction)) {
                         const int wanted = static_cast<int>(fraction * 100.0f + 0.5f);
-                        if (wanted != lastAppliedBrightnessPercent &&
-                            (GetTickCount64() >= brightnessWriteNotBefore ||
-                             std::abs(wanted - lastAppliedBrightnessPercent) >= 5)) {
+                        if (wanted != bar.lastAppliedBrightnessPercent &&
+                            (GetTickCount64() >= bar.brightnessWriteNotBefore ||
+                             std::abs(wanted - bar.lastAppliedBrightnessPercent) >= 5)) {
                             int landed = wanted;
                             const bool ok = island::SetBrightnessPercent(monitor.monitor, wanted,
                                                                         &landed);
-                            lastAppliedBrightnessPercent = landed;
-                            brightnessWriteNotBefore = GetTickCount64() + 60;
-                            if (std::abs(landed - lastLoggedBrightnessPercent) >= 5 || !ok) {
-                                lastLoggedBrightnessPercent = landed;
+                            bar.lastAppliedBrightnessPercent = landed;
+                            bar.brightnessWriteNotBefore = GetTickCount64() + 60;
+                            if (std::abs(landed - bar.lastLoggedBrightnessPercent) >= 5 || !ok) {
+                                bar.lastLoggedBrightnessPercent = landed;
                                 island::LogAndPrint(
                                     "  brightness: dragging -> %d%% (asked %d, %ls)\n", landed,
                                     wanted, ok ? "landed" : "the monitor did not take it");
                                 std::fflush(stdout);
                             }
                         }
-                        panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                        bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
                     }
                 } else if (volumeAvailable &&
                            window.PanelSliderFractionForDrag(0, dragPoint, &fraction)) {
-                    if (std::fabs(fraction - lastAppliedVolumeFraction) > 0.004f) {
-                        lastAppliedVolumeFraction = fraction;
+                    if (std::fabs(fraction - bar.lastAppliedVolumeFraction) > 0.004f) {
+                        bar.lastAppliedVolumeFraction = fraction;
                         volume.SetLevel(fraction);
                         // Reported per real step rather than per frame, so "the handle follows the pointer"
                         // and "it only moved twice" can be told apart in the log.
-                        if (std::fabs(fraction - lastLoggedVolumeFraction) >= 0.03f) {
-                            lastLoggedVolumeFraction = fraction;
+                        if (std::fabs(fraction - bar.lastLoggedVolumeFraction) >= 0.03f) {
+                            bar.lastLoggedVolumeFraction = fraction;
                             island::LogAndPrint("  volume: dragging -> %.0f%%\n",
                                                 fraction * 100.0f);
                             std::fflush(stdout);
                         }
                     }
-                    panelVolumeEchoUntil = GetTickCount64() + 1200;
+                    bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                 }
                 if (!window.LeftButtonDown()) {
-                    panelSliderDrag = false;
-                    if (panelSliderDragRow == 1) {
+                    bar.panelSliderDrag = false;
+                    if (bar.panelSliderDragRow == 1) {
                         int finalLevel = 0;
                         if (island::ReadBrightnessPercent(monitor.monitor, &finalLevel)) {
                             island::LogAndPrint("  brightness: drag ended at %d%%\n", finalLevel);
@@ -2392,29 +2320,29 @@ float musicWavePhase = 0.0f;
                             island::LogAndPrint("  volume: drag ended\n");
                         }
                     }
-                    panelSliderDragRow = 0;
+                    bar.panelSliderDragRow = 0;
                     std::fflush(stdout);
                 }
             }
 
             // The mixer's sliders are dragged the same way the panel's volume slider is, and for the same
             // reason: a press sets the level, and HOLDING it has to keep the handle under the pointer.
-            if (mixerSliderDragRow >= 0) {
+            if (bar.mixerSliderDragRow >= 0) {
                 POINT dragPoint = {};
                 GetCursorPos(&dragPoint);
                 float fraction = 0.0f;
-                if (window.MixerSliderFractionForDrag(mixerSliderDragRow, dragPoint, &fraction) &&
-                    std::fabs(fraction - lastAppliedMixerFraction) > 0.004f) {
-                    lastAppliedMixerFraction = fraction;
-                    if (mixerSliderDragRow == 0) {
+                if (window.MixerSliderFractionForDrag(bar.mixerSliderDragRow, dragPoint, &fraction) &&
+                    std::fabs(fraction - bar.lastAppliedMixerFraction) > 0.004f) {
+                    bar.lastAppliedMixerFraction = fraction;
+                    if (bar.mixerSliderDragRow == 0) {
                         if (volumeAvailable) volume.SetLevel(fraction);
                     } else if (soundOutputStarted && soundOutput) {
-                        soundOutput->SetSessionVolume(mixerSliderDragPid, fraction);
+                        soundOutput->SetSessionVolume(bar.mixerSliderDragPid, fraction);
                     }
                 }
                 if (!window.LeftButtonDown()) {
-                    mixerSliderDragRow = -1;
-                    mixerSliderDragPid = 0;
+                    bar.mixerSliderDragRow = -1;
+                    bar.mixerSliderDragPid = 0;
                     island::LogAndPrint("  mixer: drag ended\n");
                     std::fflush(stdout);
                 }
@@ -2428,12 +2356,12 @@ float musicWavePhase = 0.0f;
             // back, so there is still only one offset in play.
             {
                 int wheelNotches = 0;
-                if (soundPageOpen && window.TakeSoundWheel(&wheelNotches)) {
-                    soundPageScroll -= static_cast<float>(wheelNotches) * 60.0f;
-                    window.SetSoundPageScroll(soundPageScroll);
-                    soundPageScroll = window.SoundPageScroll();
+                if (bar.soundPageOpen && window.TakeSoundWheel(&wheelNotches)) {
+                    bar.soundPageScroll -= static_cast<float>(wheelNotches) * 60.0f;
+                    window.SetSoundPageScroll(bar.soundPageScroll);
+                    bar.soundPageScroll = window.SoundPageScroll();
                     island::LogAndPrint("  sound page: wheel %d -> scroll %.0f\n", wheelNotches,
-                                        soundPageScroll);
+                                        bar.soundPageScroll);
                     std::fflush(stdout);
                 } else if (startPageOpen && startPageState == 1 &&
                            window.TakeSoundWheel(&wheelNotches)) {
@@ -2456,55 +2384,55 @@ float musicWavePhase = 0.0f;
             {
                 POINT pressed = {};
                 while (window.TakePress(&pressed)) {
-                    if (!systemPanelOpen) continue;
+                    if (!bar.systemPanelOpen) continue;
                     // The level that is SHOWING decides which control the press lands on, exactly as the click
                     // chain below does -- see the note at `panelHit`. Without it the mixer's rows answered
                     // while the tray page was up, because the two share the card.
-                    if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Sound)) {
+                    if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
                         const island::SoundPageHit hit = window.SoundPageHitAtScreen(pressed);
                         if (hit.target == island::SoundPageTarget::MixerSlider) {
-                            mixerSliderDragRow = hit.index;
-                            lastAppliedMixerFraction = hit.fraction;
+                            bar.mixerSliderDragRow = hit.index;
+                            bar.lastAppliedMixerFraction = hit.fraction;
                             if (hit.index == 0) {
                                 if (volumeAvailable) volume.SetLevel(hit.fraction);
                             } else if (soundOutputStarted && soundOutput &&
                                        hit.index - 1 < soundSnapshot->sessionCount) {
-                                mixerSliderDragPid = soundSnapshot->sessions[hit.index - 1].pid;
-                                soundOutput->SetSessionVolume(mixerSliderDragPid, hit.fraction);
+                                bar.mixerSliderDragPid = soundSnapshot->sessions[hit.index - 1].pid;
+                                soundOutput->SetSessionVolume(bar.mixerSliderDragPid, hit.fraction);
                             }
                             island::LogAndPrint("  mixer: press on row %d -> %.0f%%\n", hit.index,
                                                 hit.fraction * 100.0f);
                             std::fflush(stdout);
                         }
-                    } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Tiles)) {
+                    } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles)) {
                         const island::SystemPanelHit hit = window.SystemPanelHitAtScreen(pressed);
                         if (hit.target == island::SystemPanelTarget::Slider) {
                             // WHICH slider, from the hit's own index: 0 is the volume row and 1 the
                             // brightness row, and the drag that this press begins has to follow the row it
                             // started on rather than whichever one is looked for first.
-                            if (hit.index == 1 && brightnessAvailable) {
-                                sliderPressHandled = true;
-                                panelSliderDrag = true;
-                                panelSliderDragRow = 1;
+                            if (hit.index == 1 && bar.brightnessAvailable) {
+                                bar.sliderPressHandled = true;
+                                bar.panelSliderDrag = true;
+                                bar.panelSliderDragRow = 1;
                                 int landed = 0;
                                 const int wanted = static_cast<int>(hit.fraction * 100.0f + 0.5f);
                                 const bool ok =
                                     island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
-                                lastAppliedBrightnessPercent = landed;
-                                lastLoggedBrightnessPercent = landed;
-                                brightnessWriteNotBefore = GetTickCount64() + 60;
-                                panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                                bar.lastAppliedBrightnessPercent = landed;
+                                bar.lastLoggedBrightnessPercent = landed;
+                                bar.brightnessWriteNotBefore = GetTickCount64() + 60;
+                                bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
                                 island::LogAndPrint(
                                     "  brightness: press on the slider -> %d%% (asked %d, %ls)\n",
                                     landed, wanted, ok ? "landed" : "the monitor did not take it");
                                 std::fflush(stdout);
                             } else if (volumeAvailable) {
-                                sliderPressHandled = true;
-                                panelSliderDrag = true;
-                                panelSliderDragRow = 0;
-                                lastAppliedVolumeFraction = hit.fraction;
+                                bar.sliderPressHandled = true;
+                                bar.panelSliderDrag = true;
+                                bar.panelSliderDragRow = 0;
+                                bar.lastAppliedVolumeFraction = hit.fraction;
                                 volume.SetLevel(hit.fraction);
-                                panelVolumeEchoUntil = GetTickCount64() + 1200;
+                                bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                                 island::LogAndPrint("  volume: press on the slider -> %.0f%%\n",
                                                     hit.fraction * 100.0f);
                                 std::fflush(stdout);
@@ -2522,11 +2450,11 @@ float musicWavePhase = 0.0f;
                 // value was already set by the press and by every frame of the drag in between; letting the
                 // click run as well would be a second handler for one gesture, and on the mixer it would
                 // re-apply the value to whichever row the pointer finished over.
-                if (panelSliderDrag || mixerSliderDragRow >= 0) {
-                    const bool wasMixer = mixerSliderDragRow >= 0;
-                    panelSliderDrag = false;
-                    mixerSliderDragRow = -1;
-                    mixerSliderDragPid = 0;
+                if (bar.panelSliderDrag || bar.mixerSliderDragRow >= 0) {
+                    const bool wasMixer = bar.mixerSliderDragRow >= 0;
+                    bar.panelSliderDrag = false;
+                    bar.mixerSliderDragRow = -1;
+                    bar.mixerSliderDragPid = 0;
                     island::LogAndPrint("  %ls: drag ended by the release\n",
                                         wasMixer ? L"mixer" : L"volume");
                     std::fflush(stdout);
@@ -2584,7 +2512,7 @@ float musicWavePhase = 0.0f;
                 // those calls re-lays the panel out to answer it. One value, read once, so the answers cannot
                 // disagree with each other within a single click either.
                 const island::SystemPanelHit panelHit =
-                    (systemPanelOpen && island::LevelAnswersInput(panelLevel, island::PanelLevel::Tiles))
+                    (bar.systemPanelOpen && island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles))
                         ? window.SystemPanelHitAtScreen(cursor)
                         : island::SystemPanelHit{};
 
@@ -2604,7 +2532,7 @@ float musicWavePhase = 0.0f;
                 // report for three rounds: the tile's own log line was being swallowed, and an empty line in
                 // the log looks like nothing happened.
                 island::LogAndPrint(L"  click: panel=%d soundPage=%d target=%d shape=%ls\n",
-                                    systemPanelOpen ? 1 : 0, soundPageOpen ? 1 : 0,
+                                    bar.systemPanelOpen ? 1 : 0, bar.soundPageOpen ? 1 : 0,
                                     static_cast<int>(panelHit.target),
                                     island::StateName(window.State()));
 
@@ -2631,12 +2559,12 @@ float musicWavePhase = 0.0f;
                     // simply no longer what THIS button does, and that is one line in the log rather than a
                     // silent change of behaviour: "start click: the bar's own card".
                     startPageOpen = !startPageOpen;
-                    systemPanelOpen = startPageOpen;
+                    bar.systemPanelOpen = startPageOpen;
                     startPageState = 0;
                     startPickerScroll = 0;
                     startPowerConfirm = -1;
                     bar.trayPageOpen = false;
-                    soundPageOpen = false;
+                    bar.soundPageOpen = false;
                     island::LogAndPrint("  start click: the bar's own card %ls\n",
                                         startPageOpen ? L"open" : L"closed");
                     std::fflush(stdout);
@@ -2650,15 +2578,15 @@ float musicWavePhase = 0.0f;
                     // once.
                     const bool opening = !bar.trayPageOpen;
                     bar.trayPageOpen = opening;
-                    systemPanelOpen = opening;
-                    systemPanelPage = 0;
-                    soundPageOpen = false;
-                    panelSliderDrag = false;
-                    mixerSliderDragRow = -1;
-                    mixerSliderDragPid = 0;
+                    bar.systemPanelOpen = opening;
+                    bar.systemPanelPage = 0;
+                    bar.soundPageOpen = false;
+                    bar.panelSliderDrag = false;
+                    bar.mixerSliderDragRow = -1;
+                    bar.mixerSliderDragPid = 0;
                     island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
                     std::fflush(stdout);
-                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Start) &&
+                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Start) &&
                            window.StartHitHovered().target !=
                                island::IslandWindow::StartHitTarget::None) {
                     // --- A PRESS ON THE START CARD -----------------------------------------------------
@@ -2737,7 +2665,7 @@ float musicWavePhase = 0.0f;
                             break;
                     }
                     std::fflush(stdout);
-                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Tray) &&
+                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
                            window.TrayCellHovered() >= 0) {
                     // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
                     // thing about the tray this bar cannot do itself -- the menu or the window that
@@ -2759,20 +2687,20 @@ float musicWavePhase = 0.0f;
                     // The system panel is a TOGGLE, like the shell's own flyout: pressing the control
                     // again closes what it opened. Without that the only way out would be to click
                     // somewhere unrelated, which is not a way out a user can guess.
-                    systemPanelOpen = !systemPanelOpen;
-                    systemPanelPage = 0;   // always opens on the first page, like the shell's flyout
+                    bar.systemPanelOpen = !bar.systemPanelOpen;
+                    bar.systemPanelPage = 0;   // always opens on the first page, like the shell's flyout
                     // ... and the tray's page is a level of the same card, so it goes with it.
                     bar.trayPageOpen = false;
                     // The page is a LEVEL of the panel, so closing the panel closes it too -- and a drag
                     // left half-done is ended, or the next press anywhere would go on dragging a slider
                     // that is no longer on screen.
-                    soundPageOpen = false;
-                    mixerSliderDragRow = -1;
-                    mixerSliderDragPid = 0;
+                    bar.soundPageOpen = false;
+                    bar.mixerSliderDragRow = -1;
+                    bar.mixerSliderDragPid = 0;
                     island::LogAndPrint("  system panel: %ls\n",
-                                        systemPanelOpen ? L"open" : L"closed");
+                                        bar.systemPanelOpen ? L"open" : L"closed");
                     std::fflush(stdout);
-                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Sound)) {
+                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
                     // --- the 声音输出 page's own controls ---
                     //
                     // Reached BEFORE the panel's, because the two are laid out over the same card: while this
@@ -2781,7 +2709,7 @@ float musicWavePhase = 0.0f;
                     const island::SoundPageHit soundHit = window.SoundPageHitAtScreen(cursor);
                     switch (soundHit.target) {
                         case island::SoundPageTarget::Back:
-                            soundPageOpen = false;
+                            bar.soundPageOpen = false;
                             island::LogAndPrint("  sound page: back to the panel\n");
                             break;
 
@@ -2825,8 +2753,8 @@ float musicWavePhase = 0.0f;
                                 // The device's own row is the master volume, which is AudioVolume's.
                                 if (volumeAvailable) {
                                     volume.SetLevel(soundHit.fraction);
-                                    mixerSliderDragRow = 0;
-                                    mixerSliderDragPid = 0;
+                                    bar.mixerSliderDragRow = 0;
+                                    bar.mixerSliderDragPid = 0;
                                     island::LogAndPrint("  mixer: master -> %.0f%%\n",
                                                         soundHit.fraction * 100.0f);
                                 }
@@ -2834,8 +2762,8 @@ float musicWavePhase = 0.0f;
                                 const island::SoundSessionInfo& session =
                                     soundSnapshot->sessions[row - 1];
                                 soundOutput->SetSessionVolume(session.pid, soundHit.fraction);
-                                mixerSliderDragRow = row;
-                                mixerSliderDragPid = session.pid;
+                                bar.mixerSliderDragRow = row;
+                                bar.mixerSliderDragPid = session.pid;
                                 island::LogAndPrint(L"  mixer: '%ls' (pid %lu) -> %.0f%%\n",
                                                     session.name, session.pid,
                                                     soundHit.fraction * 100.0f);
@@ -2869,10 +2797,10 @@ float musicWavePhase = 0.0f;
                             // hit-tested against -- and the OFFSET stays here with the page it belongs to.
                             const int jump = window.SoundScrollJumpFor(cursor);
                             if (jump != 0) {
-                                soundPageScroll += static_cast<float>(jump) * 140.0f;
-                                window.SetSoundPageScroll(soundPageScroll);
-                                soundPageScroll = window.SoundPageScroll();
-                                island::LogAndPrint("  sound page: scroll -> %.0f\n", soundPageScroll);
+                                bar.soundPageScroll += static_cast<float>(jump) * 140.0f;
+                                window.SetSoundPageScroll(bar.soundPageScroll);
+                                bar.soundPageScroll = window.SoundPageScroll();
+                                island::LogAndPrint("  sound page: scroll -> %.0f\n", bar.soundPageScroll);
                             }
                             break;
                         }
@@ -2884,32 +2812,32 @@ float musicWavePhase = 0.0f;
                             break;
                     }
                     std::fflush(stdout);
-                } else if (systemPanelOpen && panelHit.target ==
+                } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::PageDown) {
                     const int pages = window.SystemPanel().pageCount;
                     if (pages > 1) {
-                        systemPanelPage = (window.SystemPanel().pageIndex + 1) % pages;
-                        island::LogAndPrint("  system panel: page %d of %d\n", systemPanelPage + 1,
+                        bar.systemPanelPage = (window.SystemPanel().pageIndex + 1) % pages;
+                        island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
                                             pages);
                         std::fflush(stdout);
                     }
-                } else if (systemPanelOpen && panelHit.target ==
+                } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::PageUp) {
                     const int pages = window.SystemPanel().pageCount;
                     if (pages > 1) {
-                        systemPanelPage = (window.SystemPanel().pageIndex + pages - 1) % pages;
-                        island::LogAndPrint("  system panel: page %d of %d\n", systemPanelPage + 1,
+                        bar.systemPanelPage = (window.SystemPanel().pageIndex + pages - 1) % pages;
+                        island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
                                             pages);
                         std::fflush(stdout);
                     }
-                } else if (systemPanelOpen && panelHit.target ==
+                } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::Slider) {
                     // Already handled by the press that this release ends. Without this the same gesture
                     // would be applied twice -- once when the button went down and once when it came up --
                     // and the log would show a second "drag begins" for a drag that had just finished.
-                    if (sliderPressHandled) {
-                        sliderPressHandled = false;
-                    } else if (panelHit.index == 1 && brightnessAvailable) {
+                    if (bar.sliderPressHandled) {
+                        bar.sliderPressHandled = false;
+                    } else if (panelHit.index == 1 && bar.brightnessAvailable) {
                         // Pressed without a press event having been seen -- a click that arrived on its
                         // own. The fraction comes from the same layout the bar was drawn from, so the
                         // handle goes exactly where the click was.
@@ -2917,10 +2845,10 @@ float musicWavePhase = 0.0f;
                         const int wanted = static_cast<int>(panelHit.fraction * 100.0f + 0.5f);
                         const bool ok =
                             island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
-                        lastAppliedBrightnessPercent = landed;
-                        panelSliderDrag = true;
-                        panelSliderDragRow = 1;
-                        panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                        bar.lastAppliedBrightnessPercent = landed;
+                        bar.panelSliderDrag = true;
+                        bar.panelSliderDragRow = 1;
+                        bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
                         island::LogAndPrint(
                             "  brightness: set to %d%% (drag begins; asked %d, %ls)\n", landed,
                             wanted, ok ? "landed" : "the monitor did not take it");
@@ -2930,31 +2858,31 @@ float musicWavePhase = 0.0f;
                         // which happens when the panel opened between the two. The fraction comes from the
                         // same layout the bar was drawn from, so the handle goes exactly where the click was.
                         volume.SetLevel(panelHit.fraction);
-                        panelSliderDrag = true;   // and keep following the pointer while the button is held
-                        panelVolumeEchoUntil = GetTickCount64() + 1200;
+                        bar.panelSliderDrag = true;   // and keep following the pointer while the button is held
+                        bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                         island::LogAndPrint("  volume: set to %.0f%% (drag begins)\n",
                                             panelHit.fraction * 100.0f);
                         std::fflush(stdout);
                     }
-                } else if (systemPanelOpen && panelHit.target ==
+                } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::Speaker) {
                     // The speaker glyph is the mute control, as it is in the shell's own flyout.
                     if (volumeAvailable) {
                         volume.ToggleMute();
-                        panelVolumeEchoUntil = GetTickCount64() + 1200;
+                        bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                         island::LogAndPrint("  volume: %ls\n",
                                             volume.IsMuted() ? L"muted" : L"unmuted");
                         std::fflush(stdout);
                     }
-                } else if (systemPanelOpen && panelHit.target ==
+                } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::VolumeDevice) {
                     // The output-device button: the shell's own second level, where the devices and the
                     // per-application mixer live.
-                    soundPageOpen = true;
-                    soundPageScroll = 0.0f;
+                    bar.soundPageOpen = true;
+                    bar.soundPageScroll = 0.0f;
                     island::LogAndPrint("  sound page: open\n");
                     std::fflush(stdout);
-                } else if (systemPanelOpen && panelHit.target ==
+                } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::Gear) {
                     // The settings button, which has been drawn since the panel was built and has never had an
                     // action. It opens the sound settings, which is where this panel's own contents live.
@@ -2966,7 +2894,7 @@ float musicWavePhase = 0.0f;
                     // so the panel gets out of the way.
                     dismissPanel();
                     std::fflush(stdout);
-                } else if (systemPanelOpen && panelHit.target ==
+                } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::Tile) {
                     // A tile was pressed. What it does is carried ON the tile, so this does not have to
                     // know which tile is which -- and renaming one cannot silently change its action.
@@ -3017,8 +2945,8 @@ float musicWavePhase = 0.0f;
                                 // A tile that opens the sound page rather than a settings URI. None of them do
                                 // today -- the page is reached from the volume row's device button -- but the
                                 // action exists, so it is handled rather than falling into "no action yet".
-                                soundPageOpen = true;
-                                soundPageScroll = 0.0f;
+                                bar.soundPageOpen = true;
+                                bar.soundPageScroll = 0.0f;
                                 island::LogAndPrint(L"  tile %d '%ls' -> sound page\n", tileIndex,
                                                     tile.label ? tile.label : L"?");
                                 break;
@@ -3135,7 +3063,7 @@ float musicWavePhase = 0.0f;
                         }
                         std::fflush(stdout);
                     }
-                } else if (systemPanelOpen) {
+                } else if (bar.systemPanelOpen) {
                     // Anything else while the panel is open is treated as "put it away".
                     //
                     // A flyout closes when you click outside it, and on this bar the island IS outside
@@ -3317,7 +3245,7 @@ float musicWavePhase = 0.0f;
                 POINT rightCursor = {};
                 GetCursorPos(&rightCursor);
                 const island::IslandWindow::StartHit startHit = window.StartHitHovered();
-                if (startPageOpen && systemPanelOpen &&
+                if (startPageOpen && bar.systemPanelOpen &&
                     startHit.target == island::IslandWindow::StartHitTarget::Pin) {
                     // A pinned tile, right-clicked: that is how it comes off again. Unpinning from the
                     // CARD rather than from a settings file is the whole point of the card being the
@@ -3328,7 +3256,7 @@ float musicWavePhase = 0.0f;
                         startApps.Unpin(startHit.index);
                         startPowerConfirm = -1;
                     }
-                } else if (island::LevelAnswersInput(panelLevel, island::PanelLevel::Tray) &&
+                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
                            window.TrayCellHovered() >= 0 &&
                            window.TrayCellHovered() < trayIcons.Count()) {
                     // THE BAR'S OWN MENU, not the shell's (HANDOFF 8.80).
@@ -3351,12 +3279,12 @@ float musicWavePhase = 0.0f;
             // Held open for a photograph, if the diagnostic asked for it. Re-asserted AFTER the clicks above,
             // which is the only place either flag is cleared -- so the next frame draws the same level
             // whatever happened to the mouse in between.
-            if (panelLocked) {
-                systemPanelOpen = true;
+            if (bar.panelLocked) {
+                bar.systemPanelOpen = true;
                 // The page only rides along when the diagnostic OPENED it at startup: a lock that also pinned
                 // the page shut would make the page's own controls impossible to exercise by hand or by a
                 // script, which is the opposite of what a diagnostic is for.
-                if (lockedSoundPage) soundPageOpen = true;
+                if (bar.lockedSoundPage) bar.soundPageOpen = true;
             }
 
             // --- a click OUTSIDE the bar puts the panel away -------------------------------
@@ -3384,7 +3312,7 @@ float musicWavePhase = 0.0f;
                 Sleep(80);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             }
-            if (systemPanelOpen) {
+            if (bar.systemPanelOpen) {
                 POINT where = {};
                 GetCursorPos(&where);
                 const bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
@@ -3414,7 +3342,7 @@ float musicWavePhase = 0.0f;
 
             // --- the panel's own timer, when the diagnostic is on ---
             //
-            // Placed where a click would have left it -- `systemPanelOpen` is the same flag the chevron
+            // Placed where a click would have left it -- `bar.systemPanelOpen` is the same flag the chevron
             // sets -- so what the frame loop does next is what it does for a real press, with no
             // pointer involved.
             if (autoPanelMs > 0 && !forcedState) {
@@ -3425,8 +3353,8 @@ float musicWavePhase = 0.0f;
                     const DWORD phase =
                         (diagnosticElapsed - autoPanelMs) / autoPanelCycleMs;
                     const bool wantOpen = (phase % 2) == 0;
-                    if (wantOpen != systemPanelOpen) {
-                        systemPanelOpen = wantOpen;
+                    if (wantOpen != bar.systemPanelOpen) {
+                        bar.systemPanelOpen = wantOpen;
                         island::LogAndPrint("  diagnostic: panel %ls at %lu ms (cycle %lu)\n",
                                             wantOpen ? L"opened" : L"closed",
                                             static_cast<unsigned long>(diagnosticElapsed),
@@ -3435,7 +3363,7 @@ float musicWavePhase = 0.0f;
                     }
                 } else if (!autoPanelOpened && diagnosticElapsed >= autoPanelMs) {
                     autoPanelOpened = true;
-                    systemPanelOpen = true;
+                    bar.systemPanelOpen = true;
                     island::LogAndPrint("  diagnostic: panel opened at %lu ms\n",
                                         static_cast<unsigned long>(diagnosticElapsed));
                     std::fflush(stdout);
@@ -3579,7 +3507,7 @@ float musicWavePhase = 0.0f;
                 //     every ~0.35 s while a notification was up, and a screenshot of the card STILL being
                 //     drawn after the card had been removed. Reported as "但是现在还是会触发啊".
                 //
-                // The panel's case below is the policy's too: `systemPanelOpen` returns Expanded whatever
+                // The panel's case below is the policy's too: `bar.systemPanelOpen` returns Expanded whatever
                 // the pointer is doing, so nothing was lost by deleting this.
                 (void)pointerInside;
             }
@@ -3618,7 +3546,7 @@ float musicWavePhase = 0.0f;
                 // The panel is a request for the CARD, so the policy has to know about it -- otherwise
                 // the state stays Hover and the card is never drawn. That was a whole debugging round:
                 // the flag was set, the renderer read it, and the shape never changed.
-                context.systemPanelOpen = systemPanelOpen;
+                context.systemPanelOpen = bar.systemPanelOpen;
                 context.iconCount = window.IconCount();
                 context.hoveredIcon = window.HoveredIcon();
                 // Where the pointer is, for the rule that gives the card up: an icon or a deck button is
@@ -3653,7 +3581,7 @@ float musicWavePhase = 0.0f;
                 // exact moment the user was watching it, which is the other half of "卡卡的，没有过渡".
                 // Same shape as the rule that already holds the card for a notification: something explicit
                 // is in progress, so the pointer's position is not the question.
-                if (panelSliderDrag || mixerSliderDragRow >= 0) {
+                if (bar.panelSliderDrag || bar.mixerSliderDragRow >= 0) {
                     if (window.State() != island::IslandState::Expanded) {
                         window.SetState(island::IslandState::Expanded);
                     }
@@ -3947,9 +3875,9 @@ float musicWavePhase = 0.0f;
             // the audio reading behind it moved on. Read BEFORE the frame is built, because the build is
             // what records the new values.
             const bool soundPageChanged =
-                soundPageOpen != lastSoundPageOpen ||
-                (soundPageOpen && window.SoundPageScroll() != lastSoundScroll) ||
-                (soundPageOpen && soundOutputStarted && soundOutput &&
+                bar.soundPageOpen != lastSoundPageOpen ||
+                (bar.soundPageOpen && window.SoundPageScroll() != lastSoundScroll) ||
+                (bar.soundPageOpen && soundOutputStarted && soundOutput &&
                  soundOutput->Revision() != lastSoundRevision);
 
             // A call's level meter is the one thing on this bar that changes without an event, so it asks for
@@ -4047,11 +3975,11 @@ float musicWavePhase = 0.0f;
                 // card's whole life. It has to be this early in the loop for the same reason
                 // `outerCardUp` is: a field set after the thing that reads it is a field one frame stale
                 // (see the note below, and the four times this project has paid for that lesson).
-                panelLevel = island::NextPanelLevel(panelLevel, frame.outerCardUp, systemPanelOpen,
-                                                    bar.trayPageOpen, soundPageOpen, startPageOpen);
-                const bool trayPageShown = panelLevel == island::PanelLevel::Tray;
-                const bool soundPageShown = panelLevel == island::PanelLevel::Sound;
-                const bool startPageShown = panelLevel == island::PanelLevel::Start;
+                bar.panelLevel = island::NextPanelLevel(bar.panelLevel, frame.outerCardUp, bar.systemPanelOpen,
+                                                    bar.trayPageOpen, bar.soundPageOpen, startPageOpen);
+                const bool trayPageShown = bar.panelLevel == island::PanelLevel::Tray;
+                const bool soundPageShown = bar.panelLevel == island::PanelLevel::Sound;
+                const bool startPageShown = bar.panelLevel == island::PanelLevel::Start;
                 // ... and whether the bar is in the picture at all: with a full-screen application in front
                 // only the island is drawn (see FrameState::fullscreenApp).
                 frame.fullscreenApp = fullscreenAppInFront;
@@ -4191,14 +4119,14 @@ float musicWavePhase = 0.0f;
                 frame.trayPageTitle = trayPageShown ? L"\u6258\u76d8" : nullptr;   // 托盘
                 window.SetTrayIconCount(frame.trayIconCount);
 
-                frame.systemPanelOpen = systemPanelOpen;
+                frame.systemPanelOpen = bar.systemPanelOpen;
                 // ... and WHICH CONTROL SHOULD LOOK OPEN, which is a question about the level and not about
-                // whether a card is up: every level sets `systemPanelOpen` (that is what makes the card
+                // whether a card is up: every level sets `bar.systemPanelOpen` (that is what makes the card
                 // exist), so asking that flag lit the SYSTEM button's chevron for the tray page, for the
                 // Start card and for everything else. Reported as "点击 ⊞ 系统按钮也跟着变".
                 {
                     const island::ControlLit lit =
-                        island::ControlLitFor(panelLevel, frame.outerCardUp);
+                        island::ControlLitFor(bar.panelLevel, frame.outerCardUp);
                     frame.systemButtonOpen = lit.system;
                     frame.startButtonOpen = lit.start;
                 }
@@ -4307,7 +4235,7 @@ float musicWavePhase = 0.0f;
 
                 // Who owns the card for this frame. The panel keeps it until the card is gone.
                 //
-                // `systemPanelOpen` is the request, and the request is withdrawn the moment the control is
+                // `bar.systemPanelOpen` is the request, and the request is withdrawn the moment the control is
                 // pressed again; the card that request opened is still on screen for another 0.24 s.
                 // Drawing the panel only while the request was set made the retraction invisible -- the
                 // panel disappeared in one frame -- and, because the state had been left on the card, left
@@ -4321,7 +4249,7 @@ float musicWavePhase = 0.0f;
                 // frame of its own exit.
                 const bool cardWanted = (window.State() == island::IslandState::Expanded);
                 cardOwner = island::NextCardOwner(cardOwner, frame.outerCardUp, cardWanted,
-                                                 systemPanelOpen, active != nullptr,
+                                                 bar.systemPanelOpen, active != nullptr,
                                                  nowPlaying.present);
                 frame.cardOwner = cardOwner;
                 // ... and the WINDOW is told too, because the cursor is decided there (WM_SETCURSOR) and it
@@ -4368,12 +4296,12 @@ float musicWavePhase = 0.0f;
                         // The device's own row is drawn at the chased value as well, and at the raw reading
                         // while that row is the one being dragged -- the same rule as the other two bars.
                         const float drawnMaster =
-                            (mixerSliderDragRow == 0 || shownVolume < 0.0f) ? masterLevel : shownVolume;
+                            (bar.mixerSliderDragRow == 0 || bar.shownVolume < 0.0f) ? masterLevel : bar.shownVolume;
                         BuildSoundPage(*soundSnapshot, systemStatus, haveMaster, drawnMaster,
-                                       volume.IsMuted(), soundPageScroll, &frame.soundPage);
+                                       volume.IsMuted(), bar.soundPageScroll, &frame.soundPage);
                         frame.soundPageOpen = true;
                         lastSoundRevision = soundOutput->Revision();
-                        window.SetSoundPage(frame.soundPage, soundPageScroll);
+                        window.SetSoundPage(frame.soundPage, bar.soundPageScroll);
                     } else {
                         // Rebuilding every frame is what the tiles need: their on/off state comes from the
                         // status readings, and the readings are sampled on a timer. The text is copied into
@@ -4382,7 +4310,7 @@ float musicWavePhase = 0.0f;
                         const bool liveKnown = volume.Get(&liveLevel);
                         BuildSystemPanel(systemStatus, statusReader.InstalledLayoutCount(), liveKnown,
                                          liveLevel, volume.IsMuted(), &frame.systemPanel,
-                                         systemPanelPage);
+                                         bar.systemPanelPage);
 
                         // The volume's own percentage, shown while the slider is the control in hand: being
                         // dragged, used within the last second, or simply hovered. The handle's position is
@@ -4406,32 +4334,32 @@ float musicWavePhase = 0.0f;
                                 echoHit.target == island::SystemPanelTarget::Slider &&
                                 echoHit.index == 1;
                             const float wanted[2] = {
-                                (onVolumeRow || (panelSliderDrag && panelSliderDragRow == 0)) ? 1.0f
+                                (onVolumeRow || (bar.panelSliderDrag && bar.panelSliderDragRow == 0)) ? 1.0f
                                                                                              : 0.0f,
-                                (onBrightnessRow || (panelSliderDrag && panelSliderDragRow == 1))
+                                (onBrightnessRow || (bar.panelSliderDrag && bar.panelSliderDragRow == 1))
                                     ? 1.0f
                                     : 0.0f,
                             };
                             for (int row = 0; row < 2; ++row) {
                                 // The same chase the volume uses, with its own (quicker) constant: the size
                                 // answers the pointer, so it should arrive about as fast as a hover.
-                                sliderHandleGrowth[row] +=
-                                    (wanted[row] - sliderHandleGrowth[row]) *
+                                bar.sliderHandleGrowth[row] +=
+                                    (wanted[row] - bar.sliderHandleGrowth[row]) *
                                     (1.0f - std::exp(-dt / kHandleGrowthSeconds));
-                                if (std::fabs(wanted[row] - sliderHandleGrowth[row]) < 0.004f) {
-                                    sliderHandleGrowth[row] = wanted[row];
+                                if (std::fabs(wanted[row] - bar.sliderHandleGrowth[row]) < 0.004f) {
+                                    bar.sliderHandleGrowth[row] = wanted[row];
                                 }
-                                frame.systemPanel.sliderEmphasis[row] = sliderHandleGrowth[row];
+                                frame.systemPanel.sliderEmphasis[row] = bar.sliderHandleGrowth[row];
                             }
                             frame.systemPanel.showVolumePercent =
-                                panelSliderDrag || onSlider ||
-                                GetTickCount64() < panelVolumeEchoUntil;
+                                bar.panelSliderDrag || onSlider ||
+                                GetTickCount64() < bar.panelVolumeEchoUntil;
                             // The panel's handle is drawn at the chased value too, and at the pointer's own
                             // value while it is being dragged -- the same rule as the card's bar.
                             frame.systemPanel.volume =
-                                panelSliderDrag
+                                bar.panelSliderDrag
                                     ? (liveKnown ? liveLevel : frame.systemPanel.volume)
-                                    : (shownVolume >= 0.0f ? shownVolume : frame.systemPanel.volume);
+                                    : (bar.shownVolume >= 0.0f ? bar.shownVolume : frame.systemPanel.volume);
                         }
 
                         // The brightness row, and its own percentage on the same terms.
@@ -4441,8 +4369,8 @@ float musicWavePhase = 0.0f;
                         // cable, and drawing the confirmed value would make the handle lag behind the pointer
                         // by a visible fraction of a second -- the complaint "不顺滑" that the volume row
                         // already answered the same way.
-                        frame.systemPanel.hasBrightness = brightnessAvailable;
-                        if (brightnessAvailable) {
+                        frame.systemPanel.hasBrightness = bar.brightnessAvailable;
+                        if (bar.brightnessAvailable) {
                             float dragged = 0.0f;
                             POINT echoPoint = {};
                             GetCursorPos(&echoPoint);
@@ -4452,17 +4380,17 @@ float musicWavePhase = 0.0f;
                                 echoHit.target == island::SystemPanelTarget::Slider &&
                                 echoHit.index == 1;
                             const bool draggingBrightness =
-                                panelSliderDrag && panelSliderDragRow == 1;
+                                bar.panelSliderDrag && bar.panelSliderDragRow == 1;
 
                             if (draggingBrightness || onBrightnessRow) {
                                 dragged = echoHit.fraction;
                             }
                             frame.systemPanel.brightness =
                                 draggingBrightness ? dragged
-                                                   : static_cast<float>(brightnessPercent) / 100.0f;
+                                                   : static_cast<float>(bar.brightnessPercent) / 100.0f;
                             frame.systemPanel.showBrightnessPercent =
                                 draggingBrightness || onBrightnessRow ||
-                                GetTickCount64() < panelBrightnessEchoUntil;
+                                GetTickCount64() < bar.panelBrightnessEchoUntil;
                         }
                         // The page's hit test is closed the moment the page is not showing: leaving it open
                         // would let a click on the panel's tiles be read as a device row.
@@ -4729,22 +4657,22 @@ float musicWavePhase = 0.0f;
                             int percent = 0;
                             const bool read = island::ReadBrightnessPercent(monitor.monitor, &percent);
                             if (read) {
-                                brightnessPercent = percent;
-                                if (!brightnessAvailable) {
-                                    brightnessAvailable = true;
+                                bar.brightnessPercent = percent;
+                                if (!bar.brightnessAvailable) {
+                                    bar.brightnessAvailable = true;
                                     island::LogAndPrint(
                                         "  brightness: the panel gets a brightness row (now %d%%)\n",
                                         percent);
                                 }
-                                if (lastAppliedBrightnessPercent < 0) {
-                                    lastAppliedBrightnessPercent = percent;
-                                    lastLoggedBrightnessPercent = percent;
+                                if (bar.lastAppliedBrightnessPercent < 0) {
+                                    bar.lastAppliedBrightnessPercent = percent;
+                                    bar.lastLoggedBrightnessPercent = percent;
                                 }
-                            } else if (brightnessAvailable) {
+                            } else if (bar.brightnessAvailable) {
                                 // It answered before and does not now: the monitor was switched off, moved to
                                 // another input, or DDC/CI was turned off in its menu. The row goes away
                                 // rather than staying at the last number it saw.
-                                brightnessAvailable = false;
+                                bar.brightnessAvailable = false;
                                 island::LogAndPrint(
                                     "  brightness: the display stopped answering; the row is gone\n");
                             }
@@ -5200,7 +5128,7 @@ float musicWavePhase = 0.0f;
                     }
                 }
 
-                // The chased master volume, which the SYSTEM PANEL's slider is drawn at (see shownVolume).
+                // The chased master volume, which the SYSTEM PANEL's slider is drawn at (see bar.shownVolume).
                 //
                 // It used to feed the music card's own bar as well. The card has no volume control any more --
                 // the speaker in its top-right corner was removed on request -- but the chase stays, because it
@@ -5211,12 +5139,12 @@ float musicWavePhase = 0.0f;
                     if (volume.Get(&level)) {
                         // A drag is drawn at the pointer's own value (see the panel's volume block), so the
                         // chase never lags the finger.
-                        if (shownVolume < 0.0f) {
-                            shownVolume = level;
+                        if (bar.shownVolume < 0.0f) {
+                            bar.shownVolume = level;
                         } else {
-                            shownVolume += (level - shownVolume) *
+                            bar.shownVolume += (level - bar.shownVolume) *
                                            (1.0f - std::exp(-dt / kVolumeChaseSeconds));
-                            if (std::fabs(level - shownVolume) < 0.002f) shownVolume = level;
+                            if (std::fabs(level - bar.shownVolume) < 0.002f) bar.shownVolume = level;
                         }
                     }
                 }
@@ -5380,7 +5308,7 @@ float musicWavePhase = 0.0f;
                 // What the page looked like, recorded AFTER the draw: these are the values the next
                 // iteration's redraw decision compares against, so recording them before the draw would
                 // swallow the very change that asked for it.
-                lastSoundPageOpen = soundPageOpen;
+                lastSoundPageOpen = bar.soundPageOpen;
                 lastSoundScroll = window.SoundPageScroll();
             }
 
