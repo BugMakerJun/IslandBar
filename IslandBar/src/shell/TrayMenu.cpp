@@ -144,6 +144,10 @@ void TrayMenuFactsFor(const island::TrayIcons& icons, island::WindowList& window
     {
         const island::TrayPressRequest request = MakeTrayPressRequest(icons.At(cell), icons.ExePathAt(cell));
         out->hasCallback = island::TrayPressReachable(request);
+        // ... and whether its OWN menu has already been shown to be out of reach: two shapes tried, neither
+        // answered (the press writes that down per icon). The row stays -- the press answers with this bar's
+        // menu -- but it says so (see TrayMenuLabel).
+        out->ownMenuUnreachable = island::TrayRightClickExhausted(request);
     }
     const wchar_t* path = icons.ExePathAt(cell);
     out->hasExePath = path && path[0] != L'\0';

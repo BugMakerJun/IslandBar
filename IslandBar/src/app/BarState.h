@@ -101,6 +101,10 @@ struct BarState {
     int trayMenuCell = -1;
     TrayMenuAction trayMenuActions[kMaxTrayMenuEntries] = {};
     int trayMenuActionCount = 0;
+    // ... and whether that cell's own menu is known to be out of reach, captured when the menu OPENED (the
+    // verdict can only change when a press runs, and a press is not running while its menu is on screen). It
+    // is what the 应用菜单 row's label is decided by -- see CardLayout.h's TrayMenuLabel.
+    bool trayMenuOwnMenuUnreachable = false;
 
     // Whether 结束应用 has been asked for once and is waiting for the press that carries it out. Cleared
     // whenever the menu opens or closes: an armed entry must not survive the menu it was armed in.

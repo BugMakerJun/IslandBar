@@ -70,6 +70,11 @@ struct TrayPressOutcome {
     // WHICH RECIPE RAN, for the log: "its own callback" (the application answered), and the spelling used --
     // see TrayPress.cpp for the three recipes and why the packing is part of them.
     const wchar_t* route = L"?";
+    // How long the application's window procedure held the message, in milliseconds: the one number that
+    // separates "the system dropped it" (microseconds) from "the application read it and did nothing" (tens of
+    // milliseconds). Zero for a shape that is POSTED, which is delivered without waiting -- worth knowing too,
+    // so that a zero is not read as a failure.
+    long long busyMs = 0;
     wchar_t target[192] = {};   // the window it went to, described: "class 'X' of pid N"
     wchar_t answer[192] = {};   // what the application was seen to do, in words
     bool appAnswered = false;
@@ -89,6 +94,11 @@ TrayPressOutcome PressTrayIcon(const TrayPressRequest& request, bool rightClick)
 // report is built on -- and what the card reads when it decides whether a cell is "pressable" or opens the
 // bar's own menu instead.
 bool TrayPressReachable(const TrayPressRequest& request);
+
+// Whether this icon's own menu has been shown to be out of reach: both shapes a right press may send (the
+// shell's pair, then the context-menu notification) have been tried and the application answered neither. The
+// press itself then stops asking and the card's menu says so in words -- see TrayMenuLabel.
+bool TrayRightClickExhausted(const TrayPressRequest& request);
 
 const wchar_t* TrayPressResultName(TrayPressResult result);
 

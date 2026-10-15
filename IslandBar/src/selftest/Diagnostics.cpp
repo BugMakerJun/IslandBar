@@ -7227,6 +7227,19 @@ void TestMusicCardLayout() {
                               onlyPath[3] == TrayMenuAction::QuitApplication,
                           L"the menu offers only what can be done, and never a row that would do nothing",
                           trayDetail);
+                    // THE ROW THAT TELLS THE TRUTH ABOUT ITSELF (2026-10-16, round 44). When an icon's own menu
+                    // has been shown to be out of reach -- both shapes a right press may send were tried and the
+                    // application answered neither -- the row stays (the press opens this bar's menu) and says
+                    // so. A row promising the application's menu and delivering this bar's is the quiet lie
+                    // this round was about.
+                    Check(std::wcscmp(TrayMenuLabel(TrayMenuAction::ApplicationMenu, true),
+                                      L"应用菜单（本机拿不到）") == 0 &&
+                              std::wcscmp(TrayMenuLabel(TrayMenuAction::ApplicationMenu), L"应用菜单") == 0 &&
+                              std::wcscmp(TrayMenuLabel(TrayMenuAction::Open, true), L"打开") == 0 &&
+                              std::wcscmp(TrayMenuLabel(TrayMenuAction::QuitApplication, true),
+                                          L"关闭应用") == 0,
+                          L"only the 应用菜单 row changes when its menu cannot be reached, and it says so",
+                          trayDetail);
                     // The one entry with a second state says so in words, and only that one does.
                     wchar_t armedDetail[192];
                     std::swprintf(armedDetail, 192, L"'%ls' / '%ls'",
@@ -8542,6 +8555,40 @@ int RunSelfTest() {
         Check(classicLeft.first.lParam == island::kTrayMouseLeftDown &&
                   classicLeft.second.lParam == island::kTrayMouseLeftUp,
               L"v3 left click: the same pair, with the left button");
+
+        // WHICH SHAPE A RIGHT PRESS SENDS, AND WHEN IT STOPS ASKING (2026-10-16, round 44). One shape per
+        // press and at most two per icon, in a fixed order: the pair the shell sends, then the context-menu
+        // notification, then this bar's own menu. The rule is asserted because the version that shipped
+        // before it sent two shapes in a row, which is how a round was spent finding out which of them the
+        // applications were ignoring.
+        const auto fresh3 = island::PlanTrayRightShape(0, island::TrayRightNote::Untried);
+        Check(fresh3 == island::TrayRightShape::DownUpPair,
+              L"a v0 icon nobody has tried gets the shell's own pair first");
+        Check(island::PlanTrayRightShape(0, island::TrayRightNote::PairFailed) ==
+                  island::TrayRightShape::ContextMenu,
+              L"after the pair did nothing, the NEXT press sends the context-menu notification");
+        Check(island::PlanTrayRightShape(0, island::TrayRightNote::BothFailed) ==
+                  island::TrayRightShape::None,
+              L"after both did nothing, no press sends anything again");
+        Check(island::PlanTrayRightShape(4, island::TrayRightNote::Untried) ==
+                  island::TrayRightShape::ContextMenu &&
+                  island::PlanTrayRightShape(4, island::TrayRightNote::PairFailed) ==
+                      island::TrayRightShape::ContextMenu,
+              L"a v4 icon is never sent the pair, whatever has been tried");
+        Check(island::PlanTrayRightShape(0, island::TrayRightNote::ContextMenuWorks) ==
+                  island::TrayRightShape::ContextMenu &&
+                  island::PlanTrayRightShape(0, island::TrayRightNote::PairWorks) ==
+                      island::TrayRightShape::DownUpPair,
+              L"the shape that worked is the shape the next press sends");
+        Check(island::NextTrayRightNote(island::TrayRightNote::Untried, island::TrayRightShape::DownUpPair,
+                                        false) == island::TrayRightNote::PairFailed &&
+                  island::NextTrayRightNote(island::TrayRightNote::PairFailed,
+                                            island::TrayRightShape::ContextMenu, false) ==
+                      island::TrayRightNote::BothFailed &&
+                  island::NextTrayRightNote(island::TrayRightNote::Untried,
+                                            island::TrayRightShape::DownUpPair, true) ==
+                      island::TrayRightNote::PairWorks,
+              L"one failure moves to the second shape, the second failure ends it, an answer is remembered");
 
         Check(island::PlanTrayClick(version4, uid, true, x, y).first.wParam !=
                   island::PlanTrayClick(0, uid, true, x, y).first.wParam,

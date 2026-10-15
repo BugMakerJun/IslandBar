@@ -2346,7 +2346,8 @@ float musicWavePhase = 0.0f;
                     bar.trayQuitArmed = false;
                     if (row >= 0 && row < bar.trayMenuActionCount) {
                         const island::TrayMenuAction action = bar.trayMenuActions[row];
-                        island::LogAndPrint(L"  tray menu: %ls\n", island::TrayMenuLabel(action));
+                        island::LogAndPrint(L"  tray menu: %ls\n",
+                                            island::TrayMenuLabel(action, bar.trayMenuOwnMenuUnreachable));
                         std::fflush(stdout);
                         island::RunTrayMenuAction(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, action);
                         if (action == island::TrayMenuAction::Open ||
@@ -3082,6 +3083,9 @@ float musicWavePhase = 0.0f;
                 island::TrayMenuFactsFor(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, &facts);
                 bar.trayMenuActionCount = island::TrayMenuEntriesFor(facts, bar.trayMenuActions,
                                                                 island::kMaxTrayMenuEntries);
+                // Captured with the menu, because the 应用菜单 row's label depends on it and the verdict cannot
+                // change while that menu is on screen (a press is what changes it).
+                bar.trayMenuOwnMenuUnreachable = facts.ownMenuUnreachable;
                 systems.window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
                 bar.trayQuitArmed = false;   // a new menu starts unarmed
                 wchar_t flatMenuName[128] = {};
@@ -3960,7 +3964,8 @@ float musicWavePhase = 0.0f;
                         frame.trayMenuRows[i] = menu.rows[i];
                         frame.trayMenuLabels[i] =
                             bar.trayQuitArmed ? island::TrayMenuArmedLabel(bar.trayMenuActions[i])
-                                          : island::TrayMenuLabel(bar.trayMenuActions[i]);
+                                          : island::TrayMenuLabel(bar.trayMenuActions[i],
+                                                                  bar.trayMenuOwnMenuUnreachable);
                     }
                 }
                 // ... and the three washes, each a spring toward "the pointer is on it" (see

@@ -1,0 +1,64 @@
+第 44 轮评审（文件序列 q39）：**在不露托盘、不动指针、不注入真实输入的前提下，怎么让"每一格"都能弹出应用自己的菜单？**
+请明确表态：同意 / 反对 / 修正，并指出你认为哪个判断是错的。请给出你推荐的路线与理由。
+
+【零、用户的硬要求与硬禁令（都是他的原话，不是我的推断）】
+
+* 要求：「必须都能弹出自己的菜单，**跟原生托盘一样**」。
+* 禁令（2026-10-16，看过我写的一版兜底之后）：「把原来的拿出来不行，那套代码逻辑和实现**绝定不行**，要不当初
+  也不会让你删除了」。指的是 2026-10-15 退役的那套：**把 shell 的托盘临时露出来 + 指针瞬移 + SendInput
+  真实点击 + 之后还原**。这条路已经被永久否掉，不要再提它作为方案（可以提它作为"为什么原生行、我们不行"的
+  机理说明）。
+* 历史教训（仓库实测）：**发错编码会把应用打崩**（微信被错的 v4 编码打成崩溃并退出，用户要重新登录）。
+  所以"逐个形状试到有反应"这种做法不允许。
+
+【一、现在有哪些格子、各自什么状态（今天实测）】
+
+| 格子 | 类型 | 右键"应用菜单"现状 |
+|---|---|---|
+| RazerAppEngine | Electron，uid 注册，uVersion 0 | **成功**：发 shell 自己发的那一对（同步 `WM_RBUTTONDOWN` → 40 ms → `WM_RBUTTONUP`，uid 在 wParam）后 **47 ms** 它自己的菜单窗口 `Chrome_WidgetWin_1` 1219,635 180x222 出现 |
+| ChatGPT（其实是 Codex：AppContainer，**GUID 注册**，窗口类 `OwlElectron_NotifyIconHostWindow`） | Electron 系 | **失败**：四种形状全试过——post 单发 UP、send 单发 UP、send DOWN+UP、post DOWN+UP——**一个都不弹**；它自己的**左键**用消息路线同样没反应（只有"让 shell 去 Invoke"的 UIA 兜底能按动它） |
+| Wallpaper Engine | uVersion 4 | **成功**：post 一条打包的 `CONTEXTMENU`（`wParam=MAKELONG(x,y)`、`lParam=MAKELONG(事件,uid)`） |
+| QQ音乐 / 任务管理器 / clash-verge | v0 / v4 | 历史上都实测成功过（86 ms / 297.9 ms / 78 ms），今天没有逐一复测 |
+| NVIDIA 那几格、系统自己的网络/音量/时钟 | 从来没有注册过（或根本不是应用） | 没有回调可学；UIA 也没有右键 pattern。产品现在对它们只开我们自己的四行菜单 |
+
+【二、已经核实过的事实】
+
+1. **`IUIAutomationElement::ShowContextMenu()` 不存在**：本机 SDK 10.0.26100.0 里它只出现在
+   `IUIAutomationTextRange2/3` 上。所以"让 shell 弹它自己的上下文菜单"这条路在 UIA 侧没有对应调用。
+2. **我们发的是 shell 自己发的形状**：`--dump`（在应用里挂只读钩子 + 一次真实右键）抓到 shell 给应用发的是
+   `0x8001`，lParam `0x204` 然后 `0x205`；我们现在发的逐字节相同。
+3. **我们找目标窗口的方式**：用缓存里的**窗口类名** + 该 exe 的**所有进程**去枚举窗口（`CallbackWindowFor`），
+   **不是**用注册记录里的窗口句柄，也不是用 uid/guid 去问 shell（`Shell_NotifyIconGetRect` 需要
+   `NOTIFYICONIDENTIFIER`，仓库里记着"注册表那条记录自带 shell 自己用的身份"）。
+   ChatGPT 那一格：桌面上 `OwlElectron_NotifyIconHostWindow` 只有一个（pid 29284），我们就是发给它。
+4. 指针位置不是变量：把指针停在 1250,60（我们格子）与 2480,16（真实托盘区）两处分别试过，结果一样（都不弹）。
+
+【三、要你们回答的问题】
+
+Q1 **我们是不是在跟一个"死"窗口说话？** 对 GUID 注册 + AppContainer 的应用，应用重启后托盘窗口可能已经换掉，
+   而旧窗口还在（类名相同、还活着）。我打算先做**只读验证**：从共享内存环里取它最近的注册记录（记录里带
+   窗口句柄），和桌面上活着的实例对照；如果对不上，就改成"按注册记录里的窗口 / 按 uid+guid 去问 shell"。
+   请判断这条路是否值得先做，以及你认为正确的识别方式应该是什么（记录里的 hwnd？`NOTIFYICONIDENTIFIER`
+   + `Shell_NotifyIconGetRect`？两者都做？）。
+
+Q2 **v0 但"从来没被任何形状说服过"的应用，还有没有没试过的入口？** 例如 `WM_CONTEXTMENU`(0x007B) 直接作为
+   lParam、或者 `NIN_SELECT`/`NIN_KEYSELECT`、或者把消息发给**线程**而不是窗口（`PostThreadMessage`）。
+   请给出你认为**最值得试的一条**（只许一条形状，不许组合枚举），以及为什么。
+
+Q3 **只读地重新测一遍托盘元素的自动化能力**（枚举这些 XAML 托盘按钮暴露了哪些 pattern / 有没有 MSAA 侧
+   可用动作）值得做吗？如果值得，你希望我记录哪些字段，才能让结论**可信**而不是又一次"没查到就说没有"？
+
+Q4 如果以上都不行：**"和原生托盘一样"在"不露托盘"的前提下，对这类应用是否根本不可能？** 如果不可能，
+   你建议产品对这类格子怎么表现才算诚实（我们自己的菜单但**如实标注**？还是别的做法）？这个问题需要
+   一句话结论，因为用户会按它来决定要不要改变"不露托盘"这个前提。
+
+Q5 无论选哪条，**验收指标（一个数字 + 一行日志）**你建议怎么写？现有的一行是：
+   `tray context-menu: app=razerappengine.exe version=0 strategy=v3-sent-down-up attempts=1
+    outcome=native_menu evidence='its own Chrome_WidgetWin_1 at 1219,635 180x222' elapsed_ms=47`
+
+【四、当前代码状态（供你们判断"改动面"）】
+
+* 右键现在**只发一种形状**：v0/3 发 shell 自己发的那一对（同步），v4 发一条打包的 `CONTEXTMENU`（post）。
+  形状与发法都在 `domain/TrayEncoding.h` 里（纯逻辑、有自检断言），`shell/TrayPress.cpp` 只执行它。
+* 失败**不会**在同一次按压里换形状重试；左键的判定（缓存里 `none`/拼法）与右键彼此独立。
+* 已提交状态：`2661cdb`（本地，未推 GitHub）；自检 979 项通过、`island_smoke` 通过、Debug/Release 零告警。

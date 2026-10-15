@@ -104,4 +104,80 @@ constexpr TrayClickPlan PlanTrayClick(unsigned version, unsigned uid, bool right
     return plan;
 }
 
+// ---------------------------------------------------------------------------------------------------
+//  WHICH SHAPE A RIGHT PRESS SENDS, GIVEN WHAT THAT ICON HAS ALREADY TRIED (2026-10-16, round 44)
+// ---------------------------------------------------------------------------------------------------
+//
+// ONE SHAPE PER PRESS, AND AT MOST TWO SHAPES PER ICON, IN A FIXED ORDER. That is the rule both reviews
+// insisted on: an application is never handed two shapes in a row (the press that did that spent a round
+// finding out which of them the application was ignoring), and an application that answers neither is not
+// asked a third time -- the cell shows this bar's own menu and says so.
+//
+// The order is measured, and the second shape is the one review round 44 recommended: `WM_CONTEXTMENU` is the
+// notification a framework listens for when it does not read the raw mouse pair at all.
+//
+//   version 0/3:  the pair the SHELL sends (HANDOFF 8.142)  ->  the context-menu notification  ->  no more
+//   version 4:    the packed CONTEXTMENU (HANDOFF 8.104)    ->  no more
+enum class TrayRightShape {
+    DownUpPair,     // synchronous WM_RBUTTONDOWN, a short gap, WM_RBUTTONUP -- the shell's own shape
+    ContextMenu,    // WM_CONTEXTMENU (the v4 packing for v4, the uid spelling for v0/3), POSTED
+    None,           // this icon has answered neither; a press reports that instead of trying again
+};
+
+// WHAT ONE ICON HAS ALREADY SHOWN ABOUT ITS RIGHT BUTTON. Written by the press (not by the learning pass), in
+// its own file beside the learned cache, so that a pass rewriting the cache cannot lose a verdict that took a
+// press to earn.
+enum class TrayRightNote {
+    Untried,
+    PairWorks,          // the pair answered: keep sending it
+    ContextMenuWorks,   // the notification answered: keep sending it
+    PairFailed,         // the pair did nothing: the notification is next
+    BothFailed,         // both did nothing: this icon's own menu is not reachable from here
+};
+
+inline TrayRightShape PlanTrayRightShape(unsigned version, TrayRightNote note) {
+    if (note == TrayRightNote::BothFailed) return TrayRightShape::None;
+    // A version-4 application's shape is not a question: the packaged notification is what it was measured to
+    // answer, and the pair is not offered to it at all.
+    if (version >= 4) return TrayRightShape::ContextMenu;
+    if (note == TrayRightNote::PairWorks) return TrayRightShape::DownUpPair;
+    if (note == TrayRightNote::ContextMenuWorks) return TrayRightShape::ContextMenu;
+    if (note == TrayRightNote::PairFailed) return TrayRightShape::ContextMenu;
+    return TrayRightShape::DownUpPair;
+}
+
+// The state one press leaves behind, given the shape it sent and whether the application answered.
+inline TrayRightNote NextTrayRightNote(TrayRightNote before, TrayRightShape sent, bool answered) {
+    if (sent == TrayRightShape::None) return before;
+    if (answered) {
+        return sent == TrayRightShape::DownUpPair ? TrayRightNote::PairWorks : TrayRightNote::ContextMenuWorks;
+    }
+    // Not answered. The first failure moves to the second shape; the second failure is the end of the road for
+    // this icon. A version-4 press only ever sends the notification, so its first failure IS the end.
+    if (before == TrayRightNote::PairFailed || sent == TrayRightShape::ContextMenu) {
+        return TrayRightNote::BothFailed;
+    }
+    return TrayRightNote::PairFailed;
+}
+
+inline const wchar_t* TrayRightShapeName(TrayRightShape shape) {
+    switch (shape) {
+        case TrayRightShape::DownUpPair: return L"v3-sent-down-up";
+        case TrayRightShape::ContextMenu: return L"wm-contextmenu";
+        case TrayRightShape::None: return L"no-shape-left";
+    }
+    return L"?";
+}
+
+inline const wchar_t* TrayRightNoteName(TrayRightNote note) {
+    switch (note) {
+        case TrayRightNote::Untried: return L"untried";
+        case TrayRightNote::PairWorks: return L"pair";
+        case TrayRightNote::ContextMenuWorks: return L"ctxmenu";
+        case TrayRightNote::PairFailed: return L"pair-failed";
+        case TrayRightNote::BothFailed: return L"both-failed";
+    }
+    return L"?";
+}
+
 }  // namespace island

@@ -459,6 +459,126 @@ std::vector<TrayCallback> ReadTrayCallbacks() {
     return entries;
 }
 
+// =====================================================================
+//  WHAT THIS ICON HAS SHOWN ABOUT ITS RIGHT BUTTON, IN ITS OWN FILE
+// =====================================================================
+//
+// %USERPROFILE%\IslandBar\tray_right.txt, one line per icon: `exe|uid|word` (see TrayRightNote in
+// domain/TrayEncoding.h). It is NOT kept in the learned cache because the learning pass rewrites those lines
+// wholesale from what applications register, and a verdict that cost a press to earn must not be lost by a
+// pass that knows nothing about menus. Same directory, same name-keyed shape as everything else the tray
+// writes, so a line can be read -- or deleted -- by hand.
+std::wstring RightNotePath() {
+    wchar_t home[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) == 0) return std::wstring();
+    return std::wstring(home) + L"\\IslandBar\\tray_right.txt";
+}
+
+// One icon's identity inside that file: `uid`, or `uid|guid` when the application named the icon by guid.
+// See ReadRightNote for the measurement that forced the guid in.
+std::wstring RightNoteIdentity(const TrayPressRequest& request) {
+    std::wstring identity = std::to_wstring(request.uid);
+    if (request.hasGuid) {
+        // The same spelling the cache uses for a guid (`StringFromGUID2`), so a human reading either file sees
+        // the same string for the same icon.
+        wchar_t text[64] = {};
+        StringFromGUID2(request.guid, text, 64);
+        identity += L"|";
+        identity += text;
+    }
+    return identity;
+}
+
+TrayRightNote ReadRightNote(const TrayPressRequest& request) {
+    const std::wstring file = RightNotePath();
+    if (file.empty()) return TrayRightNote::Untried;
+    FILE* stream = nullptr;
+    if (_wfopen_s(&stream, file.c_str(), L"r, ccs=UTF-8") != 0 || !stream) return TrayRightNote::Untried;
+    const std::wstring exe = BaseNameLower(request.exePath);
+    // THE KEY IS THE ICON'S WHOLE IDENTITY, GUID INCLUDED. Keying on the uid alone puts every GUID-registered
+    // icon of one executable on the same line -- and Explorer alone has four of them here, each with a uid of 0
+    // in the registry record and a guid that is the identity the shell uses. Measured the moment this file was
+    // first written: `chatgpt.exe|0|both-failed` for an icon whose cache line says uid 3.
+    const std::wstring wanted = RightNoteIdentity(request);
+    wchar_t buffer[512] = {};
+    TrayRightNote note = TrayRightNote::Untried;
+    while (std::fgetws(buffer, 512, stream)) {
+        std::wstring text = buffer;
+        std::vector<std::wstring> fields;
+        size_t start = 0;
+        for (;;) {
+            const size_t bar = text.find(L'|', start);
+            std::wstring field = text.substr(start, bar == std::wstring::npos ? std::wstring::npos : bar - start);
+            while (!field.empty() &&
+                   (field.back() == L'\r' || field.back() == L'\n' || field.back() == L' ')) {
+                field.pop_back();
+            }
+            fields.push_back(field);
+            if (bar == std::wstring::npos) break;
+            start = bar + 1;
+        }
+        if (fields.size() < 3) continue;
+        std::wstring name = fields[0];
+        std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+        // Everything between the executable and the word is the identity: `uid`, or `uid|guid`.
+        std::wstring identity = fields[1];
+        if (fields.size() >= 4) identity += L"|" + fields[2];
+        if (name != exe || identity != wanted) continue;
+        const size_t word = fields.size() >= 4 ? 3 : 2;
+        if (fields.size() <= word) continue;
+        for (int i = 0; i <= static_cast<int>(TrayRightNote::BothFailed); ++i) {
+            const auto candidate = static_cast<TrayRightNote>(i);
+            if (_wcsicmp(fields[word].c_str(), TrayRightNoteName(candidate)) == 0) note = candidate;
+        }
+    }
+    std::fclose(stream);
+    return note;
+}
+
+void WriteRightNote(const TrayPressRequest& request, TrayRightNote note) {
+    const std::wstring file = RightNotePath();
+    if (file.empty()) return;
+    const std::wstring exe = BaseNameLower(request.exePath);
+    const std::wstring wanted = RightNoteIdentity(request);
+    std::vector<std::wstring> lines;
+    {
+        FILE* stream = nullptr;
+        if (_wfopen_s(&stream, file.c_str(), L"r, ccs=UTF-8") == 0 && stream) {
+            wchar_t buffer[512] = {};
+            while (std::fgetws(buffer, 512, stream)) lines.push_back(buffer);
+            std::fclose(stream);
+        }
+    }
+    wchar_t fresh[320] = {};
+    std::swprintf(fresh, 320, L"%ls|%ls|%ls\n", exe.c_str(), wanted.c_str(), TrayRightNoteName(note));
+    bool replaced = false;
+    for (std::wstring& line : lines) {
+        const size_t bar = line.find(L'|');
+        // THE LAST SEPARATOR ON THE LINE IS THE ONE BEFORE THE WORD, and the identity is everything between it
+        // and the first one -- `uid`, or `uid|guid`. Using the SECOND separator instead (which is what this did
+        // first) reads `0|{guid}|pair-failed` as the identity, never matches, and appends a second line for the
+        // same icon: measured, `chatgpt.exe|0|{E5768D8B-...}|pair-failed` and the same key again with
+        // `both-failed` beneath it.
+        const size_t lastBar = line.find_last_of(L'|');
+        if (bar == std::wstring::npos || lastBar == std::wstring::npos || lastBar <= bar) continue;
+        std::wstring name = line.substr(0, bar);
+        std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+        const std::wstring identity = line.substr(bar + 1, lastBar - bar - 1);
+        if (name != exe || identity != wanted) continue;
+        line = fresh;
+        replaced = true;
+        break;
+    }
+    if (!replaced) lines.push_back(fresh);
+    FILE* stream = nullptr;
+    if (_wfopen_s(&stream, file.c_str(), L"w, ccs=UTF-8") != 0 || !stream) return;
+    for (const std::wstring& line : lines) std::fputws(line.c_str(), stream);
+    std::fclose(stream);
+    LogAndPrint(L"  tray press: '%ls' right button is now recorded as %ls\n", request.name,
+                TrayRightNoteName(note));
+    std::fflush(stdout);
+}
+
 // The application's window of the class the entry names. False when it is not running, has no such window
 // yet (a tray icon that has not registered), or when nothing is known about it.
 bool CallbackWindowFor(const TrayPressRequest& request, const TrayCallback& entry, HWND* out) {
@@ -725,25 +845,50 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     Attempt attempts[3] = {};
     int attemptCount = 0;
     const bool v4 = entry->version >= 4;
+    island::TrayRightShape rightShape = island::TrayRightShape::None;
+    island::TrayRightNote rightNote = island::TrayRightNote::Untried;
     if (rightClick) {
-        // THE SHAPE THE PLAN NAMES, AND NOTHING ELSE: a right press sends the pair the SHELL sends -- a
-        // synchronous WM_RBUTTONDOWN, a short gap, then WM_RBUTTONUP (HANDOFF 8.142 caught the shell doing
-        // exactly that on a real right click, and the probe that brought up ChatGPT's own menu sends the same
-        // pair). The POSTED single message the product used to try FIRST is gone: it is a shape the shell
-        // never sends, its failure was what the press spent a round discovering, and a press that is handed
-        // two shapes in a row is a press whose behaviour depends on the first one failing tidily.
+        // ONE SHAPE PER PRESS, CHOSEN FROM WHAT THIS ICON HAS ALREADY SHOWN -- see PlanTrayRightShape. For a
+        // version 0/3 application the order is: the pair the SHELL sends (HANDOFF 8.142 caught it doing exactly
+        // that on a real right click), then -- on a LATER press, and only if the pair did nothing -- the
+        // context-menu notification (review round 44). Then this bar's own menu, and no third ask.
+        rightNote = ReadRightNote(request);
+        rightShape = island::PlanTrayRightShape(entry->version, rightNote);
+        if (rightShape == island::TrayRightShape::None) {
+            // BOTH SHAPES HAVE BEEN TRIED AND NEITHER BROUGHT UP ITS MENU: reported, not retried. The cell
+            // answers with this bar's own menu (see the caller), which is the honest answer -- an application
+            // that ignores two standard notifications is not going to answer a third guess.
+            if (outcome) {
+                outcome->result = TrayPressResult::NoEntry;
+                outcome->route = L"its own menu has answered neither shape (the pair, then the notification)";
+            }
+            LogAndPrint(L"  tray press: '%ls' has answered neither the shell's pair nor the context-menu "
+                        L"notification -- nothing else is sent\n", request.name);
+            std::fflush(stdout);
+            return false;
+        }
         const island::TrayClickPlan plan =
             island::PlanTrayClick(entry->version, entry->uid, true, anchor.x, anchor.y);
         Attempt only = {};
-        only.v4Packing = plan.version4;
-        // The event is READ BACK out of the message the plan built rather than written a second time here: a
-        // second place that decides the spelling is how the v4 note came to be written down backwards. For
-        // the pair it is the UP -- the message that carries the intent -- and for v4 the notification packed
-        // into lParam.
-        only.notify = plan.version4 ? island::TrayLow(plan.first.lParam)
-                                    : (plan.hasSecond ? plan.second.lParam : plan.first.lParam);
-        only.downFirst = !plan.version4 && plan.hasSecond;
-        only.sent = plan.sent;
+        if (rightShape == island::TrayRightShape::DownUpPair) {
+            // The event is READ BACK out of the message the plan built rather than written a second time here:
+            // a second place that decides the spelling is how the v4 note came to be written down backwards.
+            // For the pair it is the UP -- the message that carries the intent.
+            only.v4Packing = false;
+            only.notify = plan.hasSecond ? plan.second.lParam : plan.first.lParam;
+            only.downFirst = plan.hasSecond;
+            only.sent = true;
+        } else {
+            // THE CONTEXT-MENU NOTIFICATION. For a version-4 application that is the packed notification the
+            // plan describes, POSTED (measured: clash-verge 78 ms, WeChat -- HANDOFF 8.104); for a version 0/3
+            // one it is the same notification with the uid spelling, and it is posted too: it is a
+            // notification rather than a mouse state, and a posted message cannot leave this press waiting on
+            // an application that runs its menu loop inside the handler.
+            only.v4Packing = plan.version4;
+            only.notify = plan.version4 ? island::TrayLow(plan.first.lParam) : island::kTrayMouseContextMenu;
+            only.downFirst = false;
+            only.sent = plan.version4 ? plan.sent : false;
+        }
         attempts[attemptCount++] = only;
     } else if (entry->leftSpelling == TrayCallback::LeftSpelling::Select) {
         attempts[attemptCount++] = Attempt{NIN_SELECT, false, true, true};
@@ -783,13 +928,27 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
             const unsigned down = (attempt.notify == WM_RBUTTONUP) ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
             const island::TrayMessage packedDown =
                 island::EncodeTrayMessage(attempt.v4Packing, entry->uid, down, anchor.x, anchor.y);
+            const ULONGLONG downSent = GetTickCount64();
             posted = DeliverMessage(window, entry->message, static_cast<WPARAM>(packedDown.wParam),
                                     static_cast<LPARAM>(packedDown.lParam), attempt.sent) != FALSE;
+            if (outcome) {
+                const long long busy = MillisSince(downSent);
+                if (busy > outcome->busyMs) outcome->busyMs = busy;
+            }
             if (!posted) continue;
             Sleep(30);
         }
+        // HOW LONG THE APPLICATION'S WINDOW PROCEDURE HELD THIS MESSAGE, which is the one number that tells
+        // "the system dropped it" (microseconds) from "the application read it and did nothing" (tens of
+        // milliseconds) -- the difference between a UIPI story and an application that ignores its own
+        // callback. Measured per attempt, and reported in the one line a right press writes (see below).
+        const ULONGLONG eventSent = GetTickCount64();
         posted = DeliverMessage(window, entry->message, static_cast<WPARAM>(packed.wParam),
                                 static_cast<LPARAM>(packed.lParam), attempt.sent) != FALSE;
+        if (outcome) {
+            const long long busy = MillisSince(eventSent);
+            if (busy > outcome->busyMs) outcome->busyMs = busy;
+        }
         if (!posted) continue;
         answered = WatchApplicationForAnswer(watch, foregroundBefore,
                                              outcome ? outcome->answer : nullptr,
@@ -894,11 +1053,17 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
         // opens THIS BAR's menu over that cell), and it is logged there rather than here because this function
         // does not own the card.
         if (rightClick) {
-            LogAndPrint(L"  tray context-menu: app=%ls version=%u strategy=%ls attempts=%d outcome=failed "
-                        L"evidence='%ls' elapsed_ms=%lld\n",
+            // THE NEXT SHAPE IS WRITTEN DOWN, so the following press of this cell is one message (the other
+            // candidate) instead of the same one again -- and when both have failed, that is written down too
+            // and no press of this icon asks a third time. Silent unless it changes.
+            const island::TrayRightNote next = island::NextTrayRightNote(rightNote, rightShape, false);
+            if (next != rightNote) WriteRightNote(request, next);
+            LogAndPrint(L"  tray context-menu: app=%ls version=%u strategy=%ls attempts=%d busy_ms=%lld "
+                        L"outcome=failed evidence='%ls' elapsed_ms=%lld -- next press of this cell: %ls\n",
                         BaseNameLower(request.exePath).c_str(), entry->version,
-                        v4 ? L"v4-post-contextmenu" : L"v3-sent-down-up", attemptCount,
-                        outcome ? outcome->answer : L"no answer", MillisSince(rightPressStart));
+                        island::TrayRightShapeName(rightShape), attemptCount,
+                        outcome ? outcome->busyMs : 0, outcome ? outcome->answer : L"no answer",
+                        MillisSince(rightPressStart), island::TrayRightNoteName(next));
             std::fflush(stdout);
         }
         return false;
@@ -919,14 +1084,22 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     // is the window or menu the observer caught appearing, because a right press that merely moves the
     // foreground is not an answer to "show me your menu".
     if (rightClick) {
-        LogAndPrint(L"  tray context-menu: app=%ls version=%u strategy=%ls attempts=%d outcome=native_menu "
-                    L"evidence='%ls' elapsed_ms=%lld\n",
+        // The shape that worked is written down as this icon's shape: the next press sends it directly instead
+        // of starting from the other candidate again. Silent unless it changes.
+        const island::TrayRightNote next = island::NextTrayRightNote(rightNote, rightShape, true);
+        if (next != rightNote) WriteRightNote(request, next);
+        LogAndPrint(L"  tray context-menu: app=%ls version=%u strategy=%ls attempts=%d busy_ms=%lld "
+                    L"outcome=native_menu evidence='%ls' elapsed_ms=%lld\n",
                     BaseNameLower(request.exePath).c_str(), entry->version,
-                    v4 ? L"v4-post-contextmenu" : L"v3-sent-down-up", attemptCount,
+                    island::TrayRightShapeName(rightShape), attemptCount, outcome ? outcome->busyMs : 0,
                     outcome ? outcome->answer : L"answered", MillisSince(rightPressStart));
         std::fflush(stdout);
     }
     return true;
+}
+
+bool TrayRightClickExhausted(const TrayPressRequest& request) {
+    return ReadRightNote(request) == TrayRightNote::BothFailed;
 }
 
 bool TrayPressReachable(const TrayPressRequest& request) {

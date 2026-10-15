@@ -1,0 +1,397 @@
+Gemini
+自动
+Gemini
+search
+发起新对话
+库
+已安排
+自定义
+笔记本
+新建笔记本
+全部
+托盘注册抓取失败问题修复方案
+软件开发规范全解析
+Windows托盘卡片评审与底层机制分析
+托盘图标点击机制的架构确认
+君主
+与 Gemini 对话
+你说 第 42 轮评审（文件序列 q37）：**托盘搬进产品之后，只剩一个问题——"刚开机／刚重启 explorer 的第一次学习抓不到注册"**。 请明确表态：同意 / 反对 / 修正，并指出你认为哪个判…
+
+第 42 轮评审（文件序列 q37）：**托盘搬进产品之后，只剩一个问题——"刚开机／刚重启 explorer 的第一次学习抓不到注册"**。
+
+请明确表态：同意 / 反对 / 修正，并指出你认为哪个判断是错的。请给出你推荐的修法与理由。
+
+
+
+
+【一、现在是怎么工作的（都是实测，不是推测）】
+
+
+
+
+1) 托盘注册是应用把 (窗口, uid, uCallbackMessage, uVersion, 提示文字) 注册给 shell；这条注册是应用
+
+   用 **SendMessage 发**给 `Shell_TrayWnd` 的一条 **WM_COPYDATA**（同步，应用等 shell 返回）。
+
+2) 产品里有一个模块 `island_tray_hook.dll`：bar 用 `SetWindowsHookExW(WH_GETMESSAGE, 导出过程, 模块, 线程)`
+
+   把它"递"进 explorer（每线程一个钩子）；模块在自己的导出过程第一次被调用时做 `EnsureHooked()`：
+
+   改写 explorer 里 `Shell_NotifyIcon` 的调用点（IAT / GetProcAddress 槽），并调用
+
+   `InstallSentWatch()` —— 它 `CreateToolhelp32Snapshot` 取**本进程**的线程，然后对每个线程
+
+   `SetWindowsHookExW(WH_CALLWNDPROC, SentProc, nullptr, threadId)`；**失败没有任何日志**。
+
+3) `SentProc` 是真正读注册的那条通道：看到 `call->message == WM_COPYDATA` 就解码（偏移 +0x004 命令、
+
+   +0x00C 窗口、+0x010 uid、+0x018 uCallbackMessage、+0x020 tip、+0x328 uVersion），然后
+
+   **memcpy 进共享内存环 + 一个命名事件**发布出来；bar 在自己的 tick 里排空环，学成缓存条目。
+
+4) bar 安装完钩子后会广播 `TaskbarCreated`，让应用重新注册一次（应用只会在收到这个广播时重注册）。
+
+
+
+
+【二、现象（今天实测两次，确定可复现）】
+
+
+
+
+**刚重启 explorer 之后的第一趟**（模块第一次落地）：
+
+  `tray hook: 57 of 143 thread hook(s) accepted for the shell (pid 19264, last error 87)`，
+
+  然后 `tray learn: the shell (1 process(es) offered) was already carrying the module,
+
+  0 registration(s) captured, 0 new entr(ies) -- 0 of 14 icon(s) have a callback entry (in 4719 ms)`。
+
+**同一份构建、几分钟之后再跑一趟**（模块已经钉在同一个 explorer 里）：
+
+  `tray learn: 9 registration(s) arrived ... -- 8 of 14 icon(s) have a callback entry now`，
+
+  同一趟里 `42 registration(s) captured`；模块报告里出现 53 条
+
+  `call S NIM_ADD ... (read in the shell, over the ring)`。
+
+我已经试过的一招**没用**：在第一趟广播之后 1.2 秒**再广播一次** `TaskbarCreated`，让应用再注册一遍
+
+  —— 第一趟仍然是 0 条。
+
+对照：我们的实验探针（`probe-tray-observer.cpp`）**只钩 `Shell_TrayWnd` 所属的那一个线程**
+
+  （`GetWindowThreadProcessId(FindWindow(L"Shell_TrayWnd"))`），用 WH_CALLWNDPROC，同一台机器上
+
+  每次都能抓到 12–53 条注册。
+
+
+
+
+【三、我目前的理解（请判断对不对）】
+
+
+
+
+`WH_GETMESSAGE` 看不见这条注册是**原理上**的：它只在被钩线程从消息队列取消息时被调用，而注册是
+
+**发送**（SendMessage）的，不进队列。它能起作用是因为"把模块送进 explorer"，以及触发 `EnsureHooked()`
+
+——真正读注册的是随后装上的 `WH_CALLWNDPROC`（`SentProc`）。第一趟失败，说明那一趟 `SentProc`
+
+在注册到达之前**还没装上**，或者根本没装成（失败被吞了，没有数字）。
+
+
+
+
+【四、要你们回答的四个问题】
+
+
+
+
+Q1 第一趟抓不到、第二趟抓得到，请按可能性排序给出机制解释（例如：`EnsureHooked()` 只在第一次回调时
+
+   跑一次而那一刻的线程快照不完整；模块落地与广播的时序竞争；`SetWindowsHookEx(WH_CALLWNDPROC)` 对
+
+   某些线程返回失败被吞；环/事件的游标在第一趟被错过；explorer 新进程里模块的起点与旧进程不同……）。
+
+Q2 修法你推荐哪一个（可以否掉我的选项）：(a) 模块把 sent hook 的成败数字写进报告并重试；
+
+   (b) bar 直接对 `Shell_TrayWnd` 所属线程装 WH_CALLWNDPROC（探针的做法）；
+
+   (c) 模块不再快照全部线程、改成针对任务栏窗口/线程装钩子；(d) 你的方案。
+
+Q3 "模块已经可捕获"应该用什么条件判定，再广播才不算白问？（例如：bar 先让 shell 回一次消息/事件、
+
+   模块发布一条假的握手记录、模块报告落地……）第一趟该等多久？
+
+Q4 这个修复的验收指标（一个数字 + 一行日志）你建议怎么写？
+
+Gemini 说
+明确表态
+
+修正
+
+哪一个判断是错的？
+
+你在线索（一.2）中提到“失败没有任何日志”，但在你随后贴出的实测日志里其实已经明确输出了：tray hook: 57 of 143 thread hook(s) accepted for the shell (pid 19264, last error 87)。这说明代码里不仅有统计，还捕获到了错误码 87（ERROR_INVALID_PARAMETER）。
+
+这个细节恰恰是破案的关键：explorer 拥有 143 个线程，其中包含大量没有消息队列的纯后台工作线程。对这些线程调用 SetWindowsHookEx(WH_CALLWNDPROC, ..., threadId) 会直接报错失效。而 Shell_TrayWnd 所在的真正核心线程很可能在第一趟时恰好落在了那 86 个失败的线程之中，导致核心通道压根没建起来。
+
+Q1：第一趟抓不到、第二趟抓得到的原因排序（机制解释）
+
+Explorer 线程未就绪与错误 87 导致核心线程漏挂：
+explorer 刚启动时，EnsureHooked() 发起的 CreateToolhelp32Snapshot 包含了 143 个线程。许多线程尚未建立消息队列或处于不适合挂钩的状态，导致 SetWindowsHookEx 对其中 86 个线程返回 ERROR_INVALID_PARAMETER（错误码 87）。托盘窗口 Shell_TrayWnd 所在的线程在第一趟时可能正好没有被成功挂上 WH_CALLWNDPROC。
+
+时序竞争与 EnsureHooked() 触发过早：
+WH_GETMESSAGE 首次被触发时（由 explorer 中任意一个有消息的线程唤醒），立刻触发全线程快照。此时 explorer 刚拉起，UI 线程和消息循环正处于初始化的高峰期，线程状态极其不稳定。
+
+TaskbarCreated 广播时机过早：
+bar 在安装完钩子的瞬间就立刻广播了 TaskbarCreated，此时应用收到广播并疯狂重发 WM_COPYDATA，但此时底层 SentProc 还没有完全在正确的线程上生效，导致第一趟错失。第二趟之所以能抓到，是因为几分钟后应用因各种原因重注册时，explorer 的线程已经全部稳定。
+
+Q2：推荐的修法与理由
+
+推荐方案：方案 (d) —— 精准定向挂钩（结合探针思路与模块重构）
+
+具体做法：
+
+放弃对 explorer 全线程（143个）盲目轰炸：不再遍历所有线程装 WH_CALLWNDPROC。
+
+精准定位托盘线程：在模块落地或 EnsureHooked() 执行时，直接通过 FindWindow(L"Shell_TrayWnd", nullptr) 拿到托盘窗口句柄，再用 GetWindowThreadProcessId 获取其准确的目标线程 ID (dwThreadId)。
+
+只对该核心线程加钩子：仅对这个特定的 threadId 安装 WH_CALLWNDPROC（就像你的实验探针 probe-tray-observer.cpp 那样）。
+
+理由：
+探针的实测结果已经给出了铁证——只钩托盘窗口所属的那一个线程，在同一台机器上每次都能稳稳抓到 12–53 条注册。抛弃无效的 142 个后台线程钩子，既消除了错误 87 的干扰，又保证了 100% 的命中率。
+
+Q3：“模块已经可捕获”的判定条件与等待时间
+
+判定条件：
+不要采用盲目延时（如硬等 1.2 秒）。应当由 island_tray_hook.dll 在成功定位 Shell_TrayWnd 并成功安装目标线程的 WH_CALLWNDPROC 之后，主动向共享内存写入一个就绪标志（例如 tray_hook_ready = true）并触发一个命名事件。bar 在检测到该标志位变为真（或收到事件通知）后，再发出 TaskbarCreated 广播。
+
+第一趟该等多久：
+设置一个合理的超时上限（例如 2000 ms）。在 explorer 启动后，DLL 通常在几十到几百毫秒内即可完成落地和精准挂钩，事件触发后 bar 即可立即广播，既安全又高效。
+
+Q4：修复的验收指标
+
+数字指标：> 0（即：刚重启 explorer 后的第一趟学习，captured registrations 必须大于 0，正常应达到同等应用规模的注册数，例如 
+≥
+10
+≥10）。
+
+日志行：
+
+Plaintext
+tray hook: target tray thread (tid XXXXX) successfully hooked; tray learn: captured X registration(s) on first pass.
+
+你说 第 44 轮评审（文件序列 q39）：**在不露托盘、不动指针、不注入真实输入的前提下，怎么让"每一格"都能弹出应用自己的菜单？** 请明确表态：同意 / 反对 / 修正，并指出你认为哪个判断是错的。…
+
+第 44 轮评审（文件序列 q39）：**在不露托盘、不动指针、不注入真实输入的前提下，怎么让"每一格"都能弹出应用自己的菜单？**
+
+请明确表态：同意 / 反对 / 修正，并指出你认为哪个判断是错的。请给出你推荐的路线与理由。
+
+
+
+
+【零、用户的硬要求与硬禁令（都是他的原话，不是我的推断）】
+
+
+
+
+* 要求：「必须都能弹出自己的菜单，**跟原生托盘一样**」。
+
+* 禁令（2026-10-16，看过我写的一版兜底之后）：「把原来的拿出来不行，那套代码逻辑和实现**绝定不行**，要不当初
+
+也不会让你删除了」。指的是 2026-10-15 退役的那套：**把 shell 的托盘临时露出来 + 指针瞬移 + SendInput
+
+真实点击 + 之后还原**。这条路已经被永久否掉，不要再提它作为方案（可以提它作为"为什么原生行、我们不行"的
+
+机理说明）。
+
+* 历史教训（仓库实测）：**发错编码会把应用打崩**（微信被错的 v4 编码打成崩溃并退出，用户要重新登录）。
+
+所以"逐个形状试到有反应"这种做法不允许。
+
+
+
+
+【一、现在有哪些格子、各自什么状态（今天实测）】
+
+
+
+
+| 格子 | 类型 | 右键"应用菜单"现状 |
+
+|---|---|---|
+
+| RazerAppEngine | Electron，uid 注册，uVersion 0 | **成功**：发 shell 自己发的那一对（同步 `WM_RBUTTONDOWN` → 40 ms → `WM_RBUTTONUP`，uid 在 wParam）后 **47 ms** 它自己的菜单窗口 `Chrome_WidgetWin_1` 1219,635 180x222 出现 |
+
+| ChatGPT（其实是 Codex：AppContainer，**GUID 注册**，窗口类 `OwlElectron_NotifyIconHostWindow`） | Electron 系 | **失败**：四种形状全试过——post 单发 UP、send 单发 UP、send DOWN+UP、post DOWN+UP——**一个都不弹**；它自己的**左键**用消息路线同样没反应（只有"让 shell 去 Invoke"的 UIA 兜底能按动它） |
+
+| Wallpaper Engine | uVersion 4 | **成功**：post 一条打包的 `CONTEXTMENU`（`wParam=MAKELONG(x,y)`、`lParam=MAKELONG(事件,uid)`） |
+
+| QQ音乐 / 任务管理器 / clash-verge | v0 / v4 | 历史上都实测成功过（86 ms / 297.9 ms / 78 ms），今天没有逐一复测 |
+
+| NVIDIA 那几格、系统自己的网络/音量/时钟 | 从来没有注册过（或根本不是应用） | 没有回调可学；UIA 也没有右键 pattern。产品现在对它们只开我们自己的四行菜单 |
+
+
+
+
+【二、已经核实过的事实】
+
+
+
+
+1. **`IUIAutomationElement::ShowContextMenu()` 不存在**：本机 SDK 10.0.26100.0 里它只出现在
+
+`IUIAutomationTextRange2/3` 上。所以"让 shell 弹它自己的上下文菜单"这条路在 UIA 侧没有对应调用。
+
+2. **我们发的是 shell 自己发的形状**：`--dump`（在应用里挂只读钩子 + 一次真实右键）抓到 shell 给应用发的是
+
+`0x8001`，lParam `0x204` 然后 `0x205`；我们现在发的逐字节相同。
+
+3. **我们找目标窗口的方式**：用缓存里的**窗口类名** + 该 exe 的**所有进程**去枚举窗口（`CallbackWindowFor`），
+
+**不是**用注册记录里的窗口句柄，也不是用 uid/guid 去问 shell（`Shell_NotifyIconGetRect` 需要
+
+`NOTIFYICONIDENTIFIER`，仓库里记着"注册表那条记录自带 shell 自己用的身份"）。
+
+ChatGPT 那一格：桌面上 `OwlElectron_NotifyIconHostWindow` 只有一个（pid 29284），我们就是发给它。
+
+4. 指针位置不是变量：把指针停在 1250,60（我们格子）与 2480,16（真实托盘区）两处分别试过，结果一样（都不弹）。
+
+
+
+
+【三、要你们回答的问题】
+
+
+
+
+Q1 **我们是不是在跟一个"死"窗口说话？** 对 GUID 注册 + AppContainer 的应用，应用重启后托盘窗口可能已经换掉，
+
+而旧窗口还在（类名相同、还活着）。我打算先做**只读验证**：从共享内存环里取它最近的注册记录（记录里带
+
+窗口句柄），和桌面上活着的实例对照；如果对不上，就改成"按注册记录里的窗口 / 按 uid+guid 去问 shell"。
+
+请判断这条路是否值得先做，以及你认为正确的识别方式应该是什么（记录里的 hwnd？`NOTIFYICONIDENTIFIER`
+
++ `Shell_NotifyIconGetRect`？两者都做？）。
+
+
+
+
+Q2 **v0 但"从来没被任何形状说服过"的应用，还有没有没试过的入口？** 例如 `WM_CONTEXTMENU`(0x007B) 直接作为
+
+lParam、或者 `NIN_SELECT`/`NIN_KEYSELECT`、或者把消息发给**线程**而不是窗口（`PostThreadMessage`）。
+
+请给出你认为**最值得试的一条**（只许一条形状，不许组合枚举），以及为什么。
+
+
+
+
+Q3 **只读地重新测一遍托盘元素的自动化能力**（枚举这些 XAML 托盘按钮暴露了哪些 pattern / 有没有 MSAA 侧
+
+可用动作）值得做吗？如果值得，你希望我记录哪些字段，才能让结论**可信**而不是又一次"没查到就说没有"？
+
+
+
+
+Q4 如果以上都不行：**"和原生托盘一样"在"不露托盘"的前提下，对这类应用是否根本不可能？** 如果不可能，
+
+你建议产品对这类格子怎么表现才算诚实（我们自己的菜单但**如实标注**？还是别的做法）？这个问题需要
+
+一句话结论，因为用户会按它来决定要不要改变"不露托盘"这个前提。
+
+
+
+
+Q5 无论选哪条，**验收指标（一个数字 + 一行日志）**你建议怎么写？现有的一行是：
+
+`tray context-menu: app=razerappengine.exe version=0 strategy=v3-sent-down-up attempts=1
+
+outcome=native_menu evidence='its own Chrome_WidgetWin_1 at 1219,635 180x222' elapsed_ms=47`
+
+
+
+
+【四、当前代码状态（供你们判断"改动面"）】
+
+
+
+
+* 右键现在**只发一种形状**：v0/3 发 shell 自己发的那一对（同步），v4 发一条打包的 `CONTEXTMENU`（post）。
+
+形状与发法都在 `domain/TrayEncoding.h` 里（纯逻辑、有自检断言），`shell/TrayPress.cpp` 只执行它。
+
+* 失败**不会**在同一次按压里换形状重试；左键的判定（缓存里 `none`/拼法）与右键彼此独立。
+
+* 已提交状态：`2661cdb`（本地，未推 GitHub）；自检 979 项通过、`island_smoke` 通过、Debug/Release 零告警。
+
+Gemini 说
+明确表态
+
+修正
+
+哪一个判断是错的？
+
+你认为 ChatGPT（Codex）右键不响应主要是因为“可能在和死窗口说话（窗口没换掉）”。
+错在漏掉了更底层的安全与隔离机制：AppContainer 隔离与 UIPI（用户界面特权隔离）。ChatGPT 是一个运行在 AppContainer 沙箱内的应用（带有 GUID 注册，窗口类 OwlElectron_NotifyIconHostWindow）。这类应用由于现代 Windows 的沙箱权限隔离限制，天然拒绝或丢弃来自外部非同等权限进程通过 PostMessage/SendMessage 注入的窗口消息。这根本不是窗口死活的问题，而是操作系统级的主权拒止。
+
+Q1：是不是在跟一个“死”窗口说话？识别方案判断
+
+判断：这条路值得做，但只能解决表层的一半问题。比对窗口句柄和从共享内存里取最近的注册记录、或者用 NOTIFYICONIDENTIFIER + Shell_NotifyIconGetRect 去向 shell 问实时句柄，是非常健康的防御性编程。
+
+正确的识别方式：两者结合，以 shell 侧为准。
+
+先从共享内存环中取出该 UID/GUID 对应最近一次有效注册时的 hWnd。
+
+调用 Shell_NotifyIconGetRect(&identifier, &rect) 验证其在 shell 眼中的合法性。
+
+但必须清醒认识到：即使拿到了最鲜活的 hwnd，由于 AppContainer 隔离，直接发消息依然会因为权限被系统拦截而失效。
+
+Q2：v0 但从来没被说服过的应用，最值得试的一条形状
+
+推荐形状：直接发送 WM_CONTEXTMENU (0x007B) 消息。
+
+具体做法：
+PostMessage(hWnd, WM_CONTEXTMENU, (WPARAM)hWnd, MAKELONG(x, y))（或将 lParam 设为光标坐标）。
+
+理由：
+许多现代化框架（如 Electron、WPF、部分高级 Win32 控件）在接收到右键时，根本不解析底层的 WM_RBUTTONDOWN/WM_RBUTTONUP 组合拳，而是直接监听系统标准的上下文菜单触发事件 WM_CONTEXTMENU。单发这一条既符合规范，又避开了复杂的鼠标状态机时序。
+
+Q3：只读重测托盘元素的自动化能力（UIA/MSAA）
+
+值得做吗：极有价值。正如你前面提到的：“只有‘让 shell 去 Invoke’的 UIA 兜底能按动它”。既然主进程的 shell 托盘树里包含这些图标元素，即使托盘窗口在视觉上被隐藏（不露托盘），UIA 树结构在后台依然是完整的、可寻址的。
+
+必须记录的可信字段：
+
+AutomationId / Name（用于稳定锚定图标）。
+
+IsOffscreen（验证隐藏状态下是否仍可被 UIA 访问）。
+
+SupportedPatternIds（如 InvokePattern / ExpandCollapsePattern）。
+
+Invoke() 执行后的实际副作用（验证在不显示托盘窗口的前提下，调用 shell 元素的 Invoke() 是否能成功迫使应用弹窗）。
+
+Q4：在“不露托盘”前提下，这类应用是否根本不可能？
+
+一句话结论：
+对于沙箱隔离（AppContainer）或架构严格的应用，在“绝不露托盘、不移指针、不发真实输入”的前提下，通过外部强行模拟消息做到“跟原生托盘完全一样”是物理级不可能的，产品应当对这类特殊格子提供降级标记（如显示我们自己的统一样式菜单并诚实标注为“基础快捷菜单”）。
+
+Q5：验收指标建议
+
+数字指标：1（针对非沙箱顽固应用的策略命中与响应成功数）。
+
+日志行：
+
+Plaintext
+tray context-menu: app=chatgpt.exe version=guid strategy=wm-contextmenu attempts=1 outcome=native_menu evidence='its own OwlElectron_NotifyIconHostWindow at 1050,40 200x300' elapsed_ms=32
+
+
+Gemini 是一款 AI 工具，其回答未必正确无误。
+
+
+
+
+Investigating Shell Invocation

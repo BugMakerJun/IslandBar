@@ -250,7 +250,14 @@ enum class TrayMenuAction : int {
 };
 
 // The label a user reads. Wide, because two of the four are Chinese and the renderer wants wide strings.
-inline const wchar_t* TrayMenuLabel(TrayMenuAction action) {
+//
+// `ownMenuUnreachable` is the one fact that changes a WORD rather than adding a row (2026-10-16, round 44):
+// an icon whose application has answered neither of the two shapes a right press may send (see
+// TrayPress.cpp's right-note file) can still be offered the row -- the press will simply open this bar's own
+// menu -- but the row has to say so. A row that promises the application's own menu and delivers this bar's
+// is the kind of quiet lie this project keeps paying for.
+inline const wchar_t* TrayMenuLabel(TrayMenuAction action, bool ownMenuUnreachable = false) {
+    if (action == TrayMenuAction::ApplicationMenu && ownMenuUnreachable) return L"应用菜单（本机拿不到）";
     switch (action) {
         case TrayMenuAction::Open:            return L"打开";
         case TrayMenuAction::ActivateWindow:  return L"显示窗口";
@@ -284,6 +291,10 @@ struct TrayMenuFacts {
     // "did nothing", because all it could do was re-open the same menu -- a row that does nothing is worse
     // than a row that is absent, and this struct is what the rule is stated in.
     bool hasCallback = false;
+    // ... AND WHETHER ITS OWN MENU IS REACHABLE AT ALL: false once both shapes a right press can send have been
+    // tried and the application answered neither (the press writes that down per icon). The row stays -- the
+    // press falls back to this bar's menu -- but its label says what it can actually deliver.
+    bool ownMenuUnreachable = false;
 };
 
 // Which entries the menu shows, in order, for one icon -- PURE, so the rule is pinned by the self-test
