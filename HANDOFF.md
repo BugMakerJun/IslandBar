@@ -11573,3 +11573,37 @@ uninstaller written: ...  shortcut written: ...  registered under Settings > App
 ```
 
 退出码 0；两个文件时间戳都刷新；开机自启快捷方式没有被动过；用**装出来的** exe 起 bar：`integrity: same as the shell's`、`tray hook: module ready at ...island_tray_hook-A7C48217338CD471.dll`（说明它从刚装好的 DLL 现切了一份内容哈希副本）、托盘 11 格、4 格有条目、`3 of 11 can be pressed`。
+
+### 8.121 **注册载荷的解析变成一个纯函数，并被自检盯住（F4 第一步）** ✅（模块侧也实测走过）
+
+#### 8.121.1 为什么动它
+
+读注册的那段代码住在 `island_tray_hook.dll` 里——**它在别人的进程里跑，自检够不着**。而它做的恰恰是最容易错、错了又不报警的事：按固定偏移从一堆字节里取出 uid、回调消息号和 guid。偏移读错一格，bar 会"学到"一个错的调用号，然后按下去毫无反应，日志里一切正常。
+
+#### 8.121.2 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `domain/TrayRegistration.h`（新） | 线路格式的唯一定义：tag、最小长度、8 个偏移、`TrayCopyCommand` 枚举、`struct TrayRegistration`，以及纯函数 `DecodeTrayRegistration(const void*, size_t)`。**没有 Windows**，所以自检能在没有 shell、没有托盘、没有任何应用的情况下检查它 |
+| `trayhook/TrayHook.cpp` | `ReportShellCopy` 不再自己 memcpy：调那个纯函数，再从返回值拼日志行；本地的偏移常量删掉（唯一定义在头文件里） |
+| `trayhook/CMakeLists.txt` | 给模块加 `src/` 作为包含根（与 bar 一致），让它能 `#include "domain/TrayRegistration.h"` |
+| `selftest/Diagnostics.cpp` | 三条检查（见下） |
+
+**拒绝而不是猜**是这份头文件的立场：tag 不对、长度不够、命令号不是 NIM_ 值 → `valid == false`，一个字段都不填。格式变了就应当"学不到"（看得见），而不是"从错的字节里学到"（看不见）。
+
+#### 8.121.3 验证
+
+自检（三条全 OK，`RESULT: PASS`）：
+
+1. **真实字节**：`probe-tray-registrar.exe` 那次注册的 192 字节原文（从 `reviews/tray-copydata-dump.txt` 粘出来）→ 解出 `uid 7 / msg 0xABCD / hwnd 0x1F0A82 / tip "ISLANDBAR-PROBE-4711"`。
+2. **GUID 那条**：按实测偏移构造（值取自真实抓包）→ `hasGuid` 为真、guid 逐字节等于 `8B8D76E5…`、tip 是 "ChatGPT"。
+3. **必须拒绝的两种**：tag 不是 shell 的、载荷短于下限 → 都为 invalid。
+
+模块侧（真事件）：让对照程序注册一次，explorer 里的**新**模块用新解码器写下
+`call S NIM_ADD pid 16116 exe probe-tray-registrar.exe hwnd 0000000000070B8C uid 7 msg 0xABCD version 0 flags 0x7 guid - tip "ISLANDBAR-PROBE-4711"` —— 与对照程序自称的值逐项一致。
+
+#### 8.121.4 顺带查出的一个真问题：报告文件根本清不掉
+
+准备这次验证时想删掉 `tray_learned.txt` 重来，发现**删不掉**。原因在 8.116 那次优化里：为了不在同步的 WM_COPYDATA 回调里做 open/close，模块改成"一个进程一个常开句柄"，但共享模式只给了 `FILE_SHARE_READ | FILE_SHARE_WRITE`。**没有 `FILE_SHARE_DELETE` 就意味着任何持有句柄的进程都能阻止删除**，而 bar 的学习轮次正是靠 `DeleteFileW` 清空报告来保证"文件里只有本轮的东西"（TrayLearn.cpp 里那句注释因此悄悄失效了）。
+
+修法是一行的共享模式；机制单独量了一遍：同一个文件，`Read|Write` 下删除**失败**，加上 `Delete` 后**成功**。生效要等 explorer 换上新模块（旧模块被钉在 shell 里，进程不死就不会走）——所以这一条要重启一次 explorer 才能看到。

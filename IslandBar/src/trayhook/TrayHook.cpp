@@ -37,6 +37,12 @@
 #include <string.h>
 #include <wchar.h>
 
+// The wire format of a registration, and the reason it is a header in domain/ rather than code here: this
+// module runs inside other people's processes and cannot be exercised by the self-test, so the part of it that
+// can be wrong -- the reading of the bytes -- is somewhere the self-test can reach. See the header for how the
+// offsets were measured.
+#include "domain/TrayRegistration.h"
+
 // Declared HERE, at file scope, rather than inside the anonymous namespace below: the pin needs an address
 // that is inside this module, and pinning is what stops the loader from ever unloading it. Inside the
 // namespace the definition below would be a second, differently linked function of the same name.
@@ -141,8 +147,15 @@ HANDLE ReportHandle(const wchar_t* path) {
     if (g_report != INVALID_HANDLE_VALUE) return g_report;
     // Shared for writing, because the module can be mapped in more than one process at once and both of them
     // report to this same file.
-    g_report = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    //
+    // FILE_SHARE_DELETE AS WELL, and that one was missing until it was measured: the bar's learning pass
+    // TRUNCATES this report before it offers the module (`DeleteFileW`, see TrayLearn.cpp) so that everything
+    // in the file belongs to that pass. With a handle open that did not allow deletion, the delete failed
+    // silently -- a running shell's copy of the module is holding it for the life of that process -- and the
+    // file kept growing without the bar ever noticing. The sharing mode is the whole difference between "the
+    // report is rotated" and "the report is append-only forever", and it costs nothing.
+    g_report = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     return g_report;
 }
 
@@ -263,12 +276,6 @@ bool WorthObserving(UINT message) {
 //  its leading cbSize and with pointers stored as DWORDs. That is why the two lowest offsets were found by
 //  searching for the values a controlled registration had written, not by adding up a header.
 // =====================================================================
-const unsigned kShellCopyTag = 0x34753423u;
-const size_t kShellCopyMinimum = 1024;
-const size_t kGuidOffset = 0x3B0;
-const size_t kVersionOffset = 0x328;
-const size_t kTipOffset = 0x020;
-
 const wchar_t* OwnerLeaf(HWND window, wchar_t* out, size_t count) {
     out[0] = L'\0';
     DWORD pid = 0;
@@ -294,51 +301,34 @@ const wchar_t* OwnerLeaf(HWND window, wchar_t* out, size_t count) {
 void ReportShellCopy(const wchar_t* channel, HWND receiver, WPARAM wparam, LPARAM lparam) {
     if (!lparam) return;
     const COPYDATASTRUCT* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
-    if (!data || !data->lpData || data->cbData < kShellCopyMinimum) return;
+    if (!data || !data->lpData) return;
 
-    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data->lpData);
-    unsigned tag = 0;
-    unsigned command = 0;
-    unsigned uid = 0;
-    unsigned flags = 0;
-    unsigned callback = 0;
-    unsigned version = 0;
+    // THE WIRE FORMAT IS NOT DECODED HERE. It lives in domain/TrayRegistration.h, with no Windows in it, so the
+    // self-test can check the decoding against the bytes of a real registration on a machine with no shell,
+    // no tray and no application running -- which is the only way a change to these offsets can be caught
+    // before it reaches somebody's desktop.
+    const island::TrayRegistration registration =
+        island::DecodeTrayRegistration(data->lpData, data->cbData);
+    if (!registration.valid) return;
+
     GUID guid = {};
-    unsigned trayHandle = 0;
-    memcpy(&tag, bytes, sizeof(tag));
-    if (tag != kShellCopyTag) return;
-    memcpy(&command, bytes + 4, sizeof(command));
-    if (command > NIM_SETVERSION) return;   // not a NIM_ command: not a registration
-    memcpy(&trayHandle, bytes + 0x0C, sizeof(trayHandle));
-    memcpy(&uid, bytes + 0x10, sizeof(uid));
-    memcpy(&flags, bytes + 0x14, sizeof(flags));
-    memcpy(&callback, bytes + 0x18, sizeof(callback));
-    memcpy(&version, bytes + kVersionOffset, sizeof(version));
-    memcpy(&guid, bytes + kGuidOffset, sizeof(guid));
-
-    wchar_t tip[128] = {};
-    for (size_t i = 0; i + 1 < 128; ++i) {
-        wchar_t character = 0;
-        memcpy(&character, bytes + kTipOffset + i * 2, sizeof(character));
-        if (!character) break;
-        tip[i] = character;
-    }
-
-    const HWND trayWindow = reinterpret_cast<HWND>(static_cast<uintptr_t>(trayHandle));
+    memcpy(&guid, registration.guid, sizeof(guid));
+    const HWND trayWindow = reinterpret_cast<HWND>(static_cast<uintptr_t>(registration.trayWindow));
     wchar_t exeLeaf[MAX_PATH] = {};
     OwnerLeaf(trayWindow, exeLeaf, MAX_PATH);
     DWORD ownerPid = 0;
     GetWindowThreadProcessId(trayWindow, &ownerPid);
     wchar_t guidText[64] = {};
-    if (flags & NIF_GUID) GuidText(guid, guidText, 64);
+    if (registration.hasGuid) GuidText(guid, guidText, 64);
 
     // The version is stated on its own call, never with the registration, and the request to write it down is
     // the version. Both are reported; the bar's reader pairs them by (exe, uid/guid) exactly as it does for the
     // in-application path.
     ReportLine(L"call S %hs pid %lu exe %ls hwnd %p uid %u msg 0x%04X version %u flags 0x%X guid %ls "
                L"tip \"%ls\" (read in the shell, pid %lu channel %ls)",
-               MessageName(command), ownerPid, exeLeaf[0] ? exeLeaf : L"-", trayWindow, uid, callback,
-               version, flags, guidText[0] ? guidText : L"-", tip, GetCurrentProcessId(), channel);
+               MessageName(registration.command), ownerPid, exeLeaf[0] ? exeLeaf : L"-", trayWindow,
+               registration.uid, registration.callback, registration.version, registration.flags,
+               guidText[0] ? guidText : L"-", registration.tip, GetCurrentProcessId(), channel);
     (void)receiver;
     (void)wparam;
 }

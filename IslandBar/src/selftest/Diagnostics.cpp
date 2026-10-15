@@ -20,12 +20,15 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>   // strtoul: unpacking the hex of a captured registration in the tray checks
+#include <vector>
 #include <cwchar>
 #include <string>
 
 #include "domain/Geometry.h"
 #include "core/Log.h"
 #include "domain/MiniJson.h"
+#include "domain/TrayRegistration.h"
 #include "domain/CardLayout.h"
 #include "domain/StatePolicy.h"
 #include "media/Lyrics.h"
@@ -6541,6 +6544,9 @@ void TestMusicCardLayout() {
                 IslandBoxFor(trayMonitor, kCollapsedWidthDip, kCollapsedHeightDip);
 
             wchar_t trayDetail[256];
+                    // Its own buffer rather than trayDetail, which the layout checks below keep using: two
+                    // checks writing the same detail would make a failure point at the wrong one.
+                    wchar_t trayWireDetail[256] = {};
             {
                 // THE BUTTON, at the monitor's right margin: one control, in the same place whatever the
                 // application row is doing (see TrayButtonFor).
@@ -6624,6 +6630,91 @@ void TestMusicCardLayout() {
                     Check(noOverlap, L"no two tray cells overlap", trayDetail);
                     Check(smallestCell >= kTrayPageMinCellDip - 0.01f,
                           L"... and every cell is still big enough to press", trayDetail);
+
+                    // --- THE WIRE FORMAT OF A TRAY REGISTRATION ------------------------------------------
+                    //
+                    // The module that reads registrations lives inside the shell's process, where no test can
+                    // follow it: everything it is told to read arrives as a WM_COPYDATA whose payload is the
+                    // shell's own copy of NOTIFYICONDATA. So the READING of those bytes is a pure function in
+                    // domain/TrayRegistration.h, and this is the test that keeps it honest.
+                    //
+                    // THE FIRST CASE IS REAL BYTES, not a construction: the 192 bytes below are the head of the
+                    // copy that probe-tray-registrar.exe (uid 7, message 0xABCD, tip ISLANDBAR-PROBE-4711) sent
+                    // to the shell on 2026-10-15, pasted from reviews/tray-copydata-dump.txt. The payload on the
+                    // wire is 1484 bytes and only its head was captured, so the rest is zero here -- which is
+                    // exactly why this case asserts no guid: the guid field lives at +0x3B0, past the capture.
+                    {
+                        static const char* probeHead =
+                            "2334753400000000BC030000820A1F000700000007000000CDAB00002B000100490053004C0041004E"
+                            "0044004200410052002D00500052004F00420045002D003400370031003100000000000000000000"
+                            "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                            "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                            "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                            "0000000000000000000000000000000000000000000000000000000000000000000000000000";
+                        std::vector<unsigned char> payload(island::kTrayCopyMinimum, 0);
+                        for (size_t i = 0; i < std::strlen(probeHead) / 2 && i < payload.size(); ++i) {
+                            payload[i] = static_cast<unsigned char>(
+                                std::strtoul(std::string(probeHead + i * 2, 2).c_str(), nullptr, 16));
+                        }
+                        const island::TrayRegistration decoded =
+                            island::DecodeTrayRegistration(payload.data(), payload.size());
+                        std::swprintf(trayWireDetail, 256,
+                                      L"valid=%d uid=%u msg=0x%04X tip='%ls'",
+                                      decoded.valid ? 1 : 0, decoded.uid, decoded.callback, decoded.tip);
+                        Check(decoded.valid && decoded.command == island::kTrayCopyAdd && decoded.uid == 7 &&
+                                  decoded.callback == 0xABCD && decoded.trayWindow == 0x1F0A82 &&
+                                  !decoded.hasGuid &&
+                                  std::wcscmp(decoded.tip, L"ISLANDBAR-PROBE-4711") == 0,
+                              L"a registration's real bytes decode to the values it was registered with",
+                              trayWireDetail);
+                    }
+                    // A GUID-registered icon -- the shape ChatGPT.exe registers in, with the guid Explorer's
+                    // own registry entry names for it. Built here at the measured offsets because the captured
+                    // head above does not reach the guid field; the values are the ones the capture carried.
+                    {
+                        std::vector<unsigned char> payload(island::kTrayCopyMinimum, 0);
+                        const unsigned tag = island::kTrayCopyTag;
+                        const unsigned window = 0x000E0B32, uid = 3, flags = 0x27, callback = 0x8001;
+                        std::memcpy(payload.data(), &tag, 4);
+                        std::memcpy(payload.data() + island::kTrayCopyOffsetWindow, &window, 4);
+                        std::memcpy(payload.data() + island::kTrayCopyOffsetUid, &uid, 4);
+                        std::memcpy(payload.data() + island::kTrayCopyOffsetFlags, &flags, 4);
+                        std::memcpy(payload.data() + island::kTrayCopyOffsetCallback, &callback, 4);
+                        const unsigned char guidBytes[16] = {0x8B, 0x8D, 0x76, 0xE5, 0x36, 0x69, 0x45, 0x4F,
+                                                             0xB1, 0xAD, 0x4C, 0x5F, 0xB4, 0x14, 0xCB, 0x35};
+                        std::memcpy(payload.data() + island::kTrayCopyOffsetGuid, guidBytes, 16);
+                        const wchar_t* tipText = L"ChatGPT";
+                        std::memcpy(payload.data() + island::kTrayCopyOffsetTip, tipText,
+                                    (std::wcslen(tipText) + 1) * sizeof(wchar_t));
+                        const island::TrayRegistration decoded =
+                            island::DecodeTrayRegistration(payload.data(), payload.size());
+                        std::swprintf(trayWireDetail, 256, L"valid=%d guid=%d uid=%u msg=0x%04X",
+                                      decoded.valid ? 1 : 0, decoded.hasGuid ? 1 : 0, decoded.uid,
+                                      decoded.callback);
+                        Check(decoded.valid && decoded.hasGuid && decoded.uid == 3 &&
+                                  decoded.callback == 0x8001 &&
+                                  std::memcmp(decoded.guid, guidBytes, 16) == 0 &&
+                                  std::wcscmp(decoded.tip, L"ChatGPT") == 0,
+                              L"a guid-registered icon decodes with its guid, which is what it is pressed by",
+                              trayWireDetail);
+                    }
+                    // ... AND THE TWO WAYS A PAYLOAD MUST BE REFUSED, because a reader that guesses is worse
+                    // than one that learns nothing: the shell changing this format must cost the tray its
+                    // learning, visibly, and not produce presses aimed at the wrong message number.
+                    {
+                        std::vector<unsigned char> payload(island::kTrayCopyMinimum, 0);
+                        const unsigned notTheShellsTag = 0x12345678u;
+                        std::memcpy(payload.data(), &notTheShellsTag, 4);
+                        const island::TrayRegistration decoded =
+                            island::DecodeTrayRegistration(payload.data(), payload.size());
+                        const island::TrayRegistration tooSmall =
+                            island::DecodeTrayRegistration(payload.data(), island::kTrayCopyMinimum - 1);
+                        std::swprintf(trayWireDetail, 256, L"wrong tag valid=%d, short valid=%d",
+                                      decoded.valid ? 1 : 0, tooSmall.valid ? 1 : 0);
+                        Check(!decoded.valid && !tooSmall.valid,
+                              L"a payload that is not the shell's, or too short, is refused rather than read",
+                              trayWireDetail);
+                    }
                     Check(page.cells[0].top > trayCard.rect.top + 30.0f,
                           L"the grid starts below the page's heading", trayDetail);
                 }

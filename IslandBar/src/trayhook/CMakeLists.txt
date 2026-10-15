@@ -14,6 +14,10 @@ add_library(island_tray_hook SHARED
 
 target_link_libraries(island_tray_hook PRIVATE user32 shell32)
 
+# src/ is the include root, exactly as it is for the bar: the module includes "domain/TrayRegistration.h", and a
+# relative path here would be the only place in the project that spells an include differently.
+target_include_directories(island_tray_hook PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
 # Beside the bar, not in a separate bin directory: the bar looks for it by its own module's path, and a
 # deployment that copies one file without the other would otherwise be a silent, half-working install.
 set_target_properties(island_tray_hook PROPERTIES
