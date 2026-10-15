@@ -8,7 +8,9 @@
 
 Windows 11 上替代系统任务栏的一条横条（"岛"）：自己画 pill 与卡片，接管媒体、通知、开始菜单、任务条，并把原生任务栏藏起来。C++20 + Win32 + D3D11 + Direct2D + DirectComposition，单 exe、静态 CRT、无运行时依赖，私有内存 75-95MB。
 
-二进制只有一个：`island_bar.exe`。（2026-10-15 之前还有一个 `island_tray_hook.dll`，装进 explorer 读托盘注册；**托盘功能已按要求整体移除**，这个模块和它的载荷、命令、探针一起走了。见第 7 节。）
+二进制有两个：`island_bar.exe` 与 **`island_tray_hook.dll`**。模块**只**进 `Shell_TrayWnd` 所在的那一个进程
+（当前是 explorer），在那里读应用发给 shell 的托盘注册（`WH_CALLWNDPROC` + 导入槽/`GetProcAddress` 两个
+detour），经共享内存环回传；它钉住自己，安装器的载荷里也带它。见第 7 节。
 
 ## 2. 目录与职责
 
@@ -24,7 +26,8 @@ src/
   render/           D2D/DComp 渲染：Renderer、TextRenderer、玻璃材质
   media/            GSMTC 会话、歌词、音量、声音输出、图片解码
   shell/            与 shell 打交道：开始菜单、天气、系统开关、原生任务栏
-  platform/         平台能力：显示器、窗口列表、缩略图、原生任务栏（三种模式：裁到托盘 / 隐藏 / 不动）、Win32 薄封装
+  platform/         平台能力：显示器、窗口列表、缩略图、原生任务栏（三种模式：隐藏（默认）/ 裁到托盘
+                    （`--native-tray`）/ 完全不动（`--keep-taskbar`））、托盘注册的共享内存环、Win32 薄封装
   services/         Toast 通知读取与通知管道
   selftest/         诊断与 900+ 条断言（--self-test）
 tools/              独立探针可执行文件（geo_probe / thumb_probe / jsonprobe / island_smoke）
@@ -56,7 +59,7 @@ island_bar.exe（main.cpp：组装 + 消息泵）
 | pill 的形状、边距、命中区域 | `core/Geometry.h`（唯一一份圆角矩形判定）、`core/CardLayout.h` | 渲染与命中测试用同一个函数，改一处两边一起变 |
 | 展开/收起的动画手感 | `core/Motion.h`（spring，可中断、继承速度） | `core/StatePolicy.h` 决定状态迁移 |
 | 卡片里某个控件的位置 | `core/CardLayout.h` | `selftest/Diagnostics.cpp` 里通常已有对它的断言 |
-| （托盘已移除） | 无 —— 托盘卡片、按压、学习、explorer 内模块在 2026-10-15 整体退役 | 实测记录留在 `docs/TRAY-RESEARCH-RETIRED.md`，探针在 `scripts/retired/tray/` |
+| **托盘页**（岛里那一页：画什么、怎么按、我们自己的菜单） | 画什么：`shell/TrayIcons.*` —— 注册表给图标与身份，`domain/TrayLedger.*` 给「现在真的注册着」，两边都有才画一格；怎么知道：`shell/TrayLearn.*`（模块 + 共享内存环 + 回调缓存）；怎么按：`shell/TrayPress.*`（编码在 `domain/TrayEncoding.h`）；我们自己的四行菜单：`shell/TrayMenu.*` | 模块在 `src/trayhook/TrayHook.cpp`，注册的线格式在 `domain/TrayRegistration.h`，通道在 `platform/TrayRing.h`；历史记录留在 `docs/TRAY-RESEARCH-RETIRED.md`，探针在 `scripts/retired/tray/` |
 | 媒体卡片 | `media/MusicSession.cpp`、`media/Lyrics.cpp`、`render/` | 延迟初始化：没音乐时不该起线程 |
 | 通知纸条 | `services/`（Toast 读取）加 `app/IslandWindow` 的 NoticeStrip 状态 | |
 | 与 Win32 对话的细节 | `platform/` | 不要在 `core/` 里加 `<windows.h>` |
@@ -81,7 +84,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 1. **exe 要从项目树外运行**。镜像在 `C:\PROJECT\Taskbar` 下的进程会被降成 LOW 完整性，UIPI 会静默丢弃所有发往 Explorer 的消息；GUI 二进制在受限沙箱里起不来（0xC0000142）。正式部署位置是 `%USERPROFILE%\IslandBar`。
 2. **有单实例互斥锁**（`IslandBar.SingleInstance`），不能并行跑第二个副本做对照。要对照就先优雅关掉正在运行的那个（它会恢复原生任务栏），测完再启动。
 3. **只有 PowerShell 5.1**，所有 `.ps1` 必须是纯 ASCII。
-4. **注入到别人进程里的模块必须自己 PIN 住**（`GET_MODULE_HANDLE_EX_FLAG_PIN`），否则那个进程退出时导入表里会留下悬空指针——这件事已经崩过 Explorer 6 次。**现在没有这样的模块了**（托盘 2026-10-15 退役后 IslandBar 是单进程），所以这条只在重新引入注入时适用。
+4. **注入到别人进程里的模块必须自己 PIN 住**（`GET_MODULE_HANDLE_EX_FLAG_PIN`），否则那个进程退出时导入表里会留下悬空指针——这件事已经崩过 Explorer 6 次。**现在有一个这样的模块**：`island_tray_hook.dll` 只进 `Shell_TrayWnd` 所在进程，`trayhook/TrayHook.cpp` 里钉住自己。**为什么不是全局钩子**（那才是 MyDockFinder 的做法）：未签名的模块进不了 Chromium 的渲染进程——实测装上全局钩子后 Clash Verge 的窗口整块变黑（`TrayLearn.h` 有这次实验的记录）。
 
 ## 6. 一次改动要走完的流程
 
@@ -95,8 +98,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 ## 7. 已知的架构债（写在明处，不是等人发现）
 
 - **只有 `core/` 的边界被构建系统强制**：`island_domain` 是独立静态库，`domain/` 里不许出现 `<windows.h>`（编译期护栏）。`shell/`、`render/`、`media/`、`platform/` 之间仍是同一个目标里的翻译单元，互相 include 的门槛很低——下一步是按依赖方向再切静态库目标，逐层往上锁。
-- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（5.5k / 8.1k 行）。已经搬出去的三块：托盘的行为去了 `shell/TrayMenu.*`（234 行，**随托盘一起删了**）、代替岛运行的那些命令去了 `cli/Cli.cpp`（约 950 行）、`RunBar` 里跨帧状态去了 `app/BarState.h`。
+- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（5.9k / 9.0k 行，2026-10-16）。已经搬出去的三块：托盘的行为去了 `shell/TrayMenu.*`（10-15 曾随托盘一起删掉，10-16 托盘回来后重写，现在 275 行）、代替岛运行的那些命令去了 `cli/Cli.cpp`（约 950 行）、`RunBar` 里跨帧状态去了 `app/BarState.h`。
   `main.cpp` 剩下的主体仍是 `RunBar`——约 5,000 行的帧循环，装着窗口、渲染、媒体、通知、天气和系统面板的全部驱动逻辑。**状态迁移是"一组一组来"的**：每组搬完都全量重建两套配置 + 自检 + 冒烟 + 部署，这样出错一定归因到刚搬的那组（整块机械替换的风险是"静默用了外层状态"，编译器抓不住）。顺序：面板与声音页那组 → 通知与媒体那组 → 对象组（window / renderer / text / 会话）。等这些搬完，`RunBar` 才谈得上按相位切成函数。
-- **2026-10-15 已还的债**（留着这几行是为了说明它们不再是问题）：`core/` 已抽成 `island_domain` 独立静态库；模块↔主程序的通道已经从"文件轮询"换成共享内存环 + ABI 版本号（随托盘删除）；安装器已经能带第二份载荷（随托盘删除，回到单载荷）。
-- **托盘那条自己实现的链路退役了**（卡片、按压、学习、explorer 内模块、4 条 CLI 命令、18 个探针），**换成了原生托盘**（HANDOFF 8.133/8.134）：栏不再藏整条任务栏，而是用窗口区域把它**裁到只剩通知区域**，所以屏幕右上角那一块是**系统自己的托盘**——它自己的图标、自己的菜单、自己的折叠箭头、自己的时钟，我们一行都不画。开关：默认就是这个；`--hide-taskbar` 回到"整条藏掉"（托盘也随之不在屏幕上）；`--keep-taskbar` 是"整条都不动"（调试用）。全屏应用在前面时托盘跟着一起退场。
-- **要知道这条路为什么成立、边界在哪，先读 HANDOFF 8.133 的三个判别实验**：占名当托盘宿主**失败**（同名 `Shell_TrayWnd` 窗口收不到任何注册，shell32 只认 shell 自己的那个窗口）；搬托盘窗口**被系统接受**但**像素不跟**（Win11 的托盘由铺满整条任务栏的 XAML 内容桥画，窗口走了、画没走）；`SetWindowPos` 搬整条任务栏**被忽略**；只有**裁剪**既好看又零成本（区域在图标增删后仍存活，被裁掉的区域点击直接穿透到桌面）。**代价**：那 144 DIP 里**包含时钟**（`TrayNotifyWnd` 没有子 HWND，图标/音量/时钟都是 XAML 画的），做不到"只留图标不留时钟"；托盘也只能待在 shell 放它的地方（右上角），搬不走。**想拥有托盘协议本身**（应用注册进我们手里）仍然只有一条路：自己当 shell —— 未做，E1 已经证明没有便宜的替代。
+- **已还的债**（留着这几行是为了说明它们不再是问题）：`core/` 已抽成 `island_domain` 独立静态库（编译期护栏见第 3 节）；模块↔主程序的通道是**共享内存环 + ABI 版本号**（`platform/TrayRing.h`），同步路径里没有磁盘 I/O；安装器的载荷里带 `island_tray_hook.dll`（构建输出那行 `Copying island_bar.exe and island_tray_hook.dll into the setup payload`）。
+- **托盘是"岛里我们自己的那一页"**（2026-10-16，HANDOFF 8.144/8.145/8.146/8.147），**默认整条隐藏原生任务栏**；`--native-tray` 才是 2026-10-15 那套"把任务栏裁到只剩通知区域、屏幕上留系统自己的托盘"，`--keep-taskbar` 是完全不动它。按压的唯一编码入口是 `domain/TrayEncoding.h`（`PlanTrayClick`）：把应用自己的 `uCallbackMessage` 投递到它自己的托盘窗口；学不到回调的格子（有应用窗口活着但不应答、或从来没注册过回调的）开我们自己的菜单，并如实标注"应用菜单（本机拿不到）"。
+- **卡片画什么 = 注册表 ∩ shell 里真的注册着的**（2026-10-16，HANDOFF 8.151）。注册表 `HKCU\Control Panel\NotifyIconSettings` 给图标 PNG 与身份（uid / guid），`domain/TrayLedger.h` 的账本给"现在是否真的活着"——账本由模块在 shell 里看到的 `NIM_ADD`/`NIM_MODIFY`/`NIM_DELETE` 记出来，窗口没了就剔除；第一趟学习跑完之前用注册表列表兜底。**旧口径**（只按"这条记录的 exe 有进程在跑"过滤）会把 NVIDIA 的三个常驻条目和一条死掉的 explorer 记录也画出来——实测 **13 格 vs 系统托盘的 9 个**。
+- **`--native-tray` 那条路为什么成立、边界在哪**：读 HANDOFF 8.133 的三个判别实验（占名当托盘宿主**失败**；搬托盘窗口**被系统接受但像素不跟**；`SetWindowPos` 搬整条任务栏**被忽略**；只有**裁剪**好看又零成本）。它的代价：那 144 DIP 里**包含时钟**，做不到"只留图标不留时钟"，托盘也只能待在 shell 放它的地方。

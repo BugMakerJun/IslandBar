@@ -6,10 +6,11 @@
 
 ## 0. 现状（一句话一条）
 
-- 功能：岛、系统面板、媒体卡片、任务条、通知、天气/时钟、开始按钮、**自己的托盘页**（见下），全部可用；`--self-test` **976 条**断言通过（真实会话里跑，`RESULT: PASS`）。
-- 托盘：**岛里的那一页 + 一个只读观察者模块**（2026-10-16，HANDOFF 8.144/8.145）。右键菜单是**打开 / 文件位置 / 应用菜单 / 关闭应用**四行；"应用菜单"走 `domain/TrayEncoding.h` 的**唯一编码入口**去要应用自己的菜单。为了让"按一下格子"不需要移动指针，bar 把 `island_tray_hook.dll` 递给 `Shell_TrayWnd` 所在进程，模块用 `WH_CALLWNDPROC` 读应用**发给 shell** 的那条 `WM_COPYDATA` 注册，经共享内存环回传（ABI 2），bar 落盘成 `tray_callbacks.txt`。
+- 功能：岛、系统面板、媒体卡片、任务条、通知、天气/时钟、开始按钮、**自己的托盘页**（见下），全部可用；`--self-test` **1001 条**断言通过（真实会话里跑，`RESULT: PASS`）。
+- 托盘：**岛里的那一页 + 一个只读观察者模块**（2026-10-16，HANDOFF 8.144/8.145/8.151）。右键菜单是**打开 / 文件位置 / 应用菜单 / 关闭应用**四行；"应用菜单"走 `domain/TrayEncoding.h` 的**唯一编码入口**去要应用自己的菜单。为了让"按一下格子"不需要移动指针，bar 把 `island_tray_hook.dll` 递给 `Shell_TrayWnd` 所在进程，模块用 `WH_CALLWNDPROC` 读应用**发给 shell** 的那条 `WM_COPYDATA` 注册，经共享内存环回传（ABI 2），bar 落盘成 `tray_callbacks.txt`。
+- 托盘画哪几格：**注册表 ∩ shell 里真的注册着的**（HANDOFF 8.151）。`shell/TrayIcons.*` 从 `HKCU\Control Panel\NotifyIconSettings` 取图标与身份，`domain/TrayLedger.*` 从模块看到的 `NIM_ADD`/`NIM_MODIFY`/`NIM_DELETE` 记一本"现在是否真的活着"的账，两边都有才画一格（同一身份只画一格）；第一趟学习跑完之前用注册表列表兜底。验收口径就是栏自己打的那一行：`tray: 9 icon(s) -- 9 live of 32 registry entr(ies) (not shown: ...)`。
 - 代码：约 90 个源文件；`domain/`（纯逻辑）已是独立静态库目标且有编译期护栏；`/WX` 生效，零告警；**单 exe + 一个模块 DLL**（只在 shell 进程里，不进其它应用）。
-- 版本库：本地领先 `origin/main` **40+ 个提交**，按规矩等用户测完再推。
+- 版本库：本地领先 `origin/main` **30+ 个提交**（截至 2026-10-16），按规矩等用户测完再推。
 
 ---
 
@@ -47,7 +48,7 @@
 
 | # | 事项 | 为什么 | 验收 |
 |---|---|---|---|
-| F1 | ~~**安装器带上 `island_tray_hook.dll`**~~（**随托盘删除，安装器回到单载荷**） | — | ✅ 曾是：payload 加第二份 RCDATA（1002），安装器写两个文件并各自记日志；安装摘要里有一行 `tray: module installed / NOT INSTALLED`；卸载也会删它（被 explorer 占着时如实报告）。**实测**：从树外跑 `/silent /no-launch`，日志 `program written (1867264 bytes)` + `tray module written (508928 bytes)`，退出码 0，装出来的 bar 起得来、托盘 3 of 11 可按 |
+| F1 | ~~**安装器带上 `island_tray_hook.dll`**~~（10-15 随托盘删除；**10-16 托盘回来后这条重新成立**，构建输出里那行 `Copying island_bar.exe and island_tray_hook.dll into the setup payload` 就是它） | — | ✅ 曾是：payload 加第二份 RCDATA（1002），安装器写两个文件并各自记日志；安装摘要里有一行 `tray: module installed / NOT INSTALLED`；卸载也会删它（被 explorer 占着时如实报告）。**实测**（10-15 那一版）：从树外跑 `/silent /no-launch`，日志 `program written (1867264 bytes)` + `tray module written (508928 bytes)`，退出码 0，装出来的 bar 起得来、托盘 3 of 11 可按 |
 | F2 | ~~**模块与主程序之间的通道**~~（**随托盘删除**） | — | ✅ 曾是：共享内存环 + ABI 版本号；`--tray-learn` 与 5 秒 tick 照常；自检加一条版本不匹配的断言 |
 | F3 | ~~**UIA 兜底**~~（**随托盘删除**） | 实测可行：调 ChatGPT 那个元素 17 ms 返回、窗口到前台、指针不动；代价是原生任务栏要"活着"一小会儿 | 一行日志说明这次走的是哪条路；没学到的格子按下有真实效果 |
 | F4 | ~~**托盘按压的自动化回归（第一步：载荷解析）**~~（**随托盘删除**，记录归档） | — | ✅ 曾是：解析搬进 `domain/TrayRegistration.h`（纯函数，无 Windows），模块与自检共用同一份；自检三条检查（**真实字节**：对照程序的 192 字节原文 → uid 7 / 0xABCD / tip 全部对上；GUID 那条 → guid 逐字节相等；错误 tag 与过短载荷 → 拒绝）。**实测**：模块在 explorer 里用新解码器把对照程序的注册解出来，行内容与对照程序自称的值完全一致。遗留：缓存合并与判定规则那两段还没有用例 |
