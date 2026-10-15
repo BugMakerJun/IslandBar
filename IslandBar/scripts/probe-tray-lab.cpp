@@ -1349,6 +1349,7 @@ constexpr int kSampleMax = 32;
 constexpr int kSampleCell = 34;
 constexpr int kSampleGap = 4;
 constexpr int kSamplePad = 8;
+constexpr int kSampleLabel = 26;   // a line under the strip, for the name under the pointer
 
 struct SampleItem {
     std::wstring name;         // flattened, for the menu and the log
@@ -1365,6 +1366,7 @@ int g_sampleCount = 0;
 int g_sampleHover = -1;
 HWND g_sampleWindow = nullptr;
 HWND g_samplePanel = nullptr;   // the shell's overflow panel, clipped while this sample reads it
+bool g_sampleQuit = false;
 
 RECT SampleCellRect(int index) {
     RECT box = {};
@@ -1438,9 +1440,39 @@ LRESULT CALLBACK SampleProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 }
             }
+            // The name of whatever is under the pointer, on its own line: the sample has no tooltips, and
+            // "which of these is WeChat" is exactly what somebody looking at it wants to know.
+            if (g_sampleHover >= 0 && g_sampleHover < g_sampleCount) {
+                RECT line = client;
+                line.left += kSamplePad;
+                line.right -= kSamplePad;
+                line.top = kSamplePad + kSampleCell + 3;
+                HBRUSH prompt = CreateSolidBrush(RGB(22, 22, 28));
+                HPEN noPen = CreatePen(PS_NULL, 0, RGB(0, 0, 0));
+                HGDIOBJ oldBrush2 = SelectObject(dc, prompt);
+                HGDIOBJ oldPen2 = SelectObject(dc, noPen);
+                RoundRect(dc, line.left, line.top, line.right, line.bottom, 8, 8);
+                SelectObject(dc, oldBrush2);
+                SelectObject(dc, oldPen2);
+                DeleteObject(prompt);
+                DeleteObject(noPen);
+                SetTextColor(dc, RGB(210, 210, 220));
+                SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+                RECT text = line;
+                text.left += 8;
+                text.right -= 8;
+                DrawTextW(dc, g_sample[g_sampleHover].name.c_str(), -1, &text,
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
             EndPaint(hwnd, &paint);
             return 0;
         }
+        case WM_KEYDOWN:
+            if (wparam == VK_ESCAPE) {
+                Log(L"TRAYSAMPLE: Esc -- closing");
+                g_sampleQuit = true;
+            }
+            return 0;
         case WM_MOUSEMOVE: {
             const int cell = SampleCellAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             if (cell != g_sampleHover) {
@@ -1462,6 +1494,8 @@ LRESULT CALLBACK SampleProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             HMENU menu = CreatePopupMenu();
             AppendMenuW(menu, MF_STRING, 1, L"打开（左键那一下）");
             AppendMenuW(menu, MF_STRING, 2, L"打开文件位置");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING, 3, L"关闭样例");
             SetForegroundWindow(hwnd);
             const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, at.x, at.y, 0, hwnd,
                                               nullptr);
@@ -1479,6 +1513,9 @@ LRESULT CALLBACK SampleProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                     Log(L"TRAYSAMPLE: opened the location of '%ls' -> %p", g_sample[cell].exe.c_str(),
                         reinterpret_cast<void*>(run));
                 }
+            } else if (chosen == 3) {
+                Log(L"TRAYSAMPLE: closing from the menu");
+                g_sampleQuit = true;
             }
             return 0;
         }
@@ -1670,16 +1707,18 @@ int RunTraySample(int seconds, int x, int y) {
     wc.lpszClassName = L"TrayLabSample";
     RegisterClassExW(&wc);
     const int width = kSamplePad * 2 + g_sampleCount * kSampleCell + (g_sampleCount - 1) * kSampleGap;
-    const int height = kSamplePad * 2 + kSampleCell;
+    const int height = kSamplePad * 2 + kSampleCell + kSampleLabel;
     g_sampleWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"TrayLabSample",
                                      L"tray sample", WS_POPUP | WS_VISIBLE, x, y, width, height,
                                      nullptr, nullptr, wc.hInstance, nullptr);
-    Log(L"TRAYSAMPLE: window %p at %d,%d %dx%d -- click a cell, right-click for our menu",
+    Log(L"TRAYSAMPLE: window %p at %d,%d %dx%d -- click a cell, right-click for our menu, Esc to close",
         reinterpret_cast<void*>(g_sampleWindow), x, y, width, height);
 
-    const ULONGLONG until = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+    // seconds <= 0 means "stay until it is closed", which is what somebody looking at an example wants.
+    const bool untilClosed = seconds <= 0;
+    const ULONGLONG until = GetTickCount64() + static_cast<ULONGLONG>(seconds > 0 ? seconds : 1) * 1000;
     MSG msg = {};
-    while (GetTickCount64() < until) {
+    while (!g_sampleQuit && (untilClosed || GetTickCount64() < until)) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -1756,10 +1795,10 @@ int main(int argc, char** argv) {
         return RunTrayWindow(seconds > 0 ? seconds : 30, x, y);
     }
     if (std::strcmp(argv[1], "--traysample") == 0) {
-        const int seconds = (argc > 2) ? std::atoi(argv[2]) : 45;
+        const int seconds = (argc > 2) ? std::atoi(argv[2]) : 0;   // 0 = stay until it is closed
         const int x = (argc > 3) ? std::atoi(argv[3]) : 1700;
         const int y = (argc > 4) ? std::atoi(argv[4]) : 6;
-        return RunTraySample(seconds > 0 ? seconds : 45, x, y);
+        return RunTraySample(seconds, x, y);
     }
     Log(L"unknown command");
     return 2;
