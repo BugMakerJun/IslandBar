@@ -27,7 +27,8 @@
 #include <vector>
 
 #include "app/AppBar.h"
-#include "app/BarState.h"     // the bar's own state: slice 1 is the tray card and its menu
+#include "app/BarState.h"
+#include "app/BarSystems.h"    // the window, the renderer, and one object per channel
 #include "shell/StartMenu.h"
 #include "domain/TaskStripLayout.h"
 #include "platform/WindowList.h"
@@ -643,9 +644,13 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     island::ApplyRememberedTheme();
 
     // The machine's own state, sampled on a timer rather than per frame.
-    island::SystemStatusReader statusReader;
-    island::SystemStatus systemStatus;
-    statusReader.Open();
+
+    // THE THINGS THE BAR TALKS TO, in one named place: the window and the renderer, and one object per
+    // channel the outside world arrives through. See app/BarSystems.h for why this is separate from
+    // app/BarState.h (resources, and a construction order) -- and note that the calls that START each
+    // one stay below, in the order they always were: this line only says they exist.
+    island::BarSystems systems;
+    systems.statusReader.Open();
 
     // How long between samples. Most of these values come from APIs that open a COM object or walk
     // a device tree, and they do not change quickly enough to justify paying that every frame.
@@ -694,7 +699,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // name the endpoint it wants, and the row the user is looking at is the one in this snapshot. On the
     // heap, like the worker that fills it: it is tens of kilobytes and this function's frame is not the
     // place for that.
-    auto soundSnapshot = std::make_unique<island::SoundOutputSnapshot>();
 
     island::LogAndPrint("IslandBar\n");
     island::LogAndPrint("  monitor %ldx%ld, work %ldx%ld, %u dpi, taskbar inset %ld px\n",
@@ -711,19 +715,17 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // If this process is killed rather than closed, the restore never runs. The
     // documented recovery then is to restart Explorer, or to run:
     //   ShowWindow(FindWindow("Shell_TrayWnd", NULL), SW_SHOW)
-    island::NativeTaskbar taskbar;
-    bool haveTaskbar = false;
     if (hideNativeTaskbar) {
-        haveTaskbar = taskbar.Locate();
-        if (haveTaskbar) {
+        systems.haveTaskbar = systems.taskbar.Locate();
+        if (systems.haveTaskbar) {
             // Check the integrity level as well as the result. When this process is
             // confined to a lower integrity level than the shell, every method of
             // hiding the taskbar is silently dropped by UIPI: the calls return 0,
             // no error is reported, and the taskbar simply stays. Saying so up
             // front is the difference between a two-minute fix and an afternoon of
             // suspecting the code.
-            const bool blocked = taskbar.IsBlockedByIntegrity();
-            const bool hidden = taskbar.Hide();
+            const bool blocked = systems.taskbar.IsBlockedByIntegrity();
+            const bool hidden = systems.taskbar.Hide();
 
             if (hidden && !blocked) {
                 island::LogAndPrint("  native taskbar: hidden");
@@ -765,23 +767,20 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // top edge and does not read the work area, so a later work-area change cannot move it. That
     // independence is deliberate -- it is why the tests can assert the pill's position without
     // knowing anything about bars.
-    island::AppBar appBar;
     // kReservedBarHeightDip, not margin + collapsed height: the reservation has to cover the whole
     // chrome, and the two differ by the pill's own height. See the constant.
     const LONG barThicknessPx =
         island::DipToPixels(island::kReservedBarHeightDip, monitor.dpi);
-    island::AppBarResult appBarResult = island::AppBarResult::NoWindow;
-    island::IslandWindow window;
-    if (!window.Create(monitor, /*show=*/true)) {
+    if (!systems.window.Create(monitor, /*show=*/true)) {
         island::LogAndPrint("FATAL: could not create the window (error %lu)\n", GetLastError());
         std::fflush(stdout);
         // The taskbar was already hidden by this point, so it must not be left
         // that way because startup failed.
-        taskbar.Restore();
+        systems.taskbar.Restore();
         return 1;
     }
 
-    window.SetAppBar(&appBar);
+    systems.window.SetAppBar(&systems.appBar);
 
     if (!claimAppBar) {
         // Off by default, and that is a deliberate safety decision rather than an unfinished
@@ -806,18 +805,18 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
         // Claiming the strip while the shell's own taskbar is on screen cannot work: it already
         // owns the top edge. A refusal is reported rather than retried, because retrying cannot
         // change the answer.
-        appBarResult = appBar.Claim(window.Handle(), island::DockEdge::Top, barThicknessPx);
-        island::LogAndPrint("  appbar: %ls -- %ls", island::AppBarResultName(appBarResult),
-                            appBar.LastDetail());
+        systems.appBarResult = systems.appBar.Claim(systems.window.Handle(), island::DockEdge::Top, barThicknessPx);
+        island::LogAndPrint("  appbar: %ls -- %ls", island::AppBarResultName(systems.appBarResult),
+                            systems.appBar.LastDetail());
 
         // Each outcome needs a different response, which is why they are distinguished rather
         // than collapsed into a bool. SpaceNotGranted is the interesting one: the registration
         // stands, so the space may become available once the shell's own bar is gone, and the
         // shell says so with ABN_POSCHANGED.
-        if (appBarResult == island::AppBarResult::NotRegistered) {
+        if (systems.appBarResult == island::AppBarResult::NotRegistered) {
             island::LogAndPrint("    The shell refused to register another bar on this edge;");
             island::LogAndPrint("    that is expected while the native taskbar still owns it.");
-        } else if (appBarResult == island::AppBarResult::SpaceNotGranted) {
+        } else if (systems.appBarResult == island::AppBarResult::SpaceNotGranted) {
             island::LogAndPrint("    Registered, but the desktop did not give up the strip yet.");
             island::LogAndPrint("    It is claimed again automatically on ABN_POSCHANGED.");
         }
@@ -843,10 +842,10 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     } else if (keepStrip) {
         island::LogAndPrint("  work area: the strip is NOT released (--keep-strip);");
         island::LogAndPrint("    a maximized window will keep the band the shell's taskbar reserves");
-    } else if (appBarResult == island::AppBarResult::Registered) {
+    } else if (systems.appBarResult == island::AppBarResult::Registered) {
         island::LogAndPrint("  work area: the strip stays reserved (the AppBar above claims it)");
     } else {
-        const island::NativeTaskbar::WorkAreaRelease release = taskbar.ReleaseWorkArea();
+        const island::NativeTaskbar::WorkAreaRelease release = systems.taskbar.ReleaseWorkArea();
         if (release.changed) {
             island::LogAndPrint("  work area: the strip is released -- %ld,%ld - %ld,%ld  ->  "
                                 "%ld,%ld - %ld,%ld",
@@ -870,17 +869,15 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
         std::fflush(stdout);
     }
 
-    const RECT rect = window.WindowRect();
-    island::Renderer renderer;
-    const bool renderOk = renderer.Initialize(
-        window.Handle(),
+    const RECT rect = systems.window.WindowRect();
+    const bool renderOk = systems.renderer.Initialize(
+        systems.window.Handle(),
         static_cast<UINT>(rect.right - rect.left),
         static_cast<UINT>(rect.bottom - rect.top),
-        window.Scale());
+        systems.window.Scale());
 
-    island::TextRenderer text;
-    if (renderOk && text.Initialize()) {
-        renderer.SetTextRenderer(&text);
+    if (renderOk && systems.text.Initialize()) {
+        systems.renderer.SetTextRenderer(&systems.text);
     }
 
     // --- the local push channel ---
@@ -888,9 +885,7 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // Started before the loop so a sender that connects immediately is served
     // rather than refused. A failure here is reported and the bar keeps working:
     // the clock and the hover states do not depend on notifications.
-    island::NotificationStore notifications;
-    island::NotificationServer notificationServer;
-    const bool listening = notificationServer.Start();
+    const bool listening = systems.notificationServer.Start();
     island::LogAndPrint(listening ? "  notifications: listening on \\\\.\\pipe\\%ls"
                                   : "  notifications: DISABLED (could not create the pipe)",
                         island::kPipeName);
@@ -899,8 +894,7 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // uses. Polled on the frame loop's slow timer rather than by a thread of its own -- one indexed SELECT
     // every couple of seconds costs less than a thread would -- and a failure to read it leaves the bar exactly
     // as it was, because the push channel does not depend on it.
-    island::ToastReader toasts;
-    const bool toastsAvailable = toasts.Start();
+    const bool toastsAvailable = systems.toasts.Start();
     if (!toastsAvailable) {
         island::LogAndPrint("  notifications: system toasts are NOT being read (see above)");
     }
@@ -909,7 +903,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     //
     // Polled faster than the toast database because a WeChat popup is on screen for a few seconds: two
     // seconds of polling would miss it about as often as not. The scan is a handful of windows.
-    island::WeChatWatcher wechat;
 // ... and the same clock for the pill's background meter (see musicMeterDue).
 unsigned long long lastMusicMeterMs = 0;
     std::fflush(stdout);
@@ -918,7 +911,6 @@ unsigned long long lastMusicMeterMs = 0;
     //
     // Polled on a worker thread; the frame loop only reads a snapshot. A failure
     // here is not fatal: the bar is a taskbar replacement, not a music player.
-    island::MusicSession music;
     //
     // ISLANDBAR_NO_MEDIA=1 leaves the reader unstarted, which is how the bar looks on a machine
     // where nothing is playing -- a state that cannot otherwise be photographed on this one, whose
@@ -935,7 +927,7 @@ unsigned long long lastMusicMeterMs = 0;
     wchar_t noSessionSetting[8] = {};
     const bool noSession = GetEnvironmentVariableW(L"ISLANDBAR_NO_SESSION", noSessionSetting, 8) > 0 &&
                            noSessionSetting[0] == L'1';
-    const bool musicAvailable = !noMedia && !noSession && music.Start();
+    const bool musicAvailable = !noMedia && !noSession && systems.music.Start();
     island::LogAndPrint(musicAvailable
                             ? "  music: reading the system media session"
                             : (noMedia ? "  music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were"
@@ -956,8 +948,7 @@ unsigned long long lastMusicMeterMs = 0;
     //
     // Off under ISLANDBAR_NO_MEDIA, which means "as if nothing were playing" -- the idle island's own
     // screenshot depends on that meaning exactly what it says.
-    island::PlayerWindowWatch playerWindow;
-    const bool playerWindowAvailable = !noMedia && playerWindow.Start();
+    const bool playerWindowAvailable = !noMedia && systems.playerWindow.Start();
     island::LogAndPrint(playerWindowAvailable
                             ? "  music: player window titles are watched too (used only while no"
                               " session exists)"
@@ -973,8 +964,7 @@ unsigned long long lastMusicMeterMs = 0;
     // On its own worker, because IMMDeviceEnumerator touches the audio service and can block
     // for tens of milliseconds; blocking the frame loop is exactly what the stutter reports
     // were about.
-    island::AudioVolume volume;
-    const bool volumeAvailable = volume.Start();
+    const bool volumeAvailable = systems.volume.Start();
     island::LogAndPrint(volumeAvailable ? "  volume: reading the default output endpoint"
                                         : "  volume: DISABLED (no audio endpoint)");
     std::fflush(stdout);
@@ -991,16 +981,14 @@ unsigned long long lastMusicMeterMs = 0;
     // was added: its SOUND signal is read from the per-application session list, and that signal has to work
     // whether or not anybody has ever looked at the mixer. (It did not, silently: the page's lazy start meant
     // the list was never read at all, and the sound channel sat there with nothing to look at.)
-    auto soundOutput = std::make_unique<island::SoundOutput>();
-    const bool soundOutputStarted = soundOutput->Start();
+    const bool soundOutputStarted = systems.soundOutput->Start();
     island::LogAndPrint(soundOutputStarted
                             ? "  sound: audio sessions are being read (for the mixer and the WeChat channel)"
                             : "  sound: audio sessions are NOT readable; the mixer and the WeChat sound"
                               " channel are unavailable");
     std::fflush(stdout);
 
-    island::LyricsProvider lyrics;
-    const bool lyricsAvailable = lyrics.Start();
+    const bool lyricsAvailable = systems.lyrics.Start();
     island::LogAndPrint(lyricsAvailable
                             ? "  lyrics: on demand, NetEase then QQ Music"
                             : "  lyrics: DISABLED (the worker could not start)");
@@ -1014,8 +1002,7 @@ unsigned long long lastMusicMeterMs = 0;
     // Started unconditionally. A machine with no weather.txt (or no network) is the ordinary
     // case for a first run: the reader logs where the city goes and the strip shows the date and
     // the time without a reading, which is what it is designed to do.
-    island::WeatherReader weather;
-    const bool weatherAvailable = weather.Start();
+    const bool weatherAvailable = systems.weather.Start();
     island::LogAndPrint(weatherAvailable
                             ? "  weather: position from Windows, forecast from Open-Meteo "
                               "(weather.txt can pin a city instead)"
@@ -1027,9 +1014,8 @@ unsigned long long lastMusicMeterMs = 0;
     // A live thumbnail of the window under the pointer, hanging below the bar. A window of its own,
     // because a DWM thumbnail is drawn by the compositor into an HWND rather than handed over as a
     // bitmap -- see ThumbnailPreview.h.
-    island::ThumbnailPreview preview;
     // Owned by the bar's window, so it can never be covered by it (see Create).
-    const bool previewReady = preview.Create(window.Handle());
+    const bool previewReady = systems.preview.Create(systems.window.Handle());
     island::LogAndPrint(previewReady
                             ? "  preview: resting on a task icon shows a live thumbnail"
                             : "  preview: DISABLED (the preview window could not be created)");
@@ -1043,11 +1029,10 @@ unsigned long long lastMusicMeterMs = 0;
     //
     // Read here once so the first frame has icons, and refreshed from the frame loop on a timer: the tray
     // changes when applications start and stop, which is a scale of seconds, not frames.
-    island::TrayIcons trayIcons;
 
-    const int trayAtStart = trayIcons.Refresh();
+    const int trayAtStart = systems.trayIcons.Refresh();
     island::LogAndPrint("  tray: %d icon(s) from the registry (%d entr(ies), %d process(es) seen)",
-                        trayAtStart, trayIcons.Examined(), trayIcons.ProcessesSeen());
+                        trayAtStart, systems.trayIcons.Examined(), systems.trayIcons.ProcessesSeen());
     std::fflush(stdout);
 
     // --- learning every tray callback, on a worker, once a session --------------------------------
@@ -1068,7 +1053,7 @@ unsigned long long lastMusicMeterMs = 0;
         // press an application the moment it registers -- no per-application pass, and no pass at all when a
         // new application starts.
         island::InstallTrayHook();
-        const int coveredNow = island::CountCoveredIcons(trayIcons);
+        const int coveredNow = island::CountCoveredIcons(systems.trayIcons);
         if (coveredNow >= trayAtStart) {
             island::LogAndPrint("  tray learn: %d of %d icon(s) already have a callback entry -- not asking "
                                 "again", coveredNow, trayAtStart);
@@ -1101,10 +1086,12 @@ unsigned long long lastMusicMeterMs = 0;
     // The pins are the user's, in a text file beside the bar (see StartApps). The account picture and the
     // name are read once: they are the two things in the card's footer and they change about as often as
     // the user changes his picture.
-    island::StartApps startApps;
-    std::thread([&startApps]() {
+    // The pins are read on a worker, and it is handed the object BY REFERENCE under its own name: a capture
+    // list takes names, not member accesses (see the same trap in the tray learning pass), and naming it
+    // `apps` also says what the thread is for.
+    std::thread([&apps = systems.startApps]() {
         const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        startApps.RefreshList();
+        apps.RefreshList();
         if (SUCCEEDED(comHr)) CoUninitialize();
     }).detach();
     {
@@ -1195,7 +1182,7 @@ unsigned long long lastMusicMeterMs = 0;
             island::LogAndPrint("  start: no account picture (%ls)", picture);
         }
         island::LogAndPrint("  start: footer name '%ls'", bar.accountName);
-        startApps.LoadPins();
+        systems.startApps.LoadPins();
         std::fflush(stdout);
     }
 
@@ -1204,7 +1191,6 @@ unsigned long long lastMusicMeterMs = 0;
     // Refreshed from the frame loop rather than polled here, because it is only needed while the
     // strip is on screen. The titles are copied into this array for the frame to point at: the list
     // can refresh between frames, and a frame that pointed into the list would read freed entries.
-    island::WindowList taskWindows;
 
     if (!renderOk) {
         island::LogAndPrint("WARNING: composition surface unavailable; the window stays empty\n");
@@ -1213,11 +1199,11 @@ unsigned long long lastMusicMeterMs = 0;
         // Frame pacing. The compositor clock drives this when available, so an
         // idle desktop costs nothing; otherwise MsgWaitForMultipleObjects blocks
         // on input, which is also event-driven rather than a spin.
-    const bool clockDriven = renderer.WaitForCompositorClock(1);
+    const bool clockDriven = systems.renderer.WaitForCompositorClock(1);
     // Which wait the loop will use, named once here and repeated on every throttle line below. The
     // order is the order of preference: the swap chain's own frame-latency object, then the compositor
     // clock, then a short message wait.
-    const char* pacingPath = renderer.PacingIsWaitable() ? "waitable"
+    const char* pacingPath = systems.renderer.PacingIsWaitable() ? "waitable"
                                                         : (clockDriven ? "compositor" : "timer");
     island::LogAndPrint("  frame pacing: %s\n", pacingPath);
         std::fflush(stdout);
@@ -1229,7 +1215,7 @@ unsigned long long lastMusicMeterMs = 0;
 
         int  lastSecond = -1;
         long long lastNotificationId = 0;
-        island::IslandState lastLogged = window.State();
+        island::IslandState lastLogged = systems.window.State();
         bool haveDrawn = false;
         unsigned long long lastDecodedArtworkRevision = 0;
         const uint8_t* artworkPixels = nullptr;
@@ -1258,7 +1244,7 @@ float musicWavePhase = 0.0f;
         island::MusicInfo nowPlaying;
         unsigned long long musicPositionAt = GetTickCount64();
         long long lastShownSecond = -1;
-        unsigned long long lastVolumeRevision = volumeAvailable ? volume.Revision() : 0;
+        unsigned long long lastVolumeRevision = volumeAvailable ? systems.volume.Revision() : 0;
         // The 声音输出 page: whether it is up, how far it is scrolled, and the revision of the audio reading
         // it was last drawn from. The mixer's rows change on their own -- an application starts or stops
         // playing -- so a change in the reading is a reason to draw, and nothing else on this bar is.
@@ -1281,8 +1267,8 @@ float musicWavePhase = 0.0f;
         // checkable within seconds of a deploy instead of after five minutes of waiting.
         unsigned long long memorySamplePendingAt = GetTickCount64() + 2000;
         bool firstMemorySample = true;
-        unsigned long long lastMemoryMusicRevision = music.Revision();
-        int lastMemoryTrayIcons = trayIcons.Count();
+        unsigned long long lastMemoryMusicRevision = systems.music.Revision();
+        int lastMemoryTrayIcons = systems.trayIcons.Count();
         bool lastMemoryCardUp = false;
         // --- the throttle line's own state -------------------------------------------------------
         //
@@ -1290,7 +1276,7 @@ float musicWavePhase = 0.0f;
         // between "the loop paced itself on the compositor" and "the loop spun and presented whenever
         // it happened to wake": a frame count near the monitor's refresh rate WITH a wait count near it
         // is the healthy shape, and a frame count far above it is the defect this change is about.
-        unsigned long long lastFramesPresented = renderer.FramesPresented();
+        unsigned long long lastFramesPresented = systems.renderer.FramesPresented();
         unsigned long long frameWaits = 0;
         unsigned long long lastFrameWaits = 0;
         // When the card last had a reason to be drawn with the cheap material: while it animates, or while
@@ -1319,8 +1305,8 @@ float musicWavePhase = 0.0f;
         int whyStartHover = 0, whyStartWash = 0;
         island::FrameStats liveStats;
         liveStats.Start();
-        unsigned long long lastMusicRevision = music.Revision();
-        unsigned long long lastDrawnMusicRevision = music.Revision();
+        unsigned long long lastMusicRevision = systems.music.Revision();
+        unsigned long long lastDrawnMusicRevision = systems.music.Revision();
         // Whether a reading has ever been taken from the session worker, so the FIRST one is taken
         // whatever the revision says. See the music block for why that is not the same question.
         bool haveMusicReading = false;
@@ -1463,7 +1449,7 @@ float musicWavePhase = 0.0f;
             // move the pointer here, so this is how a row with its last button opened can be photographed.
             if (GetEnvironmentVariableW(L"ISLANDBAR_HOVER_ICON", setting, 32) > 0) {
                 forcedHoverIcon = static_cast<int>(wcstol(setting, nullptr, 10));
-                window.SetForcedHoverIcon(forcedHoverIcon);
+                systems.window.SetForcedHoverIcon(forcedHoverIcon);
                 island::LogAndPrint("  diagnostic: icon %d is treated as hovered\n", forcedHoverIcon);
                 std::fflush(stdout);
             }
@@ -1471,7 +1457,7 @@ float musicWavePhase = 0.0f;
             // pointer cannot be moved from a script here, so this is how that card gets photographed.
             if (GetEnvironmentVariableW(L"ISLANDBAR_FORCE_INSIDE", setting, 32) > 0) {
                 const int mode = static_cast<int>(wcstol(setting, nullptr, 10));
-                window.SetForcedPointerInside(mode);
+                systems.window.SetForcedPointerInside(mode);
                 island::LogAndPrint("  diagnostic: the pointer is treated as %ls\n",
                                     mode == 4   ? L"in the GAP between the bar and the card"
                                     : mode == 3 ? L"on the CARD"
@@ -1514,7 +1500,7 @@ float musicWavePhase = 0.0f;
             }
         }
         if (slowMotion > 1.0f) {
-            window.ScaleTransitionDurations(slowMotion);
+            systems.window.ScaleTransitionDurations(slowMotion);
             island::LogAndPrint("  diagnostic: transitions stretched %.0fx\n", slowMotion);
             std::fflush(stdout);
         }
@@ -1541,7 +1527,7 @@ float musicWavePhase = 0.0f;
         // --- lyrics state ---
         // A pointer into the provider, not a copy: Lyrics is ~132 KB.
         const island::Lyrics* currentLyrics = nullptr;
-        unsigned long long lastLyricsRevision = lyrics.Revision();
+        unsigned long long lastLyricsRevision = systems.lyrics.Revision();
         int  lastLyricIndex = -2;      // -2 forces the first evaluation
         float lyricsScrollDip = 0.0f;
 
@@ -1571,7 +1557,7 @@ float musicWavePhase = 0.0f;
         unsigned long long lastWork = 0;
 
         while (true) {
-            if (!window.PumpMessages()) break;
+            if (!systems.window.PumpMessages()) break;
 
             // ... and NOT gated on `haveTaskbar`. That flag is "the taskbar was there when this process
             // started", and a bar that starts at logon can easily start first -- see the note in
@@ -1592,7 +1578,7 @@ float musicWavePhase = 0.0f;
                 // to an application's own window now -- the shell's taskbar is never touched, never shown,
                 // never layered -- and TrayPressInFlight, TrayPressCleanupPending and TrayPressFinishCleanup
                 // are gone with the route that needed them.
-                if (taskbar.EnsureHidden()) {
+                if (systems.taskbar.EnsureHidden()) {
                     island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
                     std::fflush(stdout);
                 }
@@ -1602,7 +1588,7 @@ float musicWavePhase = 0.0f;
                 // those puts the strip back. Silent when nothing happened, which is the usual case.
                 if (!keepStrip) {
                     const island::NativeTaskbar::WorkAreaRelease again =
-                        taskbar.EnsureWorkAreaReleased();
+                        systems.taskbar.EnsureWorkAreaReleased();
                     if (again.changed) {
                         island::LogAndPrint("  work area: strip released again (it was back) -- "
                                             "%ld,%ld - %ld,%ld  ->  %ld,%ld - %ld,%ld\n",
@@ -1630,8 +1616,8 @@ float musicWavePhase = 0.0f;
             if (listening) {
                 island::Notification incoming;
                 int drained = 0;
-                while (notificationServer.Take(&incoming)) {
-                    const island::Notification* stored = notifications.Push(incoming);
+                while (systems.notificationServer.Take(&incoming)) {
+                    const island::Notification* stored = systems.notifications.Push(incoming);
                     ++drained;
                     if (stored) {
                         // Wide, and converted here: the store is UTF-8 and the narrow overload would print
@@ -1654,7 +1640,7 @@ float musicWavePhase = 0.0f;
                     // NextShape's notice strip); the card is what the pointer opens when it goes to the island
                     // to read the whole thing. Forcing Expanded here -- which is what this did -- would fight
                     // that on every arrival: the strip would exist and never be seen.
-                    window.SetState(island::IslandState::NoticeStrip);
+                    systems.window.SetState(island::IslandState::NoticeStrip);
                 }
             }
 
@@ -1666,14 +1652,14 @@ float musicWavePhase = 0.0f;
             if (toastsAvailable && GetTickCount64() - bar.lastToastPoll >= 2000) {
                 bar.lastToastPoll = GetTickCount64();
                 frameWork |= kWorkToastPoll;
-                const int arrived = toasts.Poll(&notifications);
+                const int arrived = systems.toasts.Poll(&systems.notifications);
                 if (arrived > 0) {
                     island::LogAndPrint("  toasts: %d new system toast(s), %d taken in total", arrived,
-                                        toasts.Taken());
+                                        systems.toasts.Taken());
                     std::fflush(stdout);
                     // A message from another application deserves the same attention as one pushed here --
                     // which is the strip, not the card. See the push channel above.
-                    window.SetState(island::IslandState::NoticeStrip);
+                    systems.window.SetState(island::IslandState::NoticeStrip);
                 }
             }
 
@@ -1681,10 +1667,10 @@ float musicWavePhase = 0.0f;
             if (GetTickCount64() - bar.lastWeChatPoll >= 500) {
                 bar.lastWeChatPoll = GetTickCount64();
                 frameWork |= kWorkWeChatScan;
-                if (wechat.Poll(&notifications, GetTickCount64()) > 0) {
-                    island::LogAndPrint("  wechat: %d message announcement(s) so far", wechat.Announced());
+                if (systems.wechat.Poll(&systems.notifications, GetTickCount64()) > 0) {
+                    island::LogAndPrint("  wechat: %d message announcement(s) so far", systems.wechat.Announced());
                     std::fflush(stdout);
-                    window.SetState(island::IslandState::NoticeStrip);
+                    systems.window.SetState(island::IslandState::NoticeStrip);
                 }
             }
 
@@ -1693,31 +1679,31 @@ float musicWavePhase = 0.0f;
             // Its own clock (200 ms) rather than the window scan's: a notification sound is about a second
             // long, and a check every half second could read the session as active twice in a row and never
             // see the edge -- the sound would play with no announcement and no evidence anywhere.
-            if (soundOutputStarted && soundOutput && GetTickCount64() - bar.lastWeChatSoundPoll >= 200) {
+            if (soundOutputStarted && systems.soundOutput && GetTickCount64() - bar.lastWeChatSoundPoll >= 200) {
                 bar.lastWeChatSoundPoll = GetTickCount64();
                 frameWork |= kWorkWeChatSound;
-                soundOutput->Snapshot(soundSnapshot.get());
+                systems.soundOutput->Snapshot(systems.soundSnapshot.get());
 
                 // Is WeChat running, and is one of its audio sessions making sound?
                 const bool wechatRunning = island::AnyWeChatProcessRunning();
                 bool wechatSessionActive = false;
                 int wechatSessions = 0;
-                for (int i = 0; i < soundSnapshot->sessionCount; ++i) {
-                    const island::SoundSessionInfo& session = soundSnapshot->sessions[i];
+                for (int i = 0; i < systems.soundSnapshot->sessionCount; ++i) {
+                    const island::SoundSessionInfo& session = systems.soundSnapshot->sessions[i];
                     if (!island::IsWeChatProcess(session.pid)) continue;
                     ++wechatSessions;
                     if (session.active) wechatSessionActive = true;
                 }
-                if (wechat.PollSound(&notifications, wechatRunning, wechatSessionActive, wechatSessions,
+                if (systems.wechat.PollSound(&systems.notifications, wechatRunning, wechatSessionActive, wechatSessions,
                                      GetTickCount64()) > 0) {
-                    window.SetState(island::IslandState::NoticeStrip);
+                    systems.window.SetState(island::IslandState::NoticeStrip);
                 }
             }
 
             // Is something asking for attention right now? Computed before the
             // pointer logic so both branches agree on the same answer.
             const island::Notification* active =
-                notifications.ActiveDisplay(GetTickCount64());
+                systems.notifications.ActiveDisplay(GetTickCount64());
 
             // ... AND A CALL HOLDS THE ISLAND, even when it is no longer the newest thing in the store.
             //
@@ -1733,8 +1719,8 @@ float musicWavePhase = 0.0f;
             // The rule is the one the reference uses: a FRESH message wins (a call is not a reason to hide
             // what someone just sent), and the call comes back as soon as the message is done. Reading it --
             // a click on the island -- retires it for good, which is what "read" means everywhere else here.
-            if (active == nullptr && wechat.CallNotificationId() != 0) {
-                const island::Notification* call = notifications.Find(wechat.CallNotificationId());
+            if (active == nullptr && systems.wechat.CallNotificationId() != 0) {
+                const island::Notification* call = systems.notifications.Find(systems.wechat.CallNotificationId());
                 if (call != nullptr && !call->read) active = call;
             }
 
@@ -1742,7 +1728,7 @@ float musicWavePhase = 0.0f;
             // card is open its state is Expanded, and a notice is not a state -- it is something the bar is
             // saying. Everything that lays out the bar's own controls asks the window for this (see
             // SetNoticeStripUp), so the drawing, the hit test and the window region agree about one box.
-            window.SetNoticeStripUp(active != nullptr);
+            systems.window.SetNoticeStripUp(active != nullptr);
 
             // --- what is playing ---
             if (musicAvailable) {
@@ -1757,11 +1743,11 @@ float musicWavePhase = 0.0f;
                 // the bar believed nothing was playing, so its card could not be opened and its own bar.track
                 // was invisible.
                 const bool firstMusicReading = !haveMusicReading;
-                if (firstMusicReading || music.Revision() != lastMusicRevision) {
+                if (firstMusicReading || systems.music.Revision() != lastMusicRevision) {
                     haveMusicReading = true;
-                    lastMusicRevision = music.Revision();
+                    lastMusicRevision = systems.music.Revision();
                     island::MusicInfo latest;
-                    music.Snapshot(&latest);
+                    systems.music.Snapshot(&latest);
                     nowPlaying = latest;
                     // The moment this position was read, so it can be projected forward.
                     musicPositionAt = GetTickCount64();
@@ -1833,9 +1819,9 @@ float musicWavePhase = 0.0f;
             // completed and NOTHING READ IT -- the log showed the bar.track arriving from the window title
             // and then no `lyrics:` line at all, while the words were sitting in the provider. The
             // provider is the same one for both sources, so this belongs to neither of them.
-            if (lyrics.Revision() != lastLyricsRevision) {
-                lastLyricsRevision = lyrics.Revision();
-                currentLyrics = lyrics.Current();
+            if (systems.lyrics.Revision() != lastLyricsRevision) {
+                lastLyricsRevision = systems.lyrics.Revision();
+                currentLyrics = systems.lyrics.Current();
                 lastLyricIndex = -2;
                 lyricsScrollDip = 0.0f;
                 // The catalogue's length is on this line because it is what the card prints and the bar
@@ -1856,14 +1842,14 @@ float musicWavePhase = 0.0f;
             // Measured need: NetEase Cloud Music 3.1.40 plays with the system's session list empty
             // until its own switch is turned on (HANDOFF 8.72), and until then the island had nothing
             // at all to show for the music.
-            if (playerWindowAvailable && playerWindow.Revision() != bar.lastPlayerWindowRevision) {
-                bar.lastPlayerWindowRevision = playerWindow.Revision();
+            if (playerWindowAvailable && systems.playerWindow.Revision() != bar.lastPlayerWindowRevision) {
+                bar.lastPlayerWindowRevision = systems.playerWindow.Revision();
                 // ONLY the reading. It is NOT announced here, because "this player publishes no session"
                 // is a statement about which source is IN USE, and that is decided in the block below --
                 // the live run produced the opposite: the window arrived a few hundred milliseconds before
                 // the session did (the reader's first poll), so the log announced the fallback while a
                 // session was about to be published, and the bar.track it named was the same one.
-                playerWindow.Snapshot(&bar.playerWindowNow);
+                systems.playerWindow.Snapshot(&bar.playerWindowNow);
             }
 
             // --- ONE bar.track change, whichever source it came from -------------------------
@@ -1905,7 +1891,7 @@ float musicWavePhase = 0.0f;
                     // it starts, drifting when it does not).
                     bar.trackPlayedMs = 0.0;
                     if (bar.activePresent) {
-                        lyrics.Request(bar.activeTitle, bar.activeArtist);
+                        systems.lyrics.Request(bar.activeTitle, bar.activeArtist);
                         if (!bar.activeFromSession) {
                             // WHICH SOURCE, said out loud. Without this line a log cannot tell that the
                             // words on the pill came from a window title instead of a session -- and the
@@ -1966,7 +1952,7 @@ float musicWavePhase = 0.0f;
                         // ... and the WINDOW is told, because the hit test is answered there: while an
                         // application has the screen only the island itself is the bar, so a pointer
                         // crossing the top of it cannot land on an icon or a deck button that is not drawn.
-                        window.SetFullscreenApp(bar.fullscreenAppInFront);
+                        systems.window.SetFullscreenApp(bar.fullscreenAppInFront);
                         // `%s` and not `%ls`: this is the NARROW overload of LogAndPrint, whose arguments
                         // are widened a byte at a time, so a `%ls` here would read a `const char*` as a wide
                         // string -- and the CRT answers an invalid conversion by emptying the whole line,
@@ -1986,19 +1972,19 @@ float musicWavePhase = 0.0f;
                     bar.fullscreenLast = fullscreenNow;
 
                     if (fullscreenNow) {
-                        if (appBar.IsRegistered()) {
-                            appBar.Release();
+                        if (systems.appBar.IsRegistered()) {
+                            systems.appBar.Release();
                             island::LogAndPrint("  fullscreen: space released; the bar fills the band");
                         } else {
                             island::LogAndPrint("  fullscreen: the bar stands down");
                         }
-                    } else if (appBarResult == island::AppBarResult::Registered) {
+                    } else if (systems.appBarResult == island::AppBarResult::Registered) {
                         // Reclaimed only if it had been claimed: `--keep-taskbar` never claims, and
                         // claiming on the way out of full-screen would reserve space never asked for.
-                        appBarResult =
-                            appBar.Claim(window.Handle(), island::DockEdge::Top, barThicknessPx);
+                        systems.appBarResult =
+                            systems.appBar.Claim(systems.window.Handle(), island::DockEdge::Top, barThicknessPx);
                         island::LogAndPrint("  fullscreen: over, space re-claimed -- %ls",
-                                            island::AppBarResultName(appBarResult));
+                                            island::AppBarResultName(systems.appBarResult));
                     } else {
                         island::LogAndPrint("  fullscreen: over, back to the pill");
                     }
@@ -2049,7 +2035,7 @@ float musicWavePhase = 0.0f;
                 bar.trayPageOpen = false;
                 // ... and the tray's own menu, which is a thing in front of that page rather than a level
                 // of it, so it cannot outlive the card it was opened over.
-                window.CloseTrayMenu();
+                systems.window.CloseTrayMenu();
                 bar.panelSliderDrag = false;
                 bar.mixerSliderDragRow = -1;
                 bar.mixerSliderDragPid = 0;
@@ -2064,7 +2050,7 @@ float musicWavePhase = 0.0f;
                 // A notice is not a card, so dismissing a card has no business retiring it. This is the only
                 // place a card is put away -- every click-outside branch calls this lambda -- so the shape
                 // can now only ever go card -> notice strip while something is being announced.
-                window.SetState(active == nullptr ? resting : island::IslandState::NoticeStrip);
+                systems.window.SetState(active == nullptr ? resting : island::IslandState::NoticeStrip);
             };
             // A click, routed to whatever it landed on. The icon row is checked FIRST because the
             // icons are not the island: a click on one asks to switch to that window, and must not
@@ -2091,7 +2077,7 @@ float musicWavePhase = 0.0f;
                     // allows: a write per frame would queue up in the monitor and arrive behind the
                     // handle. The value shown follows the pointer either way (see the frame fill).
                     if (bar.brightnessAvailable &&
-                        window.PanelSliderFractionForDrag(1, dragPoint, &fraction)) {
+                        systems.window.PanelSliderFractionForDrag(1, dragPoint, &fraction)) {
                         const int wanted = static_cast<int>(fraction * 100.0f + 0.5f);
                         if (wanted != bar.lastAppliedBrightnessPercent &&
                             (GetTickCount64() >= bar.brightnessWriteNotBefore ||
@@ -2112,10 +2098,10 @@ float musicWavePhase = 0.0f;
                         bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
                     }
                 } else if (volumeAvailable &&
-                           window.PanelSliderFractionForDrag(0, dragPoint, &fraction)) {
+                           systems.window.PanelSliderFractionForDrag(0, dragPoint, &fraction)) {
                     if (std::fabs(fraction - bar.lastAppliedVolumeFraction) > 0.004f) {
                         bar.lastAppliedVolumeFraction = fraction;
-                        volume.SetLevel(fraction);
+                        systems.volume.SetLevel(fraction);
                         // Reported per real step rather than per frame, so "the handle follows the pointer"
                         // and "it only moved twice" can be told apart in the log.
                         if (std::fabs(fraction - bar.lastLoggedVolumeFraction) >= 0.03f) {
@@ -2127,7 +2113,7 @@ float musicWavePhase = 0.0f;
                     }
                     bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                 }
-                if (!window.LeftButtonDown()) {
+                if (!systems.window.LeftButtonDown()) {
                     bar.panelSliderDrag = false;
                     if (bar.panelSliderDragRow == 1) {
                         int finalLevel = 0;
@@ -2138,7 +2124,7 @@ float musicWavePhase = 0.0f;
                         }
                     } else {
                         float finalLevel = 0.0f;
-                        if (volume.Get(&finalLevel)) {
+                        if (systems.volume.Get(&finalLevel)) {
                             island::LogAndPrint("  volume: drag ended at %.0f%%\n",
                                                 finalLevel * 100.0f);
                         } else {
@@ -2156,16 +2142,16 @@ float musicWavePhase = 0.0f;
                 POINT dragPoint = {};
                 GetCursorPos(&dragPoint);
                 float fraction = 0.0f;
-                if (window.MixerSliderFractionForDrag(bar.mixerSliderDragRow, dragPoint, &fraction) &&
+                if (systems.window.MixerSliderFractionForDrag(bar.mixerSliderDragRow, dragPoint, &fraction) &&
                     std::fabs(fraction - bar.lastAppliedMixerFraction) > 0.004f) {
                     bar.lastAppliedMixerFraction = fraction;
                     if (bar.mixerSliderDragRow == 0) {
-                        if (volumeAvailable) volume.SetLevel(fraction);
-                    } else if (soundOutputStarted && soundOutput) {
-                        soundOutput->SetSessionVolume(bar.mixerSliderDragPid, fraction);
+                        if (volumeAvailable) systems.volume.SetLevel(fraction);
+                    } else if (soundOutputStarted && systems.soundOutput) {
+                        systems.soundOutput->SetSessionVolume(bar.mixerSliderDragPid, fraction);
                     }
                 }
-                if (!window.LeftButtonDown()) {
+                if (!systems.window.LeftButtonDown()) {
                     bar.mixerSliderDragRow = -1;
                     bar.mixerSliderDragPid = 0;
                     island::LogAndPrint("  mixer: drag ended\n");
@@ -2181,20 +2167,20 @@ float musicWavePhase = 0.0f;
             // back, so there is still only one offset in play.
             {
                 int wheelNotches = 0;
-                if (bar.soundPageOpen && window.TakeSoundWheel(&wheelNotches)) {
+                if (bar.soundPageOpen && systems.window.TakeSoundWheel(&wheelNotches)) {
                     bar.soundPageScroll -= static_cast<float>(wheelNotches) * 60.0f;
-                    window.SetSoundPageScroll(bar.soundPageScroll);
-                    bar.soundPageScroll = window.SoundPageScroll();
+                    systems.window.SetSoundPageScroll(bar.soundPageScroll);
+                    bar.soundPageScroll = systems.window.SoundPageScroll();
                     island::LogAndPrint("  sound page: wheel %d -> scroll %.0f\n", wheelNotches,
                                         bar.soundPageScroll);
                     std::fflush(stdout);
                 } else if (bar.startPageOpen && bar.startPageState == 1 &&
-                           window.TakeSoundWheel(&wheelNotches)) {
+                           systems.window.TakeSoundWheel(&wheelNotches)) {
                     // The picker scrolls one NOTCH per row, not in pixels: 121 applications at 34 DIP a row
                     // is 4,114 DIP of list, and a pixel-per-notch wheel would take a minute to reach the
                     // end alphabetically. Clamped so the last screenful is the last thing reachable.
-                    window.ScrollStartPicker(wheelNotches);
-                    bar.startPickerScroll = window.StartPickerScroll();
+                    systems.window.ScrollStartPicker(wheelNotches);
+                    bar.startPickerScroll = systems.window.StartPickerScroll();
                     island::LogAndPrint("  start: picker wheel %d -> row %d of %d\n", wheelNotches,
                                         bar.startPickerScroll, bar.startAppCount);
                     std::fflush(stdout);
@@ -2208,29 +2194,29 @@ float musicWavePhase = 0.0f;
             // only the END of the gesture: see the top of the click loop below.
             {
                 POINT pressed = {};
-                while (window.TakePress(&pressed)) {
+                while (systems.window.TakePress(&pressed)) {
                     if (!bar.systemPanelOpen) continue;
                     // The level that is SHOWING decides which control the press lands on, exactly as the click
                     // chain below does -- see the note at `panelHit`. Without it the mixer's rows answered
                     // while the tray page was up, because the two share the card.
                     if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
-                        const island::SoundPageHit hit = window.SoundPageHitAtScreen(pressed);
+                        const island::SoundPageHit hit = systems.window.SoundPageHitAtScreen(pressed);
                         if (hit.target == island::SoundPageTarget::MixerSlider) {
                             bar.mixerSliderDragRow = hit.index;
                             bar.lastAppliedMixerFraction = hit.fraction;
                             if (hit.index == 0) {
-                                if (volumeAvailable) volume.SetLevel(hit.fraction);
-                            } else if (soundOutputStarted && soundOutput &&
-                                       hit.index - 1 < soundSnapshot->sessionCount) {
-                                bar.mixerSliderDragPid = soundSnapshot->sessions[hit.index - 1].pid;
-                                soundOutput->SetSessionVolume(bar.mixerSliderDragPid, hit.fraction);
+                                if (volumeAvailable) systems.volume.SetLevel(hit.fraction);
+                            } else if (soundOutputStarted && systems.soundOutput &&
+                                       hit.index - 1 < systems.soundSnapshot->sessionCount) {
+                                bar.mixerSliderDragPid = systems.soundSnapshot->sessions[hit.index - 1].pid;
+                                systems.soundOutput->SetSessionVolume(bar.mixerSliderDragPid, hit.fraction);
                             }
                             island::LogAndPrint("  mixer: press on row %d -> %.0f%%\n", hit.index,
                                                 hit.fraction * 100.0f);
                             std::fflush(stdout);
                         }
                     } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles)) {
-                        const island::SystemPanelHit hit = window.SystemPanelHitAtScreen(pressed);
+                        const island::SystemPanelHit hit = systems.window.SystemPanelHitAtScreen(pressed);
                         if (hit.target == island::SystemPanelTarget::Slider) {
                             // WHICH slider, from the hit's own index: 0 is the volume row and 1 the
                             // brightness row, and the drag that this press begins has to follow the row it
@@ -2256,7 +2242,7 @@ float musicWavePhase = 0.0f;
                                 bar.panelSliderDrag = true;
                                 bar.panelSliderDragRow = 0;
                                 bar.lastAppliedVolumeFraction = hit.fraction;
-                                volume.SetLevel(hit.fraction);
+                                systems.volume.SetLevel(hit.fraction);
                                 bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                                 island::LogAndPrint("  volume: press on the slider -> %.0f%%\n",
                                                     hit.fraction * 100.0f);
@@ -2267,7 +2253,7 @@ float musicWavePhase = 0.0f;
                 }
             }
 
-            while (window.TakeClick()) {
+            while (systems.window.TakeClick()) {
                 POINT cursor = {};
                 GetCursorPos(&cursor);
 
@@ -2291,8 +2277,8 @@ float musicWavePhase = 0.0f;
                 // menu is CONSUMED -- that is what every context menu does, and the alternative (dismiss and
                 // then act on whatever was underneath) presses a tray icon the user was only trying to get
                 // out from under the menu.
-                if (window.TrayMenuIsOpen()) {
-                    const int row = window.TrayMenuRowHovered();
+                if (systems.window.TrayMenuIsOpen()) {
+                    const int row = systems.window.TrayMenuRowHovered();
                     // ARMED, NOT DONE. 结束应用 is the one entry that cannot be taken back -- it ends the
                     // application's processes and gives it no chance to save -- so the first press only says
                     // what the second will do (the row's own label changes; see TrayMenuArmedLabel) and the
@@ -2310,13 +2296,13 @@ float musicWavePhase = 0.0f;
                         std::fflush(stdout);
                         continue;
                     }
-                    window.CloseTrayMenu();
+                    systems.window.CloseTrayMenu();
                     bar.trayQuitArmed = false;
                     if (row >= 0 && row < bar.trayMenuActionCount) {
                         const island::TrayMenuAction action = bar.trayMenuActions[row];
                         island::LogAndPrint(L"  tray menu: %ls\n", island::TrayMenuLabel(action));
                         std::fflush(stdout);
-                        island::RunTrayMenuAction(trayIcons, taskWindows, bar.trayMenuCell, action);
+                        island::RunTrayMenuAction(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, action);
                         if (action == island::TrayMenuAction::Open ||
                             action == island::TrayMenuAction::CloseWindow ||
                             action == island::TrayMenuAction::ApplicationMenu) {
@@ -2338,7 +2324,7 @@ float musicWavePhase = 0.0f;
                 // disagree with each other within a single click either.
                 const island::SystemPanelHit panelHit =
                     (bar.systemPanelOpen && island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles))
-                        ? window.SystemPanelHitAtScreen(cursor)
+                        ? systems.window.SystemPanelHitAtScreen(cursor)
                         : island::SystemPanelHit{};
 
                 // ... AND ONLY WHILE THE TILES ARE THE LEVEL THAT IS SHOWING. All four levels share one card
@@ -2359,7 +2345,7 @@ float musicWavePhase = 0.0f;
                 island::LogAndPrint(L"  click: panel=%d soundPage=%d target=%d shape=%ls\n",
                                     bar.systemPanelOpen ? 1 : 0, bar.soundPageOpen ? 1 : 0,
                                     static_cast<int>(panelHit.target),
-                                    island::StateName(window.State()));
+                                    island::StateName(systems.window.State()));
 
                 // Nothing about this can be concluded from a screenshot, so it reports what it
                 // decided: which icon was hit, which window that was, and whether the activation
@@ -2369,7 +2355,7 @@ float musicWavePhase = 0.0f;
                 // list. `IconAtScreen` answers from the same count the window was given, so it cannot
                 // return more than that anyway -- but the list can hold windows the row had no room
                 // for, and indexing straight into it would switch to a window with no icon on screen.
-                const int icon = window.IconAtScreen(cursor);
+                const int icon = systems.window.IconAtScreen(cursor);
                 island::LogAndPrint("  click: icon under the pointer = %d\n", icon);
 
                 // The START BUTTON first, because it is on the far side of the island from the icons
@@ -2378,7 +2364,7 @@ float musicWavePhase = 0.0f;
                 // Its outcome is reported rather than assumed: asking for the Start menu can fail in
                 // ways that leave no trace afterwards, and "the button did nothing" is the same symptom
                 // for every one of them.
-                if (window.StartAtScreen(cursor)) {
+                if (systems.window.StartAtScreen(cursor)) {
                     // THE BAR'S OWN START CARD, which is what was asked for: "能不能也自己画 而不是使用系统
                     // 的". The system menu is not gone -- the Windows key and Ctrl+Esc still open it -- it is
                     // simply no longer what THIS button does, and that is one line in the log rather than a
@@ -2393,7 +2379,7 @@ float musicWavePhase = 0.0f;
                     island::LogAndPrint("  start click: the bar's own card %ls\n",
                                         bar.startPageOpen ? L"open" : L"closed");
                     std::fflush(stdout);
-                } else if (trayIcons.Count() > 0 && window.TrayButtonAtScreen(cursor)) {
+                } else if (systems.trayIcons.Count() > 0 && systems.window.TrayButtonAtScreen(cursor)) {
                     // THE TRAY BUTTON, at the other end of the bar from the system button, and a toggle
                     // for the same reason: pressing it again puts away what it opened.
                     //
@@ -2412,7 +2398,7 @@ float musicWavePhase = 0.0f;
                     island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
                     std::fflush(stdout);
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Start) &&
-                           window.StartHitHovered().target !=
+                           systems.window.StartHitHovered().target !=
                                island::IslandWindow::StartHitTarget::None) {
                     // --- A PRESS ON THE START CARD -----------------------------------------------------
                     //
@@ -2421,11 +2407,11 @@ float musicWavePhase = 0.0f;
                     //
                     // Every branch logs what it did: a launcher whose click does nothing is the hardest
                     // thing on this bar to tell from a click that never arrived.
-                    const island::IslandWindow::StartHit startHit = window.StartHitHovered();
+                    const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
                     switch (startHit.target) {
                         case island::IslandWindow::StartHitTarget::Pin: {
                             if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
-                                const island::StartApp& app = startApps.PinAt(startHit.index);
+                                const island::StartApp& app = systems.startApps.PinAt(startHit.index);
                                 island::LogAndPrint("  start: launching pinned '%ls'\n", app.name);
                                 island::LaunchStartApp(app.target);
                             }
@@ -2434,13 +2420,13 @@ float musicWavePhase = 0.0f;
                         }
                         case island::IslandWindow::StartHitTarget::PickerRow: {
                             if (startHit.index >= 0 && startHit.index < bar.startAppCount) {
-                                const island::StartApp& app = startApps.ListAt(startHit.index);
+                                const island::StartApp& app = systems.startApps.ListAt(startHit.index);
                                 // The shortcut is NAMED after the application, which is also what the tile
                                 // will show: renaming the file in Explorer renames the tile.
-                                const bool added = startApps.Pin(app.target, app.name);
+                                const bool added = systems.startApps.Pin(app.target, app.name);
                                 island::LogAndPrint("  start: %ls '%ls' (%d pinned now)\n",
                                                     added ? "pinned" : "already pinned", app.name,
-                                                    startApps.PinCount());
+                                                    systems.startApps.PinCount());
                                 // Back to the pins, which is where the new one just appeared: staying in a
                                 // list of 121 with no sign of what happened is how a click reads as a dud.
                                 bar.startPageState = 0;
@@ -2491,7 +2477,7 @@ float musicWavePhase = 0.0f;
                     }
                     std::fflush(stdout);
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
-                           window.TrayCellHovered() >= 0) {
+                           systems.window.TrayCellHovered() >= 0) {
                     // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
                     // thing about the tray this bar cannot do itself -- the menu or the window that
                     // follows belongs to the application, and the shell is the one that knows how to ask
@@ -2501,14 +2487,14 @@ float musicWavePhase = 0.0f;
                     // On a WORKER THREAD, because showing the shell's tray, opening its overflow and
                     // pressing through UI Automation takes a few hundred milliseconds, and the bar draws
                     // at the compositor's rate on this thread.
-                    const int cell = window.TrayCellHovered();
-                    if (cell < trayIcons.Count()) {
-                        island::StartTrayPress(trayIcons, cell, false);
+                    const int cell = systems.window.TrayCellHovered();
+                    if (cell < systems.trayIcons.Count()) {
+                        island::StartTrayPress(systems.trayIcons, cell, false);
                     }
                     // The card goes with the press, which is what the shell does with its own flyout: the
                     // application's window or menu is what the user is waiting for.
                     dismissPanel();
-                } else if (window.SystemButtonAtScreen(cursor)) {
+                } else if (systems.window.SystemButtonAtScreen(cursor)) {
                     // The system panel is a TOGGLE, like the shell's own flyout: pressing the control
                     // again closes what it opened. Without that the only way out would be to click
                     // somewhere unrelated, which is not a way out a user can guess.
@@ -2531,7 +2517,7 @@ float musicWavePhase = 0.0f;
                     // Reached BEFORE the panel's, because the two are laid out over the same card: while this
                     // level is showing, a click at the position of a tile is a click on a device row, and
                     // asking the panel first would fire the wrong action entirely.
-                    const island::SoundPageHit soundHit = window.SoundPageHitAtScreen(cursor);
+                    const island::SoundPageHit soundHit = systems.window.SoundPageHitAtScreen(cursor);
                     switch (soundHit.target) {
                         case island::SoundPageTarget::Back:
                             bar.soundPageOpen = false;
@@ -2540,9 +2526,9 @@ float musicWavePhase = 0.0f;
 
                         case island::SoundPageTarget::Device:
                             if (soundHit.index >= 0 &&
-                                soundHit.index < soundSnapshot->deviceCount) {
+                                soundHit.index < systems.soundSnapshot->deviceCount) {
                                 const island::SoundDeviceInfo& wanted =
-                                    soundSnapshot->devices[soundHit.index];
+                                    systems.soundSnapshot->devices[soundHit.index];
                                 if (wanted.isDefault) {
                                     island::LogAndPrint(
                                         L"  sound page: device %d '%ls' is already the default\n",
@@ -2551,10 +2537,10 @@ float musicWavePhase = 0.0f;
                                     // Handed to the worker: switching the default goes through an interface
                                     // that has no public documentation (see SoundOutput), and the worker's
                                     // own log line is what says whether it took.
-                                    soundOutput->SetDefaultDevice(wanted.id);
+                                    systems.soundOutput->SetDefaultDevice(wanted.id);
                                     // And a fresh reading asked for at once, rather than up to a second of
                                     // showing the old device as the current one.
-                                    soundOutput->Refresh();
+                                    systems.soundOutput->Refresh();
                                     island::LogAndPrint(
                                         L"  sound page: switching the default device to %d '%ls'\n",
                                         soundHit.index, wanted.name);
@@ -2577,16 +2563,16 @@ float musicWavePhase = 0.0f;
                             if (row == 0) {
                                 // The device's own row is the master volume, which is AudioVolume's.
                                 if (volumeAvailable) {
-                                    volume.SetLevel(soundHit.fraction);
+                                    systems.volume.SetLevel(soundHit.fraction);
                                     bar.mixerSliderDragRow = 0;
                                     bar.mixerSliderDragPid = 0;
                                     island::LogAndPrint("  mixer: master -> %.0f%%\n",
                                                         soundHit.fraction * 100.0f);
                                 }
-                            } else if (row - 1 < soundSnapshot->sessionCount) {
+                            } else if (row - 1 < systems.soundSnapshot->sessionCount) {
                                 const island::SoundSessionInfo& session =
-                                    soundSnapshot->sessions[row - 1];
-                                soundOutput->SetSessionVolume(session.pid, soundHit.fraction);
+                                    systems.soundSnapshot->sessions[row - 1];
+                                systems.soundOutput->SetSessionVolume(session.pid, soundHit.fraction);
                                 bar.mixerSliderDragRow = row;
                                 bar.mixerSliderDragPid = session.pid;
                                 island::LogAndPrint(L"  mixer: '%ls' (pid %lu) -> %.0f%%\n",
@@ -2620,11 +2606,11 @@ float musicWavePhase = 0.0f;
                             // which is what the shell's own scrollbar does. The window says WHICH WAY -- it is
                             // the one that knows where the thumb is, from the same layout the press was
                             // hit-tested against -- and the OFFSET stays here with the page it belongs to.
-                            const int jump = window.SoundScrollJumpFor(cursor);
+                            const int jump = systems.window.SoundScrollJumpFor(cursor);
                             if (jump != 0) {
                                 bar.soundPageScroll += static_cast<float>(jump) * 140.0f;
-                                window.SetSoundPageScroll(bar.soundPageScroll);
-                                bar.soundPageScroll = window.SoundPageScroll();
+                                systems.window.SetSoundPageScroll(bar.soundPageScroll);
+                                bar.soundPageScroll = systems.window.SoundPageScroll();
                                 island::LogAndPrint("  sound page: scroll -> %.0f\n", bar.soundPageScroll);
                             }
                             break;
@@ -2639,18 +2625,18 @@ float musicWavePhase = 0.0f;
                     std::fflush(stdout);
                 } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::PageDown) {
-                    const int pages = window.SystemPanel().pageCount;
+                    const int pages = systems.window.SystemPanel().pageCount;
                     if (pages > 1) {
-                        bar.systemPanelPage = (window.SystemPanel().pageIndex + 1) % pages;
+                        bar.systemPanelPage = (systems.window.SystemPanel().pageIndex + 1) % pages;
                         island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
                                             pages);
                         std::fflush(stdout);
                     }
                 } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::PageUp) {
-                    const int pages = window.SystemPanel().pageCount;
+                    const int pages = systems.window.SystemPanel().pageCount;
                     if (pages > 1) {
-                        bar.systemPanelPage = (window.SystemPanel().pageIndex + pages - 1) % pages;
+                        bar.systemPanelPage = (systems.window.SystemPanel().pageIndex + pages - 1) % pages;
                         island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
                                             pages);
                         std::fflush(stdout);
@@ -2682,7 +2668,7 @@ float musicWavePhase = 0.0f;
                         // Pressed without a press event having been seen -- a click that arrived on its own,
                         // which happens when the panel opened between the two. The fraction comes from the
                         // same layout the bar was drawn from, so the handle goes exactly where the click was.
-                        volume.SetLevel(panelHit.fraction);
+                        systems.volume.SetLevel(panelHit.fraction);
                         bar.panelSliderDrag = true;   // and keep following the pointer while the button is held
                         bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                         island::LogAndPrint("  volume: set to %.0f%% (drag begins)\n",
@@ -2693,10 +2679,10 @@ float musicWavePhase = 0.0f;
                                                   island::SystemPanelTarget::Speaker) {
                     // The speaker glyph is the mute control, as it is in the shell's own flyout.
                     if (volumeAvailable) {
-                        volume.ToggleMute();
+                        systems.volume.ToggleMute();
                         bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
                         island::LogAndPrint("  volume: %ls\n",
-                                            volume.IsMuted() ? L"muted" : L"unmuted");
+                                            systems.volume.IsMuted() ? L"muted" : L"unmuted");
                         std::fflush(stdout);
                     }
                 } else if (bar.systemPanelOpen && panelHit.target ==
@@ -2727,7 +2713,7 @@ float musicWavePhase = 0.0f;
                     // Read from the WINDOW rather than from a frame, because the click handler runs
                     // before this frame's state exists: the frame is filled further down the loop.
                     const int tileIndex = panelHit.index;
-                    const island::TextRenderer::SystemPanelText& panel = window.SystemPanel();
+                    const island::TextRenderer::SystemPanelText& panel = systems.window.SystemPanel();
                     if (tileIndex >= 0 && tileIndex < panel.tileCount) {
                         const island::TextRenderer::SystemPanelTile& tile = panel.tiles[tileIndex];
                         island::LogAndPrint(L"  click: tile %d '%ls' action=%d chevron=%d\n", tileIndex,
@@ -2784,7 +2770,7 @@ float musicWavePhase = 0.0f;
                                 // Off when anything is still on, on otherwise -- the same rule the shell's own
                                 // airplane mode follows, and the one a user expects from a toggle that is dark
                                 // while a radio beside it is lit.
-                                const bool wanted = systemStatus.wifiRadioOn || systemStatus.bluetoothOn;
+                                const bool wanted = systems.systemStatus.wifiRadioOn || systems.systemStatus.bluetoothOn;
                                 const bool started = island::RequestRadios(true, true, wanted);
                                 island::LogAndPrint(
                                     L"  tile %d '%ls' -> Wi-Fi and Bluetooth %ls (result %d)\n",
@@ -2799,7 +2785,7 @@ float musicWavePhase = 0.0f;
                                 // The Wi-Fi radio on its own, from the Wi-Fi tile. Its own switch and the
                                 // 飞行模式 tile's are the same mechanism at different scopes, which is why
                                 // they are one call with different arguments rather than two code paths.
-                                const bool wanted = !systemStatus.wifiRadioOn;
+                                const bool wanted = !systems.systemStatus.wifiRadioOn;
                                 const bool started = island::RequestRadios(true, false, wanted);
                                 island::LogAndPrint(
                                     L"  tile %d '%ls' -> Wi-Fi radio %ls (%ls)\n", tileIndex,
@@ -2827,7 +2813,7 @@ float musicWavePhase = 0.0f;
                                 // milliseconds and the frame loop must not wait for it. The outcome is
                                 // collected in the loop below and logged there, and the caption is read back
                                 // from the machine on the next status sample rather than flipped here.
-                                const bool wanted = !systemStatus.bluetoothOn;
+                                const bool wanted = !systems.systemStatus.bluetoothOn;
                                 const bool started = island::RequestRadios(false, true, wanted);
                                 island::LogAndPrint(
                                     L"  tile %d '%ls' -> Bluetooth %ls (%ls)\n", tileIndex,
@@ -2843,7 +2829,7 @@ float musicWavePhase = 0.0f;
                                 // Pressed on the Settings page's own switch, on a worker, because that page
                                 // takes seconds to load. The cost is stated in the log line: a Settings window
                                 // appears for the length of the operation.
-                                const bool wanted = !systemStatus.nightLightOn;
+                                const bool wanted = !systems.systemStatus.nightLightOn;
                                 const bool started = island::RequestNightLight(wanted);
                                 island::LogAndPrint(
                                     L"  tile %d '%ls' -> night light %ls (%ls; this opens the Settings page"
@@ -2874,7 +2860,7 @@ float musicWavePhase = 0.0f;
                                 // change would otherwise leave every old colour in memory for the rest
                                 // of the session.
                                 const island::Theme& chosen = island::CycleTheme();
-                                text.ClearBrushCache();
+                                systems.text.ClearBrushCache();
                                 island::LogAndPrint(
                                     L"  tile %d '%ls' -> theme %ls (%d of %d)\n", tileIndex,
                                     tile.label ? tile.label : L"?", chosen.name,
@@ -2918,14 +2904,14 @@ float musicWavePhase = 0.0f;
                     const bool alreadyInFront = (GetForegroundWindow() == target);
 
                     if (alreadyInFront) {
-                        if (taskWindows.Minimize(target)) {
+                        if (systems.taskWindows.Minimize(target)) {
                             island::LogAndPrint("  icon click: minimised %p (it was already in front)",
                                                 reinterpret_cast<void*>(target));
                         } else {
                             island::LogAndPrint("  icon click: minimise FAILED for %p",
                                                 reinterpret_cast<void*>(target));
                         }
-                    } else if (taskWindows.Activate(target)) {
+                    } else if (systems.taskWindows.Activate(target)) {
                         island::LogAndPrint("  icon click: activated %p",
                                             reinterpret_cast<void*>(target));
                     } else {
@@ -2946,7 +2932,7 @@ float musicWavePhase = 0.0f;
                                         bar.taskWindowsShown);
                     std::fflush(stdout);
 
-                const island::CardControl control = window.MusicControlAtScreen(cursor);
+                const island::CardControl control = systems.window.MusicControlAtScreen(cursor);
                 // Every click reports what it was taken to mean.
                 //
                 // "The card does not respond" and "the click never reached the process" look the
@@ -2962,7 +2948,7 @@ float musicWavePhase = 0.0f;
                         what = "next";
                     }
                     island::LogAndPrint("  click routed: state=%ls, meaning=%s",
-                                        island::StateName(window.State()), what);
+                                        island::StateName(systems.window.State()), what);
                     std::fflush(stdout);
                 }
                 if (control != island::CardControl::None) {
@@ -2976,11 +2962,11 @@ float musicWavePhase = 0.0f;
                         action = island::MusicSession::Transport::Next;
                         name = "next";
                     }
-                    if (music.RequestTransport(action)) {
+                    if (systems.music.RequestTransport(action)) {
                         island::LogAndPrint("  music: %s requested", name);
                         std::fflush(stdout);
                     }
-                } else if (window.State() == island::IslandState::NoticeStrip) {
+                } else if (systems.window.State() == island::IslandState::NoticeStrip) {
                     // A PRESS WHILE A CALL OR A MESSAGE IS ON THE ISLAND LEAVES IT ALONE.
                     //
                     // Asked for in these words: "当通知和通话的时候点击 就通话和通知的样子" -- while the strip
@@ -3013,13 +2999,13 @@ float musicWavePhase = 0.0f;
                     // disappeared for good: `notifications: 1 marked read (click)` at 13:43:19 with the call
                     // still up, after which the island never showed it again. The call is retired by the call
                     // ENDING, which the watcher detects and reports.
-                    const int marked = notifications.MarkAllReadExcept(wechat.CallNotificationId());
+                    const int marked = systems.notifications.MarkAllReadExcept(systems.wechat.CallNotificationId());
                     if (marked > 0) {
                         island::LogAndPrint("  notifications: %d marked read (click)", marked);
                         std::fflush(stdout);
                         // Recompute immediately so the same frame reflects the click
                         // instead of waiting for the next tick to notice.
-                        window.SetState(window.IsPointerInside()
+                        systems.window.SetState(systems.window.IsPointerInside()
                                             ? island::IslandState::Hover
                                             : resting);
                     }
@@ -3047,43 +3033,43 @@ float musicWavePhase = 0.0f;
             const auto openBarTrayMenu = [&](int cell) {
                 bar.trayMenuCell = cell;
                 island::TrayMenuFacts facts;
-                island::TrayMenuFactsFor(trayIcons, taskWindows, bar.trayMenuCell, &facts);
+                island::TrayMenuFactsFor(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, &facts);
                 bar.trayMenuActionCount = island::TrayMenuEntriesFor(facts, bar.trayMenuActions,
                                                                 island::kMaxTrayMenuEntries);
-                window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
+                systems.window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
                 bar.trayQuitArmed = false;   // a new menu starts unarmed
                 wchar_t flatMenuName[128] = {};
                 island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d callback=%d)\n",
-                                    island::FlatName(trayIcons.At(bar.trayMenuCell).name, flatMenuName, 128),
+                                    island::FlatName(systems.trayIcons.At(bar.trayMenuCell).name, flatMenuName, 128),
                                     bar.trayMenuActionCount, facts.hasWindow ? 1 : 0,
                                     facts.hasExePath ? 1 : 0, facts.hasCallback ? 1 : 0);
                 std::fflush(stdout);
             };
             // The worker's request, answered on the thread that owns the window (see island::trayMenuRequestCell).
             const int menuRequestCell = island::trayMenuRequestCell.exchange(-1);
-            if (menuRequestCell >= 0 && menuRequestCell < trayIcons.Count()) {
+            if (menuRequestCell >= 0 && menuRequestCell < systems.trayIcons.Count()) {
                 island::LogAndPrint(L"  tray menu: nothing is known about cell %d yet, so the press opens "
                                     L"this bar's own menu instead\n", menuRequestCell);
                 openBarTrayMenu(menuRequestCell);
             }
-            while (window.TakeRightClick()) {
+            while (systems.window.TakeRightClick()) {
                 POINT rightCursor = {};
                 GetCursorPos(&rightCursor);
-                const island::IslandWindow::StartHit startHit = window.StartHitHovered();
+                const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
                 if (bar.startPageOpen && bar.systemPanelOpen &&
                     startHit.target == island::IslandWindow::StartHitTarget::Pin) {
                     // A pinned tile, right-clicked: that is how it comes off again. Unpinning from the
                     // CARD rather than from a settings file is the whole point of the card being the
                     // user's own -- he said the upper area should be his to fill.
                     if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
-                        const island::StartApp& app = startApps.PinAt(startHit.index);
+                        const island::StartApp& app = systems.startApps.PinAt(startHit.index);
                         island::LogAndPrint("  start: unpinning '%ls'\n", app.name);
-                        startApps.Unpin(startHit.index);
+                        systems.startApps.Unpin(startHit.index);
                         bar.startPowerConfirm = -1;
                     }
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
-                           window.TrayCellHovered() >= 0 &&
-                           window.TrayCellHovered() < trayIcons.Count()) {
+                           systems.window.TrayCellHovered() >= 0 &&
+                           systems.window.TrayCellHovered() < systems.trayIcons.Count()) {
                     // THE BAR'S OWN MENU, not the shell's (HANDOFF 8.80).
                     //
                     // Right-clicking a cell used to ask the shell for the application's menu: show the
@@ -3093,7 +3079,7 @@ float musicWavePhase = 0.0f;
                     // the pointer that asked for it. This menu is instant, lands where the pointer is, and
                     // is drawn in the card the user is already looking at; the application's own menu is the
                     // LAST entry of it, for the things only the application knows ("退出微信").
-                    openBarTrayMenu(window.TrayCellHovered());
+                    openBarTrayMenu(systems.window.TrayCellHovered());
                 } else {
                     island::LogAndPrint("  right click: no tray cell under the pointer (%d,%d)\n",
                                         rightCursor.x, rightCursor.y);
@@ -3144,7 +3130,7 @@ float musicWavePhase = 0.0f;
                 if (leftDown && !bar.leftWasDown) {
                     // Reported even when the press was on the bar: "the panel did not close" and "the press
                     // was never seen" are different faults, and only this line tells them apart.
-                    const bool onBar = window.HitTestScreen(where);
+                    const bool onBar = systems.window.HitTestScreen(where);
                     island::LogAndPrint(
                         "  system panel: a press at (%ld,%ld) %ls the bar\n", where.x, where.y,
                         onBar ? L"on" : L"outside");
@@ -3242,7 +3228,7 @@ float musicWavePhase = 0.0f;
                 const DWORD elapsed = static_cast<DWORD>(GetTickCount() - diagnosticStart);
                 if (elapsed >= bar.autoTransportMs) {
                     bar.transportForced = true;
-                    const bool asked = music.RequestTogglePlayPause();
+                    const bool asked = systems.music.RequestTogglePlayPause();
                     island::LogAndPrint("  diagnostic: play/pause %ls at %lu ms\n",
                                         asked ? L"requested" : L"REFUSED (no session to control)",
                                         static_cast<unsigned long>(elapsed));
@@ -3260,7 +3246,7 @@ float musicWavePhase = 0.0f;
                 const bool insideNow = ((since / autoInsideFlickerMs) % 2) == 0;
                 if (insideNow != flickerInside) {
                     flickerInside = insideNow;
-                    window.SetForcedPointerInside(insideNow ? 1 : 0);
+                    systems.window.SetForcedPointerInside(insideNow ? 1 : 0);
                     island::LogAndPrint("  diagnostic: the pointer flicks %ls at %lu ms\n",
                                         insideNow ? L"ONTO the island" : L"OFF the island", since);
                     std::fflush(stdout);
@@ -3275,7 +3261,7 @@ float musicWavePhase = 0.0f;
             if (autoDeckHoverMs > 0 && !forcedState && !deckHoverForced &&
                 GetTickCount() - diagnosticStart >= autoDeckHoverMs) {
                 deckHoverForced = true;
-                window.SetForcedDeckHover(true);
+                systems.window.SetForcedDeckHover(true);
                 island::LogAndPrint("  diagnostic: the pointer is treated as ON a deck button at %lu ms\n",
                                     static_cast<unsigned long>(GetTickCount() - diagnosticStart));
                 std::fflush(stdout);
@@ -3286,7 +3272,7 @@ float musicWavePhase = 0.0f;
             if (autoCardHoverMs > 0 && !forcedState && !cardHoverForced &&
                 GetTickCount() - diagnosticStart >= autoCardHoverMs) {
                 cardHoverForced = true;
-                window.SetForcedPointerInside(autoCardMode);
+                systems.window.SetForcedPointerInside(autoCardMode);
                 island::LogAndPrint("  diagnostic: the pointer is treated as %ls at %lu ms\n",
                                     autoCardMode == 4 ? L"in the GAP above the card" : L"ON the card",
                                     static_cast<unsigned long>(GetTickCount() - diagnosticStart));
@@ -3308,7 +3294,7 @@ float musicWavePhase = 0.0f;
             // The frame loop runs at the compositor's rate, which is better than 8 ms and cannot
             // be starved, so it is the reliable place to ask. The timer is left in place as a
             // fallback for the paths that do not pump this loop.
-            window.UpdatePointerState();
+            systems.window.UpdatePointerState();
 
             // The window only reports that the pointer entered or left; what that
             // means is decided here, which keeps the window procedure free of policy.
@@ -3318,7 +3304,7 @@ float musicWavePhase = 0.0f;
             // than collapsing it, or an arriving message would be cut off the instant
             // the pointer drifted away.
             bool pointerInside = false;
-            if (window.TakePointerInsideChanged(&pointerInside)) {
+            if (systems.window.TakePointerInsideChanged(&pointerInside)) {
                 // THE EDGE IS CONSUMED AND NOTHING ELSE HAPPENS HERE.
                 //
                 // The state is the POLICY's answer (NextShape, below). Every state this handler used to
@@ -3338,7 +3324,7 @@ float musicWavePhase = 0.0f;
             }
             // A layout change (DPI, work-area change) has already been applied by
             // the window; draining the flag keeps it from accumulating.
-            window.TakeLayoutChanged();
+            systems.window.TakeLayoutChanged();
 
             // --- pointer -> shape, once the motion has settled ---
             //
@@ -3350,15 +3336,15 @@ float musicWavePhase = 0.0f;
             //
             // Only consulted when the motion has stopped, so a shape is never re-targeted
             // mid-flight (that would restart the animation every frame).
-            if (!window.IsAnimating()) {
+            if (!systems.window.IsAnimating()) {
                 // The icon row is described to the policy so it can tell "the pointer is on the
                 // island" from "the pointer is on one of the icons". Those need different answers:
                 // the first widens the island, the second widens one icon and leaves the island
                 // exactly as it is.
                 island::PointerContext context;
-                context.shape = window.State();
+                context.shape = systems.window.State();
                 context.resting = resting;
-                context.pointerInside = window.IsPointerInside();
+                context.pointerInside = systems.window.IsPointerInside();
                 context.notificationActive = active != nullptr;
                 // ... and whether there is a player at all: a PAUSED session still opens the card, which
                 // is how the play button is reached after a pause (see ShouldPromoteToCard).
@@ -3372,19 +3358,19 @@ float musicWavePhase = 0.0f;
                 // the state stays Hover and the card is never drawn. That was a whole debugging round:
                 // the flag was set, the renderer read it, and the shape never changed.
                 context.systemPanelOpen = bar.systemPanelOpen;
-                context.iconCount = window.IconCount();
-                context.hoveredIcon = window.HoveredIcon();
+                context.iconCount = systems.window.IconCount();
+                context.hoveredIcon = systems.window.HoveredIcon();
                 // Where the pointer is, for the rule that gives the card up: an icon or a deck button is
                 // asking about itself, not about the island. The window is the only thing that knows where
                 // those buttons are.
-                context.pointerOnDeck = window.SystemButtonHovered() || window.StartHovered();
+                context.pointerOnDeck = systems.window.SystemButtonHovered() || systems.window.StartHovered();
                 // ... and whether it is on the PILL rather than elsewhere on the bar. The card is the
                 // pill's, so this, not `pointerInside`, is what asks for it.
-                context.pointerOnIsland = window.IsPointerOnIsland();
+                context.pointerOnIsland = systems.window.IsPointerOnIsland();
                 // ... and whether it is in the CARD's COLUMN -- the card and the gap between it and the bar.
                 // That column is the pill's territory as much as the pill is: the pointer has to be able to
                 // walk from the pill down onto the card whose buttons it wants, and the gap is part of the walk.
-                context.pointerInCardColumn = window.IsPointerInCardColumn();
+                context.pointerInCardColumn = systems.window.IsPointerInCardColumn();
 
                 const island::IslandState next = island::NextShape(context);
 
@@ -3393,9 +3379,9 @@ float musicWavePhase = 0.0f;
                     // acted on, so what is on screen is a named state rather than whatever the pointer
                     // happened to be doing.
                     const island::IslandState pinned = island::StateFromName(forcedState);
-                    if (window.State() != pinned) window.SetState(pinned);
-                } else if (next != window.State()) {
-                    window.SetState(next);
+                    if (systems.window.State() != pinned) systems.window.SetState(pinned);
+                } else if (next != systems.window.State()) {
+                    systems.window.SetState(next);
                 }
 
                 // A DRAG UNDER WAY HOLDS THE CARD OPEN, whatever the pointer does.
@@ -3407,8 +3393,8 @@ float musicWavePhase = 0.0f;
                 // Same shape as the rule that already holds the card for a notification: something explicit
                 // is in progress, so the pointer's position is not the question.
                 if (bar.panelSliderDrag || bar.mixerSliderDragRow >= 0) {
-                    if (window.State() != island::IslandState::Expanded) {
-                        window.SetState(island::IslandState::Expanded);
+                    if (systems.window.State() != island::IslandState::Expanded) {
+                        systems.window.SetState(island::IslandState::Expanded);
                     }
                 }
             }
@@ -3460,8 +3446,8 @@ float musicWavePhase = 0.0f;
                 // The island's own expansion already opens the whole row, so the pointed-at button is
                 // left alone in that state: growing it on top would be two animations where one is
                 // wanted.
-                const bool islandOpen = (window.State() == island::IslandState::Hover);
-                const int pointed = islandOpen ? -1 : window.HoveredIcon();
+                const bool islandOpen = (systems.window.State() == island::IslandState::Hover);
+                const int pointed = islandOpen ? -1 : systems.window.HoveredIcon();
 
                 bar.iconAnimating = false;
                 for (int i = 0; i < island::kMaxTaskWindows; ++i) {
@@ -3495,7 +3481,7 @@ float musicWavePhase = 0.0f;
 
             // Clamp: a long stall (a debugger break, a sleep) must not teleport
             // the animation to its end, which would read as a jump cut.
-            const bool animating = window.Tick(dt > 0.1f ? 0.1f : dt);
+            const bool animating = systems.window.Tick(dt > 0.1f ? 0.1f : dt);
 
             // --- draw ---
             //
@@ -3503,7 +3489,7 @@ float musicWavePhase = 0.0f;
             // the notification being shown changed. Nothing else can alter a frame,
             // so when none holds the loop does no drawing at all.
             int second = -1;
-            text.CurrentSecond(&second);
+            systems.text.CurrentSecond(&second);
             const bool clockChanged = (second != lastSecond);
             lastSecond = second;
 
@@ -3512,8 +3498,8 @@ float musicWavePhase = 0.0f;
             lastNotificationId = activeId;
 
             // A bar.track change is a reason to redraw even when nothing moved.
-            const bool musicChanged = (music.Revision() != lastDrawnMusicRevision);
-            lastDrawnMusicRevision = music.Revision();
+            const bool musicChanged = (systems.music.Revision() != lastDrawnMusicRevision);
+            lastDrawnMusicRevision = systems.music.Revision();
 
             // --- the lyric line for the resting strip ---
             //
@@ -3634,7 +3620,7 @@ float musicWavePhase = 0.0f;
                         // which is card-sized for the whole of a card transition and would tell the
                         // marquee the line fits while the renderer clips it to 220 DIP.
                         const island::RoundedBox lineBox =
-                            island::BoxForState(island::IslandState::Collapsed, window.CurrentAnchor());
+                            island::BoxForState(island::IslandState::Collapsed, systems.window.CurrentAnchor());
                         const float stripWidth = lineBox.rect.right - lineBox.rect.left;
                         wchar_t wide[512] = {};
                         if (MultiByteToWideChar(CP_UTF8, 0, line->text, -1, wide, 512) > 0) {
@@ -3645,7 +3631,7 @@ float musicWavePhase = 0.0f;
                             // ... and the same WIDTH measurement: `TrackLineWidth` is the width in the format
                             // that draws the line. With `TextWidth` (the narrow, non-bold face) a line just
                             // over the threshold was judged to fit, centred, and cut at both ends.
-                            if (island::LyricNeedsScroll(text.TrackLineWidth(wide),
+                            if (island::LyricNeedsScroll(systems.text.TrackLineWidth(wide),
                                                          stripWidth)) {
                                 // A PAUSED SESSION'S LINE STANDS STILL. The words stay on the pill -- they
                                 // are what it is for -- but a line that kept creeping across a paused player
@@ -3676,20 +3662,20 @@ float musicWavePhase = 0.0f;
             // the time printed on the card and the words on the island cannot disagree -- including for
             // a session that sends no timeline, where both are the bar's own count.
             const long long shownPosition =
-                (window.State() == island::IslandState::Expanded) ? bar.track.ms : 0;
+                (systems.window.State() == island::IslandState::Expanded) ? bar.track.ms : 0;
             // The volume can be changed by the keyboard or the shell flyout, not only here, so
             // it is a redraw reason too.
             bool volumeChanged = false;
-            if (volumeAvailable && volume.Revision() != lastVolumeRevision) {
-                lastVolumeRevision = volume.Revision();
+            if (volumeAvailable && systems.volume.Revision() != lastVolumeRevision) {
+                lastVolumeRevision = systems.volume.Revision();
                 volumeChanged = true;
             }
 
             // A new weather reading is the same kind of reason: it arrives on its own schedule, and
             // nothing else about the frame has to move for the strip to have something new to say.
             bool weatherChanged = false;
-            if (weather.Revision() != bar.lastWeatherRevision) {
-                bar.lastWeatherRevision = weather.Revision();
+            if (systems.weather.Revision() != bar.lastWeatherRevision) {
+                bar.lastWeatherRevision = systems.weather.Revision();
                 weatherChanged = true;
             }
 
@@ -3701,14 +3687,14 @@ float musicWavePhase = 0.0f;
             // what records the new values.
             const bool soundPageChanged =
                 bar.soundPageOpen != lastSoundPageOpen ||
-                (bar.soundPageOpen && window.SoundPageScroll() != lastSoundScroll) ||
-                (bar.soundPageOpen && soundOutputStarted && soundOutput &&
-                 soundOutput->Revision() != lastSoundRevision);
+                (bar.soundPageOpen && systems.window.SoundPageScroll() != lastSoundScroll) ||
+                (bar.soundPageOpen && soundOutputStarted && systems.soundOutput &&
+                 systems.soundOutput->Revision() != lastSoundRevision);
 
             // A call's level meter is the one thing on this bar that changes without an event, so it asks for
             // frames of its own. 20 Hz: twice a second looks broken, and sixty times a second is a meter nobody
             // can see paid for with a loop that never idles during a call that may last an hour.
-            const bool callMeterDue = (wechat.CallNotificationId() != 0) &&
+            const bool callMeterDue = (systems.wechat.CallNotificationId() != 0) &&
                                       (GetTickCount64() - bar.lastCallMeterMs >= 50);
             if (callMeterDue) bar.lastCallMeterMs = GetTickCount64();
 
@@ -3727,7 +3713,7 @@ float musicWavePhase = 0.0f;
             // frame. See the note in the condition below for what this cost.
             bool startHoverChanged = false;
             {
-                const island::IslandWindow::StartHit hit = window.StartHitHovered();
+                const island::IslandWindow::StartHit hit = systems.window.StartHitHovered();
                 const int target = static_cast<int>(hit.target);
                 startHoverChanged = island::StartCardAsksForFrame(target, hit.index, bar.startPickerScroll,
                                                                  bar.lastStartHitTarget,
@@ -3794,8 +3780,8 @@ float musicWavePhase = 0.0f;
                 //
                 // Setting a field late is the same defect as not setting it at all; this project has now
                 // paid for that lesson four times, which is why this comment is this emphatic.
-                frame.outerCardUp = window.State() == island::IslandState::Expanded ||
-                                    window.FromState() == island::IslandState::Expanded;
+                frame.outerCardUp = systems.window.State() == island::IslandState::Expanded ||
+                                    systems.window.FromState() == island::IslandState::Expanded;
                 // WHICH LEVEL THE CARD SHOWS, decided here -- before anything reads it -- and held for the
                 // card's whole life. It has to be this early in the loop for the same reason
                 // `outerCardUp` is: a field set after the thing that reads it is a field one frame stale
@@ -3816,12 +3802,12 @@ float musicWavePhase = 0.0f;
                 if (GetTickCount64() - bar.lastTrayRefresh >= kTrayRefreshMs) {
                     bar.lastTrayRefresh = GetTickCount64();
                     frameWork |= kWorkTrayRefresh;
-                    const int trayNow = trayIcons.Refresh();
+                    const int trayNow = systems.trayIcons.Refresh();
                     if (trayNow != bar.lastTrayCount) {
                         bar.lastTrayCount = trayNow;
                         island::LogAndPrint("  tray: %d icon(s) (%d of %d registered applications are "
                                             "running)",
-                                            trayNow, trayIcons.RunningApps(), trayIcons.Examined());
+                                            trayNow, systems.trayIcons.RunningApps(), systems.trayIcons.Examined());
                         std::fflush(stdout);
                     }
 
@@ -3834,7 +3820,7 @@ float musicWavePhase = 0.0f;
                         island::LogAndPrint("  tray learn: %d registration(s) arrived from applications "
                                             "already reached by the module -- %d of %d icon(s) have a "
                                             "callback entry now",
-                                            harvested, island::CountCoveredIcons(trayIcons), trayNow);
+                                            harvested, island::CountCoveredIcons(systems.trayIcons), trayNow);
                         std::fflush(stdout);
                     }
 
@@ -3876,12 +3862,12 @@ float musicWavePhase = 0.0f;
                         }).detach();
                     }
                 }
-                frame.trayIcons = trayIcons.Count() > 0 ? &trayIcons.At(0) : nullptr;
+                frame.trayIcons = systems.trayIcons.Count() > 0 ? &systems.trayIcons.At(0) : nullptr;
                 frame.trayIconCount =
-                    trayIcons.Count() < island::kMaxTrayIcons ? trayIcons.Count()
+                    systems.trayIcons.Count() < island::kMaxTrayIcons ? systems.trayIcons.Count()
                                                               : island::kMaxTrayIcons;
-                frame.trayRevision = trayIcons.Revision();
-                frame.trayHoveredIndex = window.TrayCellHovered();
+                frame.trayRevision = systems.trayIcons.Revision();
+                frame.trayHoveredIndex = systems.window.TrayCellHovered();
                 // ... AND WHETHER THE CARD'S SURFACE IS MOVING, which decides how much of the material is
                 // drawn this frame: the shadow and the grain are skipped while the card animates or while a
                 // moving pointer keeps changing which cell is hovered, and come back on the first frame that
@@ -3902,14 +3888,14 @@ float musicWavePhase = 0.0f;
                 const unsigned long long nowMs = GetTickCount64();
                 if (animating || overTrayCell) lastCardMotionMs = nowMs;
                 frame.cardSurfaceMoving = (nowMs - lastCardMotionMs) < 200;
-                frame.trayButtonHovered = window.TrayButtonHovered();
+                frame.trayButtonHovered = systems.window.TrayButtonHovered();
                 // ... and the tray's own menu, when one is up: its rows come from the window (it owns the
                 // card and answers the hover test), its labels from here (user-facing text is not the
                 // renderer's to invent -- the same split as the page's title above).
-                frame.trayMenuOpen = window.TrayMenuIsOpen();
-                frame.trayMenuHovered = window.TrayMenuRowHovered();
+                frame.trayMenuOpen = systems.window.TrayMenuIsOpen();
+                frame.trayMenuHovered = systems.window.TrayMenuRowHovered();
                 if (frame.trayMenuOpen) {
-                    const island::TrayMenuLayout& menu = window.TrayMenu();
+                    const island::TrayMenuLayout& menu = systems.window.TrayMenu();
                     const int rows = menu.count < bar.trayMenuActionCount ? menu.count : bar.trayMenuActionCount;
                     frame.trayMenuRowCount = rows;
                     for (int i = 0; i < rows; ++i) {
@@ -3923,9 +3909,9 @@ float musicWavePhase = 0.0f;
                 // FrameState::startWash for why a wash cannot be a switch). Stepped here, before the
                 // frame is drawn, and reported in the frame as AMOUNTS rather than as the booleans.
                 {
-                    const bool want[3] = {window.StartHovered() || forcedStartHover,
-                                          window.SystemButtonHovered(),
-                                          window.TrayButtonHovered()};
+                    const bool want[3] = {systems.window.StartHovered() || forcedStartHover,
+                                          systems.window.SystemButtonHovered(),
+                                          systems.window.TrayButtonHovered()};
                     bar.controlWashAnimating = false;
                     for (int i = 0; i < 3; ++i) {
                         if (island::ControlWashStep(&bar.controlWash[i], &bar.controlWashVelocity[i],
@@ -3942,7 +3928,7 @@ float musicWavePhase = 0.0f;
                 // page. See NextPanelLevel.
                 frame.trayPageOpen = trayPageShown;
                 frame.trayPageTitle = trayPageShown ? L"\u6258\u76d8" : nullptr;   // 托盘
-                window.SetTrayIconCount(frame.trayIconCount);
+                systems.window.SetTrayIconCount(frame.trayIconCount);
 
                 frame.systemPanelOpen = bar.systemPanelOpen;
                 // ... and WHICH CONTROL SHOULD LOOK OPEN, which is a question about the level and not about
@@ -3973,9 +3959,9 @@ float musicWavePhase = 0.0f;
                         // highlights are sized, so a pin that was just added has a spring of its own in the
                         // frame it appears in -- sizing them from the previous frame's counts left the
                         // newest tile the one tile with no highlight.
-                        bar.startPinCount = startApps.PinCount();
-                        bar.startAppCount = startApps.ListCount();
-                        const island::IslandWindow::StartHit hover = window.StartHitHovered();
+                        bar.startPinCount = systems.startApps.PinCount();
+                        bar.startAppCount = systems.startApps.ListCount();
+                        const island::IslandWindow::StartHit hover = systems.window.StartHitHovered();
                         const int pinHover = hover.target == island::IslandWindow::StartHitTarget::Pin
                                                  ? hover.index
                                                  : -1;
@@ -4011,11 +3997,11 @@ float musicWavePhase = 0.0f;
                         step(bar.startRowWashes, bar.startRowWashValues, rowHover);
                         step(bar.startPowerWashes, bar.startPowerWashValues, powerHover);
                     }
-                    const island::IslandWindow::StartHit startHit = window.StartHitHovered();
+                    const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
                     island::TextRenderer::StartCardText& card = frame.startCard;
-                    card.pins = bar.startPinCount > 0 ? &startApps.PinAt(0) : nullptr;
+                    card.pins = bar.startPinCount > 0 ? &systems.startApps.PinAt(0) : nullptr;
                     card.pinCount = bar.startPinCount;
-                    card.list = bar.startAppCount > 0 ? &startApps.ListAt(0) : nullptr;
+                    card.list = bar.startAppCount > 0 ? &systems.startApps.ListAt(0) : nullptr;
                     card.listCount = bar.startAppCount;
                     card.pickerScrollRow = bar.startPickerScroll;
                     card.page = bar.startPageState;
@@ -4047,7 +4033,7 @@ float musicWavePhase = 0.0f;
                     bar.startIconSizes.clear();
                     for (int i = 0; i < bar.startPinCount; ++i) {
                         size_t size = 0;
-                        const uint8_t* png = startApps.PinIconPng(i, &size);
+                        const uint8_t* png = systems.startApps.PinIconPng(i, &size);
                         bar.startIconPointers.push_back(png);
                         bar.startIconSizes.push_back(size);
                     }
@@ -4055,7 +4041,7 @@ float musicWavePhase = 0.0f;
                     card.pinIconSizes = bar.startIconSizes.empty() ? nullptr : bar.startIconSizes.data();
                 }
                 // ... and the window, which answers "what is the pointer on" with the same geometry.
-                window.SetStartState(startPageShown, bar.startPageState, bar.startPinCount, bar.startAppCount,
+                systems.window.SetStartState(startPageShown, bar.startPageState, bar.startPinCount, bar.startAppCount,
                                      bar.startPickerScroll);
 
                 // Who owns the card for this frame. The panel keeps it until the card is gone.
@@ -4072,14 +4058,14 @@ float musicWavePhase = 0.0f;
                 // owner is chosen afresh (panel, then a message, then what is playing); while it is no the
                 // owner is kept, so the card is drawn all the way out instead of vanishing on the first
                 // frame of its own exit.
-                const bool cardWanted = (window.State() == island::IslandState::Expanded);
+                const bool cardWanted = (systems.window.State() == island::IslandState::Expanded);
                 cardOwner = island::NextCardOwner(cardOwner, frame.outerCardUp, cardWanted,
                                                  bar.systemPanelOpen, active != nullptr,
                                                  nowPlaying.present);
                 frame.cardOwner = cardOwner;
                 // ... and the WINDOW is told too, because the cursor is decided there (WM_SETCURSOR) and it
                 // has to know which card's controls are the ones on screen. See SetCardOwner.
-                window.SetCardOwner(cardOwner);
+                systems.window.SetCardOwner(cardOwner);
 
                 // The message the card is showing, held for the whole life of the card.
                 if (active) {
@@ -4087,7 +4073,7 @@ float musicWavePhase = 0.0f;
                     haveNotificationShown = true;
                 }
                 if (cardOwner != island::CardOwner::Notification) haveNotificationShown = false;
-                frame.systemButtonHovered = window.SystemButtonHovered();
+                frame.systemButtonHovered = systems.window.SystemButtonHovered();
                 frame.systemPanel.tileCount = 0;
                 frame.cardLeftDip = 0.0f;
 
@@ -4115,26 +4101,26 @@ float musicWavePhase = 0.0f;
                         // A snapshot per frame while the page is up. Cheap enough -- it is a copy of a list
                         // that changes about once a second -- and the alternative, holding the live object,
                         // would put the worker's own state on screen mid-update.
-                        soundOutput->Snapshot(soundSnapshot.get());
+                        systems.soundOutput->Snapshot(systems.soundSnapshot.get());
                         float masterLevel = 0.0f;
-                        const bool haveMaster = volume.Get(&masterLevel);
+                        const bool haveMaster = systems.volume.Get(&masterLevel);
                         // The device's own row is drawn at the chased value as well, and at the raw reading
                         // while that row is the one being dragged -- the same rule as the other two bars.
                         const float drawnMaster =
                             (bar.mixerSliderDragRow == 0 || bar.shownVolume < 0.0f) ? masterLevel : bar.shownVolume;
-                        BuildSoundPage(*soundSnapshot, systemStatus, haveMaster, drawnMaster,
-                                       volume.IsMuted(), bar.soundPageScroll, &frame.soundPage);
+                        BuildSoundPage(*systems.soundSnapshot, systems.systemStatus, haveMaster, drawnMaster,
+                                       systems.volume.IsMuted(), bar.soundPageScroll, &frame.soundPage);
                         frame.soundPageOpen = true;
-                        lastSoundRevision = soundOutput->Revision();
-                        window.SetSoundPage(frame.soundPage, bar.soundPageScroll);
+                        lastSoundRevision = systems.soundOutput->Revision();
+                        systems.window.SetSoundPage(frame.soundPage, bar.soundPageScroll);
                     } else {
                         // Rebuilding every frame is what the tiles need: their on/off state comes from the
                         // status readings, and the readings are sampled on a timer. The text is copied into
                         // the frame's own buffers, so nothing here points at a shorter-lived string.
                         float liveLevel = 0.0f;
-                        const bool liveKnown = volume.Get(&liveLevel);
-                        BuildSystemPanel(systemStatus, statusReader.InstalledLayoutCount(), liveKnown,
-                                         liveLevel, volume.IsMuted(), &frame.systemPanel,
+                        const bool liveKnown = systems.volume.Get(&liveLevel);
+                        BuildSystemPanel(systems.systemStatus, systems.statusReader.InstalledLayoutCount(), liveKnown,
+                                         liveLevel, systems.volume.IsMuted(), &frame.systemPanel,
                                          bar.systemPanelPage);
 
                         // The volume's own percentage, shown while the slider is the control in hand: being
@@ -4149,7 +4135,7 @@ float musicWavePhase = 0.0f;
                             // gesture started on -- a handle that shrank because the pointer wandered off
                             // the bar.track mid-drag would be the slider losing the control being held.
                             const island::SystemPanelHit echoHit =
-                                window.SystemPanelHitAtScreen(echoPoint);
+                                systems.window.SystemPanelHitAtScreen(echoPoint);
                             const bool onSlider =
                                 echoHit.target == island::SystemPanelTarget::Slider;
                             const bool onVolumeRow =
@@ -4200,7 +4186,7 @@ float musicWavePhase = 0.0f;
                             POINT echoPoint = {};
                             GetCursorPos(&echoPoint);
                             const island::SystemPanelHit echoHit =
-                                window.SystemPanelHitAtScreen(echoPoint);
+                                systems.window.SystemPanelHitAtScreen(echoPoint);
                             const bool onBrightnessRow =
                                 echoHit.target == island::SystemPanelTarget::Slider &&
                                 echoHit.index == 1;
@@ -4219,7 +4205,7 @@ float musicWavePhase = 0.0f;
                         }
                         // The page's hit test is closed the moment the page is not showing: leaving it open
                         // would let a click on the panel's tiles be read as a device row.
-                        window.CloseSoundPage();
+                        systems.window.CloseSoundPage();
                     }
 
                     // The card is CENTRED on the button that opened it -- the system button for the
@@ -4243,7 +4229,7 @@ float musicWavePhase = 0.0f;
                     //
                     // The anchor comes from the RESTING island, so the position does not move while the
                     // card's own width is animating.
-                    const island::RoundedBox anchorIsland = window.LayoutIslandFor();
+                    const island::RoundedBox anchorIsland = systems.window.LayoutIslandFor();
                     // The centre of the control that opened the card: the system button for the panel, the
                     // tray button for the tray page, the START button for the Start card. See
                     // DeckCardAnchorCentre -- and its note about how the Start card came to be drawn under
@@ -4270,9 +4256,9 @@ float musicWavePhase = 0.0f;
                                                    : islandCentre;
                     const float anchorLeft = anchorCentre - island::kExpandedWidthDip * 0.5f;
                     const float windowWidthDipNow =
-                        static_cast<float>(window.Monitor().screen.right -
-                                           window.Monitor().screen.left) /
-                        window.Scale();
+                        static_cast<float>(systems.window.Monitor().screen.right -
+                                           systems.window.Monitor().screen.left) /
+                        systems.window.Scale();
                     frame.cardLeftDip = island::CardLeftFor(anchorLeft, island::kExpandedWidthDip,
                                                             windowWidthDipNow);
                 }
@@ -4280,10 +4266,10 @@ float musicWavePhase = 0.0f;
                 // Given to the window here as well, because the click handler reads it to work out which
                 // tile was pressed -- and the click handler runs near the TOP of the loop, before the
                 // renderer's own bookkeeping.
-                window.SetSystemPanel(frame.systemPanel, frame.cardLeftDip);
+                systems.window.SetSystemPanel(frame.systemPanel, frame.cardLeftDip);
 
-                frame.pill.box = window.CurrentBox();
-                frame.state = window.State();
+                frame.pill.box = systems.window.CurrentBox();
+                frame.state = systems.window.State();
 
                 // The pill's own box, which is NOT the animated one while a card is opening or closing.
                 //
@@ -4302,14 +4288,14 @@ float musicWavePhase = 0.0f;
                 frame.restingPill =
                     island::BoxForState(active != nullptr ? island::IslandState::NoticeStrip
                                                           : island::IslandState::Collapsed,
-                                        window.CurrentAnchor());
+                                        systems.window.CurrentAnchor());
                 // ... and WHAT the bar shows at rest, which is what the pill's own line is chosen by
                 // (see FrameState::restingState). A card does not change this, which is the point.
                 frame.restingState = resting;
 
                 if (GetTickCount64() - bar.lastTaskRefresh >= 500) {
                     bar.lastTaskRefresh = GetTickCount64();
-                    taskWindows.Refresh();
+                    systems.taskWindows.Refresh();
                 }
 
                 // Trimmed to what fits before the row would leave the monitor, so the count the
@@ -4322,8 +4308,8 @@ float musicWavePhase = 0.0f;
                 // whatever its length. Subtracting them would cost icons for space that the icons
                 // cannot use.
                 const float monitorWidthDip =
-                    static_cast<float>(window.Monitor().screen.right -
-                                       window.Monitor().screen.left) / window.Scale();
+                    static_cast<float>(systems.window.Monitor().screen.right -
+                                       systems.window.Monitor().screen.left) / systems.window.Scale();
                 // ... AND THE TRAY BUTTON'S ROOM IS SPENT FIRST, WHEN THERE IS ONE.
                 //
                 // The button stands between the island and the row, so the application row is what has to
@@ -4338,12 +4324,12 @@ float musicWavePhase = 0.0f;
                 // does not get. This read the count into `trayShown` and then subtracted the room
                 // regardless -- the compiler had been pointing at the unused variable for a while.
                 const int trayShown =
-                    trayIcons.Count() < island::kMaxTrayIcons ? trayIcons.Count()
+                    systems.trayIcons.Count() < island::kMaxTrayIcons ? systems.trayIcons.Count()
                                                               : island::kMaxTrayIcons;
                 const float rowWidthDip =
                     trayShown > 0 ? monitorWidthDip - island::TrayButtonReservedDip()
                                   : monitorWidthDip;
-                int listed = island::TaskIconsThatFit(rowWidthDip, taskWindows.Count());
+                int listed = island::TaskIconsThatFit(rowWidthDip, systems.taskWindows.Count());
 
                 // EACH ICON'S ARRIVAL, and the row as the UNION of what is listed and what is leaving.
                 //
@@ -4360,7 +4346,7 @@ float musicWavePhase = 0.0f;
                 for (int i = 0; i < bar.rowSlotCount;) {
                     bool listedNow = false;
                     for (int j = 0; j < listed; ++j) {
-                        if (taskWindows.At(j).handle == bar.rowSlots[i].handle) {
+                        if (systems.taskWindows.At(j).handle == bar.rowSlots[i].handle) {
                             listedNow = true;
                             break;
                         }
@@ -4375,7 +4361,7 @@ float musicWavePhase = 0.0f;
                     ++i;
                 }
                 for (int j = 0; j < listed && bar.rowSlotCount < island::FrameState::kMaxTaskButtons; ++j) {
-                    const HWND handle = taskWindows.At(j).handle;
+                    const HWND handle = systems.taskWindows.At(j).handle;
                     bool tracked = false;
                     for (int i = 0; i < bar.rowSlotCount; ++i) {
                         if (bar.rowSlots[i].handle == handle) {
@@ -4398,7 +4384,7 @@ float musicWavePhase = 0.0f;
                     return 1.0f;
                 };
                 for (int j = 0; j < listed && drawn < island::FrameState::kMaxTaskButtons; ++j) {
-                    const island::TaskEntry& entry = taskWindows.At(j);
+                    const island::TaskEntry& entry = systems.taskWindows.At(j);
                     // Copied into a persistent buffer: the frame is consumed after this loop
                     // body returns, and the list can refresh in between, so pointing at the
                     // entry's own title would be a dangling read.
@@ -4406,7 +4392,7 @@ float musicWavePhase = 0.0f;
                               _TRUNCATE);
                     frame.taskButtons[drawn].title = bar.taskTitles[drawn];
                     frame.taskButtons[drawn].active =
-                        (entry.handle == taskWindows.ForegroundHandle());
+                        (entry.handle == systems.taskWindows.ForegroundHandle());
                     frame.taskButtons[drawn].minimised = entry.iconic;
                     // The icon is resolved by the RENDERER, which owns the GPU bitmaps and
                     // caches one per window. The caller only names the window.
@@ -4421,7 +4407,7 @@ float musicWavePhase = 0.0f;
                     if (bar.rowSlots[i].appear <= 0.0f) continue;
                     bool stillListed = false;
                     for (int j = 0; j < listed; ++j) {
-                        if (taskWindows.At(j).handle == bar.rowSlots[i].handle) {
+                        if (systems.taskWindows.At(j).handle == bar.rowSlots[i].handle) {
                             stillListed = true;
                             break;
                         }
@@ -4452,7 +4438,7 @@ float musicWavePhase = 0.0f;
                 // Told to the window so it can work out whether the pointer is on an icon, and
                 // which one. The window owns the hit test; the frame loop owns the list, and this
                 // is the handover between them.
-                window.SetTaskIconCount(drawn);
+                systems.window.SetTaskIconCount(drawn);
 
                 // The system READINGS, sampled on a timer.
                 //
@@ -4472,7 +4458,7 @@ float musicWavePhase = 0.0f;
                     if (statusNowMs - lastStatusSampleMs >= kStatusSampleMs) {
                         lastStatusSampleMs = statusNowMs;
                         frameWork |= kWorkStatusSample;
-                        statusReader.Sample(&systemStatus);
+                        systems.statusReader.Sample(&systems.systemStatus);
 
                         // The brightness, on the same clock. It is a DDC/CI read -- an I2C transaction over
                         // the video cable -- which is why it is not read per frame, and why the panel's row is
@@ -4533,7 +4519,7 @@ float musicWavePhase = 0.0f;
                             island::LogAndPrint("  radios: Bluetooth %s -- %s%s\n",
                                                 bluetoothNow ? "on" : "off", verdict, refused);
                         }
-                        statusReader.Sample(&systemStatus);
+                        systems.statusReader.Sample(&systems.systemStatus);
                         lastStatusSampleMs = GetTickCount64();
                         std::fflush(stdout);
                     }
@@ -4550,8 +4536,8 @@ float musicWavePhase = 0.0f;
 
                 // The ONE button to widen. Read back from the window, which computed it from the
                 // pointer's position using the geometry that is actually on screen.
-                frame.taskHoveredIndex = window.HoveredIcon();
-                frame.startHovered = window.StartHovered() || forcedStartHover;
+                frame.taskHoveredIndex = systems.window.HoveredIcon();
+                frame.startHovered = systems.window.StartHovered() || forcedStartHover;
 
                 // --- the hover preview: a live thumbnail under the icon the pointer rests on -------
                 //
@@ -4581,14 +4567,14 @@ float musicWavePhase = 0.0f;
                     // and making them wait again for the neighbour is the flicker rather than the cure:
                     // the preview would vanish and come back 350 ms later. It still goes away the moment
                     // the pointer leaves the row.
-                    const bool follow = wanted != nullptr && preview.Visible();
+                    const bool follow = wanted != nullptr && systems.preview.Visible();
                     bool shown = false;
                     // The preview path registers a DWM thumbnail on the window and can redraw the live
                     // content every frame, so it is one of the things a slow frame may turn out to be.
                     frameWork |= kWorkThumbnail;
                     if ((rested || follow) && !frame.outerCardUp && IsWindow(wanted)) {
-                        const RECT monitorPx = window.Monitor().screen;
-                        const float scale = window.Scale();
+                        const RECT monitorPx = systems.window.Monitor().screen;
+                        const float scale = systems.window.Scale();
                         // THE ROW THE PREVIEW HANGS OFF IS THE ROW THAT IS DRAWN, tray button and all.
                         //
                         // The application icons are painted from a box the tray button has moved along
@@ -4597,7 +4583,7 @@ float musicWavePhase = 0.0f;
                         // one button to the LEFT of the icon it belongs to -- the same off-by-one
                         // button that made the FIRST icon open the SECOND, seen from the drawing side.
                         const island::RoundedBox islandBox = island::RowAnchorWithTray(
-                            window.LayoutIslandFor(), frame.trayIconCount > 0);
+                            systems.window.LayoutIslandFor(), frame.trayIconCount > 0);
                         const island::RectF button = island::TaskIconButtonAtAmounts(
                             islandBox, hoveredIcon, drawn, bar.taskHoverAmount);
                         RECT iconPx = {};
@@ -4613,10 +4599,10 @@ float musicWavePhase = 0.0f;
                         // fill whatever rectangle it is given, so the card has to be built around the shape
                         // IT reports. GetWindowRect is not that shape -- using it drew one window squashed
                         // into a flat strip (see ThumbnailPreview.h).
-                        const SIZE sourceSize = preview.Begin(wanted);
+                        const SIZE sourceSize = systems.preview.Begin(wanted);
                         const island::ThumbnailPlacement placement = island::ThumbnailBoxFor(
                             sourceSize.cx, sourceSize.cy, iconPx, monitorPx, scale);
-                        shown = placement.valid && preview.Place(placement);
+                        shown = placement.valid && systems.preview.Place(placement);
 
                         if (!bar.previewReported) {
                             bar.previewReported = true;
@@ -4628,21 +4614,21 @@ float musicWavePhase = 0.0f;
                                 placement.card.bottom - placement.card.top,
                                 placement.picture.right - placement.picture.left,
                                 placement.picture.bottom - placement.picture.top, sourceSize.cx,
-                                sourceSize.cy, shown ? 1 : 0, preview.LastResult());
+                                sourceSize.cy, shown ? 1 : 0, systems.preview.LastResult());
                             std::fflush(stdout);
                         }
                     }
 
-                    if (!shown) preview.Hide();
+                    if (!shown) systems.preview.Hide();
 
                     // A refusal is reported once per count rather than once per frame: a window the
                     // compositor will not preview is a fact about that window, and repeating it 60 times
                     // a second would drown the log.
-                    if (preview.Refusals() != bar.previewLastRefusals) {
-                        bar.previewLastRefusals = preview.Refusals();
+                    if (systems.preview.Refusals() != bar.previewLastRefusals) {
+                        bar.previewLastRefusals = systems.preview.Refusals();
                         island::LogAndPrint("  preview: the compositor refused a thumbnail of hwnd %p "
                                             "(0x%08llX)",
-                                            reinterpret_cast<void*>(wanted), preview.LastResult());
+                                            reinterpret_cast<void*>(wanted), systems.preview.LastResult());
                         std::fflush(stdout);
                     }
                 }
@@ -4668,13 +4654,13 @@ float musicWavePhase = 0.0f;
                 // the renderer's own `row:` line says what the layout PRODUCED. A row that does not
                 // move is either a decision that never changed or a layout that ignored it, and only
                 // having both makes the difference visible.
-                if (window.HoveredIcon() != bar.lastReportedHoveredIcon ||
+                if (systems.window.HoveredIcon() != bar.lastReportedHoveredIcon ||
                     bar.taskHoverAmount[0] != bar.lastReportedHoverAmount) {
-                    bar.lastReportedHoveredIcon = window.HoveredIcon();
+                    bar.lastReportedHoveredIcon = systems.window.HoveredIcon();
                     bar.lastReportedHoverAmount = bar.taskHoverAmount[0];
                     island::LogAndPrint("  loop: hoveredIcon=%d, button0 hover=%.2f, %d icons",
-                                        window.HoveredIcon(), bar.taskHoverAmount[0],
-                                        window.IconCount());
+                                        systems.window.HoveredIcon(), bar.taskHoverAmount[0],
+                                        systems.window.IconCount());
                     std::fflush(stdout);
                 }
 
@@ -4699,7 +4685,7 @@ float musicWavePhase = 0.0f;
                     island::LogAndPrint("  taskbar: state=%ls, %d buttons from %d windows listed "
                                         "(%ls)",
                                         island::StateName(frame.state), frame.taskButtonCount,
-                                        taskWindows.Count(), taskWindows.LastSummary());
+                                        systems.taskWindows.Count(), systems.taskWindows.LastSummary());
                     std::fflush(stdout);
                 }
                 // The system panel is a request for the CARD, so the frame has to be told about it in
@@ -4722,11 +4708,11 @@ float musicWavePhase = 0.0f;
                 // region DECIDES which pixels belong to this window, so a strip outside it is clipped --
                 // see SetStatusStripWidth. Keyed on the FADE rather than on the placement flag, because
                 // the strip is still on screen for the length of its exit.
-                window.SetStatusStripWidth(bar.statusStripOpacity > 0.001f
+                systems.window.SetStatusStripWidth(bar.statusStripOpacity > 0.001f
                                                ? island::kStatusStripWidthDip
                                                : 0.0f);
 
-                window.ApplyInputRegion();
+                systems.window.ApplyInputRegion();
 
                 // HOW STRONG, and for WHOM. The card's own content follows the reveal; the BAR's does
                 // not fade at all.
@@ -4748,8 +4734,8 @@ float musicWavePhase = 0.0f;
                 // and never touches it. Reported as "点击系统按钮 或者 播放音乐的时候 鼠标移入灵动岛时候
                 // 图片中红框里的会闪一下". See ContentStrengthsFor.
                 const island::ContentStrengths strengths =
-                    island::ContentStrengthsFor(cardUp, window.EasedProgress(),
-                                                window.State() == island::IslandState::Expanded);
+                    island::ContentStrengthsFor(cardUp, systems.window.EasedProgress(),
+                                                systems.window.State() == island::IslandState::Expanded);
                 frame.contentOpacity = strengths.bar;
                 frame.cardOpacity = strengths.card;
 
@@ -4763,11 +4749,11 @@ float musicWavePhase = 0.0f;
                     const island::RoundedBox animated = frame.pill.box;
                     const float animatedHeight = animated.rect.bottom - animated.rect.top;
                     const float cardTopDip = frame.restingPill.rect.bottom + island::kCardTopGapDip;
-                    const RECT applied = window.AppliedRegion();
+                    const RECT applied = systems.window.AppliedRegion();
                     island::LogAndPrint("  card dt=%5.1fms eased=%.3f h=%5.1f left=%.0f "
                                         "rect=[%.0f,%.0f %.0f,%.0f] cardOpacity=%.2f barOpacity=%.2f "
                                         "region=[%ld,%ld %ld,%ld] panel=%d state=%ls",
-                                        dt * 1000.0f, window.EasedProgress(), animatedHeight,
+                                        dt * 1000.0f, systems.window.EasedProgress(), animatedHeight,
                                         frame.cardLeftDip, frame.cardLeftDip, cardTopDip,
                                         frame.cardLeftDip + island::kExpandedWidthDip,
                                         cardTopDip + animatedHeight, frame.cardOpacity,
@@ -4826,7 +4812,7 @@ float musicWavePhase = 0.0f;
                 // The output's peak, for the pill's background meter. This is the reader's CACHED
                 // sample -- its worker refreshes it about thirty times a second (see
                 // AudioVolume::Peak) -- so this is a load rather than a trip to the audio engine.
-                frame.musicLevelKnown = volume.Peak(&frame.musicLevel);
+                frame.musicLevelKnown = systems.volume.Peak(&frame.musicLevel);
                 frame.musicWavePhase = musicWavePhase;
                 frame.musicAccent = D2D1::ColorF(waveAccent.r, waveAccent.g, waveAccent.b, 1.0f);
                 frame.transportGlyph =
@@ -4846,12 +4832,12 @@ float musicWavePhase = 0.0f;
                 // does: an avatar, a green running timer, and a level meter from the output's peak. The timer
                 // counts from when the WATCHER saw the call begin, not from when this frame was drawn, so
                 // restarting the bar in the middle of a call does not restart the count.
-                if (active && wechat.CallNotificationId() != 0 && active->id == wechat.CallNotificationId()) {
+                if (active && systems.wechat.CallNotificationId() != 0 && active->id == systems.wechat.CallNotificationId()) {
                     frame.callUp = true;
                     // The avatar, looked up once per call: the icon of the process that is in it.
                     {
                         wchar_t source[260] = {};
-                        if (ProcessImagePath(wechat.CallPid(), source, 260) &&
+                        if (ProcessImagePath(systems.wechat.CallPid(), source, 260) &&
                             std::wcscmp(source, callIconSource) != 0) {
                             wcscpy_s(callIconSource, 260, source);
                             callIconPixels.clear();
@@ -4866,11 +4852,11 @@ float musicWavePhase = 0.0f;
                                 std::fflush(stdout);
                             }
                         }
-                    }                    const unsigned long long startedMs = wechat.CallStartMs();
+                    }                    const unsigned long long startedMs = systems.wechat.CallStartMs();
                     frame.callStrip.seconds =
                         startedMs != 0 ? static_cast<int>((GetTickCount64() - startedMs) / 1000) : 0;
                     float peak = 0.0f;
-                    frame.callStrip.levelKnown = volume.Peak(&peak);
+                    frame.callStrip.levelKnown = systems.volume.Peak(&peak);
                     frame.callStrip.level = peak;
                     frame.callStrip.iconPixels =
                         callIconPixels.empty() ? nullptr : callIconPixels.data();
@@ -4910,7 +4896,7 @@ float musicWavePhase = 0.0f;
                 //
                 // Two pieces, not one string: the line sets the word and the temperature apart (see
                 // FrameState::statusSky).
-                weather.Pieces(bar.statusSkyText, 32, bar.statusTemperatureText, 32);
+                systems.weather.Pieces(bar.statusSkyText, 32, bar.statusTemperatureText, 32);
                 frame.statusSky = bar.statusSkyText[0] != L'\0' ? bar.statusSkyText : nullptr;
                 frame.statusTemperature =
                     bar.statusTemperatureText[0] != L'\0' ? bar.statusTemperatureText : nullptr;
@@ -4919,7 +4905,7 @@ float musicWavePhase = 0.0f;
                 {
                     double statusTemperatureC = 0.0;
                     int statusWeatherCode = -1;
-                    frame.statusCode = weather.Get(&statusTemperatureC, &statusWeatherCode)
+                    frame.statusCode = systems.weather.Get(&statusTemperatureC, &statusWeatherCode)
                                            ? statusWeatherCode
                                            : -1;
                 }
@@ -4961,7 +4947,7 @@ float musicWavePhase = 0.0f;
                 // the fix for "调节声音的还是卡卡的，没有动画过渡".
                 if (volumeAvailable) {
                     float level = 0.0f;
-                    if (volume.Get(&level)) {
+                    if (systems.volume.Get(&level)) {
                         // A drag is drawn at the pointer's own value (see the panel's volume block), so the
                         // chase never lags the finger.
                         if (bar.shownVolume < 0.0f) {
@@ -5127,25 +5113,25 @@ float musicWavePhase = 0.0f;
                                         nowPlaying.iconRevision);
                 }
 
-                renderer.Render(frame);
+                systems.renderer.Render(frame);
                 frameWork |= kWorkDraw;
 
                 // What the page looked like, recorded AFTER the draw: these are the values the next
                 // iteration's redraw decision compares against, so recording them before the draw would
                 // swallow the very change that asked for it.
                 lastSoundPageOpen = bar.soundPageOpen;
-                lastSoundScroll = window.SoundPageScroll();
+                lastSoundScroll = systems.window.SoundPageScroll();
             }
 
             // Log the settled shape once per change. Without this, "the card never
             // appears" is indistinguishable from "the pointer was never detected", and
             // the two need completely different fixes -- it took adding exactly this line
             // to find that a settled hover never promoted to the card.
-            if (window.State() != lastLogged && !window.IsAnimating()) {
-                lastLogged = window.State();
+            if (systems.window.State() != lastLogged && !systems.window.IsAnimating()) {
+                lastLogged = systems.window.State();
                 island::LogAndPrint("  state: %ls (pointer inside=%d, resting=%ls)\n",
                                     island::StateName(lastLogged),
-                                    window.IsPointerInside() ? 1 : 0,
+                                    systems.window.IsPointerInside() ? 1 : 0,
                                     island::StateName(resting));
                 std::fflush(stdout);
             }
@@ -5193,14 +5179,14 @@ float musicWavePhase = 0.0f;
             // "a cache filled up" and "something is leaking" are told apart by whether they rise together.
             {
                 const unsigned long long nowTicks = GetTickCount64();
-                const unsigned long long musicRevision = music.Revision();
-                const int trayCount = trayIcons.Count();
+                const unsigned long long musicRevision = systems.music.Revision();
+                const int trayCount = systems.trayIcons.Count();
                 // The same expression the frame's own `outerCardUp` is built from (`frame` is declared in
                 // the inner block that draws, and is not visible here). Kept as one expression rather
                 // than two spellings of the same idea wherever it can be helped: this one only decides
                 // when to take a sample, so a disagreement would cost a sample rather than a drawing.
-                const bool cardUp = window.State() == island::IslandState::Expanded ||
-                                    window.FromState() == island::IslandState::Expanded;
+                const bool cardUp = systems.window.State() == island::IslandState::Expanded ||
+                                    systems.window.FromState() == island::IslandState::Expanded;
 
                 if (musicRevision != lastMemoryMusicRevision) {
                     lastMemoryMusicRevision = musicRevision;
@@ -5222,16 +5208,16 @@ float musicWavePhase = 0.0f;
                 if (steady || afterEvent) {
                     island::ProcessMemorySample sample;
                     island::SampleProcessMemory(&sample);
-                    sample.vramValid = renderer.VideoMemory(&sample.vramLocalBytes,
+                    sample.vramValid = systems.renderer.VideoMemory(&sample.vramLocalBytes,
                                                             &sample.vramNonLocalBytes);
 
                     island::ProcessCacheCounts counts;
                     counts.coverBytes    = nowPlaying.artworkSize;
                     counts.lyricLines    = currentLyrics ? currentLyrics->count : 0;
                     counts.trayIcons     = trayCount;
-                    counts.taskButtons   = taskWindows.Count();
-                    counts.notifications = notifications.Count();
-                    renderer.CacheCounts(&counts.bitmaps, &counts.windowIcons);
+                    counts.taskButtons   = systems.taskWindows.Count();
+                    counts.notifications = systems.notifications.Count();
+                    systems.renderer.CacheCounts(&counts.bitmaps, &counts.windowIcons);
 
                     const char* reason = firstMemorySample ? "start"
                                                           : (steady ? "5min" : "after-event");
@@ -5246,7 +5232,7 @@ float musicWavePhase = 0.0f;
                 lastIntervalReport = GetTickCount64();
                 wchar_t intervalSummary[256] = {};
                 liveStats.Describe(intervalSummary, 256);
-                island::LogAndPrint("  interval [%ls] %ls", island::StateName(window.State()),
+                island::LogAndPrint("  interval [%ls] %ls", island::StateName(systems.window.State()),
                                     intervalSummary);
                 island::LogAndPrint("  redraws: animating=%d clock=%d notify=%d music=%d "
                                     "lyrics=%d progress=%d strip=%d first=%d startHover=%d "
@@ -5259,13 +5245,13 @@ float musicWavePhase = 0.0f;
                 // hundred of them in a 4 s window containing one 0.36 s transition means the transition
                 // paid for them, and "one per state change" means it did not.
                 {
-                    const unsigned long long applied = window.RegionApplications();
+                    const unsigned long long applied = systems.window.RegionApplications();
                     island::LogAndPrint("  window region: %llu applied in total (%llu in the last 4 s)",
                                         applied, applied - lastRegionApplications);
                     lastRegionApplications = applied;
                 }
                 {
-                    const unsigned long long frames = renderer.FramesPresented();
+                    const unsigned long long frames = systems.renderer.FramesPresented();
                     island::LogAndPrint("  throttle: path=%s frames=%llu/s waits=%llu/s maxLatency=1",
                                         pacingPath, frames - lastFramesPresented,
                                         frameWaits - lastFrameWaits);
@@ -5285,18 +5271,18 @@ float musicWavePhase = 0.0f;
             // message wait as a fallback). When idle, block on input instead of
             // spinning: the clock only needs a wake-up once a second, so a 100 ms
             // cap is plenty and costs nothing on an idle desktop.
-            if (window.IsAnimating()) {
+            if (systems.window.IsAnimating()) {
                 // Preferred order, and the reason for it: the swap chain's frame-latency waitable
                 // object is the compositor's own "the next frame may go now" signal, so a wait on it
                 // ends when there is a frame to draw instead of after a guess. The compositor clock
                 // comes second (it is the same idea through a different door), and a short message wait
                 // last. The 8 ms cap is a safety net for a signalled-but-unused object, not the pacing.
-                const HANDLE frameWait = renderer.FrameLatencyWaitable();
+                const HANDLE frameWait = systems.renderer.FrameLatencyWaitable();
                 if (frameWait) {
                     ::MsgWaitForMultipleObjectsEx(1, &frameWait, 8, QS_ALLINPUT,
                                                   MWMO_INPUTAVAILABLE);
                 } else if (clockDriven) {
-                    renderer.WaitForCompositorClock(8);
+                    systems.renderer.WaitForCompositorClock(8);
                 } else {
                     ::MsgWaitForMultipleObjectsEx(0, nullptr, 4, QS_ALLINPUT,
                                                   MWMO_INPUTAVAILABLE);
@@ -5314,16 +5300,16 @@ float musicWavePhase = 0.0f;
         }
     }
 
-    renderer.SetTextRenderer(nullptr);
-    text.Shutdown();
+    systems.renderer.SetTextRenderer(nullptr);
+    systems.text.Shutdown();
     // Stop the listener before tearing the window down: a client mid-send should be
     // finished with, not left holding a pipe that is about to disappear.
-    notificationServer.Stop();
-    lyrics.Stop();
-    weather.Stop();
-    volume.Stop();
-    playerWindow.Stop();
-    music.Stop();
+    systems.notificationServer.Stop();
+    systems.lyrics.Stop();
+    systems.weather.Stop();
+    systems.volume.Stop();
+    systems.playerWindow.Stop();
+    systems.music.Stop();
 
     // Give the reserved strip back while the window still exists.
     //
@@ -5331,11 +5317,11 @@ float musicWavePhase = 0.0f;
     // result in the log: a work area left inset after the program exits is a permanent gap on
     // the desktop that looks like a broken system rather than a program that failed to clean up.
     // Doing it before window.Destroy() means the shell still has a live HWND to talk to.
-    if (appBar.IsRegistered()) {
-        appBar.Release();
+    if (systems.appBar.IsRegistered()) {
+        systems.appBar.Release();
     }
 
-    window.Destroy();
+    systems.window.Destroy();
 
     // Put the shell's taskbar back before exiting. This runs on every normal exit
     // path -- the window closing, WM_QUIT, or the loop breaking for any other
@@ -5345,7 +5331,7 @@ float musicWavePhase = 0.0f;
     // where this object owns a hide that the flag never saw. `Restore()` is a no-op when nothing was
     // hidden, so the wider condition costs nothing.
     if (hideNativeTaskbar) {
-        taskbar.Restore();
+        systems.taskbar.Restore();
         island::LogAndPrint("  native taskbar: restored\n");
         // The work area went back with it, inside Restore() and BEFORE the taskbar was shown: showing
         // the taskbar makes the shell re-derive the work area from it, so this order leaves one answer,
@@ -5356,7 +5342,7 @@ float musicWavePhase = 0.0f;
     // Its handles, on the same path. Closing the WLAN client here rather than leaving it to process
     // teardown matters because the shell's wireless service keeps a per-client context, and a bar
     // that is started and stopped repeatedly would accumulate them.
-    statusReader.Close();
+    systems.statusReader.Close();
     return 0;
 }
 

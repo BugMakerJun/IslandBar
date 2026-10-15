@@ -11695,3 +11695,30 @@ preview: resting on a task icon shows a live thumbnail
 ```
 
 （`h0.00` 就是搬走的 `taskHoverAmount`。）
+
+### 8.127 **BarState 第 7 片：22 个对象进 `app/BarSystems.h`** ✅（含一次机械改写的连环误伤与修复）
+
+#### 8.127.1 为什么是**另一个**结构体，而不是塞进 BarState
+
+两者是不同种类的东西，合并会把这件事藏起来：`BarState` 是纯数据（数字、字符串、标志），它的全部故事是"谁读它、谁写它"；而这 22 个对象**持有资源**——D3D 设备、合成表面、COM 会话、工作线程、文件句柄——它们的故事是"什么时候创建、什么时候启动、什么时候释放"。找"这条栏的状态是什么"的人，不该先走过二十个资源持有者；找"这个进程起了几个线程"的人，应该能一眼看到那几处。
+
+`app/BarSystems.h` 里按**源码逐行的顺序**声明（结构体构造顺序 = 声明顺序，析构相反，和原来的局部变量完全一致；我在头文件里写明了这条，并且**第一版我按用途重排了顺序却又在注释里声称"顺序与源码相同"——被抓出来后改回逐行相同**，分组只体现在注释里）。**没有搬的是那些启动调用**（`window.Create`、`statusReader.Open`、`music.Start`、`preview.Create(window.Handle())`…）：它们是一段有日志、有提前返回、有回退的**序列**，序列属于 `RunBar`，可以自上而下读。两个小字段跟着它们的主人走：`haveTaskbar` 跟 `taskbar`、`appBarResult` 跟 `appBar`。
+
+#### 8.127.2 这一次机械改写连环误伤了四类东西
+
+| 误伤 | 表现 | 修法 |
+|---|---|---|
+| `->text` | 我的前瞻只挡了 `.` 和词字符，没挡 `->`，于是 `line->text` 变成 `line->systems.text`（12 处编译错） | 把 `->systems.NAME` 改回 `->NAME` |
+| lambda 捕获列表 | `[&startApps]` → `[&systems.startApps]`——捕获列表只能是名字（与第 1 片同一个坑） | 改成 init-capture `[&apps = systems.startApps]`，并顺手给线程起了名字 |
+| **注释** | 212 行注释被改成"the systems.preview"、"the shell's own systems.taskbar"… | 整批：以 `//` 开头的行里的 `systems.NAME` 全部去掉前缀 |
+| **字符串字面量** | **83 处显示给用户的日志前缀**被改成 `"  systems.music: …"`、`"  native systems.taskbar: hidden"`，甚至使用说明 `"(systems.weather.txt can pin a city instead)"` | 写了按引号配对判断"是否在字符串内"的脚本逐行修回；修完抽查日志前缀与改动前完全一致（`  music: [QQMusic.exe] …`） |
+
+**教训（写进流程）**：机械改写之后，**在编译之前**先 grep 新前缀出现在注释与字符串里的次数；编译能抓住前两类，抓不住后两类。第 4 片那次留下的纪律（先打印片段核对）加上这一条，一起成了后面每一刀的固定动作。
+
+#### 8.127.3 验证
+
+`main.cpp` **5,764 → 5,750 行**；`BarState.h` 380 行、`BarSystems.h` 103 行。
+
+两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；起 bar 后媒体会话、托盘、通知、声音页、预览、天气全部照常工作，日志前缀与改动前逐字相同（`  music: [QQMusic.exe] 王睿卓 - 茶花开了 (playing)`、`  native taskbar: restored` 等）。
+
+顺带又看到一次"日志量本身是成本"：媒体状态每秒写一行（`music: … (playing)` 连着一秒一条，直到 `(stopped)`）。这属于 ROADMAP 里"日志降噪"那条，不属本轮。
