@@ -629,6 +629,92 @@ void BuildSoundPage(const island::SoundOutputSnapshot& snapshot, const island::S
     out->scroll = scroll;
 }
 
+// =====================================================================
+//  THE STARTUP, ONE PHASE AT A TIME (2026-10-16)
+//
+//  WHAT THESE ARE, AND WHAT THEY ARE NOT. Each one is a contiguous block that was ALREADY inside RunBar,
+//  moved out unchanged: not one statement reordered, not one value recomputed, not one comment rewritten.
+//  The reason is that RunBar is a 5,200-line function -- the last piece of structure debt named in
+//  ARCHITECTURE.md section 7 -- and a phase that has a name can be read and tested; the same code as the
+//  middle third of a function cannot.
+//
+//  HOW THEY ARE WRITTEN, and this is the whole safety argument: explicit parameters, so a block that
+//  reaches for something it was not handed does not compile. That is the only check that has ever caught
+//  this class of mistake here -- "a field set after the thing that reads it" and "the outer variable with
+//  the same name" have each cost a round (see the notes in RunBar itself and in app/BarState.h). Nothing is
+//  stored in a new struct for the move: state keeps its owner.
+//
+//  ACCEPTANCE for every one of these: both configurations build with zero warnings, --self-test passes, and
+//  scripts\regression\normalize-log.ps1 reports ZERO lines of difference against the baseline. A phase moved
+//  twice, or moved to the wrong place in the sequence, changes that log.
+// =====================================================================
+
+// --- the shell's taskbar: what happens to it, and the report of what happened ---
+//
+// Moved out of RunBar verbatim. It says out loud which of the three modes the taskbar is in, and why
+// nothing happened when nothing happened: a lower integrity level than the shell's makes every one of these
+// calls return 0 with no error, which is the failure that has cost the most time on this machine.
+static void ApplyNativeTaskbarMode(bool hideNativeTaskbar, bool keepNativeTray,
+                                   island::BarSystems& systems) {
+    // Hiding the shell's taskbar is the point of the exercise, but it is also the
+    // only thing this program does that the user can see outside its own window,
+    // so it is announced and it is always undone on the way out.
+    //
+    // If this process is killed rather than closed, the restore never runs. The
+    // documented recovery then is to restart Explorer, or to run:
+    //   ShowWindow(FindWindow("Shell_TrayWnd", NULL), SW_SHOW)
+    if (hideNativeTaskbar) {
+        systems.haveTaskbar = systems.taskbar.Locate();
+        if (systems.haveTaskbar) {
+            // WHICH OF THE THREE THINGS HAPPENS TO THE SHELL'S TASKBAR is decided here, before the
+            // first Hide(): the object remembers the mode for every later call (see NativeTaskbar.h).
+            systems.taskbar.SetKeepTrayVisible(keepNativeTray);
+            // Check the integrity level as well as the result. When this process is
+            // confined to a lower integrity level than the shell, every method of
+            // hiding the taskbar is silently dropped by UIPI: the calls return 0,
+            // no error is reported, and the taskbar simply stays. Saying so up
+            // front is the difference between a two-minute fix and an afternoon of
+            // suspecting the code.
+            const bool blocked = systems.taskbar.IsBlockedByIntegrity();
+            const bool hidden = systems.taskbar.Hide();
+
+            if (hidden && !blocked && keepNativeTray) {
+                // The tray is the shell's own: its icons, its menus, its overflow, its clock. Nothing
+                // about it is drawn or simulated here -- see HANDOFF 8.133 for why this is the only
+                // route that survives measurement.
+                island::LogAndPrint("  native taskbar: clipped to the tray -- the REAL system tray"
+                                    " stays on screen");
+                island::LogAndPrint("  (the rest of the taskbar is cut away by a window region;"
+                                    " --hide-taskbar goes back to hiding it)");
+            } else if (hidden && !blocked) {
+                island::LogAndPrint("  native taskbar: hidden");
+                island::LogAndPrint("  (restored on exit; if this process is killed"
+                                    " instead, restart Explorer)");
+            } else if (blocked && keepNativeTray) {
+                island::LogAndPrint("  native taskbar: CANNOT KEEP THE TRAY VISIBLE from this process");
+                island::LogAndPrint("    (see --probe-taskbar: a lower integrity level than the shell's"
+                                    " is dropped by UIPI)");
+            } else if (blocked) {
+                island::LogAndPrint("  native taskbar: CANNOT BE HIDDEN from this process");
+                island::LogAndPrint("    island_bar.exe runs at a LOWER integrity level than the");
+                island::LogAndPrint("    shell's taskbar, so Windows drops the request silently");
+                island::LogAndPrint("    (UIPI: no error, the call just returns 0).");
+                island::LogAndPrint("    FIX: start island_bar.exe from your own shell -- Win+R, or a");
+                island::LogAndPrint("    PowerShell/cmd window opened from the Start menu -- NOT from");
+                island::LogAndPrint("    inside a sandbox, an IDE, or a restricted launcher.");
+                island::LogAndPrint("    Confirm with --probe-taskbar there before starting the bar.");
+            } else {
+                island::LogAndPrint("  native taskbar: could NOT be hidden (reason unknown;"
+                                    " try --probe-taskbar)");
+            }
+        } else {
+            island::LogAndPrint("  native taskbar: not found (nothing to hide)");
+        }
+    } else {
+        island::LogAndPrint("  native taskbar: left alone (--keep-taskbar)");
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -708,63 +794,9 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     island::LogAndPrint("  move the pointer onto the pill to spread it; click to open the card\n");
     island::LogAndPrint("  close the window to exit\n");
 
-    // Hiding the shell's taskbar is the point of the exercise, but it is also the
-    // only thing this program does that the user can see outside its own window,
-    // so it is announced and it is always undone on the way out.
-    //
-    // If this process is killed rather than closed, the restore never runs. The
-    // documented recovery then is to restart Explorer, or to run:
-    //   ShowWindow(FindWindow("Shell_TrayWnd", NULL), SW_SHOW)
-    if (hideNativeTaskbar) {
-        systems.haveTaskbar = systems.taskbar.Locate();
-        if (systems.haveTaskbar) {
-            // WHICH OF THE THREE THINGS HAPPENS TO THE SHELL'S TASKBAR is decided here, before the
-            // first Hide(): the object remembers the mode for every later call (see NativeTaskbar.h).
-            systems.taskbar.SetKeepTrayVisible(keepNativeTray);
-            // Check the integrity level as well as the result. When this process is
-            // confined to a lower integrity level than the shell, every method of
-            // hiding the taskbar is silently dropped by UIPI: the calls return 0,
-            // no error is reported, and the taskbar simply stays. Saying so up
-            // front is the difference between a two-minute fix and an afternoon of
-            // suspecting the code.
-            const bool blocked = systems.taskbar.IsBlockedByIntegrity();
-            const bool hidden = systems.taskbar.Hide();
-
-            if (hidden && !blocked && keepNativeTray) {
-                // The tray is the shell's own: its icons, its menus, its overflow, its clock. Nothing
-                // about it is drawn or simulated here -- see HANDOFF 8.133 for why this is the only
-                // route that survives measurement.
-                island::LogAndPrint("  native taskbar: clipped to the tray -- the REAL system tray"
-                                    " stays on screen");
-                island::LogAndPrint("  (the rest of the taskbar is cut away by a window region;"
-                                    " --hide-taskbar goes back to hiding it)");
-            } else if (hidden && !blocked) {
-                island::LogAndPrint("  native taskbar: hidden");
-                island::LogAndPrint("  (restored on exit; if this process is killed"
-                                    " instead, restart Explorer)");
-            } else if (blocked && keepNativeTray) {
-                island::LogAndPrint("  native taskbar: CANNOT KEEP THE TRAY VISIBLE from this process");
-                island::LogAndPrint("    (see --probe-taskbar: a lower integrity level than the shell's"
-                                    " is dropped by UIPI)");
-            } else if (blocked) {
-                island::LogAndPrint("  native taskbar: CANNOT BE HIDDEN from this process");
-                island::LogAndPrint("    island_bar.exe runs at a LOWER integrity level than the");
-                island::LogAndPrint("    shell's taskbar, so Windows drops the request silently");
-                island::LogAndPrint("    (UIPI: no error, the call just returns 0).");
-                island::LogAndPrint("    FIX: start island_bar.exe from your own shell -- Win+R, or a");
-                island::LogAndPrint("    PowerShell/cmd window opened from the Start menu -- NOT from");
-                island::LogAndPrint("    inside a sandbox, an IDE, or a restricted launcher.");
-                island::LogAndPrint("    Confirm with --probe-taskbar there before starting the bar.");
-            } else {
-                island::LogAndPrint("  native taskbar: could NOT be hidden (reason unknown;"
-                                    " try --probe-taskbar)");
-            }
-        } else {
-            island::LogAndPrint("  native taskbar: not found (nothing to hide)");
-        }
-    } else {
-        island::LogAndPrint("  native taskbar: left alone (--keep-taskbar)");
-    }
+    // What happens to the shell's taskbar, and the report of it. The phase lives above RunBar; the order it
+    // runs in is unchanged (see the note on the phase functions).
+    ApplyNativeTaskbarMode(hideNativeTaskbar, keepNativeTray, systems);
     // Flushed explicitly rather than left to the buffer: this process runs for
     // hours and is then killed, and a killed process discards whatever the
     // runtime still holds. Redirecting stdout makes _IOLBF block-buffered

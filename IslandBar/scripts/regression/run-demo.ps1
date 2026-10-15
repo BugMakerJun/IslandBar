@@ -54,6 +54,21 @@ $Built = Join-Path $Root "build\$Config\src\$Config"
 $Deployed = Join-Path $env:USERPROFILE 'IslandBar'
 if (-not $Exe) { $Exe = Join-Path $Deployed 'island_bar.exe' }
 
+# STOP FIRST, THEN DEPLOY: a running bar holds its own image open, so copying over it fails with "being used
+# by another process" -- which is how an earlier version of this script silently compared an old binary.
+$running = Get-Process island_bar -ErrorAction SilentlyContinue
+if ($running) {
+    if (-not $StopRunning) {
+        throw "island_bar is already running (pid $($running[0].Id)); close it first, or pass -StopRunning"
+    }
+    Write-Host "[demo] asking the running bar (pid $($running[0].Id)) to close"
+    foreach ($process in $running) {
+        [void]$process.CloseMainWindow()
+        if (-not $process.WaitForExit(8000)) { $process.Kill() }
+    }
+    Start-Sleep -Seconds 2
+}
+
 if ($Deploy) {
     if (-not (Test-Path "$Built\island_bar.exe")) { throw "nothing built at $Built" }
     New-Item -ItemType Directory -Force -Path $Deployed | Out-Null
@@ -66,19 +81,6 @@ if (-not (Test-Path $Exe)) { throw "no executable at $Exe -- build it first (scr
 if ($Exe -like "$Root*") {
     Write-Host "[demo] WARNING: $Exe is inside the project tree -- it will start at LOW integrity and the"
     Write-Host "[demo]          run will not describe this machine (see the note at the top of this script)"
-}
-
-$running = Get-Process island_bar -ErrorAction SilentlyContinue
-if ($running) {
-    if (-not $StopRunning) {
-        throw "island_bar is already running (pid $($running[0].Id)); close it first, or pass -StopRunning"
-    }
-    Write-Host "[demo] asking the running bar (pid $($running[0].Id)) to close"
-    foreach ($process in $running) {
-        [void]$process.CloseMainWindow()
-        if (-not $process.WaitForExit(8000)) { $process.Kill() }
-    }
-    Start-Sleep -Seconds 2
 }
 
 $log = Join-Path (Split-Path -Parent $Exe) 'island_bar.log'
