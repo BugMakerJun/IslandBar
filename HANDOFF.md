@@ -12693,7 +12693,7 @@ before)' elapsed_ms=47`
   需要升级" —— 账号侧的模型问题。用户明确同意"这一轮按 Gemini + 本机实测走"。本文件里凡引用 ChatGPT
   的地方都是**第 43 轮**它的原话。
 
-### 8.147.2 落地：一格最多两种形状，一次一种（提交 `4a07f1c`）
+### 8.147.2 落地：一格最多两种形状，一次一种（提交 `39b672b`）
 
 * `domain/TrayEncoding.h`：新增纯逻辑 `TrayRightShape`（`DownUpPair` / `ContextMenu` / `None`）、
   `TrayRightNote`（`untried` / `pair` / `ctxmenu` / `pair-failed` / `both-failed`）、`PlanTrayRightShape`
