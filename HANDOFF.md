@@ -11795,3 +11795,13 @@ preview: resting on a task icon shows a live thumbnail
 | 日志总行数 | — | 203（含启动、tray、mem 等正常行） |
 
 自检 PASS、冒烟 PASS、覆盖率不变（4 of 11）；两套配置都能编（`/WX` 生效）。
+
+### 8.130 **收尾：自检里那几条 wire/ring 检查从循环里挪出来（各跑 1 次而不是 6 次）** ✅
+
+第 8.121 与 8.128 加的六条检查（注册字节的真实解码、GUID 那条、两种必须拒绝的载荷、环开通、记录往返、另一个构建的环被拒绝）被放在了自检里 `for (int count : {1, 3, 6, 10, 16, kMaxTrayIcons})` 的**循环体内**，于是每轮自检各跑 6 遍——功能上无害，但输出里同一句重复六次，读起来像出了什么事。
+
+做法：整段 151 行从两层循环里移出（同时把缩进从 20 空格改成 12），插到那两层收尾之后、"WHERE THE TRAY PAGE'S CARD STANDS"那一节之前。
+
+**过程中又踩了一次自己的坑**：插入用的 `InsertRange` 因为集合类型不匹配抛异常，而**文件已经在异常之前被写回**——等于把那六条检查整段删掉了。处理是 `git checkout --` 把该文件恢复到上一个提交（字节级准确），再用修正后的脚本重做（这次插入前后都打印上下文核对）。这与 8.129 那条纪律同源：**批量写文件之后先看文件，再谈别的**。
+
+**验证**：新构建里六条检查各出现 **1 次**（之前各 6 次），`--self-test` PASS、exit 0；`island_smoke` PASS；覆盖率 5 of 12；起 bar 后 `music:` 行仍然只在真事件上出现（`cover present` / `cover decoded`），`tray learn: … 105 registration(s) captured … 6 of 12 icon(s) have a callback entry`。
