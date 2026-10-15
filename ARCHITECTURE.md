@@ -15,7 +15,9 @@ Windows 11 上替代系统任务栏的一条横条（"岛"）：自己画 pill �
 ```
 src/
   main.cpp          入口。解析命令行 → 要么跑一条命令，要么跑这条岛
-  core/             纯逻辑：几何、布局、动画、状态策略、日志、进程指标
+  domain/           纯逻辑，独立静态库目标 island_domain：几何、布局、动画、状态策略、JSON 读取。
+                    这一层不许包含 <windows.h>，也不许链接任何库（见第 3 节）
+  core/             所有模块共用的基础设施：日志、进程指标
   app/              窗口与生命周期：IslandWindow（画与命中）、AppBar（占位）、PlayerWindow
   render/           D2D/DComp 渲染：Renderer、TextRenderer、玻璃材质
   media/            GSMTC 会话、歌词、音量、声音输出、图片解码
@@ -37,13 +39,14 @@ scripts/            build.ps1 / capture-*.ps1 / snapshot.ps1
 island_bar.exe（main.cpp：组装 + 消息泵）
    |-- app/ render/ media/ shell/ platform/ services/
    |      （这些之间可以互相调用，但共用的类型都来自 core/）
-   +-- core/（纯逻辑：布局、动画、命中、状态策略）
+   +-- island_domain（纯逻辑：布局、动画、命中、状态策略、JSON）
+   +-- core/（共用基础设施：日志、进程指标）
 ```
 
-- **`core/` 不许包含 `<windows.h>`**。它只做几何、布局、动画、状态策略这些能脱离桌面运行的东西——`--self-test` 能在不开窗口的情况下跑完 900+ 条断言，靠的就是这条规则真的成立。
-- 这条规则**不靠自觉**：`src/core/PurityCheck.cpp` 是一个只做一件事的翻译单元——包含所有 `core/` 头文件，然后 `#ifdef _WINDOWS_ #error`。谁把 `<windows.h>` 加回纯逻辑层，谁的构建**当场失败**，错误信息里写着该往哪儿搬。
-- 需要 Win32 类型的地方（例如 `LONG`/`UINT` 的像素换算）放在 `platform/` 或各模块自己的头里，不放 `core/`。
-- 反向依赖（`core/` 去依赖 `shell/`、`platform/`、`render/`）在评审里直接拒绝。
+- **`src/domain/` 不许包含 `<windows.h>`**。它只做几何、布局、动画、状态策略这些能脱离桌面运行的东西——`--self-test` 能在不开窗口的情况下跑完 900+ 条断言，靠的就是这条规则真的成立。
+- 这条规则**不靠自觉**，有两层：① `src/domain/PurityCheck.cpp` 是一个只做一件事的翻译单元——包含 `domain/` 下所有头文件，然后 `#ifdef _WINDOWS_ #error`；② `island_domain` 这个目标**不链接任何库**，所以纯逻辑里出现 Win32 调用会先在编译期就被拦住。
+- 需要 Win32 类型的地方（例如 `LONG`/`UINT` 的像素换算）放在 `platform/` 或各模块自己的头里，不放 `domain/`。
+- 反向依赖（`domain/` 去依赖 `shell/`、`platform/`、`render/`，或 `island_domain` 去链接它们）在评审里直接拒绝。
 
 ## 4. 一条功能住在哪儿
 

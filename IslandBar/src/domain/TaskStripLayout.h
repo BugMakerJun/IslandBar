@@ -29,8 +29,8 @@
 // =====================================================================
 #pragma once
 
-#include "core/Geometry.h"
-#include "core/Motion.h"
+#include "domain/Geometry.h"
+#include "domain/Motion.h"
 
 #include <algorithm>
 

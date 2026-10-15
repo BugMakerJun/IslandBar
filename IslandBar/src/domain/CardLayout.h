@@ -16,10 +16,10 @@
 // =====================================================================
 #pragma once
 
-#include "core/Geometry.h"
+#include "domain/Geometry.h"
 // The tray page's grid is bounded by the same limit the tray itself has (kMaxTrayIcons), so the two cannot
 // disagree about how many icons exist.
-#include "core/TaskStripLayout.h"
+#include "domain/TaskStripLayout.h"
 
 namespace island {
 

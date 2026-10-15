@@ -20,13 +20,13 @@
 //  this file was written.
 // =====================================================================
 
-#include "core/CardLayout.h"       // brings Geometry.h, TaskStripLayout.h, Motion.h with it
-#include "core/Geometry.h"
-#include "core/MiniJson.h"
-#include "core/Motion.h"
+#include "domain/CardLayout.h"       // brings Geometry.h, TaskStripLayout.h, Motion.h with it
+#include "domain/Geometry.h"
+#include "domain/MiniJson.h"
+#include "domain/Motion.h"
 #include "core/ProcessMetrics.h"
-#include "core/StatePolicy.h"
-#include "core/TaskStripLayout.h"
+#include "domain/StatePolicy.h"
+#include "domain/TaskStripLayout.h"
 
 #if defined(_WINDOWS_) || defined(_INC_WINDOWS)
 #error "The pure-logic headers in core/ must not include <windows.h>. Move whatever needs a Win32 type into a platform/ header (see core/Geometry.h for the one that was moved out)."

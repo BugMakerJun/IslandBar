@@ -30,7 +30,7 @@
 
 #include <cstddef>
 
-#include "core/CardLayout.h"   // kMaxSoundDevices, kMaxSoundSessions
+#include "domain/CardLayout.h"   // kMaxSoundDevices, kMaxSoundSessions
 
 namespace island {
 

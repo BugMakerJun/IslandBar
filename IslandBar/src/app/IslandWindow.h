@@ -27,10 +27,10 @@
 
 #include <windows.h>
 
-#include "core/CardLayout.h"   // CardControl: which control a click landed on
-#include "core/Geometry.h"
+#include "domain/CardLayout.h"   // CardControl: which control a click landed on
+#include "domain/Geometry.h"
 #include "platform/Monitor.h"
-#include "core/Motion.h"
+#include "domain/Motion.h"
 #include "render/TextRenderer.h" // the system panel's tiles, which the window hit-tests
 
 namespace island {

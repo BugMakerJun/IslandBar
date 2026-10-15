@@ -22,9 +22,9 @@
 #include <dcomp.h>
 #include <dxgi1_6.h>
 
-#include "core/Geometry.h"
-#include "core/TaskStripLayout.h"   // the island plus the row of application icons
-#include "core/Motion.h"
+#include "domain/Geometry.h"
+#include "domain/TaskStripLayout.h"   // the island plus the row of application icons
+#include "domain/Motion.h"
 #include "media/MusicSession.h"
 #include "services/Notification.h"
 #include "render/TextRenderer.h"

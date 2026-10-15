@@ -28,11 +28,11 @@
 
 #include "app/AppBar.h"
 #include "shell/StartMenu.h"
-#include "core/TaskStripLayout.h"
+#include "domain/TaskStripLayout.h"
 #include "platform/WindowList.h"
 #include "media/AudioVolume.h"
 #include "selftest/Diagnostics.h"
-#include "core/Geometry.h"
+#include "domain/Geometry.h"
 #include "app/IslandWindow.h"
 #include "core/Log.h"
 #include "platform/Monitor.h"
@@ -44,7 +44,7 @@
 #define SECURITY_WIN32
 #include <security.h>   // GetUserNameExW, for the name in that card's footer
 #include <sddl.h>       // ConvertSidToStringSidW, to find the account picture
-#include "core/Motion.h"
+#include "domain/Motion.h"
 #include "core/ProcessMetrics.h"   // the memory line: what this process holds, and whether it grows
 #include "media/MusicSession.h"
 #include "platform/NativeTaskbar.h"
@@ -61,7 +61,7 @@
 #include "shell/SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
 #include "render/Theme.h"               // the material: colours and edges, switchable, plus themes\*.txt
 #include "services/WeChatWatch.h"
-#include "core/StatePolicy.h"
+#include "domain/StatePolicy.h"
 #include "media/SoundOutput.h"
 #include "shell/SystemStatus.h"
 #include "media/WicImage.h"

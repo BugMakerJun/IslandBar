@@ -23,7 +23,7 @@
 // =====================================================================
 #pragma once
 
-#include "core/Motion.h"
+#include "domain/Motion.h"
 
 namespace island {
 

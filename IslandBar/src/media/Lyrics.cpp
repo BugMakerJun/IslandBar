@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "core/MiniJson.h"
+#include "domain/MiniJson.h"
 #include "core/Log.h"
 
 #pragma comment(lib, "winhttp.lib")

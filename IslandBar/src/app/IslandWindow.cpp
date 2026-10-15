@@ -3,11 +3,11 @@
 // =====================================================================
 #include "app/IslandWindow.h"
 #include "app/AppBar.h"
-#include "core/TaskStripLayout.h"
+#include "domain/TaskStripLayout.h"
 #include "core/Log.h"
 #include "platform/Monitor.h"   // ShellTopBandThicknessPx: the band, once the work area no longer carries it
 
-#include "core/CardLayout.h"   // HitsTransportButton, for click routing
+#include "domain/CardLayout.h"   // HitsTransportButton, for click routing
 
 #include <dwmapi.h>
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM

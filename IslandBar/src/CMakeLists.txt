@@ -13,6 +13,24 @@
 #  and the reasons are written down here because they were written down here once.
 # =====================================================================
 
+# --- domain: the pure logic, and the only target that must stay OS-free ----------------
+#
+#  Everything in here runs without a desktop: layout, animation, hit testing, state policy, the JSON reader.
+#  That is what lets --self-test run 900+ assertions without creating a window, and it is the property most
+#  easily lost by accident -- one <windows.h> in one header and the whole layer is compiled against Win32
+#  again, which is exactly what had happened (core/Geometry.h used to include it, so every file that wanted
+#  a rectangle got HWND, MSG and the min/max macros for free).
+#
+#  THE RULE IS ENFORCED, NOT DOCUMENTED. domain/PurityCheck.cpp includes every header in this target and then
+#  fails with #error if <windows.h> has arrived. And this target may never gain a link library: a file that
+#  needs a Win32 call does not belong in it.
+add_library(island_domain STATIC
+    domain/MiniJson.cpp
+    domain/Motion.cpp
+    domain/PurityCheck.cpp
+)
+target_include_directories(island_domain PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
 add_executable(island_bar
     main.cpp
 
@@ -21,13 +39,8 @@ add_executable(island_bar
     app/IslandWindow.cpp
     app/PlayerWindow.cpp
 
-    # --- core: pure logic and the plumbing everything shares ---------
+    # --- core: the plumbing everything shares ------------------------
     core/Log.cpp
-    core/MiniJson.cpp
-    # Not a module: a compile-time rule. It fails the build if <windows.h> creeps back into the pure-logic
-    # headers (see the file). Cheap, and it is the only thing here that keeps the layering honest.
-    core/PurityCheck.cpp
-    core/Motion.cpp
     core/ProcessMetrics.cpp
 
     # --- media: what is playing, and what it looks like --------------
@@ -78,6 +91,11 @@ target_include_directories(island_bar PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 # --- C++/WinRT, for the system media controls (Windows.Media.Control) ---------
 # island_bar, gsmtcprobe and geoprobe all need it, so it lives in one place.
 islandbar_enable_cppwinrt(island_bar)
+
+# The bar links the pure-logic library, which is what makes the layering visible in the build rather than
+# only in the directory names: `island_domain` has no include of <windows.h> anywhere (PurityCheck.cpp
+# enforces it) and links nothing, so a Win32 call written into it stops the build here.
+target_link_libraries(island_bar PRIVATE island_domain)
 
 # --- the application manifest ------------------------------------------------
 #

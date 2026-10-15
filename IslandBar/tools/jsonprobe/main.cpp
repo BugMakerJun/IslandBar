@@ -23,7 +23,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "../../src/core/MiniJson.h"
+#include "../../src/domain/MiniJson.h"
 #include "../../src/services/Notification.h"
 
 namespace {

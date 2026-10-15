@@ -19,7 +19,7 @@
 // =====================================================================
 #pragma once
 
-#include "core/Geometry.h"
+#include "domain/Geometry.h"
 
 namespace island {
 

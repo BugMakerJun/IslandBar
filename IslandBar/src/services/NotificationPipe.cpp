@@ -11,7 +11,7 @@
 
 #pragma comment(lib, "advapi32.lib")
 
-#include "core/MiniJson.h"
+#include "domain/MiniJson.h"
 
 namespace island {
 namespace {

@@ -23,14 +23,14 @@
 #include <cwchar>
 #include <string>
 
-#include "core/Geometry.h"
+#include "domain/Geometry.h"
 #include "core/Log.h"
-#include "core/MiniJson.h"
-#include "core/CardLayout.h"
-#include "core/StatePolicy.h"
+#include "domain/MiniJson.h"
+#include "domain/CardLayout.h"
+#include "domain/StatePolicy.h"
 #include "media/Lyrics.h"
 #include "app/AppBar.h"
-#include "core/TaskStripLayout.h"
+#include "domain/TaskStripLayout.h"
 #include "platform/WindowList.h"
 #include "media/MusicSession.h"
 #include "app/PlayerWindow.h"
@@ -47,7 +47,7 @@
 #include "render/Theme.h"
 #include "platform/GlassMaterial.h"
 #include "shell/Weather.h"   // SkyMarkForCode: the word and the mark come from the same WMO code
-#include "core/Motion.h"
+#include "domain/Motion.h"
 #include "render/Renderer.h"
 #include "render/TextRenderer.h"
 #include "shell/TrayIcons.h"

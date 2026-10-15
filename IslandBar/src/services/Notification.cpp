@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "core/MiniJson.h"
+#include "domain/MiniJson.h"
 
 namespace island {
 namespace {

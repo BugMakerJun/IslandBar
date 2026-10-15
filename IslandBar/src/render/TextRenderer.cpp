@@ -7,7 +7,7 @@
 #include "shell/Weather.h"   // SkyMark: the weather mark the status line draws, per WMO code
 
 #include "media/WicImage.h"   // DecodeImage, for the mixer's application icons
-#include "core/TaskStripLayout.h"
+#include "domain/TaskStripLayout.h"
 
 // For the notification field capacities. TextRenderer itself stays free of the
 // notification model; it only needs to know how large the buffers it is handed can

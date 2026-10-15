@@ -1,7 +1,7 @@
 // =====================================================================
 //  MiniJson.cpp
 // =====================================================================
-#include "core/MiniJson.h"
+#include "domain/MiniJson.h"
 
 #include <cstdio>
 #include <cstdlib>

@@ -8,8 +8,11 @@
 
 add_executable(jsonprobe
     main.cpp
-    "${CMAKE_SOURCE_DIR}/src/core/MiniJson.cpp"
     "${CMAKE_SOURCE_DIR}/src/services/Notification.cpp"
 )
 
 target_include_directories(jsonprobe PRIVATE "${CMAKE_SOURCE_DIR}/src")
+
+# The JSON reader lives in the pure-logic library now (src/domain), so this probe links that library instead
+# of compiling the reader itself -- the same boundary the bar uses.
+target_link_libraries(jsonprobe PRIVATE island_domain)

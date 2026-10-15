@@ -20,10 +20,10 @@
 #include <cstddef>
 #include <unordered_map>
 
-#include "core/Geometry.h"      // RoundedBox: the text is laid out inside the pill's box
+#include "domain/Geometry.h"      // RoundedBox: the text is laid out inside the pill's box
 #include "media/MusicSession.h"  // the now-playing field capacities
-#include "core/CardLayout.h"    // where the card's controls go
-#include "core/TaskStripLayout.h"  // where the tray sits, and how many icons fit
+#include "domain/CardLayout.h"    // where the card's controls go
+#include "domain/TaskStripLayout.h"  // where the tray sits, and how many icons fit
 #include "shell/TrayIcons.h"     // the icons themselves
 #include "shell/StartApps.h"     // the Start card's applications
 

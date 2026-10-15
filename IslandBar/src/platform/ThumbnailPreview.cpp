@@ -3,7 +3,7 @@
 // =====================================================================
 #include "platform/ThumbnailPreview.h"
 
-#include "core/Geometry.h"
+#include "domain/Geometry.h"
 #include "core/Log.h"
 
 #include <dwmapi.h>
