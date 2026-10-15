@@ -13,6 +13,7 @@
 //      probe-tray-lab.exe --traynotify <secs>  register a callback with the shell's own tray and watch it
 //      probe-tray-lab.exe --traywindow <secs> [x y]  a tray of OUR OWN: our window, our drawing, the shell pressing
 //      probe-tray-lab.exe --traysample <secs> [x y] a look at what a tray of our own would be: real icons, our style
+//      probe-tray-lab.exe --rightclick <name> [post|send]  can an icon's OWN right-click menu be reached?
 //
 //  WHY THESE THREE. The tray is not an API: it is a WINDOW inside the shell's process, and
 //  Shell_NotifyIcon is shell32 handing a registration to it (measured 2026-10-15: a synchronous
@@ -1743,6 +1744,217 @@ int RunTraySample(int seconds, int x, int y) {
 
 } // namespace
 
+// --- E10, THE APPLICATION'S OWN RIGHT-CLICK MENU: two ways to ask the shell for it ----------------
+//
+//  WHY THIS IS NEEDED. UI Automation publishes no context-menu pattern -- an icon can be INVOKED (which is
+//  its left click) and nothing else -- so a menu of ours is the only honest right click unless the SHELL
+//  can be made to perform the right click itself. The shell is the one that knows the application's
+//  callback message, so if anything can produce 退出微信, it is the shell. Two ways to ask:
+//
+//    post -- post WM_RBUTTONDOWN/UP to the window the icon belongs to, at the icon's own coordinates. No
+//            pointer movement, no input injection; whether XAML accepts a POSTED mouse message is the
+//            question (it reads its input from the input site, which normally means real input).
+//    send -- a REAL right click: save the pointer, move it onto the icon, right press and release, put the
+//            pointer back. It moves the pointer for a few milliseconds, which is exactly what the user
+//            asked this project not to do -- so it is here as the fallback that decides whether the
+//            capability exists at all, not as a design.
+namespace {
+
+int RunRightClick(const wchar_t* wanted, bool sendInput, bool keepPanelVisible) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) return 1;
+    ComPtr<IUIAutomation> automation;
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(automation.Put()))) ||
+        !automation) {
+        return 1;
+    }
+    ComPtr<IUIAutomationElement> desktop;
+    automation->GetRootElement(desktop.Put());
+    VARIANT buttonType = {};
+    buttonType.vt = VT_I4;
+    buttonType.lVal = UIA_ButtonControlTypeId;
+    ComPtr<IUIAutomationCondition> buttons;
+    automation->CreatePropertyCondition(UIA_ControlTypePropertyId, buttonType, buttons.Put());
+
+    // Both trees, and the overflow is asked for first if it is not there yet: measured, its window is
+    // created lazily and only exists after the panel has been opened once in the session.
+    ComPtr<IUIAutomationElement> match;
+    RECT box = {};
+    for (int attempt = 0; attempt < 2 && !match; ++attempt) {
+        for (const wchar_t* rootClass : {L"TopLevelWindowForOverflowXamlIsland", L"Shell_TrayWnd"}) {
+            ComPtr<IUIAutomationCondition> byClass;
+            VARIANT value = {};
+            value.vt = VT_BSTR;
+            value.bstrVal = SysAllocString(rootClass);
+            ComPtr<IUIAutomationElement> root;
+            if (FAILED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value,
+                                                           byClass.Put()))) {
+                continue;
+            }
+            if (FAILED(desktop->FindFirst(TreeScope_Descendants, byClass.Get(), root.Put())) || !root) {
+                continue;
+            }
+            ComPtr<IUIAutomationElementArray> list;
+            if (FAILED(root->FindAll(TreeScope_Descendants, buttons.Get(), list.Put())) || !list) continue;
+            int count = 0;
+            list->get_Length(&count);
+            for (int i = 0; i < count; ++i) {
+                ComPtr<IUIAutomationElement> element;
+                if (FAILED(list->GetElement(i, element.Put())) || !element) continue;
+                // THE TRAY'S OWN CLASSES ONLY. Without this the walk finds the TASKBAR's task buttons as
+                // well -- "微信 - 1 个运行窗口" matches a search for 微信 -- and clicking one of those is a
+                // different thing entirely (it activates a window; it does not open a tray menu).
+                const std::wstring cls = ElementText(element.Get(), UIA_ClassNamePropertyId);
+                if (cls != L"SystemTray.AccentButton" && cls != L"SystemTray.NormalButton") continue;
+                const std::wstring name = Flattened(ElementText(element.Get(), UIA_NamePropertyId));
+                if (name.find(wanted) == std::wstring::npos) continue;
+                element->get_CurrentBoundingRectangle(&box);
+                element.Get()->AddRef();
+                match = element;
+                Log(L"RIGHTCLICK: found '%ls' at %ld,%ld %ldx%ld", name.c_str(), box.left, box.top,
+                    box.right - box.left, box.bottom - box.top);
+                break;
+            }
+            if (match) break;
+        }
+        if (!match && attempt == 0) {
+            // Ask the shell for the overflow panel, exactly as a click on the chevron does.
+            ComPtr<IUIAutomationCondition> trayClass;
+            VARIANT value = {};
+            value.vt = VT_BSTR;
+            value.bstrVal = SysAllocString(L"Shell_TrayWnd");
+            ComPtr<IUIAutomationElement> trayRoot;
+            if (SUCCEEDED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, value,
+                                                              trayClass.Put()))) {
+                desktop->FindFirst(TreeScope_Descendants, trayClass.Get(), trayRoot.Put());
+            }
+            if (trayRoot) {
+                ComPtr<IUIAutomationElementArray> strip;
+                if (SUCCEEDED(trayRoot->FindAll(TreeScope_Descendants, buttons.Get(), strip.Put())) &&
+                    strip) {
+                    int count = 0;
+                    strip->get_Length(&count);
+                    for (int i = 0; i < count; ++i) {
+                        ComPtr<IUIAutomationElement> element;
+                        if (FAILED(strip->GetElement(i, element.Put())) || !element) continue;
+                        if (Flattened(ElementText(element.Get(), UIA_NamePropertyId)).find(L"显示隐藏") ==
+                            std::wstring::npos) {
+                            continue;
+                        }
+                        ComPtr<IUIAutomationInvokePattern> invoke;
+                        if (SUCCEEDED(element->GetCurrentPatternAs(
+                                UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern),
+                                reinterpret_cast<void**>(invoke.Put()))) &&
+                            invoke) {
+                            invoke->Invoke();
+                            Log(L"RIGHTCLICK: asked the shell for its overflow panel to find that icon");
+                        }
+                        break;
+                    }
+                }
+            }
+            Sleep(900);
+            // ... and clip it to a pixel, so the panel is not on screen while we work with it.
+            ComPtr<IUIAutomationCondition> panelClass;
+            VARIANT panelValue = {};
+            panelValue.vt = VT_BSTR;
+            panelValue.bstrVal = SysAllocString(L"TopLevelWindowForOverflowXamlIsland");
+            ComPtr<IUIAutomationElement> panel;
+            if (SUCCEEDED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, panelValue,
+                                                              panelClass.Put()))) {
+                desktop->FindFirst(TreeScope_Descendants, panelClass.Get(), panel.Put());
+            }
+            if (panel) {
+                UIA_HWND native = nullptr;
+                if (SUCCEEDED(panel->get_CurrentNativeWindowHandle(&native)) && native) {
+                    HRGN sliver = CreateRectRgn(0, 0, 1, 1);
+                    if (keepPanelVisible) {
+                        // LEFT ON SCREEN ON PURPOSE. A real click can only land on pixels that are
+                        // really there -- measured twice: with the panel clipped away, a right click at
+                        // an icon's coordinates opens the DESKTOP's menu, because the desktop is what
+                        // is on screen there. So asking the shell for an application's own menu means
+                        // showing the shell's tray for the length of the click.
+                        //
+                        // The region is CLEARED first, not just left alone: an earlier run of this probe
+                        // clipped the panel and the region survives until something removes it, which is
+                        // why the first attempt at this printed the desktop's menu as well.
+                        SetWindowRgn(reinterpret_cast<HWND>(native), nullptr, TRUE);
+                        Log(L"RIGHTCLICK: leaving the panel visible -- a real click needs real pixels");
+                    } else {
+                        SetWindowRgn(reinterpret_cast<HWND>(native), sliver, TRUE);
+                        Log(L"RIGHTCLICK: clipped the panel to a sliver");
+                    }
+                }
+            }
+        }
+    }
+    if (!match) {
+        Log(L"RIGHTCLICK: nothing named '%ls' in either tree", wanted);
+        return 1;
+    }
+
+    const POINT middle = {(box.left + box.right) / 2, (box.top + box.bottom) / 2};
+    // A REAL CLICK NEEDS REAL PIXELS, and the panel may still be clipped from an earlier run of this probe
+    // (a window region outlives the process that set it). So the panel is put back on screen here, after
+    // the search rather than during it -- the search can succeed while the panel is one invisible pixel.
+    if (sendInput && keepPanelVisible) {
+        ComPtr<IUIAutomationCondition> panelClass;
+        VARIANT panelValue = {};
+        panelValue.vt = VT_BSTR;
+        panelValue.bstrVal = SysAllocString(L"TopLevelWindowForOverflowXamlIsland");
+        ComPtr<IUIAutomationElement> panel;
+        if (SUCCEEDED(automation->CreatePropertyCondition(UIA_ClassNamePropertyId, panelValue,
+                                                          panelClass.Put()))) {
+            desktop->FindFirst(TreeScope_Descendants, panelClass.Get(), panel.Put());
+        }
+        if (panel) {
+            UIA_HWND native = nullptr;
+            if (SUCCEEDED(panel->get_CurrentNativeWindowHandle(&native)) && native) {
+                SetWindowRgn(reinterpret_cast<HWND>(native), nullptr, TRUE);
+                Log(L"RIGHTCLICK: cleared the panel's region -- it is on screen for this click");
+                Sleep(250);
+            }
+        }
+    }
+    if (sendInput) {
+        POINT saved = {};
+        GetCursorPos(&saved);
+        SetCursorPos(middle.x, middle.y);
+        Sleep(80);
+        INPUT inputs[2] = {};
+        inputs[0].type = INPUT_MOUSE;
+        inputs[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+        inputs[1].type = INPUT_MOUSE;
+        inputs[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+        const UINT sent = SendInput(2, inputs, sizeof(INPUT));
+        Sleep(300);
+        SetCursorPos(saved.x, saved.y);
+        Log(L"RIGHTCLICK: real right click at %ld,%ld -> %u event(s); pointer put back at %ld,%ld",
+            middle.x, middle.y, sent, saved.x, saved.y);
+    } else {
+        // The window the element belongs to -- for a XAML island that is the island's own HWND -- and the
+        // icon's coordinates inside it.
+        UIA_HWND native = nullptr;
+        match->get_CurrentNativeWindowHandle(&native);
+        HWND target = reinterpret_cast<HWND>(native);
+        if (!target) target = FindWindowW(L"Shell_TrayWnd", nullptr);
+        POINT local = middle;
+        ScreenToClient(target, &local);
+        const LPARAM packed = static_cast<LPARAM>((local.y << 16) | (local.x & 0xFFFF));
+        PostMessageW(target, WM_RBUTTONDOWN, MK_RBUTTON, packed);
+        PostMessageW(target, WM_RBUTTONUP, 0, packed);
+        Log(L"RIGHTCLICK: posted WM_RBUTTONDOWN/UP to %p at client %ld,%ld (screen %ld,%ld)", target,
+            local.x, local.y, middle.x, middle.y);
+    }
+    Sleep(1200);
+    match->Release();
+    CoUninitialize();
+    return 0;
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
     OpenLog();
     if (argc < 2) {
@@ -1799,6 +2011,22 @@ int main(int argc, char** argv) {
         const int x = (argc > 3) ? std::atoi(argv[3]) : 1700;
         const int y = (argc > 4) ? std::atoi(argv[4]) : 6;
         return RunTraySample(seconds, x, y);
+    }
+    if (std::strcmp(argv[1], "--rightclick") == 0 && argc > 2) {
+        // THE WIDE COMMAND LINE, not argv: an application's name picked off the screen is almost always
+        // non-ASCII, and on this machine argv arrives in the ANSI codepage (936) -- widening it as UTF-8 is
+        // how `微信` became '΢��' and matched nothing. This project has paid for this exact trap twice.
+        wchar_t wanted[128] = {};
+        int wideCount = 0;
+        LPWSTR* wideArgs = CommandLineToArgvW(GetCommandLineW(), &wideCount);
+        if (wideArgs && wideCount > 2) {
+            wcsncpy_s(wanted, wideArgs[2], _TRUNCATE);
+        }
+        if (wideArgs) LocalFree(wideArgs);
+        const bool sendInput = (argc > 3) && (std::strcmp(argv[3], "send") == 0 ||
+                                              std::strcmp(argv[3], "sendvisible") == 0);
+        const bool keepPanelVisible = (argc > 3) && std::strcmp(argv[3], "sendvisible") == 0;
+        return RunRightClick(wanted, sendInput, keepPanelVisible);
     }
     Log(L"unknown command");
     return 2;
