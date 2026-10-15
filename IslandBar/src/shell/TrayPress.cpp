@@ -2,6 +2,7 @@
 //  TrayPress.cpp -- see the header for the route and for what it is built on.
 // =====================================================================
 #include "shell/TrayPress.h"
+#include "domain/TrayEncoding.h"   // the only place a click's two words are placed (see its header)
 
 #include "shell/TrayUia.h"   // the fallback for the icons no message can ever reach
 
@@ -765,21 +766,23 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     int answeredWith = -1;
     for (int i = 0; i < attemptCount; ++i) {
         const Attempt& attempt = attempts[i];
-        const WPARAM wparam = attempt.v4Packing ? static_cast<WPARAM>(MAKELONG(anchor.x, anchor.y))
-                                                : static_cast<WPARAM>(entry->uid);
-        const LPARAM packed = attempt.v4Packing
-                                  ? static_cast<LPARAM>(MAKELONG(attempt.notify, entry->uid))
-                                  : static_cast<LPARAM>(attempt.notify);
+        // THE TWO WORDS COME FROM domain/TrayEncoding.h AND NOWHERE ELSE (2026-10-16). The spelling that was
+        // written here by hand was right, and the probe written later got it backwards -- which crashed
+        // WeChat twice and was read as a "modal menu loop" for a round (HANDOFF 8.142). A press may choose
+        // WHICH spelling to try; where the coordinates, the event and the uid go is not a per-file decision.
+        const island::TrayMessage packed =
+            island::EncodeTrayMessage(attempt.v4Packing, entry->uid, attempt.notify, anchor.x, anchor.y);
         if (attempt.downFirst) {
             const unsigned down = (attempt.notify == WM_RBUTTONUP) ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
-            const LPARAM packedDown = attempt.v4Packing
-                                          ? static_cast<LPARAM>(MAKELONG(down, entry->uid))
-                                          : static_cast<LPARAM>(down);
-            posted = DeliverMessage(window, entry->message, wparam, packedDown, attempt.sent) != FALSE;
+            const island::TrayMessage packedDown =
+                island::EncodeTrayMessage(attempt.v4Packing, entry->uid, down, anchor.x, anchor.y);
+            posted = DeliverMessage(window, entry->message, static_cast<WPARAM>(packedDown.wParam),
+                                    static_cast<LPARAM>(packedDown.lParam), attempt.sent) != FALSE;
             if (!posted) continue;
             Sleep(30);
         }
-        posted = DeliverMessage(window, entry->message, wparam, packed, attempt.sent) != FALSE;
+        posted = DeliverMessage(window, entry->message, static_cast<WPARAM>(packed.wParam),
+                                static_cast<LPARAM>(packed.lParam), attempt.sent) != FALSE;
         if (!posted) continue;
         answered = WatchApplicationForAnswer(watch, foregroundBefore,
                                              outcome ? outcome->answer : nullptr,

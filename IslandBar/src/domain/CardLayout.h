@@ -254,10 +254,10 @@ inline const wchar_t* TrayMenuLabel(TrayMenuAction action) {
     switch (action) {
         case TrayMenuAction::Open:            return L"打开";
         case TrayMenuAction::ActivateWindow:  return L"显示窗口";
-        case TrayMenuAction::OpenLocation:    return L"打开文件位置";
+        case TrayMenuAction::OpenLocation:    return L"文件位置";
         case TrayMenuAction::CloseWindow:     return L"关闭窗口";
-        case TrayMenuAction::QuitApplication: return L"结束应用";
-        case TrayMenuAction::ApplicationMenu: return L"应用自己的菜单…";
+        case TrayMenuAction::QuitApplication: return L"关闭应用";
+        case TrayMenuAction::ApplicationMenu: return L"应用菜单";
     }
     return L"";
 }
@@ -269,7 +269,7 @@ inline const wchar_t* TrayMenuLabel(TrayMenuAction action) {
 // words ("再点一次"), which is the same arrangement the Start card's power list uses for sign-out,
 // restart and shutdown.
 inline const wchar_t* TrayMenuArmedLabel(TrayMenuAction action) {
-    if (action == TrayMenuAction::QuitApplication) return L"再点一次：结束应用";
+    if (action == TrayMenuAction::QuitApplication) return L"再点一次：关闭应用";
     return TrayMenuLabel(action);
 }
 
@@ -295,12 +295,14 @@ inline int TrayMenuEntriesFor(const TrayMenuFacts& facts, TrayMenuAction* out, i
     const auto add = [&](TrayMenuAction action) {
         if (count < capacity) out[count++] = action;
     };
+    // THE FOUR ROWS THE USER ASKED FOR (2026-10-16): 打开 / 文件位置 / 应用菜单 / 关闭应用 -- in his
+    // order. 打开 is the icon's own default action (the application's own left click, sent as its own
+    // callback), and 应用菜单 is the one row that goes and gets the application's OWN menu, which is the
+    // slow route and the only one that can offer what only the application knows ("退出微信").
     if (facts.hasCallback) add(TrayMenuAction::Open);
-    if (facts.hasWindow) add(TrayMenuAction::ActivateWindow);
     if (facts.hasExePath) add(TrayMenuAction::OpenLocation);
-    if (facts.hasWindow) add(TrayMenuAction::CloseWindow);
-    add(TrayMenuAction::QuitApplication);
     if (facts.hasCallback) add(TrayMenuAction::ApplicationMenu);
+    add(TrayMenuAction::QuitApplication);
     return count;
 }
 

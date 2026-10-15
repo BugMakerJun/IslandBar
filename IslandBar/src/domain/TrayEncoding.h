@@ -62,19 +62,31 @@ struct TrayClickPlan {
     bool version4 = false;
 };
 
+// One message, encoded. This is the form the press code needs, because a press is allowed to TRY more than
+// one spelling for an application whose protocol was never observed (see TrayPress.cpp): it chooses the
+// packing and the event, and the placement of the two words still comes from here and nowhere else.
+constexpr TrayMessage EncodeTrayMessage(bool version4Packing, unsigned uid, unsigned event, int x, int y) {
+    TrayMessage message;
+    if (version4Packing) {
+        message.wParam = TrayPack(static_cast<unsigned>(x), static_cast<unsigned>(y));
+        message.lParam = TrayPack(event, uid);
+    } else {
+        message.wParam = uid;
+        message.lParam = event;
+    }
+    return message;
+}
+
 constexpr TrayClickPlan PlanTrayClick(unsigned version, unsigned uid, bool rightClick, int x, int y) {
     TrayClickPlan plan;
     plan.version4 = version >= 4;
     if (plan.version4) {
         const unsigned event = rightClick ? kTrayMouseContextMenu : kTraySelect;
-        plan.first.wParam = TrayPack(static_cast<unsigned>(x), static_cast<unsigned>(y));
-        plan.first.lParam = TrayPack(event, uid);
+        plan.first = EncodeTrayMessage(true, uid, event, x, y);
     } else {
-        plan.first.wParam = uid;
-        plan.first.lParam = rightClick ? kTrayMouseRightDown : kTrayMouseLeftDown;
+        plan.first = EncodeTrayMessage(false, uid, rightClick ? kTrayMouseRightDown : kTrayMouseLeftDown, x, y);
         plan.hasSecond = true;
-        plan.second.wParam = uid;
-        plan.second.lParam = rightClick ? kTrayMouseRightUp : kTrayMouseLeftUp;
+        plan.second = EncodeTrayMessage(false, uid, rightClick ? kTrayMouseRightUp : kTrayMouseLeftUp, x, y);
     }
     return plan;
 }

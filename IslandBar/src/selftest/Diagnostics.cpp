@@ -7135,13 +7135,15 @@ void TestMusicCardLayout() {
                 // instead of under the pointer. This menu is the bar's own, and these are the two rules it
                 // runs on: WHICH rows it offers, and WHERE they land.
                 {
-                    // Which rows: an entry that would do nothing is not offered, and the application's own
-                    // menu -- the slow one, the one that leaves the bar -- is always last.
+                    // Which rows: THE FOUR THE USER ASKED FOR, in his order -- 打开 / 文件位置 / 应用菜单 /
+                    // 关闭应用 (2026-10-16) -- and an entry that would do nothing is still not offered. A row
+                    // whose message cannot be sent (no callback learned) or whose path is unknown is absent,
+                    // which is the rule that was measured the hard way on 2026-10-15: the user pressed
+                    // 应用自己的菜单… on such a cell and it "did nothing", because all it could do was
+                    // re-open the same menu.
                     //
-                    // The row the user found dead on 2026-10-15 is 应用自己的菜单… on a cell whose callback has
-                    // never been learned: it can only send the application its right-click message, and there
-                    // is no message to send. 打开 is the same question about the left button. Both are pinned
-                    // here as ABSENT rather than present-and-inert.
+                    // 打开 and 应用菜单 are the application's own left and right actions, so both need a
+                    // callback; 文件位置 needs a recorded path; 关闭应用 always has something to do.
                     TrayMenuAction all[kMaxTrayMenuEntries] = {};
                     const int withEverything = TrayMenuEntriesFor(TrayMenuFacts{true, true, true}, all,
                                                                   kMaxTrayMenuEntries);
@@ -7161,19 +7163,22 @@ void TestMusicCardLayout() {
                                       ? static_cast<int>(all[withEverything - 1])
                                       : -1,
                                   withNoCallback, withNothing, withPath);
-                    Check(withEverything == 6 && all[0] == TrayMenuAction::Open &&
-                              all[1] == TrayMenuAction::ActivateWindow &&
-                              all[2] == TrayMenuAction::OpenLocation &&
-                              all[3] == TrayMenuAction::CloseWindow &&
-                              all[4] == TrayMenuAction::QuitApplication &&
-                              all[5] == TrayMenuAction::ApplicationMenu &&
-                              withNoCallback == 4 && noCallback[0] == TrayMenuAction::ActivateWindow &&
-                              noCallback[1] == TrayMenuAction::OpenLocation &&
-                              noCallback[2] == TrayMenuAction::CloseWindow &&
-                              noCallback[3] == TrayMenuAction::QuitApplication &&
-                              // path only, WITH a callback: 打开 and 应用自己的菜单… come back with it, and
-                              // the two window rows stay out because there is no window -- four rows.
-                              withNothing == 1 && bare[0] == TrayMenuAction::QuitApplication && withPath == 4,
+                    Check(withEverything == 4 && all[0] == TrayMenuAction::Open &&
+                              all[1] == TrayMenuAction::OpenLocation &&
+                              all[2] == TrayMenuAction::ApplicationMenu &&
+                              all[3] == TrayMenuAction::QuitApplication &&
+                              // no callback: the two rows that ARE the application's own action go, and the
+                              // two that do not need it stay.
+                              withNoCallback == 2 && noCallback[0] == TrayMenuAction::OpenLocation &&
+                              noCallback[1] == TrayMenuAction::QuitApplication &&
+                              // nothing known at all: one row, and it is the one that always has something
+                              // to do. path only, with a callback: three, because there is no window but
+                              // there is a path -- and 关闭应用 is still there.
+                              withNothing == 1 && bare[0] == TrayMenuAction::QuitApplication &&
+                              withPath == 4 && onlyPath[0] == TrayMenuAction::Open &&
+                              onlyPath[1] == TrayMenuAction::OpenLocation &&
+                              onlyPath[2] == TrayMenuAction::ApplicationMenu &&
+                              onlyPath[3] == TrayMenuAction::QuitApplication,
                           L"the menu offers only what can be done, and never a row that would do nothing",
                           trayDetail);
                     // The one entry with a second state says so in words, and only that one does.
@@ -7182,7 +7187,7 @@ void TestMusicCardLayout() {
                                   TrayMenuArmedLabel(TrayMenuAction::QuitApplication),
                                   TrayMenuArmedLabel(TrayMenuAction::Open));
                     Check(std::wcscmp(TrayMenuArmedLabel(TrayMenuAction::QuitApplication),
-                                      L"再点一次：结束应用") == 0 &&
+                                      L"再点一次：关闭应用") == 0 &&
                               std::wcscmp(TrayMenuArmedLabel(TrayMenuAction::Open), L"打开") == 0,
                           L"an armed entry says what the second press will do, and only it changes",
                           armedDetail);
