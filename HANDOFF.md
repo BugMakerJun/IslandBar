@@ -11471,3 +11471,34 @@ Windows 安全中心 …      | SystemTray.NormalButton | invoke=True | 2374,89,
 | `--tray-surface` | 3 of 10 可按，无退化 |
 | **`--tray-press 0 --right --fire`（真实右击 ChatGPT）** | `pressed: its own callback (press 1984 ms)` —— 搬走之后的菜单/按压链路端到端可用 |
 | 部署 + 重启 bar | pid 3756，正常 |
+
+### 8.118 **架构改造第三步：命令行命令从 main.cpp 搬进 src/cli/（约 1,000 行）** ✅（已部署，逐条命令回归通过）
+
+#### 8.118.1 搬了什么
+
+`main.cpp` 里十二个"代替岛运行"的命令整体搬进 `src/cli/Cli.{h,cpp}`（两段连续块，共约 1,000 行）：`--tray-dump` / `--tray-surface` / `--tray-learn` / `--tray-press` / `--icon-dump` / `--window-list` / `--toast-dump` / `--volume-set` / `--volume-test` / `--notify` / `--music-preview` / `--lyrics-test`。**参数解析留在 `main.cpp`**（它知道有哪些开关），命令只负责干活并返回退出码。
+
+`main.cpp`：**7,119 → 6,031 行**（本轮 -1,088），现在只剩"解析参数 → 要么跑一条命令、要么跑这条岛"。
+
+顺带纠正了两处**之前没搬干净**的东西，它们都是"谁拥有这个状态/类型"的问题，不搬看不见：
+
+| 东西 | 原来 | 现在 |
+|---|---|---|
+| `trayMenuRequestCell`（工作线程交给主线程的格子号） | `main.cpp` 匿名 namespace | `shell/TrayMenu.h/.cpp`（8.117 那轮跟着走） |
+| `FrameStats`（帧计时：帧数、最差帧、卡顿） | `main.cpp` 匿名 namespace 里的结构体 | `core/FrameStats.h`——bar 的帧循环和 `--music-preview` 都靠它计时，所以它是共用基础设施，不是某个循环的私有物 |
+| `ArgumentAsUtf8ToWide`（命令行参数的 UTF-8→宽字符） | `main.cpp` 匿名 namespace | `cli/Cli.cpp`（命令行管道，两个使用者：`main` 的 `--state` 与 `--icon-dump`） |
+
+#### 8.118.2 途中踩到的（都记下来）
+
+1. **我用行号切块时把一个函数的尾巴（`PowerActionName` / `PowerActionLosesWork`）一起切走了**——它们属于开始卡片，不属于命令行。编译器在链接期报"声明了但没有定义"，我把它俩搬回 `main.cpp` 并**顺手把定义挪到声明旁边**，免得下次再出现"声明在这里、定义在 5,800 行之外"。
+2. 搬完之后缺三处依赖（`CurrentTheme` 在 `render/Theme.h`、`FrameStats`、`ArgumentAsUtf8ToWide`），全靠编译器一条条指出来——这也是为什么每次搬完必须全量重建，而不是只跑自检。
+
+#### 8.118.3 验证
+
+| 项 | 结果 |
+|---|---|
+| Release / Debug 全量重建（/WX 生效） | OK，零告警 |
+| `--self-test` | PASS |
+| `island_smoke` | PASS |
+| **搬走的命令逐条跑**：`--tray-surface` / `--tray-dump` / `--window-list` / `--toast-dump 2` / `--icon-dump` | 全部照常出结果（覆盖率仍是 3 of 10；toast 读出 2 条；`--icon-dump Weixin.exe` 解出 32x32 图标并写出 PNG——这条同时验证了跟着搬走的 `ArgumentAsUtf8ToWide`） |
+| 部署 + 重启 bar | pid 27836，正常 |

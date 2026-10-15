@@ -39,6 +39,9 @@ add_executable(island_bar
     app/IslandWindow.cpp
     app/PlayerWindow.cpp
 
+    # --- cli: the commands that run instead of the bar ----------------
+    cli/Cli.cpp
+
     # --- core: the plumbing everything shares ------------------------
     core/Log.cpp
     core/ProcessMetrics.cpp

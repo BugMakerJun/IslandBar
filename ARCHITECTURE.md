@@ -15,6 +15,7 @@ Windows 11 上替代系统任务栏的一条横条（"岛"）：自己画 pill �
 ```
 src/
   main.cpp          入口。解析命令行 → 要么跑一条命令，要么跑这条岛
+  cli/              那些"代替岛运行"的命令（--tray-* / --toast-dump / --window-list / --icon-dump …）
   domain/           纯逻辑，独立静态库目标 island_domain：几何、布局、动画、状态策略、JSON 读取。
                     这一层不许包含 <windows.h>，也不许链接任何库（见第 3 节）
   core/             所有模块共用的基础设施：日志、进程指标
@@ -59,6 +60,7 @@ island_bar.exe（main.cpp：组装 + 消息泵）
 | 媒体卡片 | `media/MusicSession.cpp`、`media/Lyrics.cpp`、`render/` | 延迟初始化：没音乐时不该起线程 |
 | 通知纸条 | `services/`（Toast 读取）加 `app/IslandWindow` 的 NoticeStrip 状态 | |
 | 与 Win32 对话的细节 | `platform/` | 不要在 `core/` 里加 `<windows.h>` |
+| 一条诊断命令（"这个图标到底有没有回调"这类） | `cli/Cli.cpp` | 参数解析留在 `main.cpp`；命令只负责干活并返回退出码 |
 
 ## 5. 构建、自检、冒烟、部署
 
@@ -93,7 +95,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 ## 7. 已知的架构债（写在明处，不是等人发现）
 
 - **模块边界还没有被构建系统强制**：`core/` 有了编译期护栏，但 `shell/`、`render/`、`media/` 之间仍是同一个目标里的翻译单元，互相 include 的门槛很低。下一步是把 `core/` 抽成独立静态库目标，再逐层往上锁。
-- **`main.cpp` 与 `selftest/Diagnostics.cpp` 太大**（7.3k / 8.6k 行）：命令行子命令、帧循环、托盘菜单动作、诊断注入路径都还在 `main.cpp` 里。按自然缝隙拆（CLI 先出去），但要在托盘链路稳定之后单独做一轮。
+- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（6.0k / 8.6k 行）。已经搬出去的两块：托盘的行为去了 `shell/TrayMenu.*`（234 行），代替岛运行的那些命令去了 `cli/Cli.cpp`（约 1,000 行）。`main.cpp` 剩下的主体是 `RunBar`——**一个约 5,000 行的帧循环**，里面是窗口、渲染、媒体、通知、天气、系统面板和托盘卡片的全部驱动逻辑，外加许多散落的局部状态与 1 秒 / 5 秒轮询。下一步不是继续搬函数，而是先立一个**单一世界状态**（把这些局部对象收进一个 `World`），再把轮询改成事件，最后才按状态切片。这一步会动到托盘链路的宿主环境，所以它自己就是一轮。
 - **模块与主程序之间靠文件轮询**：`trayhook` 写 `tray_learned.txt`，bar 每 5 秒读一次；模块也没有 ABI 版本契约（现在靠内容哈希命名来避免文件锁）。正式做法应是共享内存或管道加版本号，把文件降级为可回放语料。
 - **安装器还没带 `island_tray_hook.dll`**：托盘学习是正式功能，所以全新安装缺这个 DLL 就是功能缺口。
 - **托盘按压没有自动化回归**：只能靠 CLI 探针（`--tray-surface` / `--tray-learn` / `--tray-press N`）加人工验证。
