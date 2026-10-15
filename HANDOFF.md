@@ -12615,3 +12615,60 @@ ChatGPT 建议的"20 次冷启动"这一轮做了 4 次（都写在本节里）�
 1. 复测微信那一格（**需要用户先把微信登录回来**）。
 2. 推 GitHub（按规矩等用户说"测试没问题"）。
 3. 探针/`retired/tray` 的清理：等用户确认这一版托盘没问题之后再做。
+
+---
+
+## 8.146 **用户：「WinUI 弹的也要显示出来」→ 右键形状与 `--right` 两处修复**（2026-10-16 03:40）
+
+用户原话：「先做吧 但是我要求是必须全都能弹出自己的菜单，跟原生的托盘一样」。
+
+### 8.146.1 评审第 43 轮
+
+* 问题写在 `reviews/review-q38.txt`（症状、产品当时发的两种形状、仓库里实测有效的形状、四个问题）。
+* **ChatGPT：修正。** 同意"先修 `WM_RBUTTONUP` 的发送方式"，并纠正我两条：不能归纳成"Electron 都遵守
+  同一条右键规则"；**不能假定 `IUIAutomationElement::ShowContextMenu()` 存在**。建议：每个应用只发**一种**
+  已验证的策略，失败就记录，不在同一次按压里换形状重试；没有可靠原生路径的格子默认给产品自己的菜单。
+  验收：`Electron 原生菜单首击成功率 3/3` + 一行 `tray context-menu: ...`。
+* **Gemini 这一轮没有拿到**：内置浏览器直接回"Gemini 目前不支持你所在的地区"，Edge 不给自动化连
+  （`Browser is not available: edge`）。如实记在这里，没有拿"另一个模型"顶替。
+* 只读核实了 SDK（10.0.26100.0）：`ShowContextMenu` 只存在于 `IUIAutomationTextRange2/3`，
+  **`IUIAutomationElement` 上没有** —— ChatGPT 的提醒成立，那条路不存在。
+
+### 8.146.2 两处修复（提交 `3c1809b`）
+
+1. **右键的形状**：原来先 post 一条 `WM_RBUTTONUP`、再同步发 DOWN+UP 一对。现在只发**那一对**
+   （`domain/TrayEncoding.h` 里的计划，`TrayPress.cpp` 从计划读出事件与发法，不再手写第二遍）。
+   依据：shell 自己的一次真实右键被 `--dump` 抓到发的正是 `0x204` → `0x205`；探针里那条"测通了"的
+   `v3-rbuttonup` 其实带 `withDown=true`，也是一对 —— **我先前把探针读成"单发 UP"，据此写了一版改动，
+   一个小时后自己纠正**（HANDOFF 里留着这条弯路）。
+2. **`--tray-press N --right` 的静默降级**：参数在固定位置上解析，`--fire` 不写时 `--right` 根本不生效 ——
+   我按下"右键"、它按的是左键，还报"pressed"。现在标志写在哪儿都认。
+
+**验收（一个数字 + 一行日志）**：修复后逐格右键实测
+
+| 格子 | 修复前 | 修复后 |
+|---|---|---|
+| RazerAppEngine | 1984 ms，什么都没出现 | **47 ms，它自己的菜单窗口 `Chrome_WidgetWin_1` 1219,635 180x222 出现** |
+| ChatGPT（Codex，AppContainer + GUID 注册） | 1532 ms，什么都没出现 | 仍然什么都没有 |
+| 任务管理器 | 1546 ms，什么都没有 | （该格当时已退出，未测） |
+
+日志行（现在每个右键一条）：
+`tray context-menu: app=razerappengine.exe version=0 strategy=v3-sent-down-up attempts=1 outcome=native_menu
+evidence='its own 'Chrome_WidgetWin_1' at 1219,635 180x222 (a window of its own that was not on screen
+before)' elapsed_ms=47`
+
+自检 976 → **979**（一对的顺序、它是 SENT、v4 通知是 POSTED 而左键在两种协议下都是 SENT），真实会话里
+`RESULT: PASS`；`island_smoke` PASS。
+
+### 8.146.3 还没做到"每一格都能弹"：两类，都要用户拍板
+
+* **托盘窗口活着但不应答**（今天的 ChatGPT）：这台桌面上只有一个
+  `OwlElectron_NotifyIconHostWindow`（pid 29284），**左键右键都不响应**；A/B 实测（指针停在 1250,60 与
+  2480,16 两个位置）与四种形状（post-up、send-up、send-down+up、post-down+up）全部无反应。所以这不是
+  形状问题，是那个窗口本身。要弄清 shell 到底怎么让它弹，唯一手段是 `--dump`（在应用里挂只读钩子 +
+  一次**真实右键**），而那需要把 shell 的托盘那一小块临时露出来 —— 会闪。
+* **从来没有过回调的**（NVIDIA 那几格、系统自己的按钮）：没有回调可学，右键只能开我们自己的菜单；
+  UIA 没有右键接口（已核实）。
+* 唯一有实测证据能把"应用自己的菜单"弄出来的兜底，是 **8.138 路线 ③：把 shell 的托盘露出来几百毫秒 →
+  指针瞬移 → 真实右键 → 还原**（当时真的弹出了微信的「退出微信」）。用户 2026-10-15 说过不要这种闪，
+  现在要求"必须都能弹" —— 两者只能选一个，等用户决定。
