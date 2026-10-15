@@ -209,6 +209,37 @@ struct BarState {
     bool activePlaying = false;
     const char* activeTitle = "";
     const char* activeArtist = "";
+
+    // --- the diagnostics, the full-screen check, and what the loop reports about itself (slice 4) ---------
+    //
+    // Moved 2026-10-15. Read-once values that come from the environment do NOT live here: they are `const`
+    // for the life of the process and are not state. ISLANDBAR_NO_FULLSCREEN is the one a reader would expect
+    // to find below and it is deliberately not here -- it stays a local in RunBar, which is where the parsing
+    // of a multi-line GetEnvironmentVariableW call belongs.
+    //
+    // What is here: the pointer edge as the LAST pass saw it (the edge is what matters -- a press that
+    // starts outside the bar puts the panel away and a button already held does not), the one-shot
+    // synthetic click a script needs because it cannot click this bar, the full-screen trio (polled four
+    // times a second: GetForegroundWindow, GetWindowRect and a class name, see kFullscreenCheckMs), and
+    // the two values that let the loop write a line when what it SHOWS has changed rather than one per
+    // frame.
+    // Whether the left button was down the last time the frame loop looked. The edge is what matters: a
+    // press that starts outside the bar puts the panel away, and a button already held does not.
+    bool leftWasDown = false;
+    // Diagnostics: a one-shot synthetic click, so the outside-click dismissal can be exercised on a machine
+    // whose integrity levels make a script's own input invisible to the bar. See ISLANDBAR_CLICK_AT.
+    long injectClick_ = 0;
+    long injectClickY_ = 0;
+    unsigned long long injectClickAtMs_ = 0;
+    // The full-screen state as of the last frame, so the transition is acted on once rather
+    // than every frame.
+    bool fullscreenLast = false;
+    // ... and whether a full-screen APPLICATION is in front, measured by us rather than announced by the
+    // shell (see FullScreenAppInFront). Polled: three cheap calls, four times a second.
+    bool fullscreenAppInFront = false;
+    unsigned long long lastFullscreenCheck = 0;
+    int lastReportedButtons = -1;
+    island::IslandState lastReportedState = island::IslandState::Collapsed;
 };
 
 } // namespace island

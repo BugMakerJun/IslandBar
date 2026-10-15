@@ -11632,3 +11632,24 @@ uninstaller written: ...  shortcut written: ...  registered under Settings > App
 **验证**：两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；起 bar 后媒体与歌词照常驱动：日志里 `music: [QQMusic.exe] 张妙格 - 海棠次第开 (playing)`、`redraws: … music=58 lyrics=16`、`mem[start]: … lyrics=49`。
 
 搬的过程里踩到一个值得记的：**按"行里带 `=` 或 `[`"去认字段名，会漏掉那些以 `;` 结尾的声明**（`island::PlayerWindowInfo playerWindowNow;`、`island::TrackPosition track;`）。两行声明被删掉了、使用点没加限定 → 编译器报一串"未声明的成员"。教训与 8.117 那条同类：机械改写的判据要覆盖所有声明的写法，改完必须让编译器过一遍。
+
+### 8.124 **BarState 第 4 片：诊断注入、全屏检测、循环自报（9 个字段）** ✅（含一次回退重做）
+
+`main.cpp` **5,893 → 5,876 行**。
+
+搬的是：`leftWasDown`（上一帧的指针左键状态——**边沿**才是判据）、`injectClick_` / `injectClickY_` / `injectClickAtMs_`（脚本没法点这条栏，所以留了一次性合成点击）、`fullscreenLast` / `fullscreenAppInFront` / `lastFullscreenCheck`（全屏检测，四次每秒），以及 `lastReportedButtons` / `lastReportedState`（让循环"只在显示内容变了时写一行"，而不是每帧一行）。
+
+**环境开关那组故意不搬**，头文件里写清了理由：它们是 `const`、进程存活期间不变、而且**是解析过程而不是状态**（`ISLANDBAR_NO_FULLSCREEN` 的初值是一段跨两行的 `GetEnvironmentVariableW` 调用）。一个读者会以为它们该在里面，所以这句说明必须写在里面。
+
+#### 8.124.1 这一次先做坏了，回退重做
+
+第一次尝试把 `noFullscreenSetting` / `noFullscreen` 也算进这一片，于是行抽取取到了**多行声明的第一行**、丢掉了续行：结构体里出现 `const bool noFullscreen =` 悬空、`main.cpp` 里留下几行被加上 `bar.` 的续行，编译器一次报出 5 类错误。
+
+处理方式是**回退到上一次提交**（那两个文件里只有我这次未提交的改动），然后：
+
+1. 把多行声明排除出这一片（它本就不是状态，见上）；
+2. **先把要写进结构体的片段打出来核对，再写文件、再编译**——这条从这一轮起成为固定动作。
+
+#### 8.124.2 验证
+
+两套配置全量重建（/WX）零告警；自检 PASS、冒烟 PASS、覆盖率不变（3 of 11）；起 bar 后自报那条路照常：`taskbar: state=music-strip, 4 buttons from 4 windows listed …`、`state: music-strip (pointer inside=0, resting=music-strip)`（这两行正是 `lastReportedState` / `lastReportedButtons` 把住的门）。

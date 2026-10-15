@@ -690,14 +690,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // The system panel can be forced open at startup by a diagnostic; that is the only piece of the state
     // above whose initial value comes from a parameter instead of a constant (see app/BarState.h).
     bar.systemPanelOpen = forcedSystemPanel;
-    // Whether the left button was down the last time the frame loop looked. The edge is what matters: a
-    // press that starts outside the bar puts the panel away, and a button already held does not.
-    bool leftWasDown = false;
-    // Diagnostics: a one-shot synthetic click, so the outside-click dismissal can be exercised on a machine
-    // whose integrity levels make a script's own input invisible to the bar. See ISLANDBAR_CLICK_AT.
-    long injectClick_ = 0;
-    long injectClickY_ = 0;
-    unsigned long long injectClickAtMs_ = 0;
     // The last audio reading, kept for the CLICK handler as well as the draw: a click on a device row has to
     // name the endpoint it wants, and the row the user is looking at is the one in this snapshot. On the
     // heap, like the worker that fills it: it is tens of kilobytes and this function's frame is not the
@@ -779,13 +771,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     const LONG barThicknessPx =
         island::DipToPixels(island::kReservedBarHeightDip, monitor.dpi);
     island::AppBarResult appBarResult = island::AppBarResult::NoWindow;
-    // The full-screen state as of the last frame, so the transition is acted on once rather
-    // than every frame.
-    bool fullscreenLast = false;
-    // ... and whether a full-screen APPLICATION is in front, measured by us rather than announced by the
-    // shell (see FullScreenAppInFront). Polled: three cheap calls, four times a second.
-    bool fullscreenAppInFront = false;
-    unsigned long long lastFullscreenCheck = 0;
     island::IslandWindow window;
     if (!window.Create(monitor, /*show=*/true)) {
         island::LogAndPrint("FATAL: could not create the window (error %lu)\n", GetLastError());
@@ -1424,8 +1409,6 @@ float musicWavePhase = 0.0f;
         // the pointer is on it. A TIMESTAMP rather than a flag, because the material must not change on the
         // frames in between (see cardSurfaceMoving -- a per-frame flag is what made the card flicker).
         unsigned long long lastCardMotionMs = 0;
-    int lastReportedButtons = -1;
-    island::IslandState lastReportedState = island::IslandState::Collapsed;
         unsigned long long lastRegionApplications = 0;
         // Which card owns the shape, held for the whole life of the card rather than for the life of the
         // request that opened it. See NextCardOwner.
@@ -1539,10 +1522,10 @@ float musicWavePhase = 0.0f;
             if (GetEnvironmentVariableW(L"ISLANDBAR_CLICK_AT", setting, 32) > 0) {
                 wchar_t point[32] = {};
                 GetEnvironmentVariableW(L"ISLANDBAR_CLICK_AT", point, 32);
-                if (swscanf_s(point, L"%ld,%ld", &injectClick_, &injectClickY_) == 2) {
-                    injectClickAtMs_ = GetTickCount64() + 3000;
-                    island::LogAndPrint("  diagnostic: will click at (%ld,%ld) in 3 s\n", injectClick_,
-                                        injectClickY_);
+                if (swscanf_s(point, L"%ld,%ld", &bar.injectClick_, &bar.injectClickY_) == 2) {
+                    bar.injectClickAtMs_ = GetTickCount64() + 3000;
+                    island::LogAndPrint("  diagnostic: will click at (%ld,%ld) in 3 s\n", bar.injectClick_,
+                                        bar.injectClickY_);
                     std::fflush(stdout);
                 }
             }
@@ -2086,16 +2069,16 @@ float musicWavePhase = 0.0f;
                 // POLLED, and by us: the shell's announcement only reaches a registered AppBar (see
                 // FullScreenAppInFront), so this is the only signal that exists in the shipped
                 // configuration.
-                if (GetTickCount64() - lastFullscreenCheck >= kFullscreenCheckMs) {
-                    lastFullscreenCheck = GetTickCount64();
+                if (GetTickCount64() - bar.lastFullscreenCheck >= kFullscreenCheckMs) {
+                    bar.lastFullscreenCheck = GetTickCount64();
                     const bool measured =
                         !noFullscreen && island::FullScreenAppInFront(monitor.screen);
-                    if (measured != fullscreenAppInFront) {
-                        fullscreenAppInFront = measured;
+                    if (measured != bar.fullscreenAppInFront) {
+                        bar.fullscreenAppInFront = measured;
                         // ... and the WINDOW is told, because the hit test is answered there: while an
                         // application has the screen only the island itself is the bar, so a pointer
                         // crossing the top of it cannot land on an icon or a deck button that is not drawn.
-                        window.SetFullscreenApp(fullscreenAppInFront);
+                        window.SetFullscreenApp(bar.fullscreenAppInFront);
                         // `%s` and not `%ls`: this is the NARROW overload of LogAndPrint, whose arguments
                         // are widened a byte at a time, so a `%ls` here would read a `const char*` as a wide
                         // string -- and the CRT answers an invalid conversion by emptying the whole line,
@@ -2110,9 +2093,9 @@ float musicWavePhase = 0.0f;
                     }
                 }
 
-                const bool fullscreenNow = fullscreenAppInFront;
-                if (fullscreenNow != fullscreenLast) {
-                    fullscreenLast = fullscreenNow;
+                const bool fullscreenNow = bar.fullscreenAppInFront;
+                if (fullscreenNow != bar.fullscreenLast) {
+                    bar.fullscreenLast = fullscreenNow;
 
                     if (fullscreenNow) {
                         if (appBar.IsRegistered()) {
@@ -3255,12 +3238,12 @@ float musicWavePhase = 0.0f;
             // Polled, not hooked. A WH_MOUSE_LL hook would see the click first, and it would also mean this
             // process watching every click on the machine for days at a time for the sake of one flyout --
             // a disproportionate thing for a bar to do, and the kind of thing that gets a program flagged.
-            if (injectClickAtMs_ != 0 && GetTickCount64() >= injectClickAtMs_) {
-                injectClickAtMs_ = 0;
+            if (bar.injectClickAtMs_ != 0 && GetTickCount64() >= bar.injectClickAtMs_) {
+                bar.injectClickAtMs_ = 0;
                 island::LogAndPrint("  diagnostic: clicking at (%ld,%ld) from the bar itself\n",
-                                    injectClick_, injectClickY_);
+                                    bar.injectClick_, bar.injectClickY_);
                 std::fflush(stdout);
-                SetCursorPos(injectClick_, injectClickY_);
+                SetCursorPos(bar.injectClick_, bar.injectClickY_);
                 Sleep(80);
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 Sleep(80);
@@ -3270,7 +3253,7 @@ float musicWavePhase = 0.0f;
                 POINT where = {};
                 GetCursorPos(&where);
                 const bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-                if (leftDown && !leftWasDown) {
+                if (leftDown && !bar.leftWasDown) {
                     // Reported even when the press was on the bar: "the panel did not close" and "the press
                     // was never seen" are different faults, and only this line tells them apart.
                     const bool onBar = window.HitTestScreen(where);
@@ -3286,12 +3269,12 @@ float musicWavePhase = 0.0f;
                         std::fflush(stdout);
                     }
                 }
-                leftWasDown = leftDown;
+                bar.leftWasDown = leftDown;
             } else {
                 // The state is tracked even while the panel is shut, so that a panel OPENED by pressing the
                 // deck button -- which is itself a click -- is not dismissed by the button being down at the
                 // moment it opened.
-                leftWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                bar.leftWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
             }
 
             // --- the panel's own timer, when the diagnostic is on ---
@@ -3496,7 +3479,7 @@ float musicWavePhase = 0.0f;
                 // title (see PlayerWindow.h) fills the pill's line but has no cover, no position and no
                 // transport keys to put on a card, and the card is exactly those three things.
                 context.musicPresent = nowPlaying.present;
-                context.fullscreenApp = fullscreenAppInFront;
+                context.fullscreenApp = bar.fullscreenAppInFront;
                 // The panel is a request for the CARD, so the policy has to know about it -- otherwise
                 // the state stays Hover and the card is never drawn. That was a whole debugging round:
                 // the flag was set, the renderer read it, and the shape never changed.
@@ -3936,7 +3919,7 @@ float musicWavePhase = 0.0f;
                 const bool startPageShown = bar.panelLevel == island::PanelLevel::Start;
                 // ... and whether the bar is in the picture at all: with a full-screen application in front
                 // only the island is drawn (see FrameState::fullscreenApp).
-                frame.fullscreenApp = fullscreenAppInFront;
+                frame.fullscreenApp = bar.fullscreenAppInFront;
 
                 // --- the tray, on its own cadence --------------------------------------------
                 //
@@ -4821,10 +4804,10 @@ float musicWavePhase = 0.0f;
                 // frame was given. If the shape is not Hover, the problem is the pointer; if it is
                 // Hover with zero windows, the problem is the enumeration; if the count is right and
                 // nothing is on screen, the problem is the drawing.
-                if (frame.taskButtonCount != lastReportedButtons ||
-                    frame.state != lastReportedState) {
-                    lastReportedButtons = frame.taskButtonCount;
-                    lastReportedState = frame.state;
+                if (frame.taskButtonCount != bar.lastReportedButtons ||
+                    frame.state != bar.lastReportedState) {
+                    bar.lastReportedButtons = frame.taskButtonCount;
+                    bar.lastReportedState = frame.state;
                     island::LogAndPrint("  taskbar: state=%ls, %d buttons from %d windows listed "
                                         "(%ls)",
                                         island::StateName(frame.state), frame.taskButtonCount,
