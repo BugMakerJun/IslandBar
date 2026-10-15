@@ -55,13 +55,21 @@ struct TrayLearnResult {
 // Loads the staged copy of the module next to the bar and keeps it for the session. Called once from the main
 // thread at startup, before any learning pass.
 //
-// THE MODULE IS OFFERED TO TRAY APPLICATIONS ONLY, one process at a time, in LearnTrayCallbacks below.
-// MyDockFinder installs ONE global hook and lets it reach every GUI process (HANDOFF 8.103); that was built
-// here too, and it had to be withdrawn the same day: with it installed, Clash Verge's window came up black.
-// Measured both ways -- `island running` gave 6 WebView2 processes and a client area of mean brightness 0,
-// `island closed` gave 12 and brightness 56 with the UI rendered. Chromium refuses a pending injection of an
-// UNSIGNED module into its renderer processes (RendererCodeIntegrity), and MyDockFinder's own DLL is a signed
-// commercial binary, which is why one global hook works for it and not for this build. See TrayLearn.cpp.
+// THE MODULE IS OFFERED TO ONE PROCESS: THE SHELL'S OWN, in LearnTrayCallbacks below.
+//
+// An application does not keep its tray registration to itself -- it SENDS it to the window of class
+// "Shell_TrayWnd" as a WM_COPYDATA, so a module inside that window's process reads every registration on the
+// machine. That is what replaced the earlier pass that offered the module to each tray application in turn,
+// and it is why the tray no longer has to be taught one application at a time. Measured 2026-10-15: an
+// AppContainer application (ChatGPT.exe) and a self-protecting one (QQ Music, which accepts 98 thread hooks
+// and never loads the module) both arrive this way, because both of them register through the shell.
+//
+// A GLOBAL hook was tried on 2026-10-15 and withdrawn the same day: with it installed Clash Verge's window
+// came up black. Measured both ways -- `island running` gave 6 WebView2 processes and a client area of mean
+// brightness 0, `island closed` gave 12 and brightness 56 with the UI rendered. Chromium refuses a pending
+// injection of an UNSIGNED module into its renderer processes (RendererCodeIntegrity), and MyDockFinder's own
+// DLL is a signed commercial binary, which is why one global hook works for it and not for this build. The
+// shell's process is one process, so nothing has to be global. See TrayLearn.cpp.
 //
 // A failure is reported in the log and is not fatal: without the module a press uses whatever the cache holds.
 bool InstallTrayHook();
@@ -83,6 +91,11 @@ int HarvestLearnedCallbacks();
 // CHANGED: retrying the same four unreachable applications every few seconds would spend the whole session
 // installing a module that they refuse for the same reason each time.
 std::wstring UncoveredApplications(const TrayIcons& icons);
+
+// The process that receives tray registrations -- the owner of the window of class "Shell_TrayWnd" -- or 0
+// when there is no such window. The frame loop watches this: the module is pinned for the life of the process
+// it lands in, so an Explorer that restarts leaves the tray unlearned until the module is offered again.
+DWORD TrayShellProcessId();
 
 // How many of the card's icons have an entry in the callback cache. The number the startup line prints, and
 // the one that says whether the automatic route is carrying its weight.

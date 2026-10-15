@@ -1,0 +1,50 @@
+第 35 轮评审：**"如果我们从头做，代码该怎么设计"**，然后**对照现有项目找不足**。用户原话：「旧代码不用备份了 现在项目有架构么 如果从头做的话，怎么设计开发代码你们三谈论一下 谈论完后 对照我们现在的项目看看有没有什么不足的」。
+
+请给一份**具体的**设计（模块划分、依赖方向、状态与数据的流转、进程边界、测试与构建目标），不要给"建议分层、注意解耦"这类空话。第二问请对照下面这份现实清单逐条指出现有项目的不足。
+
+【一、这个程序是什么（事实，不是设想）】
+
+Windows 11 上替代系统任务栏的"灵动岛"式横条（C++20 + Win32 + D3D11 + Direct2D + DirectComposition，单 exe、静态 CRT、无运行时依赖，实测私有内存 75–100MB）。
+
+它现在做这些事：
+  1) 顶栏自己的一条 pill，三种状态（collapsed / hover / expanded）用可中断、继承位移与速度的 spring 动画切换，卡片内部内容 180-200ms ease-out 淡入淡出；窗口是 WS_EX_NOREDIRECTIONBITMAP + Composition SwapChain。
+  2) 系统面板卡片：音量/亮度/播放控制等（走 system 开关与 GSMTC）。
+  3) 托盘卡片：把系统托盘里的图标画成格子，点一下等于点真实托盘图标（左键=应用自己的左键行为，右键=应用自己的右键菜单），鼠标指针不能动。
+  4) 媒体卡片：GSMTC 读会话 + 封面取色 + 歌词（多来源）。
+  5) 应用行/任务条：枚举窗口、点击激活/最小化、DWM 缩略图预览。
+  6) 通知：读系统 Toast 数据库，把消息与通话显示成通知纸条。
+  7) 天气（Windows 定位或 weather.txt 指定城市）、时钟、日期。
+  8) 开始按钮（要向 shell 注入 Ctrl+Esc / Win 键）。
+  9) 隐藏原生任务栏（ABM_SETSTATE 那条路），自己占位。
+  10) 全部纯逻辑（布局、命中测试、动画、状态策略）有一份 900+ 断言的 `--self-test`。
+
+进程与二进制现状：
+  * `island_bar.exe`（主程序，静态 CRT）。
+  * `island_tray_hook.dll`（**最近新增的第二个二进制**）：装进 explorer 的一个模块，用 WH_CALLWNDPROC 读应用发给 `Shell_TrayWnd` 的 WM_COPYDATA（托盘注册），并把结果写进 %USERPROFILE%\IslandBar\tray_learned.txt；bar 每 5 秒读一次这个文件。两者之间**没有内存交换，只有文件**。
+  * `IslandBarSetup.exe`（安装器，payload 是单份 RCDATA，目前只带 exe，带不了 DLL）。
+  * tools/ 下若干独立探针可执行文件（geo_probe / thumb_probe / jsonprobe / island_smoke）。
+
+规模与体量（刚测的）：
+  * src/ 76 个源文件（37 .cpp / 39 .h），47,876 行。
+  * 最大的：selftest/Diagnostics.cpp 8,561 行（903 个 Check）、main.cpp 7,362 行、render/TextRenderer.cpp 4,047、render/Renderer.cpp 1,751、app/IslandWindow.cpp 1,727、core/CardLayout.h 1,604（被 9 个文件包含，92 个 inline 函数）、shell/TrayPress.cpp 934、trayhook/TrayHook.cpp 932、shell/TrayLearn.cpp 784。
+  * 构建：CMake + MSBuild，/W4 **/WX**（告警即错误）、/utf-8、NOMINMAX、WIN32_LEAN_AND_MEAN，Release 全量重建 0 告警。
+  * 头文件 39/39 有 include guard；包含写成 `"core/Geometry.h"` 形式，包含根是 src/。
+  * 测试：没有单元测试框架，靠 903 条自检 + island_smoke + CLI 探针（--tray-surface / --tray-learn / --tray-press N）。
+  * 流程（仓库自己的 AGENTS.md）：研究（拿实机数据问外部评审）→ 给用户方案 → 用户确认 → 实现并本地部署（部署到 %USERPROFILE%\IslandBar，不在项目树里，因为项目树下的进程会被降成 LOW 完整性，GUI 起不来）→ 等用户测 → 推送。单实例互斥锁，不能并行跑第二个副本做对照。
+
+【二、已经踩过、必须写进设计的硬约束（都有实测）】
+
+  * 全局 WH_ 钩子（dwThreadId=0）会把 Chromium 的渲染进程打死：把 Clash Verge 的 WebView2 从 12-13 个进程打到 6 个，客户区平均亮度从 56 掉到 0。原因是 RendererCodeIntegrity 拒未签名模块的 pending injection。MyDockFinder 能用全局钩子是因为它的 DLL 有签名。
+  * 所以注入只能是"逐个线程、逐个进程、有选择地"装（现在的做法：只装给 explorer）。
+  * 注入到别人进程里的模块必须自己 PIN 住（GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|PIN），否则进程退出时导入表会留下悬空指针——这已经崩过 Explorer 6 次、wallpaper64 4 次。
+  * 部署目录必须在项目树外，且项目树下的进程被降权（UIPI 会静默丢弃发给 Explorer 的消息）。
+  * 日志写在 exe 旁边、逐行 flush——日志量本身是一项成本（现在的日志文件已经 1.2MB+，HANDOFF 800KB+）。
+  * 每 5 秒的 tick 里做托盘 harvest（读文件）、每 N 秒写一次内存指标；一帧一帧画的窗口和"事件驱动的世界状态"是同一个线程。
+
+【三、请回答】
+
+1) **从头设计**：你会怎么划模块和依赖方向？请具体到"哪些翻译单元/库目标、谁依赖谁、什么不能依赖什么"。特别注意：纯逻辑（布局/命中/动画）如何与 Win32 副作用隔离，才能被自检覆盖？
+2) **状态与数据**：现在是一个巨大的帧循环 + 一堆局部对象（窗口、托盘列表、通知、媒体、天气…）+ 各处 5 秒/1 秒轮询。从头做的话你会用什么模型（集中式 store + reducer？ECS？消息总线？还是保持过程式轮询）？为什么？在这个"渲染 60fps、事件稀疏、只有一个人维护"的场景下，哪个代价最低？
+3) **二进制与进程**：单 exe 的承诺已经被托盘 DLL 打破一次。你会怎么正式化这个边界（谁注入谁、模块如何与主程序通信、崩溃隔离、安装器怎么带、版本如何对齐）？值不值得把"注入 + 读别人注册"单独拆成一个辅助进程？
+4) **测试**：在没有单元测试框架、但有一个 900 断言的巨大自检程序的现状下，从头做你会怎么组织测试（纯逻辑单测 / 黄金图像 / 假 OS 契约 / 端到端脚本）？
+5) **对照现有项目**：上面那份清单里，哪些是"架构问题"、哪些只是"规模问题"、哪些根本不算问题？按你认为的严重程度排序，并指出我可能自我感觉良好的地方（例如 0 告警、39/39 guard 这类指标其实不说明架构好坏）。

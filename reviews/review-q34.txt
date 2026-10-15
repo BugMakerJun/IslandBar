@@ -1,0 +1,41 @@
+第 34 轮评审：**代码架构、引用（include）正确性、开发流程**。用户的原话：「你们三现在看看 现在项目代码架构，引用都对不对，符不符合正常开发流程」。
+
+请直接给结论：哪一条你同意、哪一条你反对、哪一条你认为我漏了。不要泛泛而谈"建议模块化"。
+
+【一、可验证的事实（都是刚才在这台机器上取到的，不是印象）】
+
+仓库：C:/PROJECT/Taskbar，C++20 + Win32 + D3D11/D2D/DComp，单 exe 静态 CRT。
+
+结构：
+  src/ 下 76 个源文件（37 个 .cpp、39 个 .h），共 47,876 行；按角色分目录：core(布局/运动/日志/进程指标) app(窗口) render(D2D/文本) media(GSMTC/歌词/声音) shell(托盘/开始菜单/天气/系统开关) platform(显示器) services selftest tools。
+  最大的几个：selftest/Diagnostics.cpp 8,561 行（内含 903 个 Check(...)）、main.cpp 7,362 行、render/TextRenderer.cpp 4,047、render/Renderer.cpp 1,751、app/IslandWindow.cpp 1,727、core/CardLayout.h 1,604（被 9 个文件包含）、shell/TrayPress.cpp 934、trayhook/TrayHook.cpp 932、shell/TrayLearn.cpp 784。
+
+引用（include）：
+  * 头文件 **39/39 都有 include guard**（抽查三个我一开始以为没有，实际是 20 行 banner 注释把 guard 推到了下面）。
+  * 包含风格统一：`#include "core/Geometry.h"` 这种"模块/文件"形式，src/ 作为包含根。
+  * 抽查头文件自洽性：CardLayout.h→Geometry/TaskStripLayout；IslandWindow.h→CardLayout/Geometry/Monitor/Motion/TextRenderer；Motion.h→Geometry。没找到依赖包含顺序的头。
+  * **Release 全量重建：0 个编译告警、0 个错误**（`[build] OK`）。
+  * 10 个 .cpp 直接 `#include <windows.h>`（其余经由自己的头）。
+
+流程（仓库自己的规则在 AGENTS.md：研究 → 方案 → 用户确认 → 实现并本地部署 → 等用户测试 → 推送）：
+  * 今天这一轮：研究做了三轮（第 31/32/33 轮评审，原文都在 captures/），方案给过用户，实现+部署+自检+smoke 都做了。
+  * git：分支 main，**比 origin/main 领先 23 个提交**（按规则没推，等用户测完）；**今天改的 8 个文件全部未提交**（+619/−125 行：HANDOFF.md、CardLayout.h、main.cpp、Diagnostics.cpp、TrayLearn.cpp/.h、TrayPress.cpp、TrayHook.cpp）。仓库自己的规则写着"本地提交可以，配合 scripts\snapshot.ps1"。
+  * 部署目录 %USERPROFILE%\IslandBar 里有：~20 个 island_bar.exe.bak-*、**10 份 staged 的 island_tray_hook-<hash>.dll**、tray_learned.run1..7.txt、island_smoke.exe、probe-tray-*.exe —— 实验残留。
+  * 测试：没有单元测试框架，靠 903 条自检 + island_smoke + 一组 CLI 探针（--tray-surface / --tray-learn / --tray-press N --fire）。**托盘按压这条路径没有自动化回归**（需要活着的应用），只能人工/CLI 验证。
+  * 安装器只带 island_bar.exe（payload 是单个 RCDATA #1001），**带不了 island_tray_hook.dll** —— 全新装会没有托盘学习。
+
+【二、我认为的问题，按严重程度】
+
+P0 今天改的东西没有本地提交。仓库自己的规则允许本地提交，而这一轮全部躺在工作区里，随时可能被一次误操作带走。
+P1 main.cpp 7,362 行是一个"上帝文件"：CLI 命令、帧循环、托盘菜单动作、开始菜单粘合、诊断注入路径全在里面；selftest/Diagnostics.cpp 8,561 行同理。按正常 C++ 项目会拆成 cli/ tray/ card/ 之类的翻译单元。
+P2 TrayHook.cpp 里还留着三段显式标着 TEMPORARY 的观察通道，而它自己的注释写着"把答案写进 HANDOFF 之后就把整块删掉"——答案已经写进 8.109/8.114/8.115 了，这一块该删（或者明确降级成"受标记文件控制的调试工具"并改掉那句注释）。
+P3 死代码/语义漂移：`UncoveredApplications()` 已无调用者（只留声明与定义）；`TrayLearnResult::appsReached` 现在是从报告文件里的 "attached pid" 行数出来的，数字含义和字段名已经不一致；main.cpp 里还留着 `SetCursorPos` + `mouse_event` 的 `ISLANDBAR_CLICK_AT` 诊断注入路径（默认关闭、由环境变量打开，但它在产品二进制里）。
+P4 部署目录的残留（10 份 staged DLL、7 份 report dump、20 份 exe 备份）没有清理规则；安装器带不上 hook DLL。
+P5 文档体量：HANDOFF.md 已经 800KB+，FEATURES.md 156KB，README/START-HERE/TESTING 各一份——没有目录/索引，新会话只能从头读。
+
+【三、请回答】
+
+1) P0–P5 里哪几条你同意、哪几条你觉得不是问题？有没有我漏掉的更严重的？
+2) "符合正常开发流程"这条：以这个项目的形态（单机、一个人、一个 AI 会话接力、每次改动都要实机验证）为标准，你觉得缺的最关键一环是什么？是提交纪律、回归测试、还是别的？
+3) main.cpp / Diagnostics.cpp 这两个大文件，值不值得现在拆？如果拆，按什么边界拆最省事、最不容易破坏已经通过的自检？
+4) 引用层面你还能想到什么我没查的（例如 ODR、内联函数在头文件里的膨胀、windows.h 的宏污染、DLL 与 exe 的 CRT 边界）？

@@ -57,6 +57,9 @@ BOOL WINAPI DetourShellNotifyIconW(DWORD message, PNOTIFYICONDATAW data);
 BOOL WINAPI DetourShellNotifyIconA(DWORD message, PNOTIFYICONDATAA data);
 typedef FARPROC(WINAPI* GetProcAddress_t)(HMODULE, LPCSTR);
 FARPROC WINAPI DetourGetProcAddress(HMODULE module, LPCSTR name);
+// Defined further down, next to the in-application report that uses it; the shell-side report above needs it
+// first.
+const char* MessageName(DWORD message);
 
 // THE APPLICATION'S OWN WAY OF FINDING Shell_NotifyIcon, which the import walk cannot see.
 //
@@ -121,22 +124,55 @@ void ReportPath(wchar_t* out, size_t count) {
     _snwprintf_s(out, count, _TRUNCATE, L"%s\\IslandBar\\tray_learned.txt", home);
 }
 
+// One open handle per process, and the line written through it, instead of an open/write/close per line.
+//
+// WHY THIS IS NOT A MICRO-OPTIMISATION. The line this writes is written while an application is waiting:
+// WM_COPYDATA is SYNCHRONOUS -- the sender is blocked until this process's message handling returns -- and
+// that handling is where a registration is read (see ReportShellCopy). An open and a close per line puts
+// three system calls, plus whatever a filter driver wants to do with them, in the middle of somebody else's
+// registration. With the handle kept, the same line costs one WriteFile.
+//
+// It is still a synchronous write: a line that has been written is on the file before the application is let
+// go, so nothing a reader can miss is left in this process's memory (which matters, because this module runs
+// in a process that is not ours and may end at any moment).
+HANDLE g_report = INVALID_HANDLE_VALUE;
+
+HANDLE ReportHandle(const wchar_t* path) {
+    if (g_report != INVALID_HANDLE_VALUE) return g_report;
+    // Shared for writing, because the module can be mapped in more than one process at once and both of them
+    // report to this same file.
+    g_report = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    return g_report;
+}
+
 void ReportLine(const wchar_t* format, ...) {
     if (!g_lockReady) return;
     EnterCriticalSection(&g_lock);
     wchar_t path[MAX_PATH] = {};
     ReportPath(path, MAX_PATH);
-    FILE* stream = nullptr;
-    if (_wfopen_s(&stream, path, L"a, ccs=UTF-8") == 0 && stream) {
-        SYSTEMTIME now = {};
-        GetLocalTime(&now);
-        fwprintf(stream, L"[%02u:%02u:%02u.%03u] ", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
-        va_list args;
-        va_start(args, format);
-        vfwprintf(stream, format, args);
-        va_end(args);
-        fputwc(L'\n', stream);
-        fclose(stream);
+    wchar_t line[2048] = {};
+    SYSTEMTIME now = {};
+    GetLocalTime(&now);
+    int used = _snwprintf_s(line, 2048, _TRUNCATE, L"[%02u:%02u:%02u.%03u] ", now.wHour, now.wMinute,
+                            now.wSecond, now.wMilliseconds);
+    if (used < 0) used = 0;
+    va_list args;
+    va_start(args, format);
+    const int added = _vsnwprintf_s(line + used, 2048 - used, _TRUNCATE, format, args);
+    va_end(args);
+    if (added > 0) used += added;
+    if (used > 2046) used = 2046;
+    line[used++] = L'\n';
+
+    // UTF-8 explicitly: the file is read by the bar's own reader, and a CRT locale would make that depend on
+    // the codepage of whichever process happens to be reporting.
+    char utf8[4096] = {};
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, line, used, utf8, sizeof(utf8), nullptr, nullptr);
+    const HANDLE handle = ReportHandle(path);
+    if (handle != INVALID_HANDLE_VALUE && bytes > 0) {
+        DWORD written = 0;
+        WriteFile(handle, utf8, static_cast<DWORD>(bytes), &written, nullptr);
     }
     LeaveCriticalSection(&g_lock);
 }
@@ -185,13 +221,142 @@ void ReportObserved(const wchar_t* channel, HWND window, UINT message, WPARAM wp
 // Everything at or above WM_USER is the application's own business: a window procedure is sent no end of
 // WM_* bookkeeping, and only the private range can be the tray callback.
 bool WorthObserving(UINT message) {
-    return message >= WM_USER || message == (UINT)g_callbackMessage;
+    return message >= WM_USER || message == (UINT)g_callbackMessage || message == WM_COPYDATA;
+}
+
+// =====================================================================
+//  THE SHELL'S OWN COPY OF A REGISTRATION -- HOW AN ICON IS LEARNED WITH NOBODY IN THE APPLICATION
+// =====================================================================
+//
+//  An application tells the shell about its tray icon by SENDING a WM_COPYDATA to the window of class
+//  "Shell_TrayWnd" (measured on this machine 2026-10-15: receiver class "Shell_TrayWnd" inside explorer, the
+//  sender window equal to the tray window the payload names, dwData 1, cbData 1484). Because this module is
+//  already mapped inside the shell process -- the bar offers it to Explorer for exactly this reason -- the
+//  WH_CALLWNDPROC channel above sees that copy arrive, and the payload is marshalled into THIS process, so
+//  every field of the registration can simply be read. Nothing has to be injected into the application.
+//
+//  That is the answer to the limitation this project kept hitting: an AppContainer application refuses the
+//  hook (measured: SetWindowsHookEx returns 87 for ChatGPT.exe), and a self-protecting one accepts the hooks
+//  and never loads the module (QQ Music). Their registrations still travel to the shell, and this is where
+//  they are read. Measured in the first run of this code: ChatGPT.exe (AppContainer) registered uid 3,
+//  message 0x8001, tip "ChatGPT", guid E5768D8B-6936-4F45-B1AD-4C5FB414CB35.
+//
+//  THE LAYOUT, read off the bytes rather than assumed. A controlled registration (probe-tray-registrar.exe:
+//  uid 7, message 0xABCD, tip "ISLANDBAR-PROBE-4711", NIM_SETVERSION 4) and a cross-check against
+//  applications whose answers the bar already had (Steam's copy names uid 1 with message 0x0401 and the tip
+//  "Steam"; the GUID-registered icons carry exactly the guids the shell's own registry entries name) give:
+//
+//      +0x000  the shell's tag, 0x34753423, in every copy
+//      +0x004  the NIM_ command: 0 ADD, 1 MODIFY, 2 DELETE, 4 SETVERSION
+//      +0x008  956, in every copy
+//      +0x00C  hWnd   -- the application's tray window (4 bytes; handles fit, so the shell stores one DWORD)
+//      +0x010  uID
+//      +0x014  uFlags  (0x20 is NIF_GUID: the icon is identified by guid, not by uid)
+//      +0x018  uCallbackMessage
+//      +0x01C  hIcon
+//      +0x020  szTip, wide, 128 characters
+//      +0x328  uVersion -- non-zero only in the NIM_SETVERSION copy (the union with uTimeout, so a
+//              registration that never says reads 0 -- see HANDOFF 8.111)
+//      +0x3B0  guidItem, 16 raw bytes
+//
+//  Every offset is eight bytes earlier than the documented NOTIFYICONDATAW, which is that structure without
+//  its leading cbSize and with pointers stored as DWORDs. That is why the two lowest offsets were found by
+//  searching for the values a controlled registration had written, not by adding up a header.
+// =====================================================================
+const unsigned kShellCopyTag = 0x34753423u;
+const size_t kShellCopyMinimum = 1024;
+const size_t kGuidOffset = 0x3B0;
+const size_t kVersionOffset = 0x328;
+const size_t kTipOffset = 0x020;
+
+const wchar_t* OwnerLeaf(HWND window, wchar_t* out, size_t count) {
+    out[0] = L'\0';
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (!pid) return out;
+    // QUERY_LIMITED_INFORMATION, because the answer is wanted for a process that may be in a container or at
+    // a different integrity level, and that is the strongest right a process is given over one it does not own.
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return out;
+    wchar_t path[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        const wchar_t* leaf = wcsrchr(path, L'\\');
+        wcsncpy_s(out, count, leaf ? leaf + 1 : path, _TRUNCATE);
+    }
+    CloseHandle(process);
+    return out;
+}
+
+// One WM_COPYDATA, decoded if it is a tray registration. Writes the same line the in-application path writes
+// (see LogCall), with "S" in place of "W"/"A" so the reader can tell where it was read, and with pid instead
+// of exe when the owning process refuses to name its image.
+void ReportShellCopy(const wchar_t* channel, HWND receiver, WPARAM wparam, LPARAM lparam) {
+    if (!lparam) return;
+    const COPYDATASTRUCT* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+    if (!data || !data->lpData || data->cbData < kShellCopyMinimum) return;
+
+    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data->lpData);
+    unsigned tag = 0;
+    unsigned command = 0;
+    unsigned uid = 0;
+    unsigned flags = 0;
+    unsigned callback = 0;
+    unsigned version = 0;
+    GUID guid = {};
+    unsigned trayHandle = 0;
+    memcpy(&tag, bytes, sizeof(tag));
+    if (tag != kShellCopyTag) return;
+    memcpy(&command, bytes + 4, sizeof(command));
+    if (command > NIM_SETVERSION) return;   // not a NIM_ command: not a registration
+    memcpy(&trayHandle, bytes + 0x0C, sizeof(trayHandle));
+    memcpy(&uid, bytes + 0x10, sizeof(uid));
+    memcpy(&flags, bytes + 0x14, sizeof(flags));
+    memcpy(&callback, bytes + 0x18, sizeof(callback));
+    memcpy(&version, bytes + kVersionOffset, sizeof(version));
+    memcpy(&guid, bytes + kGuidOffset, sizeof(guid));
+
+    wchar_t tip[128] = {};
+    for (size_t i = 0; i + 1 < 128; ++i) {
+        wchar_t character = 0;
+        memcpy(&character, bytes + kTipOffset + i * 2, sizeof(character));
+        if (!character) break;
+        tip[i] = character;
+    }
+
+    const HWND trayWindow = reinterpret_cast<HWND>(static_cast<uintptr_t>(trayHandle));
+    wchar_t exeLeaf[MAX_PATH] = {};
+    OwnerLeaf(trayWindow, exeLeaf, MAX_PATH);
+    DWORD ownerPid = 0;
+    GetWindowThreadProcessId(trayWindow, &ownerPid);
+    wchar_t guidText[64] = {};
+    if (flags & NIF_GUID) GuidText(guid, guidText, 64);
+
+    // The version is stated on its own call, never with the registration, and the request to write it down is
+    // the version. Both are reported; the bar's reader pairs them by (exe, uid/guid) exactly as it does for the
+    // in-application path.
+    ReportLine(L"call S %hs pid %lu exe %ls hwnd %p uid %u msg 0x%04X version %u flags 0x%X guid %ls "
+               L"tip \"%ls\" (read in the shell, pid %lu channel %ls)",
+               MessageName(command), ownerPid, exeLeaf[0] ? exeLeaf : L"-", trayWindow, uid, callback,
+               version, flags, guidText[0] ? guidText : L"-", tip, GetCurrentProcessId(), channel);
+    (void)receiver;
+    (void)wparam;
 }
 
 LRESULT CALLBACK SentProc(int code, WPARAM wparam, LPARAM lparam) {
-    if (code >= 0 && lparam && g_watch) {
+    if (code >= 0 && lparam) {
         const CWPSTRUCT* call = reinterpret_cast<const CWPSTRUCT*>(lparam);
-        if (call && WorthObserving(call->message)) {
+        if (call && call->message == WM_COPYDATA) {
+            // THE LEARNING PATH, and it is NOT behind the marker file: a registration is exactly what this
+            // module is here for. Read while the copy is still marshalled into this process, because a sent
+            // message's payload is valid only for the duration of the call.
+            __try {
+                ReportShellCopy(L"SENT", call->hwnd, call->wParam, call->lParam);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReportLine(L"call S ? pid %lu: reading a copy's payload faulted", GetCurrentProcessId());
+            }
+        }
+        if (g_watch && call && WorthObserving(call->message)) {
             ReportObserved(L"sent", call->hwnd, call->message, call->wParam, call->lParam);
         }
     }
@@ -703,11 +868,17 @@ void EnsureHooked() {
                                                      L"asks for the address at run time the GetProcAddress "
                                                      L"slots above are what will catch it");
 
-    // TEMPORARY: two channels onto what the shell sends this application's tray window. Off unless the marker
-    // file exists; see the note at the top of that block.
+    // THE SENT CHANNEL IS ALWAYS ON: it is how a registration is READ, not a diagnostic.
+    //
+    // It was moved out of the marker-file gate on 2026-10-15, and the reason is worth keeping: with the gate
+    // in place the module was present in the shell, its import slots redirected, and it still reported nothing
+    // -- because registrations do not pass through Shell_NotifyIcon in the shell's process, they arrive as a
+    // WM_COPYDATA sent TO it (see ReportShellCopy), and that is read on the WH_CALLWNDPROC side only. The
+    // marker file still decides whether the NOISY observation log is written; it no longer decides whether
+    // registrations are seen.
+    InstallSentWatch();
     if (MarkerPresent()) {
         g_watch = true;
-        InstallSentWatch();
         ReportLine(L"observing pid %lu exe %ls: marker present, %d thread(s) hooked for SENT messages and "
                    L"the posted channel is on", GetCurrentProcessId(), exe, g_sentHookCount);
     }

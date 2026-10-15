@@ -24,6 +24,9 @@ add_executable(island_bar
     # --- core: pure logic and the plumbing everything shares ---------
     core/Log.cpp
     core/MiniJson.cpp
+    # Not a module: a compile-time rule. It fails the build if <windows.h> creeps back into the pure-logic
+    # headers (see the file). Cheap, and it is the only thing here that keeps the layering honest.
+    core/PurityCheck.cpp
     core/Motion.cpp
     core/ProcessMetrics.cpp
 

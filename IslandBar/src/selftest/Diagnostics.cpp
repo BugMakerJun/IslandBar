@@ -6249,13 +6249,15 @@ void TestMusicCardLayout() {
                 const float rowRightDip =
                     TaskIconButtonAt(rowWithTray, kIcons - 1, kIcons, kIcons - 1, 1.0f).right;
 
-                wchar_t stripDetail[256];
-                std::swprintf(stripDetail, 256,
+                // `stripRowDetail`, not `stripDetail`: the latter is declared earlier in this same check and
+                // hiding it was a warning (C4456) that only showed up when this file was rebuilt.
+                wchar_t stripRowDetail[256];
+                std::swprintf(stripRowDetail, 256,
                               L"row ends at %.0f DIP, region ends at %ld px (strip right %.0f)", rowRightDip,
                               region.right, noticeStrip.rect.right);
                 Check(static_cast<float>(region.right) >= rowRightDip - 1.0f,
                       L"the region covers the right end of the icon row while the notice strip is up",
-                      stripDetail);
+                      stripRowDetail);
 
                 // The deck, from the pointer's side: the Start button is placed from the box the row is
                 // anchored to, so a strip moves it -- and a point on it, as drawn, must be the bar's. The
@@ -6974,32 +6976,44 @@ void TestMusicCardLayout() {
                 {
                     // Which rows: an entry that would do nothing is not offered, and the application's own
                     // menu -- the slow one, the one that leaves the bar -- is always last.
+                    //
+                    // The row the user found dead on 2026-10-15 is 应用自己的菜单… on a cell whose callback has
+                    // never been learned: it can only send the application its right-click message, and there
+                    // is no message to send. 打开 is the same question about the left button. Both are pinned
+                    // here as ABSENT rather than present-and-inert.
                     TrayMenuAction all[kMaxTrayMenuEntries] = {};
-                    const int withEverything = TrayMenuEntriesFor(TrayMenuFacts{true, true}, all,
+                    const int withEverything = TrayMenuEntriesFor(TrayMenuFacts{true, true, true}, all,
+                                                                  kMaxTrayMenuEntries);
+                    TrayMenuAction noCallback[kMaxTrayMenuEntries] = {};
+                    const int withNoCallback = TrayMenuEntriesFor(TrayMenuFacts{true, true, false}, noCallback,
                                                                   kMaxTrayMenuEntries);
                     TrayMenuAction bare[kMaxTrayMenuEntries] = {};
-                    const int withNothing = TrayMenuEntriesFor(TrayMenuFacts{false, false}, bare,
+                    const int withNothing = TrayMenuEntriesFor(TrayMenuFacts{false, false, false}, bare,
                                                                kMaxTrayMenuEntries);
                     TrayMenuAction onlyPath[kMaxTrayMenuEntries] = {};
-                    const int withPath = TrayMenuEntriesFor(TrayMenuFacts{false, true}, onlyPath,
+                    const int withPath = TrayMenuEntriesFor(TrayMenuFacts{false, true, true}, onlyPath,
                                                             kMaxTrayMenuEntries);
                     std::swprintf(trayDetail, 256,
-                                  L"everything=%d (last=%d), nothing=%d, path only=%d",
+                                  L"everything=%d (last=%d), no callback=%d, nothing=%d, path only=%d",
                                   withEverything,
                                   withEverything > 0
                                       ? static_cast<int>(all[withEverything - 1])
                                       : -1,
-                                  withNothing, withPath);
+                                  withNoCallback, withNothing, withPath);
                     Check(withEverything == 6 && all[0] == TrayMenuAction::Open &&
                               all[1] == TrayMenuAction::ActivateWindow &&
                               all[2] == TrayMenuAction::OpenLocation &&
                               all[3] == TrayMenuAction::CloseWindow &&
                               all[4] == TrayMenuAction::QuitApplication &&
                               all[5] == TrayMenuAction::ApplicationMenu &&
-                              withNothing == 3 && bare[0] == TrayMenuAction::Open &&
-                              bare[1] == TrayMenuAction::QuitApplication &&
-                              bare[2] == TrayMenuAction::ApplicationMenu && withPath == 4,
-                          L"the menu offers only what can be done, and the application's own menu last",
+                              withNoCallback == 4 && noCallback[0] == TrayMenuAction::ActivateWindow &&
+                              noCallback[1] == TrayMenuAction::OpenLocation &&
+                              noCallback[2] == TrayMenuAction::CloseWindow &&
+                              noCallback[3] == TrayMenuAction::QuitApplication &&
+                              // path only, WITH a callback: 打开 and 应用自己的菜单… come back with it, and
+                              // the two window rows stay out because there is no window -- four rows.
+                              withNothing == 1 && bare[0] == TrayMenuAction::QuitApplication && withPath == 4,
+                          L"the menu offers only what can be done, and never a row that would do nothing",
                           trayDetail);
                     // The one entry with a second state says so in words, and only that one does.
                     wchar_t armedDetail[192];

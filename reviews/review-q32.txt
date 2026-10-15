@@ -1,0 +1,42 @@
+第 32 轮评审（IslandBar 托盘）。这一轮不是方案，**是已经把 MyDockFinder 的做法拆出来、并做完了一版**，请对结论表态：同意 / 反对 / 修正，并直接指出你认为哪个判断是错的。
+
+【一、MyDockFinder 到底怎么做的（这台机器上实测，不是推测）】
+
+安装目录 C:\GAME\Steam\steamapps\common\MyDockFinder（Steam 版）。文件：Dock_64.exe（引擎，11MB）、Dockmod.exe / Dockmod64.exe（装钩子的两个小 exe）、Dockmod64.dll（被注入的那个模块）。
+
+- **全部二进制都有有效的 Authenticode 签名**（CN=天津市河北区英广腾达软件科技工作室）。所以它可以用**全局** WH_ 钩子而不被 Chromium 的 RendererCodeIntegrity 干掉——我们这个未签名构建用全局钩子时，Clash Verge 的 WebView2 渲染进程起不来（有钩子 6 个 webview2 进程、客户区亮度 0；撤掉 12-13 个、亮度 56）。
+- Dockmod64.dll 的导出：`GetMsgProc`、`GetMsgProc1`、`GetMsgProc2`、`GetMsgProc_Close`、`GetMsgProc_CloseUWP`、`GetMsgProc_TRAY`；导入：`CallNextHookEx`、`PostMessageA`、`SendMessageTimeoutW`、`ChangeWindowMessageFilter`、`OpenFileMappingW`/`MapViewOfFile`/`OpenEventW`（和引擎共享内存 + 事件）。
+- Dock_64.exe 里有一族 RTTI 名字：`trayico::SetTrayicoData(const tagCOPYDATASTRUCT*, HWND)`、`SYSTEMTRAYDATA`、`Finder::GetTrayicoCall`、`MyFinderBar::DrawTrayico`——**托盘数据是 WM_COPYDATA 进到它自己进程里的**。
+- 按压侧：`trayico` 模块只导入 PostMessageA，没有 SendInput / SetCursorPos / mouse_event ⇒ **它的按压是一条消息，不是点鼠标**。
+
+结论：它既不读注册表猜消息号，也不点鼠标；它靠一个签名模块在别人进程里看注册，然后把数据经 WM_COPYDATA 交给引擎。
+
+【二、我这一轮的实测发现（决定性，可复现）】
+
+把我们的模块放进 explorer（它本来就在那儿），用 WH_CALLWNDPROC 看 explorer 收到了什么，再让对照程序注册一个图标：
+
+    copydata SENT pid 11936 receiver 0x10146 class "Shell_TrayWnd" sender 0x1F0A82 dwData 0x1 cbData 1484
+
+**应用注册托盘图标 = 给 shell 的 `Shell_TrayWnd` 发一条 SENT `WM_COPYDATA`**，载荷是扩展版 NOTIFYICONDATA（1484 字节）。字段位置是从字节里读出来的（用对照程序 uid 7 / msg 0xABCD / tip "ISLANDBAR-PROBE-4711" 校准），并与已知应用交叉验证：
+
+    +0x000 标记 0x34753423（每条都有）
+    +0x004 NIM_ 命令：0 ADD、1 MODIFY、2 DELETE、4 SETVERSION
+    +0x00C 托盘窗口   +0x010 uid   +0x014 uFlags   +0x018 uCallbackMessage
+    +0x020 szTip（宽字符）   +0x328 uVersion（只在 SETVERSION 那条里非零）
+    +0x3B0 guidItem（16 字节）
+
+交叉验证：Steam 的副本是 uid 1 / 0x0401 / tip "Steam"（与缓存里早就有的答案一致）；两个 GUID 图标的 guid 与 explorer 注册表条目逐字节一致；ChatGPT 的是 uid 3 / msg 0x8001 / guid {E5768D8B-6936-4F45-B1AD-4C5FB414CB35}。
+
+【三、已经实现并在这台机器上跑通的部分】
+
+- 模块现在**只装给一个进程**：Shell_TrayWnd 的属主（explorer）。**不再给任何应用单独装模块，不再逐应用学习**，也不再需要"每个应用点一次"。
+- 每次注册都被读出来（pid / exe / hwnd / uid / flags / msg / version / guid / tip），合并进托盘缓存；模块 PIN 在 explorer 里常驻，所以以后任何时刻的注册也会被捡起来。
+- 实测：**ChatGPT（AppContainer，以前 SetWindowsHookEx 直接返回 87）与 RazerAppEngine（以前模块进得去但从不注册）第一次被学到并按下成功**——用它自己的回调，指针不动，2094 ms / 641 ms。覆盖率 2/9 → 4/9 有缓存条目、3/9 可按（分母是此刻卡片上的格子，会浮动）。
+- 自检 PASS、island_smoke PASS、Debug 与 Release 都编过；bar 起来跑 30 秒再关掉，原生任务栏正常恢复。
+
+【四、请回答】
+
+1) 结论"注册 = 应用发给 Shell_TrayWnd 的 WM_COPYDATA，因此学习只需要在 shell 进程里做"你同意吗？哪里读错了？
+2) 还剩两类不理想：(a) 提权应用（任务管理器）——UIPI 挡住我们从 Medium 发往 High 的窗口消息；(b) 在这次观察窗口里没有发出过 ADD 的图标（NVIDIA 的几个）。对这两类，你有没有我没想到的办法？
+3) 我把"逐应用装模块"那条路径删掉了（代码还在，只是不再被调用）。你同意永久删掉，还是留一个开关？
+4) 模块常驻在 explorer 里（PIN 住，只观察、只读注册，不改 shell 的任何函数体）。风险上你要提醒我什么？

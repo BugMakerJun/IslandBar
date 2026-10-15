@@ -1,0 +1,97 @@
+第 30 轮评审请求（IslandBar 托盘，数据全部来自这台机器的实测，2026-10-15）。
+请逐条明确表态：同意 / 反对 / 修正，并直接指出你认为哪个数字或判断是错的。请给结论式回答，别只讲原理。
+
+【基线：刚刚用只读命令实测，不是回忆】
+
+  island_bar.exe --tray-surface
+  -> 11 格，2 格可按
+  [0] ChatGPT.exe (GUID)                 没有条目
+  [1] DeepSeek Harness.exe               没有条目
+  [2] Steam - ...                        没有条目
+  [3] clash-verge.exe                    可按（其 own callback）
+  [4][5][8] NVIDIA                       没有条目
+  [6] explorer.exe (GUID，网络/音量)     没有条目
+  [7] RazerAppEngine.exe                 没有条目
+  [9] SecurityHealthSystray.exe (GUID)   没有条目
+  [10] explorer.exe (GUID，蓝牙)         可按（其 own callback）
+
+  启动时那一遍学习的日志原文：
+  "tray learn: the applications without a callback have changed
+   (chatgpt.exe,deepseek harness.exe,explorer.exe,nvcontainer.exe,nvdisplay.container.exe,
+    razerappengine.exe,securityhealthsystray.exe) -- offering the module again"
+  "tray learn: tried 8 application(s), the module loaded in 1 of them and was ALREADY
+   watching 5 more, 1 registration(s) captured, 0 new entr(ies) -- 3 of 11 icon(s) have
+   a callback entry (in 3593 ms)"
+
+【机制现状（已实现、已在盘上跑）】
+
+1. 应用侧模块 island_tray_hook.dll，用线程级 WH_GETMESSAGE（不需要管理员）装进"卡片上
+   每个应用里最重的那个进程"的每个线程；模块 PIN 住自己，改**本进程**导入表里
+   Shell_NotifyIconW/A 的槽位 + GetProcAddress 的槽位；bar 发一次 TaskbarCreated 广播
+   逼应用重新注册；学到的 (exe, hwnd, uid, guid, msg, version) 进 tray_callbacks.txt。
+2. 按压 = 把应用自己的回调消息发给它自己的托盘窗口（v4 拼法 / shell 实测的那一对
+   downup3），指针一格不动。实测 47-93 ms。
+3. 学不到的格子不再有真实点击兜底：按下去打开本栏自己的菜单（这是用户明确要的）。
+4. 全局钩子已撤回：它把 Clash Verge 的 WebView2 打成黑屏（有钩子 6 个 webview2 进程、
+   客户区亮度 0；没有钩子 12-13 个进程、亮度 56）。Chromium 的 RendererCodeIntegrity
+   拒未签名模块的 pending injection，MyDockFinder 的 dockmod64.dll 是签过名的所以它行。
+
+【本轮我自己先量到的两个新事实】
+
+5. 报告行本身有 bug：上面 [2][4][5][8] 四格的名字被截断，后面的 "(uid …)" 和结论一个字都
+   没打出来（实测行长分别是 14/13/13/13，正常行 79-107）。这就是 Log.h 里记过的那类宽窄
+   转换陷阱。我的基线数字因此不完整，顺手要修。
+6. RazerAppEngine（pid 20460）**体内已经有我们的模块**，报告文件里有它一串
+   "observed sent ... class RazerHidenWindowClass / ListenerThread*" 的观察行 —— 也就是说
+   模块在、观察通道在，但它在我们到场之后**一次也没调用过 Shell_NotifyIcon**，所以学不到。
+   explorer 也一样：模块在 explorer 里，蓝牙那张 GUID 图标学到了，网络/音量没学到。
+   结论：TaskbarCreated 广播对这两类不起作用。
+
+【我据此的分桶（方案就建立在这个分桶上）】
+
+A  我们进得去、但应用不再注册：RazerAppEngine、explorer 自己的网络/音量图标。
+A' 模块装错了进程（多进程应用）：DeepSeek Harness（Electron）、NVIDIA（nvcontainer /
+   nvdisplay.container）——现在只给"最重的那个进程"装，托盘窗口很可能在别的进程里。
+B  进不去：ChatGPT（AppContainer，SetWindowsHookEx 返回 87）、SecurityHealthSystray
+   （权限待测）、可能还有 NVIDIA 的容器进程。
+C  进得去、也注册了，但左键不应答：Steam（缓存里已记 none，右键可用）。
+
+【请逐条回答】
+
+Q1（A' 修法）我打算把"只装最重的那个进程"改成"装给该 exe 的所有进程，但排除
+   Chrome/WebView2 渲染进程（命令行里带 --type=renderer）"，理由就是 8.112 那次黑屏
+   正是 Chromium 渲染进程引起的。这个判据够不够硬？有没有更可靠的判据（例如按模块表里
+   有没有 chrome_elf.dll、按有没有顶层窗口、按进程是不是 job object 的子进程）？
+   有没有我没想到的反效果？速率上会不会变成"一次 pass 装几十个进程"？
+
+Q2（A 类：模块在、应用不再注册）在"不许真实点击"这条硬约束下，除 Q3 之外还有没有别的
+   **自动**学习手段？我的候选：(a) 请用户把该应用重启一次（一次性、之后模块常驻）；
+   (b) 重启一次 explorer 让 shell 自己的图标重新注册，换掉网络/音量那几格；
+   (c) 做 Q3。请给出你认为正确的顺序，以及每一条你预计能换来几格。
+
+Q3（B 类：shell 侧）我打算先做一个**只读探针**：在 explorer 里装我们的观察通道，然后触发
+   一次外部应用的重新注册（TaskbarCreated 广播 + 起停一个应用），看 explorer 的哪个窗口、
+   哪条消息带着 (hwnd, uid, guid, msg)。成了就写成模块（版本适配层），覆盖率就不再依赖
+   应用是否允许注入；不成，就老实停在 A 类的结果。**核心问题**：Shell_NotifyIcon 从客户端
+   进程到 shell 进程的通道，在你看来是"窗口消息"，还是 ALPC/COM？如果是 ALPC/COM，这个探针
+   我是不是在做无用功？如果是，请给出你认为唯一可行的拦截点（以及你认为的最小验证动作）。
+
+Q4（决定 Q3 到底要不要做的那个问题）MyDockFinder 对 AppContainer（ChatGPT/Codex）、提权
+   （任务管理器）、自保护（QQ音乐）这三类，能不能同样"发一条消息"就按动？它的 trayico.exe
+   只导入 PostMessageA（没有 SendInput / SetCursorPos / mouse_event），所以它的按压确实是
+   发消息而不是点鼠标。如果它能按动 AppContainer 的图标，它的回调消息号是从哪儿来的？
+   （这是第 29 轮 Q4，我没有拿到答复。）
+
+Q5 报告行截断（第 5 条）我的判断是 stdout 那侧的窄转换遇到非 ASCII 就整行作废/提前结束。
+   请确认，或给出真正的机制，以及你建议的修法（我发现的那 4 格名字分别是 Steam 和 NVIDIA）。
+
+Q6 我上面有没有你**明确反对**的动作？特别是 A' 的"装给该 exe 的所有进程"——这会让杀软/
+   反作弊看见更多注入行为，这个取舍要我承担，我需要你直接说"值得/不值得"。
+
+【回退与代价（如果你反对某条，我按你的意见改）】
+
+  A'：排除名单 + 一个"只装最重进程"的开关，出问题一行改回。
+  Q3：先只有独立脚本，不写进产品；将来若写成模块，则用 exe 旁边的标记文件当开关。
+  阶段验收（可量化）：`--tray-surface` 最后一行 "N of 11 can be pressed" 要从 2 抬上去，
+  且每一个仍然学不到的应用都要在日志里有一行说明原因（拒绝注入 / 不再注册 / 权限），
+  不允许再出现"沉默的格子"。

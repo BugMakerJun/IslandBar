@@ -277,6 +277,13 @@ inline const wchar_t* TrayMenuArmedLabel(TrayMenuAction action) {
 struct TrayMenuFacts {
     bool hasWindow = false;    // the application has a window to bring forward
     bool hasExePath = false;   // the registry recorded where its executable lives
+    // ... AND WHETHER ITS TRAY CALLBACK IS KNOWN. The two rows that are "the icon's own action" cannot do
+    // anything without it: 打开 sends the application its own left-click callback (TrayPress) and 应用自己的
+    // 菜单… sends it the right-click one, and an application whose callback has never been learned is simply
+    // not sendable to. Measured by the user on 2026-10-15: pressing 应用自己的菜单… on one of those cells
+    // "did nothing", because all it could do was re-open the same menu -- a row that does nothing is worse
+    // than a row that is absent, and this struct is what the rule is stated in.
+    bool hasCallback = false;
 };
 
 // Which entries the menu shows, in order, for one icon -- PURE, so the rule is pinned by the self-test
@@ -288,12 +295,12 @@ inline int TrayMenuEntriesFor(const TrayMenuFacts& facts, TrayMenuAction* out, i
     const auto add = [&](TrayMenuAction action) {
         if (count < capacity) out[count++] = action;
     };
-    add(TrayMenuAction::Open);
+    if (facts.hasCallback) add(TrayMenuAction::Open);
     if (facts.hasWindow) add(TrayMenuAction::ActivateWindow);
     if (facts.hasExePath) add(TrayMenuAction::OpenLocation);
     if (facts.hasWindow) add(TrayMenuAction::CloseWindow);
     add(TrayMenuAction::QuitApplication);
-    add(TrayMenuAction::ApplicationMenu);
+    if (facts.hasCallback) add(TrayMenuAction::ApplicationMenu);
     return count;
 }
 

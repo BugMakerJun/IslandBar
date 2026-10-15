@@ -1,0 +1,360 @@
+Gemini
+自动
+与 Gemini 对话
+你说 第 34 轮评审：**代码架构、引用（include）正确性、开发流程**。用户的原话：「你们三现在看看 现在项目代码架构，引用都对不对，符不符合正常开发流程」。 请直接给结论：哪一条你同意、哪一条…
+
+第 34 轮评审：**代码架构、引用（include）正确性、开发流程**。用户的原话：「你们三现在看看 现在项目代码架构，引用都对不对，符不符合正常开发流程」。
+
+
+
+
+请直接给结论：哪一条你同意、哪一条你反对、哪一条你认为我漏了。不要泛泛而谈"建议模块化"。
+
+
+
+
+【一、可验证的事实（都是刚才在这台机器上取到的，不是印象）】
+
+
+
+
+仓库：C:/PROJECT/Taskbar，C++20 + Win32 + D3D11/D2D/DComp，单 exe 静态 CRT。
+
+
+
+
+结构：
+
+src/ 下 76 个源文件（37 个 .cpp、39 个 .h），共 47,876 行；按角色分目录：core(布局/运动/日志/进程指标) app(窗口) render(D2D/文本) media(GSMTC/歌词/声音) shell(托盘/开始菜单/天气/系统开关) platform(显示器) services selftest tools。
+
+最大的几个：selftest/Diagnostics.cpp 8,561 行（内含 903 个 Check(...)）、main.cpp 7,362 行、render/TextRenderer.cpp 4,047、render/Renderer.cpp 1,751、app/IslandWindow.cpp 1,727、core/CardLayout.h 1,604（被 9 个文件包含）、shell/TrayPress.cpp 934、trayhook/TrayHook.cpp 932、shell/TrayLearn.cpp 784。
+
+
+
+
+引用（include）：
+
+* 头文件 **39/39 都有 include guard**（抽查三个我一开始以为没有，实际是 20 行 banner 注释把 guard 推到了下面）。
+
+* 包含风格统一：`#include "core/Geometry.h"` 这种"模块/文件"形式，src/ 作为包含根。
+
+* 抽查头文件自洽性：CardLayout.h→Geometry/TaskStripLayout；IslandWindow.h→CardLayout/Geometry/Monitor/Motion/TextRenderer；Motion.h→Geometry。没找到依赖包含顺序的头。
+
+* **Release 全量重建：0 个编译告警、0 个错误**（`[build] OK`）。
+
+* 10 个 .cpp 直接 `#include <windows.h>`（其余经由自己的头）。
+
+
+
+
+流程（仓库自己的规则在 AGENTS.md：研究 → 方案 → 用户确认 → 实现并本地部署 → 等用户测试 → 推送）：
+
+* 今天这一轮：研究做了三轮（第 31/32/33 轮评审，原文都在 captures/），方案给过用户，实现+部署+自检+smoke 都做了。
+
+* git：分支 main，**比 origin/main 领先 23 个提交**（按规则没推，等用户测完）；**今天改的 8 个文件全部未提交**（+619/−125 行：HANDOFF.md、CardLayout.h、main.cpp、Diagnostics.cpp、TrayLearn.cpp/.h、TrayPress.cpp、TrayHook.cpp）。仓库自己的规则写着"本地提交可以，配合 scripts\snapshot.ps1"。
+
+* 部署目录 %USERPROFILE%\IslandBar 里有：~20 个 island_bar.exe.bak-*、**10 份 staged 的 island_tray_hook-<hash>.dll**、tray_learned.run1..7.txt、island_smoke.exe、probe-tray-*.exe —— 实验残留。
+
+* 测试：没有单元测试框架，靠 903 条自检 + island_smoke + 一组 CLI 探针（--tray-surface / --tray-learn / --tray-press N --fire）。**托盘按压这条路径没有自动化回归**（需要活着的应用），只能人工/CLI 验证。
+
+* 安装器只带 island_bar.exe（payload 是单个 RCDATA #1001），**带不了 island_tray_hook.dll** —— 全新装会没有托盘学习。
+
+
+
+
+【二、我认为的问题，按严重程度】
+
+
+
+
+P0 今天改的东西没有本地提交。仓库自己的规则允许本地提交，而这一轮全部躺在工作区里，随时可能被一次误操作带走。
+
+P1 main.cpp 7,362 行是一个"上帝文件"：CLI 命令、帧循环、托盘菜单动作、开始菜单粘合、诊断注入路径全在里面；selftest/Diagnostics.cpp 8,561 行同理。按正常 C++ 项目会拆成 cli/ tray/ card/ 之类的翻译单元。
+
+P2 TrayHook.cpp 里还留着三段显式标着 TEMPORARY 的观察通道，而它自己的注释写着"把答案写进 HANDOFF 之后就把整块删掉"——答案已经写进 8.109/8.114/8.115 了，这一块该删（或者明确降级成"受标记文件控制的调试工具"并改掉那句注释）。
+
+P3 死代码/语义漂移：`UncoveredApplications()` 已无调用者（只留声明与定义）；`TrayLearnResult::appsReached` 现在是从报告文件里的 "attached pid" 行数出来的，数字含义和字段名已经不一致；main.cpp 里还留着 `SetCursorPos` + `mouse_event` 的 `ISLANDBAR_CLICK_AT` 诊断注入路径（默认关闭、由环境变量打开，但它在产品二进制里）。
+
+P4 部署目录的残留（10 份 staged DLL、7 份 report dump、20 份 exe 备份）没有清理规则；安装器带不上 hook DLL。
+
+P5 文档体量：HANDOFF.md 已经 800KB+，FEATURES.md 156KB，README/START-HERE/TESTING 各一份——没有目录/索引，新会话只能从头读。
+
+
+
+
+【三、请回答】
+
+
+
+
+1) P0–P5 里哪几条你同意、哪几条你觉得不是问题？有没有我漏掉的更严重的？
+
+2) "符合正常开发流程"这条：以这个项目的形态（单机、一个人、一个 AI 会话接力、每次改动都要实机验证）为标准，你觉得缺的最关键一环是什么？是提交纪律、回归测试、还是别的？
+
+3) main.cpp / Diagnostics.cpp 这两个大文件，值不值得现在拆？如果拆，按什么边界拆最省事、最不容易破坏已经通过的自检？
+
+4) 引用层面你还能想到什么我没查的（例如 ODR、内联函数在头文件里的膨胀、windows.h 的宏污染、DLL 与 exe 的 CRT 边界）？
+
+Gemini 说
+
+针对第 34 轮评审关于代码架构、引用正确性及开发流程的审视，以下是直接、不含糊的结论性表态：
+
+一、 对 P0 ~ P5 的表态与漏掉的严重问题
+
+P0（未提交代码）：完全同意。在 AI 会话接力和高频迭代中，工作区裸奔是最危险的。
+
+P1（上帝文件 main.cpp / Diagnostics.cpp）：同意，但反对现在动（见第 3 问）。
+
+P2（清理遗留代码）：完全同意。TEMPORARY 观察通道留着会污染代码心智模型。
+
+P3（死代码与语义漂移）：完全同意。字段名和底层逻辑不一致会导致后期排查出现幻觉。
+
+P4（部署残留与安装器漏带 DLL）：极其严重，完全同意。如果全新安装器不带 island_tray_hook.dll，属于功能性灾难（装完直接废掉托盘学习）。
+
+P5（文档膨胀）：完全同意。800KB 的 HANDOFF.md 已经变成累赘，AI 每次读取都在消耗无效 Token。
+
+🔥 漏掉的最严重问题：【静态 CRT（/MT）跨模块堆内存隔离与崩溃风险】
+
+如果你的 island_bar.exe 和 island_tray_hook.dll 同时采用静态 CRT（/MT 或 /MTd）编译，它们各自拥有完全独立的堆（Heap）。
+
+如果在 DLL 内部用 new / malloc 分配内存（或使用 std::string 等扩容对象），传回给主 exe 释放，或者跨边界传递标准库容器，会直接引发堆崩溃（Heap Corruption）。这是 C++ 模块化开发中最致命的隐性炸弹。
+
+二、 关于“正常开发流程”与缺少的关键一环
+
+以“单人 + AI 会话接力 + 实机强依赖”的形态来看，当前最缺的关键一环不是复杂的 CI/CD，而是：
+
+【标准化的状态增量快照（State Delta Checkpoint）】：拒绝 800KB 的巨型 HANDOFF.md。每次会话结束时，必须执行类似 scripts/snapshot.ps1，只输出“当前真实基准、上轮做了什么、当前未闭环的坑”，让新会话 1 分钟读完。
+
+【托盘自动化冒烟契约】：虽然托盘需要活应用，但至少应该有一个 CLI 冒烟脚本（如 island_smoke.exe --check-tray-pipe），在每次编译后自动拉起、向 explorer 灌入一条伪造的 WM_COPYDATA 并检查缓存是否正确写入，而不是完全依赖人工肉眼点。
+
+三、 main.cpp / Diagnostics.cpp 要不要现在拆？
+
+结论：绝对不要现在拆。
+
+理由：当前正处于托盘核心机制（WM_COPYDATA 监听、缓存合并、按压转发）刚刚打通的极度敏感期。此时大改文件边界、调整头文件依赖和符号可见性，极易引发莫名其妙的编译链接错误或破坏好不容易全绿的 903 个自检（Diagnostics.cpp 里混杂着大量自检断言）。
+
+何时拆：等托盘功能在所有机器上彻底稳定、不再大改架构时，再按 CliCore.cpp、DiagTray.cpp 的边界进行物理拆分。
+
+四、 引用层面的深层隐患检查
+
+CRT 边界隔离：再次强调，检查 island_tray_hook.dll 和 island_bar.exe 的 MSVC 运行时库设置。如果用了 DLL，推荐让 DLL 改用动态 CRT（/MD），或者确保跨边界绝对不传递任何带所有权的内存和标准库对象（只传纯 POD 数据、句柄、基础类型）。
+
+windows.h 宏污染（min / max）：
+
+如果头文件里直接包含了 <windows.h> 而没有在最前面 #define NOMINMAX，它会粗暴地把标准库的 std::min / std::max 宏掉。必须全局统一在所有源文件或公共前置头文件中加上 #ifndef NOMINMAX / #define NOMINMAX / #endif。
+
+头文件循环包含与内联膨胀（ODR）：
+
+检查像 CardLayout.h 这种被 9 个文件包含的大型头文件：里面绝对不能写复杂的非内联函数实现。所有非 inline 的函数体必须放在 .cpp 中，否则会违反 C++ 的 ODR（One Definition Rule）并导致编译产物膨胀。
+
+你说 第 35 轮评审：**"如果我们从头做，代码该怎么设计"**，然后**对照现有项目找不足**。用户原话：「旧代码不用备份了 现在项目有架构么 如果从头做的话，怎么设计开发代码你们三谈论一下 谈论完后 …
+
+第 35 轮评审：**"如果我们从头做，代码该怎么设计"**，然后**对照现有项目找不足**。用户原话：「旧代码不用备份了 现在项目有架构么 如果从头做的话，怎么设计开发代码你们三谈论一下 谈论完后 对照我们现在的项目看看有没有什么不足的」。
+
+
+
+
+请给一份**具体的**设计（模块划分、依赖方向、状态与数据的流转、进程边界、测试与构建目标），不要给"建议分层、注意解耦"这类空话。第二问请对照下面这份现实清单逐条指出现有项目的不足。
+
+
+
+
+【一、这个程序是什么（事实，不是设想）】
+
+
+
+
+Windows 11 上替代系统任务栏的"灵动岛"式横条（C++20 + Win32 + D3D11 + Direct2D + DirectComposition，单 exe、静态 CRT、无运行时依赖，实测私有内存 75–100MB）。
+
+
+
+
+它现在做这些事：
+
+1) 顶栏自己的一条 pill，三种状态（collapsed / hover / expanded）用可中断、继承位移与速度的 spring 动画切换，卡片内部内容 180-200ms ease-out 淡入淡出；窗口是 WS_EX_NOREDIRECTIONBITMAP + Composition SwapChain。
+
+2) 系统面板卡片：音量/亮度/播放控制等（走 system 开关与 GSMTC）。
+
+3) 托盘卡片：把系统托盘里的图标画成格子，点一下等于点真实托盘图标（左键=应用自己的左键行为，右键=应用自己的右键菜单），鼠标指针不能动。
+
+4) 媒体卡片：GSMTC 读会话 + 封面取色 + 歌词（多来源）。
+
+5) 应用行/任务条：枚举窗口、点击激活/最小化、DWM 缩略图预览。
+
+6) 通知：读系统 Toast 数据库，把消息与通话显示成通知纸条。
+
+7) 天气（Windows 定位或 weather.txt 指定城市）、时钟、日期。
+
+8) 开始按钮（要向 shell 注入 Ctrl+Esc / Win 键）。
+
+9) 隐藏原生任务栏（ABM_SETSTATE 那条路），自己占位。
+
+10) 全部纯逻辑（布局、命中测试、动画、状态策略）有一份 900+ 断言的 `--self-test`。
+
+
+
+
+进程与二进制现状：
+
+* `island_bar.exe`（主程序，静态 CRT）。
+
+* `island_tray_hook.dll`（**最近新增的第二个二进制**）：装进 explorer 的一个模块，用 WH_CALLWNDPROC 读应用发给 `Shell_TrayWnd` 的 WM_COPYDATA（托盘注册），并把结果写进 %USERPROFILE%\IslandBar\tray_learned.txt；bar 每 5 秒读一次这个文件。两者之间**没有内存交换，只有文件**。
+
+* `IslandBarSetup.exe`（安装器，payload 是单份 RCDATA，目前只带 exe，带不了 DLL）。
+
+* tools/ 下若干独立探针可执行文件（geo_probe / thumb_probe / jsonprobe / island_smoke）。
+
+
+
+
+规模与体量（刚测的）：
+
+* src/ 76 个源文件（37 .cpp / 39 .h），47,876 行。
+
+* 最大的：selftest/Diagnostics.cpp 8,561 行（903 个 Check）、main.cpp 7,362 行、render/TextRenderer.cpp 4,047、render/Renderer.cpp 1,751、app/IslandWindow.cpp 1,727、core/CardLayout.h 1,604（被 9 个文件包含，92 个 inline 函数）、shell/TrayPress.cpp 934、trayhook/TrayHook.cpp 932、shell/TrayLearn.cpp 784。
+
+* 构建：CMake + MSBuild，/W4 **/WX**（告警即错误）、/utf-8、NOMINMAX、WIN32_LEAN_AND_MEAN，Release 全量重建 0 告警。
+
+* 头文件 39/39 有 include guard；包含写成 `"core/Geometry.h"` 形式，包含根是 src/。
+
+* 测试：没有单元测试框架，靠 903 条自检 + island_smoke + CLI 探针（--tray-surface / --tray-learn / --tray-press N）。
+
+* 流程（仓库自己的 AGENTS.md）：研究（拿实机数据问外部评审）→ 给用户方案 → 用户确认 → 实现并本地部署（部署到 %USERPROFILE%\IslandBar，不在项目树里，因为项目树下的进程会被降成 LOW 完整性，GUI 起不来）→ 等用户测 → 推送。单实例互斥锁，不能并行跑第二个副本做对照。
+
+
+
+
+【二、已经踩过、必须写进设计的硬约束（都有实测）】
+
+
+
+
+* 全局 WH_ 钩子（dwThreadId=0）会把 Chromium 的渲染进程打死：把 Clash Verge 的 WebView2 从 12-13 个进程打到 6 个，客户区平均亮度从 56 掉到 0。原因是 RendererCodeIntegrity 拒未签名模块的 pending injection。MyDockFinder 能用全局钩子是因为它的 DLL 有签名。
+
+* 所以注入只能是"逐个线程、逐个进程、有选择地"装（现在的做法：只装给 explorer）。
+
+* 注入到别人进程里的模块必须自己 PIN 住（GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|PIN），否则进程退出时导入表会留下悬空指针——这已经崩过 Explorer 6 次、wallpaper64 4 次。
+
+* 部署目录必须在项目树外，且项目树下的进程被降权（UIPI 会静默丢弃发给 Explorer 的消息）。
+
+* 日志写在 exe 旁边、逐行 flush——日志量本身是一项成本（现在的日志文件已经 1.2MB+，HANDOFF 800KB+）。
+
+* 每 5 秒的 tick 里做托盘 harvest（读文件）、每 N 秒写一次内存指标；一帧一帧画的窗口和"事件驱动的世界状态"是同一个线程。
+
+
+
+
+【三、请回答】
+
+
+
+
+1) **从头设计**：你会怎么划模块和依赖方向？请具体到"哪些翻译单元/库目标、谁依赖谁、什么不能依赖什么"。特别注意：纯逻辑（布局/命中/动画）如何与 Win32 副作用隔离，才能被自检覆盖？
+
+2) **状态与数据**：现在是一个巨大的帧循环 + 一堆局部对象（窗口、托盘列表、通知、媒体、天气…）+ 各处 5 秒/1 秒轮询。从头做的话你会用什么模型（集中式 store + reducer？ECS？消息总线？还是保持过程式轮询）？为什么？在这个"渲染 60fps、事件稀疏、只有一个人维护"的场景下，哪个代价最低？
+
+3) **二进制与进程**：单 exe 的承诺已经被托盘 DLL 打破一次。你会怎么正式化这个边界（谁注入谁、模块如何与主程序通信、崩溃隔离、安装器怎么带、版本如何对齐）？值不值得把"注入 + 读别人注册"单独拆成一个辅助进程？
+
+4) **测试**：在没有单元测试框架、但有一个 900 断言的巨大自检程序的现状下，从头做你会怎么组织测试（纯逻辑单测 / 黄金图像 / 假 OS 契约 / 端到端脚本）？
+
+5) **对照现有项目**：上面那份清单里，哪些是"架构问题"、哪些只是"规模问题"、哪些根本不算问题？按你认为的严重程度排序，并指出我可能自我感觉良好的地方（例如 0 告警、39/39 guard 这类指标其实不说明架构好坏）。
+
+Gemini 说
+
+针对第 35 轮评审关于“从头设计”与“对照现有项目”的要求，以下给出不含废话的、可落地的技术架构设计与严肃盘点：
+
+一、 从头设计的系统架构方案
+1. 模块划分与依赖方向（Layering & Dependencies）
+
+采用严格的单向依赖分层架构（Strict Unidirectional Layering）。自顶向下分为 4 层，高层可以依赖底层，底层绝对不允许反向依赖高层。
+
+[Layer 3: UI & Platform Bindings] (IslandWindow.cpp, Win32/D3D11/DComp, TrayHook.dll)
+       ↓ (依赖)
+[Layer 2: Services & Adapters] (GSMTC, ToastDB, Weather API, Explorer Tray Observer)
+       ↓ (依赖)
+[Layer 1: Application State & Logic Core] (CardLayout, Motion, State Machine, Reducer - 无任何 Win32 依赖)
+       ↓ (依赖)
+[Layer 0: Primitive Math & Geometry] (Geometry.h, Rect, Vector2, Easing - 纯标量计算)
+
+
+绝对规则：
+
+Layer 0 和 Layer 1 必须是纯净的 C++20 逻辑代码，严禁包含任何 <windows.h>、HWND、ID3D11Device 或图形 API。所有的布局计算、鼠标命中测试（HitTest）、Spring 动画迭代、卡片状态机，全部在这个纯逻辑层完成。
+
+正是因为这一条，--self-test 才能在不需要拉起 D3D11 窗口、不需要真实 OS 环境的情况下，用 900+ 断言瞬间跑完所有布局与动画边界。
+
+2. 状态与数据流模型（State & Data Flow）
+
+结论：采用“单向显式状态树 + 纯函数 Reducer（类似轻量 Elm/Redux 模式）”，彻底放弃到处散落的轮询和零散局部变量。
+
+为什么？
+
+在单人维护、60fps 渲染、事件驱动极其稀疏（媒体切换、托盘变化、通知到来）的桌面应用场景下，如果允许组件各自去轮询文件、读注册表、改局部状态，最终就会演变成现在 main.cpp 7,362 行和 Diagnostics.cpp 8,561 行的上帝文件灾难。
+
+具体模型：
+
+一个全局的 AppState 结构体（包含托盘列表、当前媒体状态、天气、通知、卡片展开状态）。
+
+所有的外部事件（文件里读出来的托盘变更、GSMTC 嘀嗒、Win32 窗口消息转换来的 Action）汇聚到一个入口：AppStore::Dispatch(const Action& action)。
+
+Reducer(state, action) -> new_state 是纯函数，瞬间计算出新状态。
+
+渲染循环（60fps）只管拿着当前的 const AppState& 往 DirectComposition / Direct2D 刷画面。
+
+3. 二进制与进程边界（Processes & Inter-Process Communication）
+
+主程序：island_bar.exe（单实例、静态 CRT、承载所有渲染与核心逻辑）。
+
+托盘探针二进制：island_tray_hook.dll（被动注入到 explorer.exe 的观察者）。
+
+进程间通信（IPC）的正式化：
+
+严禁再用“每 5 秒轮询临时文本文件（tray_learned.txt）”这种玩具级方案。
+
+正规通信方案：主程序启动时创建一个命名管道（Named Pipe，如 \\.\pipe\island_bar_tray_pipe），island_tray_hook.dll 在 explorer 内部通过客户端连接该管道。每当捕获到 WM_COPYDATA 注册事件，实时、异步地通过管道向主程序推结构化二进制数据，实现零延迟、零磁盘 IO、零文件锁冲突。
+
+安装器交付：安装器（Setup）必须在 RCDATA 中同时打包 island_bar.exe 和 island_tray_hook.dll，在安装时释放到同一目录。
+
+4. 测试体系
+
+纯逻辑单元测试：针对 Layer 1（Layout、Motion、State Reducer）建立真正的 Catch2 / Doctest 单元测试集（直接复用那 900+ 断言）。
+
+契约与冒烟脚本（Smoke Test）：提供一个命令行工具 island_smoke.exe --simulate-tray，它向管道写入模拟的托盘注册二进制流，验证 AppState 是否正确收录该托盘项。
+
+二、 对照现有项目的残酷现实盘点（严重程度排序）
+
+对照你列出的现实清单，现有项目的不足按严重程度排序如下：
+
+1. 🚨【架构级缺陷：状态与 IO 的严重耦合（主循环吞噬一切）】
+
+表现：main.cpp 7,362 行、Diagnostics.cpp 8,561 行。托盘 harvest 靠每 5 秒读文件，状态更新、Win32 消息泵、动画迭代全部揉在一个巨大的帧循环里。
+
+后果：代码失去可测试性、可维护性，新增任何一个外部源（如天气或通知）都要在主循环里塞一堆轮询胶水代码。
+
+2. ⚠️【工程级缺陷：凌乱且脆弱的 IPC（文件轮询替代方案错位）】
+
+表现：主程序和 island_tray_hook.dll 之间通过读写 %USERPROFILE%\IslandBar\tray_learned.txt 交换数据。
+
+后果：存在文件读写冲突、延迟高、且在多用户或防病毒软件拦截时极易失效。标准做法本该是命名管道或共享内存（Shared Memory + Mutex/Event）。
+
+3. ⚠️【交付与部署缺陷：安装器资产遗漏】
+
+表现：安装器只带 exe，带不了 DLL。
+
+后果：全新用户安装后，托盘学习功能直接形同虚设（因为缺少 island_tray_hook.dll），完全属于未闭环的工程事故。
+
+4. ℹ️【代码规模与体量问题：上帝文件（God Files）】
+
+表现：TextRenderer.cpp (4,047 行)、CardLayout.h (1,604 行，92 个内联函数)。
+
+说明：这属于严重的规模和规范问题。大型头文件里写满复杂内联函数会严重拖慢编译速度，并暴露出模块划分不清的本质。
+
+5. 🟢【虚假的安全感指标（你可能自我感觉良好的地方）】
+
+“0 编译告警 / /WX 严格模式”、“39/39 头文件都有 include guard”、“纯 Release 全量重建”。
+
+点评：这些指标完全不说明架构好不好。它们只证明了你的编译器参数配得很满、C++ 基础语法规范。一个满篇宏定义、所有逻辑堆在两个 8000 行上帝文件里的代码，照样可以做到 0 告警和完美 include guard。不要把编译器的严苛当成架构优良的护身符。
+
+Gemini 是一款 AI 工具，其回答未必正确无误。
+
+

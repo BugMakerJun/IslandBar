@@ -1,0 +1,34 @@
+第 31 轮评审请求（IslandBar 托盘，Windows 11，数据全部来自这台机器的实测，2026-10-15）。
+
+请逐条明确表态：同意 / 反对 / 修正，并直接指出你认为哪个数字或判断是错的。请结论式回答，别只讲原理。
+
+最终目标：岛上托盘卡片里的每一格，按下去的效果要和用户直接点系统托盘里那个图标**完全一致**（左键做应用自己左键做的事、右键出应用自己的菜单），并且**不移动鼠标指针、不注入真实点击**。
+
+【已实测的事实，不是推测】
+
+1. 现在的实现：一个**未签名**的 island_tray_hook.dll，用**线程级 WH_GETMESSAGE** 装进"卡片上每个应用里最重的那个进程"的每个线程，改该进程导入表里 Shell_NotifyIconW/A 的槽位 + GetProcAddress 的槽位，学出 (exe, hwnd, uid, guid, uCallbackMessage, 注册版本)。按压 = 把应用自己的回调消息发回去（v3 的拼法是 wParam=uid、lParam=WM_LBUTTONDOWN 然后 WM_LBUTTONUP 两条 **SendMessage** —— 这是从 clash-verge 进程内部量出来的；v4 是 wParam 里打包）。实测 47-93 ms，指针不动。学不到的格子改成"打开本栏自己的菜单"。
+2. 全局钩子（WH_GETMESSAGE，dwThreadId=0）**已经撤回**：它让 Clash Verge 的 WebView2 起不来（有钩子时 6 个 msedgewebview2 进程、客户区平均亮度 0；无钩子时 12-13 个进程、亮度 56）。原因是 Chromium 渲染进程的 RendererCodeIntegrity 拒未签名模块的 pending injection。MyDockFinder 的 dockmod64.dll 签过名，所以它能用全局钩子。
+3. 注入够不着的三类：AppContainer（ChatGPT.exe：SetWindowsHookEx 直接返回错误 87）、提权（任务管理器，High 完整性）、自保护（QQ音乐：98 个线程钩子都接受了但 DLL 从未 attach）。
+4. 还有一类"模块进去了、但应用从此不再调用 Shell_NotifyIcon"：RazerAppEngine 体内有我们的模块、观察通道也有它一串行，但一次注册都没抓到；explorer 自己的网络/音量图标同理。
+5. 覆盖率是浮动的：两小时前 --tray-surface 报 "11 格 2 格可按"，刚才同一条命令报 "9 格 0 格可按" —— 差别只是 Clash Verge 退出了、蓝牙图标不在托盘里。
+
+【我的方案，请逐条表态】
+
+P0 报告与口径（先做）：修 stdout 截断（同一次运行里，日志文件那侧是完整的 UTF-8，stdout 断在第一个中文字符上，走的是 CRT 的 fputws）；--tray-surface 每一格都必须有判决行（its own callback / ignores its callback / the module is refused / nothing learned yet），不允许沉默的格子。
+
+P1 多进程应用（Electron 的 ChatGPT 主进程 vs 渲染进程、NVIDIA 的 nvcontainer）：把"每个应用只装最重的那个进程"改成"装给该 exe 的所有进程、但排除 Chromium 渲染进程"。判据用进程命令行里的 --type=renderer 够不够硬？有没有更可靠的判据？
+
+P2 **决定性探针**：Shell_NotifyIcon 从**应用进程**到 **shell（explorer）进程**，走的是窗口消息，还是 ALPC/COM？我打算在 explorer 里用我们已有的观察通道（WH_CALLWNDPROC 看 SENT + WH_GETMESSAGE 看 POSTED，标记文件开关），让对照程序注册一个图标，看 explorer 收到的是不是一条带 (hwnd, uid, guid, uCallbackMessage) 的窗口消息。
+**如果你知道 Windows 10/11 里 shell32!Shell_NotifyIcon 的真实内部实现（发给哪个窗口、什么消息号、参数是什么），请直接说 —— 这一条决定我要不要花时间做这个实验。**
+
+P3 如果 P2 命中：shell 侧学习就能覆盖 AppContainer / 提权 / 自保护那三类（那是应用发给 shell 的消息，不需要往应用里注入任何东西），覆盖率就不再取决于"应用允不允许被注入"。这时 explorer 侧的最小可行落点是什么（子类化内部窗口 / 我们自己的接收窗口 / 只观察）？硬条件是什么？
+
+P4 MyDockFinder 的 trayico.exe 只导入 PostMessageA，没有 SendInput / SetCursorPos / mouse_event，所以它的按压确实是"发消息"而不是点鼠标。它**能不能**按动 AppContainer（ChatGPT）、提权（任务管理器）、自保护（QQ音乐）这三类图标？如果能，它的 uCallbackMessage 是从哪里来的？
+
+P5 交付与回退：安装器现在**没带** island_tray_hook.dll（全新安装等于没有托盘学习，要补）；回退是"一行标记文件关掉整套学习，回落成每一格都打开本栏自己的菜单"；已知风险是模块进别人的进程会被杀软/反作弊看见，以及 explorer 曾因悬空导入槽崩过 6 次（已用 GET_MODULE_HANDLE_EX_FLAG_PIN 修好，之后 0 次崩溃事件）。
+
+【请回答】
+
+1) 上面 P0-P5 每一条：同意 / 反对 / 修正。
+2) P2 的通道问题（这一条我最需要你的判断）。
+3) 你认为这个方案里最可能失败的一步是哪一步，为什么。

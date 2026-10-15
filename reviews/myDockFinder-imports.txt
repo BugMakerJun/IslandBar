@@ -1,0 +1,147 @@
+Microsoft (R) COFF/PE Dumper Version 14.44.35229.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file C:\GAME\Steam\steamapps\common\MyDockFinder\Dockmod64.dll
+
+File Type: DLL
+
+  Section contains the following imports:
+
+    KERNEL32.dll
+             18002A000 Import Address Table
+             18003C8A0 Import Name Table
+                     0 time date stamp
+                     0 Index of first forwarder reference
+
+                         437 OpenFileMappingW
+                          D9 CreateEventW
+                         55C SetEvent
+                          9D CloseHandle
+                         412 MapViewOfFile
+                         433 OpenEventW
+                         5C8 Sleep
+                         3F4 LoadLibraryA
+                         2DD GetProcAddress
+                         423 MultiByteToWideChar
+                         308 GetStringTypeW
+                         64C WideCharToMultiByte
+                         246 GetCurrentThreadId
+                         28D GetLastError
+                         157 EnterCriticalSection
+                         3F0 LeaveCriticalSection
+                         397 InitializeCriticalSectionEx
+                         12F DeleteCriticalSection
+                         153 EncodePointer
+                         128 DecodePointer
+                         3E3 LCMapStringEx
+                         4EA ReleaseSRWLockExclusive
+                           0 AcquireSRWLockExclusive
+                         62D WakeAllConditionVariable
+                         481 QueryPerformanceCounter
+                         1EA GetCPInfo
+                         5B8 SetUnhandledExceptionFilter
+                         301 GetStartupInfoW
+                         2A5 GetModuleHandleW
+                         242 GetCurrentProcessId
+                         31A GetSystemTimeAsFileTime
+                         39A InitializeSListHead
+                         65F WriteConsoleW
+                          E6 CreateFileW
+                         385 HeapSize
+                         225 GetConsoleMode
+                         229 GetConsoleOutputCP
+                         660 WriteFile
+                         1C8 FlushFileBuffers
+                         593 SetStdHandle
+                         2E4 GetProcessHeap
+                         1D3 FreeEnvironmentStringsW
+                         262 GetEnvironmentStringsW
+                         200 GetCommandLineW
+                         1FF GetCommandLineA
+                         1B4 FindNextFileW
+                         1A3 FindFirstFileExW
+                         19D FindClose
+                         569 SetFilePointerEx
+                         511 RtlLookupFunctionEntry
+                         517 RtlUnwindEx
+                         513 RtlPcToFileHeader
+                         498 RaiseException
+                         39E InterlockedFlushSList
+                         578 SetLastError
+                         1C2 FlsAlloc
+                         1C4 FlsGetValue
+                         1C6 FlsSetValue
+                         1C3 FlsFree
+                         10F CreateThread
+                         187 ExitThread
+                         1D4 FreeLibrary
+                         1D5 FreeLibraryAndExitThread
+                         2A4 GetModuleHandleExW
+                         3B8 IsProcessorFeaturePresent
+                         241 GetCurrentProcess
+                         186 ExitProcess
+                         5D8 TerminateProcess
+                         2A1 GetModuleFileNameW
+                         37C HeapAlloc
+                         509 RtlCaptureContext
+                         518 RtlVirtualUnwind
+                         3B0 IsDebuggerPresent
+                         5FB UnhandledExceptionFilter
+                         380 HeapFree
+                         61A VirtualProtect
+                         3F6 LoadLibraryExW
+                         3E4 LCMapStringW
+                         291 GetLocaleInfoW
+                         3C0 IsValidLocale
+                         349 GetUserDefaultLCID
+                         17B EnumSystemLocalesW
+                         303 GetStdHandle
+                         27A GetFileType
+                         3BE IsValidCodePage
+                         1DB GetACP
+                         2C6 GetOEMCP
+                         383 HeapReAlloc
+
+    USER32.dll
+             18002A2C8 Import Address Table
+             18003CB68 Import Name Table
+                     0 time date stamp
+                     0 Index of first forwarder reference
+
+                         205 GetWindowTextW
+                         204 GetWindowTextLengthW
+                         372 SetPropA
+                         32C SendMessageTimeoutW
+                         25C IsWindowVisible
+                         2BB PostMessageA
+                          20 CallNextHookEx
+                         2A0 MsgWaitForMultipleObjects
+                         255 IsWindow
+                          C1 DispatchMessageW
+                         2B8 PeekMessageW
+                         1F4 GetWindowLongA
+                         1BE GetPropA
+                          2D ChangeWindowMessageFilter
+                         3D2 TranslateMessage
+                         138 GetClassNameW
+                         118 FindWindowA
+                         243 IsIconic
+
+    dwmapi.dll
+             18002A360 Import Address Table
+             18003CC00 Import Name Table
+                     0 time date stamp
+                     0 Index of first forwarder reference
+
+                          1B DwmSetWindowAttribute
+
+  Summary
+
+        3000 .data
+        1000 .fptable
+        3000 .pdata
+       14000 .rdata
+        1000 .reloc
+        1000 .rsrc
+       29000 .text

@@ -73,7 +73,17 @@ const wchar_t* kHookModule = L"island_tray_hook.dll";
 // an application writes nothing during a later one -- and the log line then said "the module loaded in 0"
 // about a machine where three applications were being watched the whole time. A number that reads like a
 // failure while the mechanism is working is worse than no number at all.
-bool ModuleAlreadyIn(DWORD pid) {
+// Whether THIS staged build is already mapped in that process.
+//
+// IT USED TO ASK "IS ANY island_tray_hook* IN THERE", AND THAT WAS WRONG THE MOMENT THE MODULE CHANGED.
+// The staged file is named after its content hash (StageHookModule), so a new build is never blocked by a
+// file lock -- but the question asked here was about the NAME PREFIX, so a process still holding yesterday's
+// module was counted as "already watching" and the new build was never offered to it. Measured on 2026-10-15:
+// after deploying a module whose only change was which messages it observes, `--tray-learn` reported
+// "the module loaded in 0 of them and was ALREADY watching 3 more" -- Explorer among them, still running the
+// old copy, which is why the experiment produced no data at all. Comparing the staged file's own name makes
+// an upgrade take effect in the processes that are still running, which is the point of staging by hash.
+bool AlreadyHasThisModule(DWORD pid, const wchar_t* stagedLeaf) {
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
     if (snapshot == INVALID_HANDLE_VALUE) return false;
     bool found = false;
@@ -81,7 +91,7 @@ bool ModuleAlreadyIn(DWORD pid) {
     entry.dwSize = sizeof(entry);
     if (Module32FirstW(snapshot, &entry)) {
         do {
-            if (_wcsnicmp(entry.szModule, L"island_tray_hook", 16) == 0) {
+            if (_wcsicmp(entry.szModule, stagedLeaf) == 0) {
                 found = true;
                 break;
             }
@@ -215,6 +225,48 @@ bool FieldNumber(const wchar_t* line, const wchar_t* key, unsigned* out, bool he
     return end != text;
 }
 
+// The image name a report line points at.
+//
+// The shell-side lines (TrayHook.cpp::ReportShellCopy) name the process that owns the tray window, because the
+// shell asks the window rather than the registration, and a process it does not own may refuse to be named --
+// an elevated one does. The pid is always there, and this process table is readable for any process, so the
+// name is filled in from here when the line could not state it. Lower case, like every other exe name in the
+// cache file: the registry and the window both spell it however they like.
+std::wstring ExeLeafForPid(unsigned pid) {
+    static std::vector<std::pair<unsigned, std::wstring>> known;
+    for (const std::pair<unsigned, std::wstring>& entry : known) {
+        if (entry.first == pid) return entry.second;
+    }
+    std::wstring found;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry = {};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (entry.th32ProcessID != pid) continue;
+                found = entry.szExeFile;
+                std::transform(found.begin(), found.end(), found.begin(), ::towlower);
+                break;
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    }
+    known.push_back(std::make_pair(pid, found));
+    return found;
+}
+
+// `exe` if the line could state it, the pid's image name otherwise. False when neither is available.
+bool LineExe(const wchar_t* line, wchar_t* out, size_t count) {
+    if (Field(line, L"exe", out, count) && out[0] && _wcsicmp(out, L"-") != 0) return true;
+    unsigned pid = 0;
+    if (!FieldNumber(line, L"pid", &pid, false) || pid == 0) return false;
+    const std::wstring name = ExeLeafForPid(pid);
+    if (name.empty()) return false;
+    wcsncpy_s(out, count, name.c_str(), _TRUNCATE);
+    return true;
+}
+
 // One learned entry, ready for the cache file.
 struct Learned {
     std::wstring exe;
@@ -247,6 +299,17 @@ struct Learned {
 // slots behind. When this process dies the system removes the hook, and the pinned modules stay mapped and
 // inert in the applications that already have them.
 HMODULE g_hookModule = nullptr;
+// The staged copy's own file name ("island_tray_hook-<hash>.dll"), kept so the install pass can tell "this
+// process already has THE BUILD WE ARE OFFERING" from "it has some older copy of ours" (see
+// AlreadyHasThisModule).
+std::wstring g_stagedLeaf;
+
+const wchar_t* StagedLeaf() {
+    if (!g_stagedLeaf.empty()) return g_stagedLeaf.c_str();
+    // Nothing staged yet (InstallTrayHook has not run): fall back to the plain name, which is what a process
+    // could only be holding if it was loaded by hand.
+    return kHookModule;
+}
 
 // The lines already in the cache: what this run must not duplicate, and what it may have to correct (an
 // application that changed its callback message).
@@ -344,7 +407,7 @@ void HarvestReport(TrayLearnResult* result) {
                 while (fgetws(line, 1024, stream)) {
                     if (!wcsstr(line, L"NIM_SETVERSION")) continue;
                     wchar_t exe[260] = {};
-                    if (!Field(line, L"exe", exe, 260)) continue;
+                    if (!LineExe(line, exe, 260)) continue;
                     unsigned uid = 0;
                     unsigned version = 0;
                     if (!FieldNumber(line, L"uid", &uid, false)) continue;
@@ -383,14 +446,17 @@ void HarvestReport(TrayLearnResult* result) {
                     }
                     continue;
                 }
+                // ... and the same line read on the shell's side ("S") counts exactly as much as the one read
+                // inside the application ("W"/"A"): since HANDOFF 8.114 that is where the answers come from.
                 if (!wcsstr(line, L"call W NIM_ADD") && !wcsstr(line, L"call W NIM_MODIFY") &&
-                    !wcsstr(line, L"call A NIM_ADD") && !wcsstr(line, L"call A NIM_MODIFY")) {
+                    !wcsstr(line, L"call A NIM_ADD") && !wcsstr(line, L"call A NIM_MODIFY") &&
+                    !wcsstr(line, L"call S NIM_ADD") && !wcsstr(line, L"call S NIM_MODIFY")) {
                     continue;
                 }
                 Learned item;
                 wchar_t exe[260] = {};
                 wchar_t hwndText[32] = {};
-                if (!Field(line, L"exe", exe, 260) || !Field(line, L"hwnd", hwndText, 32)) continue;
+                if (!LineExe(line, exe, 260) || !Field(line, L"hwnd", hwndText, 32)) continue;
                 unsigned uid = 0;
                 unsigned message = 0;
                 unsigned version = 0;
@@ -533,6 +599,10 @@ bool InstallTrayHook() {
     // The staged copy, not the built file: see StageHookModule for why the file that gets loaded may not be
     // the file a later build replaces.
     modulePath = StageHookModule(modulePath);
+    {
+        const size_t leaf = modulePath.find_last_of(L'\\');
+        g_stagedLeaf = (leaf == std::wstring::npos) ? modulePath : modulePath.substr(leaf + 1);
+    }
 
     if (!g_hookModule) {
         g_hookModule = LoadLibraryW(modulePath.c_str());
@@ -551,7 +621,7 @@ bool InstallTrayHook() {
         return false;
     }
 
-    LogAndPrint(L"  tray hook: module ready at %ls (offered to tray applications only -- a global hook is "
+    LogAndPrint(L"  tray hook: module ready at %ls (offered to the shell's own process -- a global hook is "
                 L"refused by signed-only renderer processes, see TrayLearn.cpp)\n",
                 modulePath.c_str());
     return true;
@@ -569,45 +639,68 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     const std::wstring report = HomePath(kReportFile);
     if (!report.empty()) DeleteFileW(report.c_str());
 
-    // --- ONE THREAD HOOK PER TRAY APPLICATION, and nothing else ---------------------------------
+    // --- ONE PROCESS: THE SHELL'S OWN ------------------------------------------------------------
     //
-    // This is the scope that matters: the applications on the card, the heaviest process of each (measured:
-    // WeChat runs five and its tray window lives in the largest), and every thread of that process. A browser
-    // or a webview renderer is never in this list unless the user has a tray icon from one, and Chromium's
-    // signed-only renderer rule (see InstallTrayHook) is exactly why the scope has to be this narrow.
+    // WHICH ONE, AND WHY IT IS ENOUGH. An application does not keep its tray registration to itself: it SENDS
+    // it to the window of class "Shell_TrayWnd" as a WM_COPYDATA (measured 2026-10-15, see ReportShellCopy in
+    // TrayHook.cpp for the layout). So a module inside that window's process reads every registration on the
+    // machine -- and it reads the ones an application-side hook can never reach: an AppContainer application
+    // refuses the hook outright (ChatGPT.exe, SetWindowsHookEx error 87) and a self-protecting one accepts
+    // 98 thread hooks and never loads the module (QQ Music). Both of them still register, and their copies
+    // arrive here. Measured in the first run: ChatGPT.exe, AppContainer and all, arrived with uid 3,
+    // message 0x8001, tip "ChatGPT" and guid E5768D8B-6936-4F45-B1AD-4C5FB414CB35.
     //
-    // A hook that cannot be installed is not an error: a process that refuses an injected module reports
-    // through `appsReached` below.
+    // This replaced a pass that offered the module to every application on the card, one process at a time.
+    // That pass was the reason the user kept asking why the tray had to be taught application by application;
+    // it is gone (see HANDOFF 8.114). The module's in-application detour is still there and still writes what
+    // it sees -- it simply is not offered to anybody unless a later decision asks for it again.
+    //
+    // A hook that cannot be installed is not an error: it is reported through `appsReached` below.
     std::vector<DWORD> tried;
     std::vector<HHOOK> hooks;
     const FARPROC procedure = GetProcAddress(g_hookModule, "IslandTrayHookProc");
-    for (int i = 0; i < icons.Count(); ++i) {
-        const std::wstring exe = BaseNameLower(icons.ExePathAt(i));
-        if (exe.empty()) continue;
-        const DWORD pid = HeaviestPid(PidsForImage(icons.ExePathAt(i)));
-        if (pid == 0 || std::find(tried.begin(), tried.end(), pid) != tried.end()) continue;
-        tried.push_back(pid);
-        ++result.appsTried;
-        if (!procedure) continue;
-
-        // The threads, from a snapshot: SetWindowsHookEx takes one thread per call, and a process that is
-        // already holding the module needs no hook at all -- which is the normal case after the first pass,
-        // because the module pins itself where it lands (TrayHook.cpp).
-        if (ModuleAlreadyIn(pid)) continue;
-        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (snapshot == INVALID_HANDLE_VALUE) continue;
-        THREADENTRY32 entry = {};
-        entry.dwSize = sizeof(entry);
-        if (Thread32First(snapshot, &entry)) {
-            do {
-                if (entry.th32OwnerProcessID != pid) continue;
-                const HHOOK installed = SetWindowsHookExW(WH_GETMESSAGE,
-                                                          reinterpret_cast<HOOKPROC>(procedure),
-                                                          g_hookModule, entry.th32ThreadID);
-                if (installed) hooks.push_back(installed);
-            } while (Thread32Next(snapshot, &entry));
+    {
+        // FindWindowW, not the card: the shell's tray window is the one that receives the registrations, and
+        // it exists whether or not the card happens to show one of Explorer's own icons.
+        const DWORD pid = TrayShellProcessId();
+        if (pid == 0) {
+            LogAndPrint(L"  tray hook: no Shell_TrayWnd on this desktop -- nothing can be learned\n");
+        } else {
+            tried.push_back(pid);
+            ++result.appsTried;
         }
-        CloseHandle(snapshot);
+        if (procedure && pid != 0 && !AlreadyHasThisModule(pid, StagedLeaf())) {
+
+            // The threads, from a snapshot: SetWindowsHookEx takes one thread per call, and a process already
+            // holding THIS EXACT staged build needs no hook at all -- which is the normal case after the first
+            // pass, because the module pins itself where it lands (TrayHook.cpp). A process holding an OLDER
+            // copy is not skipped: see AlreadyHasThisModule for the measurement that forced the distinction.
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry = {};
+                entry.dwSize = sizeof(entry);
+                int seen = 0;
+                DWORD lastError = 0;
+                if (Thread32First(snapshot, &entry)) {
+                    do {
+                        if (entry.th32OwnerProcessID != pid) continue;
+                        ++seen;
+                        const HHOOK installed = SetWindowsHookExW(WH_GETMESSAGE,
+                                                                  reinterpret_cast<HOOKPROC>(procedure),
+                                                                  g_hookModule, entry.th32ThreadID);
+                        if (installed) hooks.push_back(installed);
+                        else lastError = GetLastError();
+                    } while (Thread32Next(snapshot, &entry));
+                }
+                CloseHandle(snapshot);
+                // INSTALLED IS NOT THE SAME AS ARRIVED, and the difference used to be invisible: a hook is
+                // accepted here and the module only lands in the target when one of those threads next takes a
+                // message out of its queue. The count of accepted hooks is what tells the two failures apart
+                // -- "the shell refused the hook" from "the shell never pumped".
+                LogAndPrint(L"  tray hook: %d of %d thread hook(s) accepted for the shell (pid %lu, last "
+                            L"error %lu)\n", static_cast<int>(hooks.size()), seen, pid, lastError);
+            }
+        }
     }
 
     // --- the signal that makes applications register again -------------------------------
@@ -634,9 +727,11 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     // nobody will ever release.
     for (HHOOK installed : hooks) UnhookWindowsHookEx(installed);
 
-    // ... and "already watched" counts as reached: see ModuleAlreadyIn.
+    // ... and "already watched" counts as reached: see AlreadyHasThisModule. It is counted per process, and
+    // the same process can be counted twice if two icons of the card belong to it (Explorer's three), which
+    // is why the log line calls these applications rather than processes.
     for (DWORD pid : tried) {
-        if (ModuleAlreadyIn(pid)) ++result.appsAlreadyWatched;
+        if (AlreadyHasThisModule(pid, StagedLeaf())) ++result.appsAlreadyWatched;
     }
 
     HarvestReport(&result);
@@ -644,6 +739,14 @@ TrayLearnResult LearnTrayCallbacks(const TrayIcons& icons, bool broadcast) {
     result.covered = CountCoveredIcons(icons);
     result.ms = static_cast<long long>(GetTickCount64() - start);
     return result;
+}
+
+DWORD TrayShellProcessId() {
+    HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!tray) return 0;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(tray, &pid);
+    return pid;
 }
 
 int HarvestLearnedCallbacks() {

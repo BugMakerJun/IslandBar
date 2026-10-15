@@ -708,9 +708,19 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
     if (rightClick) {
         // The right press's job is the application's own menu, and a posted message is MEASURED to do it:
         // clash-verge's menu came up 78 ms after a post, with no pointer movement, and WeChat's did the same
-        // (HANDOFF 8.104). One attempt, posted -- changing what works would be an experiment with no question.
+        // (HANDOFF 8.104). That stays the FIRST attempt, unchanged.
+        //
+        // ... AND THE SHELL'S OWN PAIR IS THE SECOND, because the first one does not always land. Measured
+        // 2026-10-15: a posted WM_RBUTTONUP to ChatGPT.exe produced no menu at all, while the SENT pair the
+        // shell itself uses (WM_RBUTTONDOWN then WM_RBUTTONUP) is what makes that same application's LEFT
+        // press work -- so the pair is tried here too, and for a v4 application the documented spelling as
+        // well. A press nobody answered has had no effect, so trying a second spelling cannot open two menus.
         attempts[attemptCount++] = Attempt{static_cast<unsigned>(v4 ? WM_CONTEXTMENU : WM_RBUTTONUP),
                                            false, false, v4};
+        attempts[attemptCount++] = Attempt{WM_RBUTTONUP, true, true, false};
+        if (v4) {
+            attempts[attemptCount++] = Attempt{WM_RBUTTONUP, true, true, true};
+        }
     } else if (entry->leftSpelling == TrayCallback::LeftSpelling::Select) {
         attempts[attemptCount++] = Attempt{NIN_SELECT, false, true, true};
     } else if (entry->leftSpelling == TrayCallback::LeftSpelling::DownThenUp4) {
@@ -831,17 +841,26 @@ bool SendTrayCallback(const TrayPressRequest& request, bool rightClick, TrayPres
         }
     }
 
-    // NOT ANSWERED MEANS THE CELL SAYS SO FROM NOW ON. There is no fallback left to fall back TO (the real
-    // click is gone), so the honest thing is to write the verdict into the cache -- this application ignores
-    // its own callback, as far as this bar can see -- and to report the press rather than to pretend.
+    // NOT ANSWERED MEANS THE CELL SAYS SO FROM NOW ON -- BUT ONLY FOR A LEFT PRESS.
+    //
+    // THE VERDICT IS ABOUT THE LEFT BUTTON, AND IT IS PERMANENT: it is what makes the press refuse to send
+    // anything at all the next time (the check above, and the one in SendTrayCallback). Reading a failed
+    // RIGHT press into it therefore takes the working half of an application away for good, and that is
+    // exactly what happened on this machine on 2026-10-15: a right press on ChatGPT.exe got no answer (the
+    // application opens no menu from our posted message), wrote 'none' into the cache for it, and from then
+    // on a LEFT press on that same icon would have been refused -- while an hour earlier the same left press
+    // measured 2094 ms and worked. The two buttons are not the same question and an answer about one is not
+    // an answer about the other.
     if (!answered) {
-        LogAndPrint(L"  tray press: gave 0x%04X to %ls and the application did nothing with it in 1.5 s "
-                    L"(%ls) -- recorded as 'none' for that cell\n",
-                    entry->message, target, outcome ? outcome->answer : L"no answer");
-        MarkCallbackAsIgnored(request);
+        LogAndPrint(L"  tray press: gave 0x%04X to %ls and the application did nothing with it (%ls) -- %ls\n",
+                    entry->message, target, outcome ? outcome->answer : L"no answer",
+                    rightClick ? L"nothing is recorded about the left press from this: the two buttons are "
+                                 L"different questions"
+                               : L"recorded as 'none' for that cell");
+        if (!rightClick) MarkCallbackAsIgnored(request);
         if (outcome) {
             outcome->result = TrayPressResult::NoEntry;
-            outcome->route = L"its callback is ignored (recorded)";
+            outcome->route = rightClick ? L"its own menu did not come up" : L"its callback is ignored (recorded)";
             wcsncpy_s(outcome->target, sizeof(outcome->target) / sizeof(wchar_t), target, _TRUNCATE);
         }
         return false;

@@ -1,0 +1,34 @@
+第 29 轮评审请求（IslandBar 托盘，全部数据来自这台机器的实测）。请逐条明确表态：同意 / 反对 / 修正，并指出你认为哪个数字或判断是错的。
+
+【今天新增的实测，写在这里是因为它改变了优先级】
+6) 机器已在 04:11 重启过。重启后 bar 启动即做了一次后台学习（日志原文）：
+   "tray learn: 3 of 12 icon(s) known; asking the applications to register again (background)"
+   → "tray learn: tried 8 application(s), the module loaded in 5, 3 registration(s) captured, 1 new entr(ies)
+      -- 4 of 12 icon(s) have a callback entry (in 3531 ms)"
+   覆盖率仍是 4/12（Weixin/wallpaper64/steam/clash-verge 四条老缓存 + explorer 蓝牙）。
+7) 我刚遍历了全机进程的模块表：**现在没有任何一个进程映射着 island_tray_hook.dll**，而这一轮里
+   Explorer(pid 10612, 2 格)、steam(2 格)、wallpaper64(1 格) 的导入表槽位在那个学习窗口里被改过。
+   也就是说：**此刻 Explorer 的 shell32 导入槽位正指着已经解除映射的地址**，下一次它调
+   Shell_NotifyIcon 就是 0xc0000005。8.98 之前反复出现的"卡片图标消失"很可能也来自这类崩溃重启。
+8) 事件日志（重启前 3 小时，Application/Application Error）：
+   Explorer.EXE 6 次、wallpaper64.exe 4 次（另有 4 次报错模块写 steammdmp64.dll，进程也是 wallpaper64.exe），
+   出错模块 island_tray_hook.dll 或 island_tray_hook.dll_unloaded，异常码 0xc0000005 / 0xc000041d，
+   错误偏移 0x10a0（正是我们的 detour 入口）。重启后 46 分钟内没有新的崩溃事件 —— 但它只是还没被触发。
+
+【背景，已实现】
+1) 托盘卡片按一下现在是"真实点击"：指针跳到图标再跳回来。用户要求与 MyDockFinder 一致（不搬指针、应用照常响应），并接受"Windows 更新后不好用再改"。
+2) 已上线：应用侧模块 island_tray_hook.dll，用线程级 WH_GETMESSAGE（不需要管理员）装进应用进程；模块把该进程自己导入表里 Shell_NotifyIconW/A 的槽位改指到我们的 detour，于是应用每次注册托盘图标就把 (exe, pid, 调用者模块, hwnd, uid, 回调消息号, version, tooltip) 写出来。bar 发一次 TaskbarCreated 让应用重新注册，读取后合并成缓存 (exe|msg|窗口类|uid|version)，按压从"拖指针点击"变成 PostMessage(回调消息)。
+3) 实测覆盖 4/12 图标：explorer 蓝牙 0x0403、wallpaper64 0x0400、steam 0x0401、clash-verge 0x1772。够不着的四类：微信（Qt 运行时用 GetProcAddress 取地址，导入表里没有槽位）、QQ音乐（模块从未被加载，腾讯自我保护）、任务管理器（提权）、ChatGPT/Codex（AppContainer，SetWindowsHookEx 返回 87）。
+4) 今天新量到的严重问题：学习窗口结束、bar 执行 UnhookWindowsHookEx + FreeLibrary 之后，注入到应用里的那份模块被系统卸载了（实测：island_tray_hook.dll 现在可以被任意改名，等于全机没有任何进程还映射它），但应用那些被改过的导入槽位仍指着已释放的内存。近 3 小时 Application 日志：Explorer.EXE 崩 6 次、wallpaper64.exe 崩 4 次，异常码 0xc0000005，出错模块写 island_tray_hook.dll / island_tray_hook.dll_unloaded，错误偏移 0x10a0（正是我们的 detour 入口）。
+5) 另外：bar 退出或被强杀时钩子也会被系统摘掉，同样留下悬空指针。
+
+【请分别回答】
+Q1 修法：我打算在目标进程里、改任何槽位之前给自己上永不卸载的锁：GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, 本模块内地址)。这样导入表指针永远有效，也才让"常驻观察后续注册"成立。PIN 是正确的选择吗？还是更该用 LoadLibrary(自己路径) 加引用计数，或者干脆不卸载钩子（让 WH_GETMESSAGE 一直装着）？PIN 有什么我没看到的副作用（杀软、模块顺序、调试、性能）？以及：pin 之后更新这个 DLL 必须重启被钩应用或重启机器，这个代价你能接受吗，有没有更好的部署方式？
+
+Q2 覆盖率：下一步我打算把同一套导入表重定向机制从 Shell_NotifyIconW/A 扩到 GetProcAddress —— 谁向 shell32 问 Shell_NotifyIconW/A，我们就把 detour 返回给他；不需要指令重定位或跳板。微信这类动态取地址的应用是否因此能被覆盖（它静态导入的 GetProcAddress 槽位可以改）？这够吗，还是必须内联钩 shell32 的函数本体（那需要长度反汇编 / MinHook）？请给出你预测的覆盖率差别与风险。
+
+Q3 左键：实测 5 种通知码 PostMessage 全部投递成功、应用也取件，但它的窗口一次都没到前台；我判断是应用处理里 SetForegroundWindow 被系统拒绝（后台进程）。计划做法：先 SendInput 造一次 ALT 键（让系统认为最后输入来自我们），再 SetForegroundWindow(目标窗口)，全程不移动指针。这在 Win11 26100 上成立吗？有没有更干净、更稳的做法（AllowSetForegroundWindow、AttachThreadInput 之类）？会带来焦点抢占之类的副作用吗？
+
+Q4 上面四类够不着的应用（提权 / AppContainer / 自我保护 / 动态取地址），MyDockFinder 是否同样进不去、也是用真实点击兜底？如果它另有办法，办法是什么？
+
+请给结论式回答，别只讲原理。

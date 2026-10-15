@@ -968,7 +968,13 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // The applications that still have no callback entry at the last attempt, and the two things that keep
     // that attempt from becoming a loop. See the tray tick: a pass is offered again only when the SET of
     // applications to try has changed (a new tray application appeared), never on a timer.
-    std::wstring lastUncovered;
+    // Which process the tray's registrations are read in -- see TrayShellProcessId. Watched, because the
+    // module is pinned for the life of the process it lands in: an Explorer that restarts has to be given it
+    // again. Nothing else needs a pass any more, which is the point of reading registrations in the shell.
+    //
+    // Seeded with the shell that exists right now, so the startup pass below is not immediately repeated by
+    // the first tick (measured: it was, three times over, on the first run of this code).
+    DWORD lastShellPid = island::TrayShellProcessId();
     // Shared with the worker and on the heap: the worker is detached, and a detached thread writing to a
     // local of a function that has already returned is a crash waiting for the user to close the bar.
     std::shared_ptr<std::atomic<bool>> learnInFlight = std::make_shared<std::atomic<bool>>(false);
@@ -1271,10 +1277,10 @@ unsigned long long lastMusicMeterMs = 0;
     // broadcast makes applications re-add their icons, which is harmless but pointless to repeat once the
     // answers are in the file.
     {
-        // THE ONE GLOBAL HOOK FIRST, on this thread, before any learning pass: it is what makes the module
-        // follow every GUI process from now on, applications started later included (MyDockFinder's own
-        // mechanism -- see shell/TrayLearn.h). From here on the tray card can press an application the moment
-        // it registers, without a pass of its own.
+        // THE MODULE GOES IN FIRST, on this thread, before any learning pass: it is offered to the one
+        // process that receives tray registrations (see shell/TrayLearn.h), and from then on the card can
+        // press an application the moment it registers -- no per-application pass, and no pass at all when a
+        // new application starts.
         island::InstallTrayHook();
         const int coveredNow = island::CountCoveredIcons(trayIcons);
         if (coveredNow >= trayAtStart) {
@@ -1287,10 +1293,12 @@ unsigned long long lastMusicMeterMs = 0;
                 island::TrayIcons icons;
                 icons.Refresh();
                 const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in %d of them "
-                                    "and was ALREADY watching %d more, %d registration(s) captured, %d new "
-                                    "entr(ies) -- %d of %d icon(s) have a callback entry (in %lld ms)",
-                                    learned.appsTried, learned.appsReached, learned.appsAlreadyWatched,
+                island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was %s, %d "
+                                    "registration(s) captured, %d new entr(ies) -- %d of %d icon(s) have a "
+                                    "callback entry (in %lld ms)",
+                                    learned.appsTried,
+                                    learned.appsAlreadyWatched > 0 ? "already carrying the module"
+                                                                   : "given the module",
                                     learned.captured, learned.newEntries, learned.covered, learned.icons,
                                     learned.ms);
             }).detach();
@@ -3400,8 +3408,10 @@ float musicWavePhase = 0.0f;
             //
             // ... AND A LEFT PRESS THAT HAD NOTHING TO SEND OPENS THE SAME MENU, which is why the opening is
             // one piece of code and not two: since the real click was deleted there is no fallback left for a
-            // cell whose callback has never been learned, and the honest answer is this menu (it holds 打开,
-            // 显示窗口, the application's own menu and 结束应用 -- see TrayMenuEntriesFor).
+            // cell whose callback has never been learned, and the honest answer is this menu. What it holds
+            // depends on the cell: the two rows that ARE the icon's own action (打开, 应用自己的菜单…) need a
+            // learned callback and are left out without one, because a row that does nothing is worse than a
+            // row that is not there (requested by the user on 2026-10-15, see TrayMenuEntriesFor).
             const auto openBarTrayMenu = [&](int cell) {
                 trayMenuCell = cell;
                 island::TrayMenuFacts facts;
@@ -3411,10 +3421,10 @@ float musicWavePhase = 0.0f;
                 window.OpenTrayMenu(trayMenuCell, trayMenuActionCount);
                 trayQuitArmed = false;   // a new menu starts unarmed
                 wchar_t flatMenuName[128] = {};
-                island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d)\n",
+                island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d callback=%d)\n",
                                     FlatName(trayIcons.At(trayMenuCell).name, flatMenuName, 128),
                                     trayMenuActionCount, facts.hasWindow ? 1 : 0,
-                                    facts.hasExePath ? 1 : 0);
+                                    facts.hasExePath ? 1 : 0, facts.hasCallback ? 1 : 0);
                 std::fflush(stdout);
             };
             // The worker's request, answered on the thread that owns the window (see trayMenuRequestCell).
@@ -4196,39 +4206,36 @@ float musicWavePhase = 0.0f;
                         std::fflush(stdout);
                     }
 
-                    // ... AND ONE MORE PASS WHEN A TRAY APPLICATION APPEARS THAT HAS NEVER BEEN REACHED.
+                    // ... AND ONE MORE PASS ONLY WHEN THE SHELL ITSELF HAS TO BE TAUGHT AGAIN.
                     //
-                    // With the module offered per application (see shell/TrayLearn.h -- a global hook is
-                    // refused by Chromium's signed-only renderer rule), an application that starts after this
-                    // bar did has no module in it and nothing will learn its callback. So the tick compares
-                    // the set of applications that still have no entry with the set it tried last time and
-                    // offers the module again when it CHANGED -- a new application, or one that has just
-                    // started. The set-changed test is what keeps this from becoming a three-second pass
-                    // every five seconds for the applications that refuse a module outright (QQ Music's
-                    // self-protection, an elevated one, an AppContainer): they are the same set each time.
-                    const std::wstring uncovered = island::UncoveredApplications(trayIcons);
-                    if (!uncovered.empty() && uncovered != lastUncovered &&
-                        !learnInFlight->load() &&
+                    // The module lives in the process that receives tray registrations (the owner of
+                    // Shell_TrayWnd), and it is pinned there for the life of that process. So the one event
+                    // that costs the tray its learning is Explorer being replaced: a new process has none of
+                    // the module, and every registration after that goes unread. This watches for exactly
+                    // that, and for nothing else -- an application starting later needs no pass at all, which
+                    // is the whole point of reading registrations where they arrive (shell/TrayLearn.h).
+                    const DWORD shellNow = island::TrayShellProcessId();
+                    if (shellNow != 0 && shellNow != lastShellPid && !learnInFlight->load() &&
                         GetTickCount64() - lastLearnAttempt >= 15000) {
-                        lastUncovered = uncovered;
+                        lastShellPid = shellNow;
                         lastLearnAttempt = GetTickCount64();
                         learnInFlight->store(true);
-                        island::LogAndPrint("  tray learn: the applications without a callback have changed "
-                                            "(%ls) -- offering the module again (background)\n",
-                                            uncovered.c_str());
+                        island::LogAndPrint("  tray learn: the shell is a new process (pid %lu) -- offering "
+                                            "the module to it again (background)\n",
+                                            static_cast<unsigned long>(shellNow));
                         std::fflush(stdout);
                         std::thread([learnInFlight]() {
                             island::TrayIcons icons;
                             icons.Refresh();
                             const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                            island::LogAndPrint("  tray learn: tried %d application(s), the module loaded in "
-                                                "%d of them and was ALREADY watching %d more, %d "
-                                                "registration(s) captured, %d new entr(ies) -- %d of %d "
-                                                "icon(s) have a callback entry (in %lld ms)",
-                                                learned.appsTried, learned.appsReached,
-                                                learned.appsAlreadyWatched, learned.captured,
-                                                learned.newEntries, learned.covered, learned.icons,
-                                                learned.ms);
+                            island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was "
+                                                "%s, %d registration(s) captured, %d new entr(ies) -- %d of "
+                                                "%d icon(s) have a callback entry (in %lld ms)",
+                                                learned.appsTried,
+                                                learned.appsAlreadyWatched > 0 ? "already carrying the module"
+                                                                               : "given the module",
+                                                learned.captured, learned.newEntries, learned.covered,
+                                                learned.icons, learned.ms);
                             learnInFlight->store(false);
                         }).detach();
                     }
@@ -4822,9 +4829,12 @@ float musicWavePhase = 0.0f;
                 // gone -- the deck holds the Start and system buttons now -- but the readings themselves
                 // are what the system panel is built from, so they stay.
                 {
-                    const unsigned long long nowMs = GetTickCount64();
-                    if (nowMs - lastStatusSampleMs >= kStatusSampleMs) {
-                        lastStatusSampleMs = nowMs;
+                    // Named apart from the frame loop's own `nowMs`: the two are the same instant read twice,
+                    // and shadowing the outer one was a warning, not a bug -- but a reader should not have to
+                    // work out which clock a line is on.
+                    const unsigned long long statusNowMs = GetTickCount64();
+                    if (statusNowMs - lastStatusSampleMs >= kStatusSampleMs) {
+                        lastStatusSampleMs = statusNowMs;
                         frameWork |= kWorkStatusSample;
                         statusReader.Sample(&systemStatus);
 
@@ -6046,6 +6056,13 @@ void TrayMenuFactsFor(const island::TrayIcons& icons, island::WindowList& window
     if (!out) return;
     *out = island::TrayMenuFacts{};
     if (cell < 0 || cell >= icons.Count()) return;
+    // WHETHER THIS ICON'S CALLBACK IS KNOWN AT ALL -- the question the two "its own action" rows depend on
+    // (see TrayMenuFacts). Asked of the same function the press itself asks, so the menu cannot offer a row
+    // that the press would then refuse.
+    {
+        const island::TrayPressRequest request = MakeTrayPressRequest(icons.At(cell), icons.ExePathAt(cell));
+        out->hasCallback = island::TrayPressReachable(request);
+    }
     const wchar_t* path = icons.ExePathAt(cell);
     out->hasExePath = path && path[0] != L'\0';
     if (!out->hasExePath) return;
@@ -6291,9 +6308,10 @@ int RunTrayLearn() {
                         L"application and asking each to register again\n",
                         count, coveredBefore);
     const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-    island::LogAndPrint(L"tray learn: tried %d application(s), the module loaded in %d of them and was "
-                        L"ALREADY watching %d more, %d registration(s) captured, %d new entr(ies)\n",
-                        learned.appsTried, learned.appsReached, learned.appsAlreadyWatched,
+    island::LogAndPrint(L"tray learn: the shell (%d process(es) offered) was %ls, %d registration(s) "
+                        L"captured, %d new entr(ies)\n",
+                        learned.appsTried,
+                        learned.appsAlreadyWatched > 0 ? L"already carrying the module" : L"given the module",
                         learned.captured, learned.newEntries);
     island::LogAndPrint(L"tray learn: %d of %d icon(s) now have a callback entry (before: %d), %lld ms\n",
                         learned.covered, learned.icons, coveredBefore, learned.ms);

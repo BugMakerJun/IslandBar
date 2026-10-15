@@ -1,0 +1,63 @@
+第 31 轮评审请求（IslandBar 托盘，数据全部来自这台机器的实测，2026-10-15 07:4x）。
+这次我要的是**最终方案**，所以请对方案本身逐条表态：同意 / 反对 / 修正，并直接指出你认为哪个数字或判断是错的。请结论式回答，别只讲原理。
+
+【基线：刚刚实测，同一个 exe、同一条命令，不是回忆】
+
+    island_bar.exe --tray-surface
+    -> tray reach: 9 icon(s) on the card, 0 of 9 can be pressed
+      [0] ChatGPT.exe (GUID)                 没有条目
+      [1] Steam - 正在同步                   （stdout 这一行断在中文处）
+      [2][3][6] NVIDIA 设置                  （同上，stdout 断掉）
+      [4][8] explorer.exe (GUID)             没有条目
+      [5] RazerAppEngine.exe                 没有条目
+      [7] SecurityHealthSystray.exe (GUID)   没有条目
+
+  两个小时前同一条命令是 **11 格 / 2 格可按**（clash-verge、explorer 蓝牙）。差别只有一件事：clash-verge 关掉了、蓝牙图标此刻不在系统托盘里。**所以"覆盖率"这个数字本身是浮动的** —— 这是我要改口径的直接原因。
+
+  同一个进程，**日志文件里的那一行是完整的**（"Steam - 正在同步"、"NVIDIA 设置"都在），只有 stdout 断在第一个中文字符。我据此判断：stdout 侧的宽转窄（或 WriteConsole）失败后整行提前结束，日志文件那侧没有这个问题。请确认或修正这个机制（第 30 轮 Q5 没拿到答复）。
+
+【机制现状（已实现、已在盘上跑，不是计划）】
+
+1. `island_tray_hook.dll` 用**线程级 WH_GETMESSAGE** 装进"卡片上每个应用里最重的那个进程"的每个线程；不注入浏览器/WebView2 渲染进程。原因是 8.112：全局钩子让 Clash Verge 的 WebView2 渲染进程起不来，客户区亮度 0；撤掉之后 12-13 个渲染进程、亮度 56。Chromium 的 RendererCodeIntegrity 只收微软签名的镜像 —— MyDockFinder 的 dockmod64.dll 签过名，所以它的全局钩子成立，我们这个未签名构建不行。
+2. 模块 PIN 住自己（GET_MODULE_HANDLE_EX_FLAG_PIN），改**本进程**导入表里 `Shell_NotifyIconW/A` 的槽位 + `GetProcAddress` 的槽位；bar 广播一次 `TaskbarCreated` 逼应用重新注册；学到的 (exe, hwnd, uid, guid, msg, version, 试出来的配方) 写进 tray_callbacks.txt。
+3. 按压 = 把应用自己的回调消息发回去（v3 那一对 downup3 是从应用进程内部量出来的，与 2004 年那篇系统托盘教程里的契约一致），实测 47-93 ms，**指针不动**。
+4. 学不到的格子：打开本栏自己的菜单。真实点击已按用户要求整段删除（净 −955 行）。
+5. 已知够不着的几类：AppContainer（ChatGPT.exe 的 SetWindowsHookEx 返回 87）、提权（任务管理器）、自保护（QQ音乐）、Qt 动态取地址（微信，已用 GetProcAddress 重定向解决）；还有一类是"**模块进去了，但应用从此不再调用 Shell_NotifyIcon**"（RazerAppEngine 体内有模块、观察通道里有它一串 observed sent 行，但一次注册都没有；explorer 的网络/音量图标同理）。
+
+【我的最终方案（请对每一条表态）】
+
+  P0 报告与口径 —— 不管别的做不做，先做
+     a) 修 stdout 截断；
+     b) `--tray-surface` 的口径改成"当前卡片上的格子"，并且**每一格都必须以一句判决结束**：`its own callback` / `ignores its callback` / `the module is refused` / `nothing learned yet`。
+     判据：不允许出现"沉默的格子"；stdout 与日志文件的行数差 = 0。
+
+  P1 多进程应用（Electron：DeepSeek Harness、ChatGPT 的主进程 vs 渲染进程；NVIDIA 的 nvcontainer / nvdisplay.container）
+     把"每个应用只装最重的那个进程"改成"装给该 exe 的所有进程，但排除 Chromium 渲染进程"。
+     **请判这个判据够不够硬**：我打算用"进程命令行里带 `--type=renderer`"来排除。备选判据："模块表里有 chrome_elf.dll"、"进程有顶层窗口"、"父进程是同一 exe 的另一个进程"。哪个最可靠？有没有我没想到的反效果（一次 pass 变成装几十个进程、杀软敏感度、GPU/utility 进程也带 `--type=`）？
+
+  P2 explorer 的网络/音量、Razer 这类"模块在、但从此不再注册"
+     在"不许真实点击"的硬约束下，我看到的只有：(a) 模块常驻，等它将来自己重新注册（可能几天，也可能永不）；(b) 请用户把该应用重启一次（重启后模块第一时间装进去，就能抓到注册）；(c) 在卡片自己的菜单里为这一格加一条"重启它并学会它的托盘"。
+     请给出你认为正确的顺序，以及每条你预计能换来几格。
+
+  P3 **决定性探针：注册从应用走到 shell 的是哪条通道？**
+     实验（只读、不需要点击、用现成的 `probe-tray-registrar.exe`）：我们的观察通道（WH_CALLWNDPROC 看 SENT + WH_GETMESSAGE 看 POSTED，已在 TrayHook.cpp 里、由标记文件 tray_watch.txt 开关）本来就装在 explorer 体内；让对照应用注册一个图标，看 **explorer 收到的是不是一条窗口消息**，以及消息里带不带 (应用的 hwnd, uid, guid, msg)。
+     **核心问题**：`Shell_NotifyIcon` 从应用进程到 shell 进程，在你看来是窗口消息（WM_*，例如 WM_COPYDATA 一类），还是 ALPC/COM？如果是后者，这个探针是不是无用功？
+     我的理由：如果是窗口消息，我就能在 **explorer 侧**学会每一个注册 —— 包括 AppContainer / 提权 / 自保护那三类，因为那是应用发给 shell 的消息，不需要往应用里注入任何东西。覆盖率就不再取决于"应用允不允许被注入"，这才是真正接近 MyDockFinder 的那条路。如果确认是 ALPC/COM，我就明确放弃并写进 HANDOFF，不再反复试。
+
+  P4 如果 P3 命中，shell 侧的落点选哪里？
+     候选：explorer 里我们模块的 WH_CALLWNDPROC 过程（只观察、不改 shell）、对 explorer 的某个窗口子类化、或我们自己注册一个接收窗口。请直接指定你认为最小可行的那一个，以及它必须满足的硬条件（例如"必须同时对上 hwnd + uid + guid 才算读到"）。
+
+  P5 MyDockFinder 对 AppContainer（ChatGPT/Codex 的托盘图标）、提权（任务管理器）、自保护（QQ音乐）这三类，能不能同样"发一条消息"就按动？它的 trayico.exe 只导入 PostMessageA，所以它的按压确实是发消息、不是点鼠标。**它的回调消息号从哪儿来？** 第 29、30 轮我问过两次都没拿到答复。这一条直接决定我要不要把 P3 做到底。
+
+  P6 交付与回退
+     - 安装器 `IslandBarSetup.exe` 现在只带 island_bar.exe，**没带 island_tray_hook.dll** —— 全新安装等于没有托盘学习。我打算补上（setup/CMakeLists.txt + payload.rc.in + Setup.cpp）。
+     - 回退开关：一行标记文件关掉整套学习（不装钩子、不广播），回落成"每一格都打开本栏自己的菜单"。
+     - 我准备写进方案的风险：模块进的是别人的进程（杀软/反作弊可见）；explorer 曾因悬空导入槽崩过 6 次（已用 PIN 修好，06:00 之后 0 次事件）；多进程扩容会让注入面变大。
+     请说：这三条里有没有你**明确反对**的？P1 的"装给该 exe 的所有进程"我特别需要你直接说值得 / 不值得 —— 它会让杀软和反作弊看见更多注入行为，这个取舍我来承担。
+
+【可量化验收（我准备写进方案的数字）】
+
+   - 每一格都有判决行；stdout 与日志文件的行数差 = 0（P0）
+   - 在 clash-verge + Steam + Wallpaper Engine + 微信 + explorer 同时在跑的机器上，`--tray-surface` 的 "N of M can be pressed" 里 N ≥ 5
+   - P3 必须有结论：命中 → 写进 HANDOFF 并给出 shell 侧落点；不命中 → 明确写"这条通道是 ALPC/COM，放弃"，不再试
+   - 任何一格按下去"没反应、而且日志里没有一行解释" = 不通过

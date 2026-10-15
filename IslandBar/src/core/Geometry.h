@@ -9,10 +9,20 @@
 //  There is exactly ONE rounded-rectangle test in the project. The renderer
 //  draws with it and WM_NCHITTEST decides with it, so the clickable region
 //  can never drift away from the painted pill.
+//
+//  THIS HEADER DOES NOT INCLUDE <windows.h>, AND THAT IS LOAD-BEARING.
+//
+//  It used to, which meant every translation unit that wanted a rectangle -- the layout, the animation, the
+//  self-test -- was compiled against the whole Win32 surface: HWND, MSG, the min/max macros, the lot. That is
+//  what made the pure logic indistinguishable from the platform code in the first place. The two conversion
+//  helpers below are the only thing here that ever needed a Win32 type, and they only needed it as a number:
+//  LONG is a 32-bit integer and UINT is an unsigned one, so `int` and `unsigned` say the same thing without
+//  dragging the platform in. Callers pass LONG/UINT values and they convert implicitly, unchanged.
+//
+//  core/PurityCheck.cpp turns this rule into a build failure rather than a convention: if <windows.h> ever
+//  comes back into this file or anything it includes, that translation unit stops compiling.
 // =====================================================================
 #pragma once
-
-#include <windows.h>
 
 #include <algorithm>
 #include <cmath>
@@ -80,13 +90,13 @@ inline constexpr float kHitToleranceDip = 2.0f;
 
 // --- Conversions -----------------------------------------------------
 
-inline float PixelsToDip(LONG pixels, UINT dpi) {
+inline float PixelsToDip(int pixels, unsigned dpi) {
     return static_cast<float>(pixels) * kDipPerInch / static_cast<float>(dpi ? dpi : 96);
 }
 
-inline LONG DipToPixels(float dip, UINT dpi) {
+inline int DipToPixels(float dip, unsigned dpi) {
     const float scaled = dip * static_cast<float>(dpi ? dpi : 96) / kDipPerInch;
-    return static_cast<LONG>(std::lround(scaled));
+    return static_cast<int>(std::lround(scaled));
 }
 
 // --- Geometry --------------------------------------------------------

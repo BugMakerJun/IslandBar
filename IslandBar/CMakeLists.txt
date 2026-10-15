@@ -62,7 +62,17 @@ if(MSVC)
     add_link_options(/DEBUG:FULL)
 endif()
 
-option(ISLANDBAR_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+# ON, not OFF, and that is a decision rather than a default:
+#
+# It was OFF, which meant "the tree builds warning-free" was a thing somebody had to notice, and it was not
+# true: two C4456 shadowing warnings sat in main.cpp and Diagnostics.cpp for as long as those files were not
+# rebuilt, and only appeared when the geometry header changed and both were recompiled. A build that is green
+# by luck is not a build anybody else can inherit. With this ON, a new warning stops the build at the moment it
+# is introduced, with the file and line in the message -- which is the cheapest possible review.
+#
+# If a third-party header (C++/WinRT is the only candidate) ever emits a warning that cannot be fixed here, the
+# answer is to silence THAT warning for THAT include with a comment and a reason, not to turn this back off.
+option(ISLANDBAR_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 
 if(MSVC AND ISLANDBAR_WARNINGS_AS_ERRORS)
     add_compile_options(/WX)

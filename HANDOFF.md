@@ -11234,3 +11234,211 @@ g_globalHook = SetWindowsHookExW(WH_GETMESSAGE, IslandTrayHookProc, 载入的内
 | 自检 / smoke | PASS / PASS |
 
 **遗留**：从"全局钩子"那一版留下来的、被钉在 msedge / WidgetService / ShellHost / svihost 等非托盘进程里的旧副本，**要等这些进程重启才会消失**（它们只是惰性映射，不再往任何地方注入；重启浏览器或重启一次机器即可清干净）。Explorer 与 Clash 体内的是我们**想要的**那份。
+
+### 8.113 **第 31 轮评审（ChatGPT 与 Gemini 各一份）与"托盘最终方案"的取舍** 📝（方案未获用户确认，代码未动）
+
+用户 2026-10-15 07:4x 的指令是"你和 ChatGPT 给我一个托盘的最终方案"，接着追加"你再问问 Gemini，你们三个一起给我个方案"。所以这一节只有**研究**（AGENTS.md 第一步）：两份评审原文在 `captures/review-q31.txt` / `review-a31.txt`（ChatGPT，会话 `chatgpt.com/c/6ad013c3-7994-83ec-b62f-d4af99bb7d5c`）与 `captures/review-gemini-q31.txt` / `review-gemini-a31.txt`（Gemini，会话 `gemini.google.com/app/aed1a2b18024d24e`）。
+
+#### 8.113.1 本轮新量到的三件事（都只用只读命令，没有改代码）
+
+1. **覆盖率这个数字本身是浮动的**。`island_bar.exe --tray-surface`：两小时前是 "11 格 / 2 格可按"（clash-verge、explorer 蓝牙），刚才同一条命令是 "9 格 / 0 格可按"。差别只有一件事：clash-verge 退出了、蓝牙图标此刻不在系统托盘里。**两个评审都独立点了这一条**（不能拿不同时刻的分母直接比覆盖率），这也是方案里要改口径的直接依据。
+2. **stdout 截断的机制找到了**（第 30 轮 Q5 的答案，实测不是猜）。日志文件走 `_wfsopen(LogPath(), L"w, ccs=UTF-8", _SH_DENYNO)`（`Log.cpp:131`），所以它写的是标准 UTF-8；给控制台的那一份走 `std::fputws(text, stdout)`（`Log.cpp:42`），用进程默认代码页做隐式宽转窄，遇到第一个非 ASCII 字符就**整行提前结束**。三组实测：管道（exec_command）截断；`cmd /c ... > file` 截断；`chcp 65001` 与 `chcp 936` **结果完全一样**（→ 不是控制台代码页决定的，是 CRT 流那一侧的默认代码页）。同一个进程、同一个 `body` 缓冲区，日志文件里那一行是完整的。当前 9 格里 `[1] Steam - ` / `[2][3][6] NVIDIA ` 四行就是这么没的。
+3. 这一次卡片上的 9 格：ChatGPT(GUID) / Steam / NVIDIA ×3 / explorer(GUID) ×2 / RazerAppEngine / SecurityHealthSystray(GUID)。
+
+#### 8.113.2 ChatGPT（第 31 轮）的结论
+
+| 条 | 结论 |
+|---|---|
+| P0 报告与口径 | **同意**。但四种判决要细分：增加 `registered, callback unverified` 和 `module loaded, no registration observed`（正好对应 Razer 与 explorer 的网络/音量）；"stdout 与日志行数相等"应改成**按事件对账**，不要比纯文本行数（启动提示、多行异常会让行数天然不等） |
+| P1 多进程 | **反对把"同一 exe 的所有进程"当默认策略**（理由是注入面与杀软，不是可达性）；`--type=renderer` **不足以单独作判据**（会漏 GPU/utility/network 进程，也会漏包装器转发的注册）；建议改成"先从已观测到的图标回调 HWND 拿到 PID → 定向验证该进程 → 只在缺信息时对候选进程有限扩展" |
+| P2 无注册行为 | **同意**"先继续观察 → 提示用户重启 → 用户确认后才给重启入口"；**明确反对自动杀掉再拉起**（可能丢工作状态、触发多实例）；explorer 的系统图标要单列，不能当成普通应用 |
+| P3 注册通道 | **必须做实验，不可预判**；未命中**不能**写成"这条通道是 ALPC/COM"，只能写"当前观察范围内未发现可关联的窗口消息，内部通道未确定" |
+| P4 Explorer 侧落点 | **暂不批准实现**：先证明消息格式与来源，再谈跨进程传递；不要提前子类化 explorer 的内部窗口 |
+| P5 MyDockFinder | **未证实**：只凭 `trayico.exe` 的导入表不能推出它的回调消息号来源，也不能推出它能按动三类受保护应用 |
+| P6 交付 | **同意**补 DLL、加禁用开关、如实写风险；但 PIN ≠ 已消除崩溃风险，禁用开关 ≠ 能把已 PIN 的模块从别的进程里撤出来 |
+| 验收 | **反对把 N ≥ 5 当成无条件硬门槛**：拆成"工程验收（必须过）"+"覆盖率（固定环境下的目标指标）"，报告要同时记录 N / M / 应用版本 / Windows 构建 / 失败分类 |
+
+#### 8.113.3 Gemini（第 31 轮）的结论
+
+| 条 | 结论 |
+|---|---|
+| P0 / P5 | **同意**（P0 建议在入口显式处理输出编码） |
+| P1 | **同意并修正**：`--type=renderer` 不够硬，应改成"排除所有带 `--type=` 参数的子进程"，只对带主 UI 消息循环的进程注入 |
+| P2 **探针** | **反对做，且断言不必做**：称 `Shell_NotifyIcon` 到 explorer 走的是 COM / LRPC（ALPC），窗口钩子抓不到注册数据，所以 P3 一并作废 |
+| P4 | **断言 MyDockFinder 也按不动** AppContainer（ChatGPT）、提权（任务管理器）、自保护（QQ音乐）这三类，理由是 UIPI 与沙箱边界；建议**接受现实**，把这三类统一降级成本栏自己的菜单 |
+| 最可能失败的一步 | "幻想突破安全隔离区" |
+
+#### 8.113.4 我的取舍（这就是即将交给用户的方案）
+
+1. **P2 探针仍然做，但限时、带停止规则**。Gemini 那条断言没有任何证据（它自己的页脚还写着"未必正确"），而我们的观察通道**本来就已经装在 explorer 里**（8.109 修的悬空槽就是在 explorer 里），实验成本约半小时；命中就能覆盖全部格子（包括 AppContainer —— 那是应用发给 shell 的消息，不需要往应用里注入），这是唯一能把上限抬起来的路。不命中就按 ChatGPT 要求写成"未发现可关联的窗口消息、通道未确定"，**不再反复试**。
+2. **P1 按 ChatGPT 修正**：先按"图标回调 HWND → PID"定向，再对候选进程有限扩展；`--type=renderer` 只作筛选信号，不作完整分类。
+3. **验收按 ChatGPT 拆两层**：硬门槛 = 每格有判决 + 没有沉默的格子 + 每次按压都有可诊断的结果 + 学不到的格子安全降级；`N ≥ 5` 降级成固定环境下的目标指标。
+4. **Gemini 的"三类够不着"我作为兜底接受**：方案里写死"这三类永远打开本栏菜单"，不再为它们承诺任何东西；但先让 P2 的探针说话。
+5. **stdout 截断的修法**（机制已在 8.113.1 量清）：不再依赖 CRT 的隐式转换 —— 控制台用 `WriteConsoleW`，管道/文件显式转 UTF-8 并检查返回值。
+
+### 8.114 **托盘：拆开 MyDockFinder 的实现，并按它重做 —— 注册读在 shell 里，模块只进一个进程** ✅（已部署，等用户测）
+
+用户 2026-10-15 08:0x 的指令：「我想知道 mydockfinder 是怎么实现系统托盘的，你们三就不能根据这个给我个方案，然后你直接给我完成么，不要鼠标自动点击，也不用每个应用学习。要的是你做完我可以直接用」。这一节就是这一条的执行记录。
+
+#### 8.114.1 MyDockFinder 的实现（拆的是盘上那份，不是猜）
+
+安装目录 `C:\GAME\Steam\steamapps\common\MyDockFinder`（Steam 版）。`Dock_64.exe`（引擎 11MB）、`Dockmod.exe` / `Dockmod64.exe`（装钩子的小 exe）、`Dockmod64.dll`（被注入的模块 285KB）。
+
+| 证据 | 结论 |
+|---|---|
+| `Get-AuthenticodeSignature`：Dock_64.exe / Dockmod.exe / Dockmod64.dll / Mydock.exe **全部 Valid**，签署者 `CN=天津市河北区英广腾达软件科技工作室` | **它有签名**，所以能用一个**全局**钩子而不被 Chromium 的 RendererCodeIntegrity 干掉。我们这个未签名构建用全局钩子时，Clash Verge 的 WebView2 渲染进程起不来（8.112：有钩子 6 个 webview2 进程、客户区亮度 0；撤掉 12-13 个、亮度 56） |
+| `dumpbin /exports Dockmod64.dll` → `GetMsgProc`、`GetMsgProc1`、`GetMsgProc2`、`GetMsgProc_Close`、`GetMsgProc_CloseUWP`、`GetMsgProc_TRAY` | 这些都是钩子过程（每个功能一条）；导入表里有 `CallNextHookEx`、`PostMessageA`、`SendMessageTimeoutW`、`ChangeWindowMessageFilter`、`OpenFileMappingW`/`MapViewOfFile`/`OpenEventW`（与引擎共享内存 + 事件） |
+| `Dock_64.exe` 的 RTTI 名字里有 `trayico::SetTrayicoData(const tagCOPYDATASTRUCT*, HWND)`、`SYSTEMTRAYDATA`、`Finder::GetTrayicoCall`、`MyBar::CreateMenu_Trayico` | **托盘数据是以 WM_COPYDATA 交到引擎进程里的** |
+| `trayico` 只导入 `PostMessageA`（8.103 已量过），没有 SendInput / SetCursorPos / mouse_event | 它的按压是**一条消息**，不是点鼠标 |
+
+一句话：**签名模块 + 钩子看注册 + WM_COPYDATA 交给引擎 + PostMessage 按压**。它不读注册表猜消息号（注册表里根本没有 uCallbackMessage）。
+
+#### 8.114.2 决定性实测：注册就是"应用发给 `Shell_TrayWnd` 的一条 WM_COPYDATA"
+
+我们的模块本来就在 explorer 体内（8.109 修的那几格悬空槽就是它干的）。把观察通道打开，让对照程序 `probe-tray-registrar.exe` 注册一个图标，report 原文：
+
+```
+copydata SENT pid 11936 receiver 0000000000010146 class "Shell_TrayWnd" sender 00000000001F0A82 dwData 0x1 cbData 1484
+copydata SENT payload (192 of 1484 bytes) 2334753400000000BC030000820A1F000700000007000000CDAB00002B000100490053004C...
+```
+
+载荷布局是**从字节里读出来的**，不是按下标推的（第一版按 NOTIFYICONDATA 的常规布局读，读出一个 uid 956 的荒唐值，那是错的）：用对照程序已知的 uid 7 / msg 0xABCD / tip `ISLANDBAR-PROBE-4711` 校准，再用已知应用交叉验证。
+
+```
++0x000 标记 0x34753423（每条都有，是 shell 自己的 tag）
++0x004 NIM_ 命令：0 ADD、1 MODIFY、2 DELETE、4 SETVERSION
++0x008 956（常数）
++0x00C 托盘窗口（4 字节）  +0x010 uid  +0x014 uFlags  +0x018 uCallbackMessage
++0x01C hIcon  +0x020 szTip（宽字符，128 字符）
++0x328 uVersion（只在 SETVERSION 那条里非零——它与 uTimeout 同一个 union，见 8.111）
++0x3B0 guidItem（16 字节）
+```
+
+交叉验证（全部对上）：Steam 的副本 = `uid 1 / msg 0x0401 / tip "Steam"`（与缓存里早就有的答案一致）；explorer 蓝牙与安全中心的 guid 与注册表条目**逐字节一致**（`{6DA68F06-…}`、`{BA82E2DC-…}`）；ChatGPT.exe = `uid 3 / msg 0x8001 / guid {E5768D8B-6936-4F45-B1AD-4C5FB414CB35}`。原始 dump 在 `captures/tray-copydata-dump.txt`。
+
+**这条通道的意思**：注册根本不需要"进到应用里去看"。应用无论如何都要把注册发给 shell，**只要我们在 explorer 里就能读到每一格**——包括以前完全够不着的两类。
+
+#### 8.114.3 落地（改了哪些文件）
+
+| 文件 | 改动 |
+|---|---|
+| `src/trayhook/TrayHook.cpp` | 新增 `ReportShellCopy()`：解上面那个布局，写一行 `call S NIM_ADD pid … exe … hwnd … uid … msg … version … flags … guid … tip "…"`（与老的 `call W/A` 行同字段，读取器直接复用）。**WH_CALLWNDPROC 通道不再受标记文件控制**——它现在是学习路径本身（08:19 实测：门关着时模块在 shell 里、槽位也指着我们，却一行都不报，就是这个开关挡的） |
+| `src/shell/TrayLearn.cpp` | 安装目标从"卡片上每个应用最重的那个进程"改成**一个进程**：`FindWindowW(L"Shell_TrayWnd")` 的属主。读取器接受 `call S` 行；`exe` 拿不到时按 `pid` 从进程快照补（提权进程拒绝被命名）；`AlreadyHasThisModule`（按**自己那份**staged 文件名比对，不再按前缀）取代 `ModuleAlreadyIn`，否则新构建永远进不了老进程 |
+| `src/shell/TrayLearn.h` | 新增 `TrayShellProcessId()`；把"逐应用装模块"的注释换成新机制与 8.112 的证据 |
+| `src/main.cpp` | 帧循环里的触发条件从"未覆盖应用集合变了"改成"**shell 换进程了**"（explorer 重启）；日志措辞改诚实（"the shell (1 process(es) offered) was already carrying the module, 10 registration(s) captured, 0 new entr(ies)"） |
+
+#### 8.114.4 本机实测
+
+| 项 | 结果 |
+|---|---|
+| `--tray-learn` | `tray hook: 56 of 169 thread hook(s) accepted for the shell (pid 11936, last error 87)`；`5 registration(s) captured, 2 new entr(ies)`；覆盖率 2 → 4 / 9 |
+| **ChatGPT.exe（AppContainer）** | 第一次学到：`call S NIM_ADD pid 24112 exe ChatGPT.exe hwnd 0xE0B32 uid 3 msg 0x8001 guid {E5768D8B-…} tip "ChatGPT"`；`--tray-press 0 --fire` → **`gave 0x8001 to class 'OwlElectron_NotifyIconHostWindow' of pid 24112 … the pointer was NOT moved … the application answered`（2094 ms）** |
+| **RazerAppEngine.exe**（8.110 那类"模块在、但从不注册"） | 学到 `uid 3 msg 0x8001`；`--tray-press 5 --fire` → 自己的回调，641 ms，弹出一个它自己的窗口（`Chrome_WidgetWin_1`），指针不动 |
+| Steam / explorer 蓝牙 / 安全中心 | 都在同一次广播里被读到（`call S NIM_MODIFY pid 19372 … uid 100 … guid {BA82E2DC-…}` 等） |
+| `--self-test` / `island_smoke` | **PASS / PASS**；Debug 与 Release 都能编 |
+| 完整跑一次 bar | 起来 30 秒：`tray learn: 4 of 9 icon(s) known; asking the applications to register again`、`tray learn: the shell (1 process(es) offered) was already carrying the module, 10 registration(s) captured`；`CloseMainWindow()` 后原生任务栏正常恢复 |
+
+#### 8.114.5 遗留（如实说）
+
+1. **提权应用（任务管理器）还是发不出去**：那是 UIPI 的方向问题（Medium → High），与学不学得到无关——它现在已经能被学到（注册一样进 shell），按不动是发送被挡。
+2. **本次窗口里没有 ADD 过的图标**（NVIDIA 的三个）仍然没有条目。好消息是模块常驻 + 5 秒 harvest：它们**以后任何一次注册都会被捡到**，不需要再做什么。
+3. **部署目录里堆了 10 个 staged 模块**，explorer 体内同时映射着 9 个（都是历次实验留下的、PIN 住的，只观察不改行为）。重启一次 explorer 或重启机器就干净；`island_tray_hook-*.dll` 同理。
+4. `ModuleAlreadyIn` 那条"逐应用"的路径已从调用点移除；`UncoveredApplications()` 暂时没有调用者（留着不删是等第 32 轮评审的回答）。
+5. 安装器仍然只带 `island_bar.exe`，没带 `island_tray_hook.dll` —— 全新安装会没有托盘学习（8.110.7 就记过，仍未补）。
+
+### 8.115 **托盘的最后一块：shell 把每一个托盘图标都做成了可调用的 UI Automation 元素** ✅（已实测，方案待用户点头）
+
+用户 2026-10-15 08:4x 的指令：「还没学会是什么意思啊 托盘这个你们三再谈论谈论 **我要的是和系统托盘一样的功能**（附 https://www.cnblogs.com/findumars/p/5086716.html）**我要的是能实现 不要考虑产品级也不要考虑 window 更不更新**」。
+
+#### 8.115.1 先修了用户当场撞上的两个 bug（已部署）
+
+| 现象 | 真因 | 修法 |
+|---|---|---|
+| 点"应用自己的菜单…"没反应 | 那一行是"把这个应用的右键回调发回去"，而没学到的格子根本没有回调可发 —— 它只能把同一个菜单再打开一次 | `TrayMenuFacts` 增加 `hasCallback`，`TrayMenuEntriesFor` 只在**有回调**时才给"打开"和"应用自己的菜单…"两行；自检里把这条规则钉死（`no callback=4 / nothing=1 / path only=4`） |
+| （用户还没发现，但更严重）右键失败被记成"这个应用连左键都不管用" | `if (!answered) MarkCallbackAsIgnored(request);` 少了 `!rightClick` —— 那个判决是**永久**的（写进缓存后左键从此拒绝发送）。实测 08:32 对 ChatGPT 右键一次失败就写进了 'none'，而一小时前它左键明明 2094 ms 通过 | 只在**左键**失败时记判决；右键失败只报"它自己的菜单没弹出来"。同时给右键加了第二/第三种拼法（shell 自己那一对 `WM_RBUTTONDOWN`+`WM_RBUTTONUP`，v4 再加带锚点的），实测 ChatGPT 右键从 `did nothing with it in 1.5 s` 变成 `the application answered` |
+
+顺带记一条**待修**：用 `CloseMainWindow()` 关掉 bar 之后，**原生任务栏没有恢复**（实测 `Shell_TrayWnd visible=False`，我用 `ShowWindow(SW_SHOW)` 才把它叫回来）。退出路径要自己兜住这件事。
+
+#### 8.115.2 决定性发现：系统托盘本身就是一组可调用的 UIA 元素
+
+Win11 上经典的 `ToolbarWindow32` 已经不存在（`Shell_TrayWnd` 下只剩 `TrayNotifyWnd`/`ReBarWindow32`/`MSTaskSwWClass` 残骸），真正在用的是 XAML 的 `SystemTray_Main` 与 `TopLevelWindowForOverflowXamlIsland`。**但整棵 UI Automation 树是可读可调的**：
+
+```
+显示隐藏的图标        | SystemTray.AccentButton | invoke=True | 2422,0,24,32
+网络 网络 Internet 访问 | SystemTray.AccentButton | invoke=True | 2470,0,24,32
+音量 扬声器 (Realtek…) | SystemTray.AccentButton | invoke=True | 2494,0,24,32
+时钟                   | SystemTray.AccentButton | invoke=True | 2518,0,30,32
+（invoke 那个箭头之后，折叠区里的每一个图标都出现，且全部 invoke=True）
+ChatGPT               | SystemTray.NormalButton | invoke=True | 2334,49,40,40
+Steam                 | SystemTray.NormalButton | invoke=True | 2374,49,40,40
+QQ音乐 听我想听         | SystemTray.NormalButton | invoke=True | 2414,49,40,40
+NVIDIA 设置            | SystemTray.NormalButton | invoke=True | 2454,49,40,40
+蓝牙设备               | SystemTray.NormalButton | invoke=True | 2334,89,40,40
+Windows 安全中心 …      | SystemTray.NormalButton | invoke=True | 2374,89,40,40
+```
+
+**实测证明它等于真实左键**：对 ChatGPT 那个元素调用 `InvokePattern.Invoke()`（17 ms 返回），前台窗口立刻从 `Shell_TrayWnd`（pid 11936）变成 ChatGPT 的窗口（pid 24112）—— 与真实托盘左键完全一致，而**鼠标指针一格没动**。
+
+**这条路的意义**：不需要知道任何应用的 `uCallbackMessage`、不需要注入、不受 UIPI/AppContainer/自保护限制（是 shell 自己去点），所以它覆盖的正是 8.114 剩下的三类缺口——开机即注册的 NVIDIA、shell 自己的网络/音量/时钟、以及提权应用。**它是"和系统托盘一样"这句话的字面实现。**
+
+代价只有一条，而且是已知的：**UIA 只在原生任务栏真的"活着"的时候才看得见它**（实测：bar 把任务栏藏起来时，`Shell_TrayWnd` 根本不在 UIA 树里）。所以这条路要么把任务栏短暂叫出来（8.98–8.100 的 `TrayStage` 那套 alpha 1 做法，当时已实现、8.110 随"真实点击"一起删掉），要么另想一个"可见但看不见"的办法。右击（应用自己的菜单）还没验证 —— UIA 里没有右键 pattern，`IUIAutomationElement::ShowContextMenu()` 是理论上对应的调用，需要写一个 30 行的小探针确认。
+
+#### 8.115.3 三方评审的结论（第 33 轮，原文 `captures/review-q33.txt` 与 `review-a33-*.txt`）
+
+- **ChatGPT**：先做 UIA 实验（左键 Invoke / 右键菜单分别验证），别扩大内存扫描、别恢复逐应用注入；提权应用用"用户明确授权的高权限辅助进程"，不要整条 bar 提权，也不要拿计划任务规避授权；如果 UIA 只在面板显示时才工作，那就接受"面板要露一下"这个代价。
+- **Gemini**：UIA 是"终极核武器"（原话），不必解析回调、不受 UIPI；对开机即注册的图标，最省事的办法是"重启那个服务/进程一次让它们重新注册"；内存堆扫描排第二；广播 TaskbarCreated 与 ToolbarWindow32 枚举在 Win11 上可以直接放弃。
+- **我**：UIA 已实测可用（上面那 17 ms 那条），建议做成**第二路兜底**——学到的格子继续走"发它自己的回调"（瞬时、无任何视觉代价），没学到的格子走 UIA（让 shell 自己去点）。这样两类格子各自拿到最合适的路径。
+
+### 8.116 **架构改造第一步：砍断纯逻辑层对 Win32 的依赖，并把"零告警"变成强制的** ✅（已部署，自检/冒烟通过）
+
+用户 2026-10-15 的指令：「不是推倒重写，是修改，不要强耦合在一起，最起码现在的代码发给别人看 能让人知道怎么开发的」。（同一次还说了「旧代码不用备份了」——以后不再生成 `.bak` 副本。）
+
+#### 8.116.1 砍掉最根的那处耦合：`core/Geometry.h` 不再包含 `<windows.h>`
+
+它以前 `#include <windows.h>`，于是**每一个想要一个矩形的翻译单元**——布局、动画、自检——都被编译在整个 Win32 表面之下（HWND、MSG、min/max 宏全都在场）。这正是"纯逻辑"和"平台代码"在源码层面分不开的根因。
+
+改动很小但很关键：文件里只有两个函数真的需要 Win32 类型（`PixelsToDip(LONG, UINT)`、`DipToPixels(float, UINT)`），而它们只需要"一个 32 位整数"和"一个无符号整数"。改成 `int` / `unsigned`，调用点全部隐式转换，行为逐字节不变（`LONG` 就是 32 位，`UINT` 就是 `unsigned`）。
+
+#### 8.116.2 把这条规则变成编译错误，而不是注释
+
+新增 `src/core/PurityCheck.cpp`（已加进 `src/CMakeLists.txt`）：它只做一件事——包含所有 `core/` 头文件，然后
+
+```cpp
+#if defined(_WINDOWS_) || defined(_INC_WINDOWS)
+#error "The pure-logic headers in core/ must not include <windows.h>. ..."
+#endif
+```
+
+谁把 `<windows.h>` 加回纯逻辑层，**谁的构建当场失败**，错误信息里写着该往哪儿搬。实测：加进去之后 Release 全量重建通过（`PurityCheck.obj` 确实在构建产物里），说明 `core/` 现在真的不含 `windows.h` 了——包括 `CardLayout.h` → `TaskStripLayout.h` → `Motion.h` → `Geometry.h` 整条链。
+
+#### 8.116.3 修正我上一轮说错的一件事：`/WX` 那时是关的
+
+我上一轮把"0 告警"当成"`/WX` 开着"的成果汇报，**这是错的**：`CMakeLists.txt` 里那是一个 `option(... OFF)`。真实情况是——全量重建暴露出两条**一直存在**的告警（C4456 声明遮蔽了外层同名局部变量），只因为它们所在的文件（`main.cpp`、`Diagnostics.cpp`）平时不重新编译而没被看见。Gemini 那条"0 告警是被误读的安全感"说得对。
+
+两步处理：
+1. 修掉两条告警：`main.cpp` 里帧循环内的 `nowMs` 改名 `statusNowMs`；`Diagnostics.cpp` 里的 `stripDetail` 改名 `stripRowDetail`（都写了为什么）。
+2. 把 `ISLANDBAR_WARNINGS_AS_ERRORS` 的**默认值改成 ON**，并在 CMake 里写明：如果将来是第三方头（只可能是 C++/WinRT）出告警，答案是给那一处 include 单独静默 + 写原因，不是把开关关回去。
+
+实测：`-Clean` 全量重建，**Release 与 Debug 都通过、零告警**。
+
+#### 8.116.4 新增 `ARCHITECTURE.md`（写给第一次打开仓库的人）
+
+七节：这东西是什么 / 目录与职责 / 依赖方向（含那条编译期护栏）/ 一条功能该落在哪儿（对照表）/ 构建·自检·冒烟·部署（含四条环境事实）/ 一次改动要走完的六步流程 / **已知的架构债（写在明处）**。最后那一节把 `main.cpp` 太大、模块间靠文件轮询、安装器没带 DLL、托盘按压没有自动化回归都列了出来——不等人发现。
+
+#### 8.116.5 验证
+
+| 项 | 结果 |
+|---|---|
+| Release `-Clean` 全量重建（`/WX` ON） | **OK，零告警** |
+| Debug `-Clean` 全量重建（`/WX` ON） | **OK，零告警** |
+| `--self-test`（部署后的 exe） | **PASS** |
+| `island_smoke` | **PASS** |
+| 部署 + 重启 bar | pid 404，`integrity: same as the shell's`，托盘 10 格 |
+
+顺带修正一条上一轮没验证的说法：上次关 bar 之后原生任务栏没恢复，这次优雅关闭时**它是正常恢复的**（`taskbar was visible already`），所以那更可能是当时那一次的状态，而不是一条稳定可复现的退出路径 bug。仍未主动修，先记在这里。
+
+#### 8.116.6 还没做的（下一步）
+
+1. 把 `core/` 抽成独立静态库目标（`island_domain`），并**禁止它链接 user32/dwmapi/d3d11/d2d1**——比编译期护栏更强的保证。
+2. `main.cpp` 里那 1,300 行命令行子命令先搬出去（`src/cli/`），它是 god-file 里最干净的一块。
+3. 模块与主程序之间的通道从文件轮询换成共享内存/管道，并给模块加 ABI 版本；安装器补上 DLL。
