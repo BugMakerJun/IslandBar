@@ -2592,7 +2592,9 @@ int RunSendRight(const wchar_t* wanted, int x, int y, const std::wstring& mode) 
     // WHICH ENCODING. The shell and the application agree on a callback *protocol* through uVersion, and the
     // two protocols put the same click in different places:
     //   classic (version 0/3):  wParam = uid,  lParam = the mouse message
-    //   version 4:              HIWORD(wParam) = the event (NIN_SELECT / WM_CONTEXTMENU), lParam = packed x,y
+    //   version 4:              wParam = MAKELONG(x, y) [the pointer],  lParam = MAKELONG(event, uid)
+    //                           -- measured 2026-10-16 by listening to the REAL click; the reverse order
+    //                           this file used before made WeChat index out of range and crash (8.142)
     // The observer cannot always see the version (it only appears on the application's own NIM_SETVERSION
     // line, and several applications never send one), so all of them are tried and the screen says which one
     // the application acts on. There is no other way to find out: a window procedure that ignores a message
@@ -2669,12 +2671,11 @@ int RunSendRight(const wchar_t* wanted, int x, int y, const std::wstring& mode) 
         LRESULT delivered = 0;
         if (variant.version4) {
             if (variant.withDown) {
-                delivered = deliver(MAKELONG(static_cast<WORD>(chosen.uid),
-                                             static_cast<WORD>(WM_RBUTTONDOWN)),
-                                    packed);
+                delivered = deliver(packed, MAKELONG(static_cast<WORD>(WM_RBUTTONDOWN),
+                                                     static_cast<WORD>(chosen.uid)));
             }
-            delivered = deliver(MAKELONG(static_cast<WORD>(chosen.uid), static_cast<WORD>(variant.event)),
-                                packed);
+            delivered = deliver(packed, MAKELONG(static_cast<WORD>(variant.event),
+                                                 static_cast<WORD>(chosen.uid)));
         } else {
             if (variant.withDown) {
                 deliver(chosen.uid, WM_RBUTTONDOWN);
@@ -2735,7 +2736,7 @@ int RunSendRight(const wchar_t* wanted, int x, int y, const std::wstring& mode) 
 //  uCallbackMessage, uVersion, tip). A click is delivered as the message that application's own tray icon
 //  would receive, chosen by ONE rule -- uVersion -- and nothing else is learned per application:
 //
-//      version 4 : wParam = MAKELONG(uid, event), lParam = MAKELONG(x, y)
+//      version 4 : wParam = MAKELONG(x, y) [the pointer], lParam = MAKELONG(event, uid)
 //      otherwise : wParam = uid,                  lParam = the mouse message
 //
 //  Left click  -> the application's own left click (NIN_SELECT / WM_LBUTTONDOWN+UP)
@@ -2823,9 +2824,11 @@ void LiveDeliver(int index, bool rightClick) {
     wchar_t encoding[48] = {};
     if (cell.version >= 4) {
         const UINT event = rightClick ? WM_CONTEXTMENU : NIN_SELECT;
-        delivered = SendMessageTimeoutW(cell.target, cell.callback,
-                                        MAKELONG(static_cast<WORD>(cell.uid), static_cast<WORD>(event)),
-                                        packed, SMTO_ABORTIFHUNG | SMTO_BLOCK, kLiveTimeout, &answer);
+        // version 4 goes the other way round: the coordinates in wParam, the (event, uid) pair in lParam.
+        // Measured against a real click -- HANDOFF 8.142. Getting it backwards crashes some applications.
+        delivered = SendMessageTimeoutW(cell.target, cell.callback, static_cast<WPARAM>(packed),
+                                        MAKELONG(static_cast<WORD>(event), static_cast<WORD>(cell.uid)),
+                                        SMTO_ABORTIFHUNG | SMTO_BLOCK, kLiveTimeout, &answer);
         _snwprintf_s(encoding, 48, _TRUNCATE, L"version 4, event 0x%04X", event);
     } else {
         const UINT down = rightClick ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
