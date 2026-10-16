@@ -408,3 +408,36 @@ Get-Content $env:USERPROFILE\IslandBar\island_bar.log -Tail 20
 **装到别的电脑上**：那台机器只要能跑 Windows 11 就够了（运行库是静态链接进 exe 的）。
 第一次运行会被 SmartScreen 拦一下（包没签名）：点 `更多信息 → 仍要运行`。
 拿不准就先双击 `IslandBar (safe mode)` —— 它**不隐藏**系统任务栏。
+
+---
+
+## 7. 内存 / 句柄泄漏：让同一件事做几十遍，看计数有没有涨
+
+这条是**机器自己报**的，不需要外部工具：栏每隔一段时间打一行 `mem[...]`，
+里面除了字节数还有**句柄、线程、GDI、user 对象、位图**的计数。判读规则（`core/ProcessMetrics.h` 里写着）：
+**计数和字节一起涨 = 泄漏；只有字节涨 = 缓存填满了**。
+
+默认那行每 **5 分钟**才打一次，做泄漏测试等不起，所以有一个开关把它调快：
+
+```powershell
+# 让栏每 5 秒报一次，并且每 2.5 秒开关一次系统面板，跑 200 秒（约 40 个来回）
+$env:ISLANDBAR_MEM_MS='5000'
+$env:ISLANDBAR_PANEL_MS='3000'; $env:ISLANDBAR_PANEL_CLOSE_MS='5500'; $env:ISLANDBAR_PANEL_CYCLE_MS='2500'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\regression\run-demo.ps1 `
+    -Name leak-cycle -Seconds 200 -Deploy -StopRunning
+
+# 换成托盘页（每格图标都要从注册表解码一张 PNG）再跑一遍
+$env:ISLANDBAR_TRAY_PAGE='1'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\regression\run-demo.ps1 `
+    -Name leak-tray -Seconds 200 -Deploy -StopRunning
+
+# 然后看序列，不看单个数
+Select-String -Path .\scripts\regression\out\leak-cycle-raw.txt -Pattern 'mem\[' | ForEach-Object { $_.Line }
+```
+
+**2026-10-16 实测（两轮各 40 个来回）**：句柄 `1081 → 960`、线程 `71 → 54`、GDI **全程 41 不变**、
+user 对象 `25 → 13`、位图 0；常驻字节在前 5 秒涨到 `~90 MB`（封面 / 歌词 / 托盘图标那几份缓存落地），
+之后 3 分钟里在 ±0.5 MB 内平着。**句柄是先降后平**（托盘学习结束、线程退出），不是涨——涨才是泄漏。
+
+**为什么不能用"卡片关闭后那行"代替**：那行自带 30 秒延迟，而卡片每关一次就把这 30 秒重新推后一次，
+所以"每 2.5 秒开关一次卡片"这种循环**一行都不会打**（实测：200 秒 40 个来回，0 行）。

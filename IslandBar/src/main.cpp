@@ -3788,7 +3788,28 @@ unsigned long long lastMusicMeterMs = 0;
         unsigned long long musicPositionAt = GetTickCount64();
         long long lastShownSecond = -1;
         unsigned long long lastVolumeRevision = volumeAvailable ? systems.volume.Revision() : 0;
-        constexpr unsigned long long kMemorySampleMs = 5ull * 60ull * 1000ull;
+        // ISLANDBAR_MEM_MS=N puts the memory line on a faster cadence, and it is the switch that makes a
+        // leak measurable at all. The line carries the handle, GDI, user-object, thread and bitmap counts
+        // beside the bytes, so a run that drives one operation in a loop and samples every few seconds
+        // shows a leak as a TREND rather than as one number -- which is the difference between "it leaked"
+        // and "it was 1000 handles when I looked". On the default five-minute cadence that test needs an
+        // hour of driving to produce two samples.
+        //
+        // The event line cannot stand in for it (measured 2026-10-16): a card closing re-arms that line's
+        // own 30 s delay every time, so a loop that opens and closes a card every 2.5 s never produces one
+        // -- a 200 s run with 40 cycles wrote exactly zero samples.
+        //
+        // Values below one second are refused rather than clamped: a sample per frame would flood the log
+        // and change the very thing being measured.
+        const unsigned long long kDefaultMemorySampleMs = 5ull * 60ull * 1000ull;
+        unsigned long long kMemorySampleMs = kDefaultMemorySampleMs;
+        {
+            wchar_t memorySetting[32] = {};
+            if (GetEnvironmentVariableW(L"ISLANDBAR_MEM_MS", memorySetting, 32) > 0) {
+                const unsigned long long wanted = wcstoull(memorySetting, nullptr, 10);
+                if (wanted >= 1000ull) kMemorySampleMs = wanted;
+            }
+        }
         // The card's owner and the copy of the message it is showing live in BarRuntime: the latch that
         // writes them and the drawing that reads them are in different phases of the same pass, which is
         // what the struct is for (see BarRuntime).
