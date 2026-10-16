@@ -2341,6 +2341,117 @@ static void FillTrayAndPanelFrame(BarRuntime& runtime, island::FrameState& frame
     }
 }
 
+// --- the Start card, told to the frame and to the window ---
+//
+// Moved out of the frame loop verbatim (indentation aside). One place fills this in, so the drawing and the
+// hit tests cannot be given different answers; the window is told the counts and the page rather than the
+// lists, because it owns no application list and the hit tests are pure functions of the same geometry the
+// drawing uses.
+static void FillStartCardFrame(island::FrameState& frame, island::BarState& bar,
+                              island::BarSystems& systems, bool startPageShown, float dt) {
+    // --- the Start card, told to the frame and to the window --------------------------
+    //
+    // One place fills this in, so the drawing and the hit tests cannot be given different
+    // answers -- the arrangement the tray page already uses. The window is told the counts and
+    // the page rather than the lists: it owns no application list, and the hit tests are pure
+    // functions of the same geometry the drawing uses.
+    frame.startPageOpen = startPageShown;
+    {
+        // THE HIGHLIGHTS, spring-stepped, one per item -- see FrameState::pinWashes for why
+        // they are per item and why they are springs. Sized to the lists, which change when a
+        // pin is added or an application arrives.
+        {
+            // The module's counts are read here rather than cached at startup: the list arrives
+            // from a worker, and the pins change whenever the user adds one. Read BEFORE the
+            // highlights are sized, so a pin that was just added has a spring of its own in the
+            // frame it appears in -- sizing them from the previous frame's counts left the
+            // newest tile the one tile with no highlight.
+            bar.startPinCount = systems.startApps.PinCount();
+            bar.startAppCount = systems.startApps.ListCount();
+            const island::IslandWindow::StartHit hover = systems.window.StartHitHovered();
+            const int pinHover = hover.target == island::IslandWindow::StartHitTarget::Pin
+                                     ? hover.index
+                                     : -1;
+            const int rowHover =
+                hover.target == island::IslandWindow::StartHitTarget::PickerRow ? hover.index
+                                                                                : -1;
+            const int powerHover =
+                hover.target == island::IslandWindow::StartHitTarget::PowerRow ? hover.index
+                                                                               : -1;
+            const auto resize = [](std::vector<island::WashSlot>& slots,
+                                   std::vector<float>& values, int count) {
+                if (static_cast<int>(slots.size()) != count) {
+                    slots.assign(static_cast<size_t>(count), island::WashSlot{});
+                    values.assign(static_cast<size_t>(count), 0.0f);
+                }
+            };
+            resize(bar.startPinWashes, bar.startPinWashValues, bar.startPinCount);
+            resize(bar.startRowWashes, bar.startRowWashValues, bar.startAppCount);
+            resize(bar.startPowerWashes, bar.startPowerWashValues, 5);
+            bar.startWashAnimating = false;
+            const auto step = [&](std::vector<island::WashSlot>& slots,
+                                  std::vector<float>& values, int hovered) {
+                for (int i = 0; i < static_cast<int>(slots.size()); ++i) {
+                    if (island::ControlWashStep(&slots[static_cast<size_t>(i)].value,
+                                                &slots[static_cast<size_t>(i)].velocity,
+                                                i == hovered ? 1.0f : 0.0f, dt)) {
+                        bar.startWashAnimating = true;
+                    }
+                    values[static_cast<size_t>(i)] = slots[static_cast<size_t>(i)].value;
+                }
+            };
+            step(bar.startPinWashes, bar.startPinWashValues, pinHover);
+            step(bar.startRowWashes, bar.startRowWashValues, rowHover);
+            step(bar.startPowerWashes, bar.startPowerWashValues, powerHover);
+        }
+        const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
+        island::TextRenderer::StartCardText& card = frame.startCard;
+        card.pins = bar.startPinCount > 0 ? &systems.startApps.PinAt(0) : nullptr;
+        card.pinCount = bar.startPinCount;
+        card.list = bar.startAppCount > 0 ? &systems.startApps.ListAt(0) : nullptr;
+        card.listCount = bar.startAppCount;
+        card.pickerScrollRow = bar.startPickerScroll;
+        card.page = bar.startPageState;
+        card.hoveredPin =
+            startHit.target == island::IslandWindow::StartHitTarget::Pin ? startHit.index : -1;
+        card.hoveredPickerRow =
+            startHit.target == island::IslandWindow::StartHitTarget::PickerRow
+                ? startHit.index
+                : -1;
+        card.hoveredPowerRow =
+            startHit.target == island::IslandWindow::StartHitTarget::PowerRow
+                ? startHit.index
+                : -1;
+        card.powerButtonHovered =
+            startHit.target == island::IslandWindow::StartHitTarget::PowerButton;
+        card.powerConfirmRow = bar.startPowerConfirm;
+        card.pinWashes = bar.startPinWashValues.empty() ? nullptr : bar.startPinWashValues.data();
+        card.rowWashes = bar.startRowWashValues.empty() ? nullptr : bar.startRowWashValues.data();
+        card.powerWashes =
+            bar.startPowerWashValues.empty() ? nullptr : bar.startPowerWashValues.data();
+        card.accountName = bar.accountName;
+        card.avatarPng = bar.accountAvatarPng.empty() ? nullptr : bar.accountAvatarPng.data();
+        card.avatarPngSize = bar.accountAvatarPng.size();
+
+        // One array of icon pointers, rebuilt here because the frame carries pointers and must
+        // not carry a vector of them: the renderer walks `pinIcons[i]` against `pins[i]`, and
+        // the two have to be the same length in the same order.
+        bar.startIconPointers.clear();
+        bar.startIconSizes.clear();
+        for (int i = 0; i < bar.startPinCount; ++i) {
+            size_t size = 0;
+            const uint8_t* png = systems.startApps.PinIconPng(i, &size);
+            bar.startIconPointers.push_back(png);
+            bar.startIconSizes.push_back(size);
+        }
+        card.pinIcons = bar.startIconPointers.empty() ? nullptr : bar.startIconPointers.data();
+        card.pinIconSizes = bar.startIconSizes.empty() ? nullptr : bar.startIconSizes.data();
+    }
+    // ... and the window, which answers "what is the pointer on" with the same geometry.
+    systems.window.SetStartState(startPageShown, bar.startPageState, bar.startPinCount, bar.startAppCount,
+                         bar.startPickerScroll);
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -4565,107 +4676,9 @@ float musicWavePhase = 0.0f;
                 FillTrayAndPanelFrame(runtime, frame, bar, systems, animating, dt, forcedStartHover,
                                       trayPageShown);
 
-                // --- the Start card, told to the frame and to the window --------------------------
-                //
-                // One place fills this in, so the drawing and the hit tests cannot be given different
-                // answers -- the arrangement the tray page already uses. The window is told the counts and
-                // the page rather than the lists: it owns no application list, and the hit tests are pure
-                // functions of the same geometry the drawing uses.
-                frame.startPageOpen = startPageShown;
-                {
-                    // THE HIGHLIGHTS, spring-stepped, one per item -- see FrameState::pinWashes for why
-                    // they are per item and why they are springs. Sized to the lists, which change when a
-                    // pin is added or an application arrives.
-                    {
-                        // The module's counts are read here rather than cached at startup: the list arrives
-                        // from a worker, and the pins change whenever the user adds one. Read BEFORE the
-                        // highlights are sized, so a pin that was just added has a spring of its own in the
-                        // frame it appears in -- sizing them from the previous frame's counts left the
-                        // newest tile the one tile with no highlight.
-                        bar.startPinCount = systems.startApps.PinCount();
-                        bar.startAppCount = systems.startApps.ListCount();
-                        const island::IslandWindow::StartHit hover = systems.window.StartHitHovered();
-                        const int pinHover = hover.target == island::IslandWindow::StartHitTarget::Pin
-                                                 ? hover.index
-                                                 : -1;
-                        const int rowHover =
-                            hover.target == island::IslandWindow::StartHitTarget::PickerRow ? hover.index
-                                                                                            : -1;
-                        const int powerHover =
-                            hover.target == island::IslandWindow::StartHitTarget::PowerRow ? hover.index
-                                                                                           : -1;
-                        const auto resize = [](std::vector<island::WashSlot>& slots,
-                                               std::vector<float>& values, int count) {
-                            if (static_cast<int>(slots.size()) != count) {
-                                slots.assign(static_cast<size_t>(count), island::WashSlot{});
-                                values.assign(static_cast<size_t>(count), 0.0f);
-                            }
-                        };
-                        resize(bar.startPinWashes, bar.startPinWashValues, bar.startPinCount);
-                        resize(bar.startRowWashes, bar.startRowWashValues, bar.startAppCount);
-                        resize(bar.startPowerWashes, bar.startPowerWashValues, 5);
-                        bar.startWashAnimating = false;
-                        const auto step = [&](std::vector<island::WashSlot>& slots,
-                                              std::vector<float>& values, int hovered) {
-                            for (int i = 0; i < static_cast<int>(slots.size()); ++i) {
-                                if (island::ControlWashStep(&slots[static_cast<size_t>(i)].value,
-                                                            &slots[static_cast<size_t>(i)].velocity,
-                                                            i == hovered ? 1.0f : 0.0f, dt)) {
-                                    bar.startWashAnimating = true;
-                                }
-                                values[static_cast<size_t>(i)] = slots[static_cast<size_t>(i)].value;
-                            }
-                        };
-                        step(bar.startPinWashes, bar.startPinWashValues, pinHover);
-                        step(bar.startRowWashes, bar.startRowWashValues, rowHover);
-                        step(bar.startPowerWashes, bar.startPowerWashValues, powerHover);
-                    }
-                    const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
-                    island::TextRenderer::StartCardText& card = frame.startCard;
-                    card.pins = bar.startPinCount > 0 ? &systems.startApps.PinAt(0) : nullptr;
-                    card.pinCount = bar.startPinCount;
-                    card.list = bar.startAppCount > 0 ? &systems.startApps.ListAt(0) : nullptr;
-                    card.listCount = bar.startAppCount;
-                    card.pickerScrollRow = bar.startPickerScroll;
-                    card.page = bar.startPageState;
-                    card.hoveredPin =
-                        startHit.target == island::IslandWindow::StartHitTarget::Pin ? startHit.index : -1;
-                    card.hoveredPickerRow =
-                        startHit.target == island::IslandWindow::StartHitTarget::PickerRow
-                            ? startHit.index
-                            : -1;
-                    card.hoveredPowerRow =
-                        startHit.target == island::IslandWindow::StartHitTarget::PowerRow
-                            ? startHit.index
-                            : -1;
-                    card.powerButtonHovered =
-                        startHit.target == island::IslandWindow::StartHitTarget::PowerButton;
-                    card.powerConfirmRow = bar.startPowerConfirm;
-                    card.pinWashes = bar.startPinWashValues.empty() ? nullptr : bar.startPinWashValues.data();
-                    card.rowWashes = bar.startRowWashValues.empty() ? nullptr : bar.startRowWashValues.data();
-                    card.powerWashes =
-                        bar.startPowerWashValues.empty() ? nullptr : bar.startPowerWashValues.data();
-                    card.accountName = bar.accountName;
-                    card.avatarPng = bar.accountAvatarPng.empty() ? nullptr : bar.accountAvatarPng.data();
-                    card.avatarPngSize = bar.accountAvatarPng.size();
-
-                    // One array of icon pointers, rebuilt here because the frame carries pointers and must
-                    // not carry a vector of them: the renderer walks `pinIcons[i]` against `pins[i]`, and
-                    // the two have to be the same length in the same order.
-                    bar.startIconPointers.clear();
-                    bar.startIconSizes.clear();
-                    for (int i = 0; i < bar.startPinCount; ++i) {
-                        size_t size = 0;
-                        const uint8_t* png = systems.startApps.PinIconPng(i, &size);
-                        bar.startIconPointers.push_back(png);
-                        bar.startIconSizes.push_back(size);
-                    }
-                    card.pinIcons = bar.startIconPointers.empty() ? nullptr : bar.startIconPointers.data();
-                    card.pinIconSizes = bar.startIconSizes.empty() ? nullptr : bar.startIconSizes.data();
-                }
-                // ... and the window, which answers "what is the pointer on" with the same geometry.
-                systems.window.SetStartState(startPageShown, bar.startPageState, bar.startPinCount, bar.startAppCount,
-                                     bar.startPickerScroll);
+                // The Start card as the frame and the window see it. The phase lives above RunBar; the order
+                // against the card-owner latch below is unchanged.
+                FillStartCardFrame(frame, bar, systems, startPageShown, dt);
 
                 // Who owns the card, and which message it is showing. The phase lives above RunBar; the two
                 // things it carries between frames are BarRuntime's.
