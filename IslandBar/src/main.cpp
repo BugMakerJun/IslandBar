@@ -1238,6 +1238,67 @@ static void UpdateTrackPosition(island::BarState& bar, const island::MusicInfo& 
     }
 }
 
+// --- a full-screen application gets the whole screen ---
+//
+// Moved out of the frame loop verbatim (apart from the indentation: the loop sits at twelve spaces, this
+// body at four). Everything it touches comes in explicitly -- the state it keeps between frames is BarState's,
+// the check interval and the two switches are RunBar's, and barThicknessPx is the number the AppBar claim
+// uses everywhere else.
+static void UpdateFullscreenStandDown(island::BarState& bar, island::BarSystems& systems,
+                                      const island::MonitorGeometry& monitor, bool noFullscreen,
+                                      unsigned long long fullscreenCheckMs, LONG barThicknessPx) {
+    // POLLED, and by us: the shell's announcement only reaches a registered AppBar (see
+    // FullScreenAppInFront), so this is the only signal that exists in the shipped
+    // configuration.
+    if (GetTickCount64() - bar.lastFullscreenCheck >= fullscreenCheckMs) {
+        bar.lastFullscreenCheck = GetTickCount64();
+        const bool measured =
+            !noFullscreen && island::FullScreenAppInFront(monitor.screen);
+        if (measured != bar.fullscreenAppInFront) {
+            bar.fullscreenAppInFront = measured;
+            // ... and the WINDOW is told, because the hit test is answered there: while an
+            // application has the screen only the island itself is the bar, so a pointer
+            // crossing the top of it cannot land on an icon or a deck button that is not drawn.
+            systems.window.SetFullscreenApp(bar.fullscreenAppInFront);
+            // `%s` and not `%ls`: this is the NARROW overload of LogAndPrint, whose arguments
+            // are widened a byte at a time, so a `%ls` here would read a `const char*` as a wide
+            // string -- and the CRT answers an invalid conversion by emptying the whole line,
+            // leaving a blank line in the log where the answer should be. (The project's own
+            // note on that overload says the same thing; this is what it looks like when it is
+            // ignored.)
+            island::LogAndPrint(
+                "  fullscreen: %s",
+                measured ? "an application has the screen -- the bar stands down"
+                         : "over -- the bar is back");
+            std::fflush(stdout);
+        }
+    }
+
+    const bool fullscreenNow = bar.fullscreenAppInFront;
+    if (fullscreenNow != bar.fullscreenLast) {
+        bar.fullscreenLast = fullscreenNow;
+
+        if (fullscreenNow) {
+            if (systems.appBar.IsRegistered()) {
+                systems.appBar.Release();
+                island::LogAndPrint("  fullscreen: space released; the bar fills the band");
+            } else {
+                island::LogAndPrint("  fullscreen: the bar stands down");
+            }
+        } else if (systems.appBarResult == island::AppBarResult::Registered) {
+            // Reclaimed only if it had been claimed: `--keep-taskbar` never claims, and
+            // claiming on the way out of full-screen would reserve space never asked for.
+            systems.appBarResult =
+                systems.appBar.Claim(systems.window.Handle(), island::DockEdge::Top, barThicknessPx);
+            island::LogAndPrint("  fullscreen: over, space re-claimed -- %ls",
+                                island::AppBarResultName(systems.appBarResult));
+        } else {
+            island::LogAndPrint("  fullscreen: over, back to the pill");
+        }
+        std::fflush(stdout);
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -2172,58 +2233,8 @@ float musicWavePhase = 0.0f;
             //
             // The reservation is released meanwhile, because holding it would be reserving space for a
             // bar that is not in its usual place.
-            {
-                // POLLED, and by us: the shell's announcement only reaches a registered AppBar (see
-                // FullScreenAppInFront), so this is the only signal that exists in the shipped
-                // configuration.
-                if (GetTickCount64() - bar.lastFullscreenCheck >= kFullscreenCheckMs) {
-                    bar.lastFullscreenCheck = GetTickCount64();
-                    const bool measured =
-                        !noFullscreen && island::FullScreenAppInFront(monitor.screen);
-                    if (measured != bar.fullscreenAppInFront) {
-                        bar.fullscreenAppInFront = measured;
-                        // ... and the WINDOW is told, because the hit test is answered there: while an
-                        // application has the screen only the island itself is the bar, so a pointer
-                        // crossing the top of it cannot land on an icon or a deck button that is not drawn.
-                        systems.window.SetFullscreenApp(bar.fullscreenAppInFront);
-                        // `%s` and not `%ls`: this is the NARROW overload of LogAndPrint, whose arguments
-                        // are widened a byte at a time, so a `%ls` here would read a `const char*` as a wide
-                        // string -- and the CRT answers an invalid conversion by emptying the whole line,
-                        // leaving a blank line in the log where the answer should be. (The project's own
-                        // note on that overload says the same thing; this is what it looks like when it is
-                        // ignored.)
-                        island::LogAndPrint(
-                            "  fullscreen: %s",
-                            measured ? "an application has the screen -- the bar stands down"
-                                     : "over -- the bar is back");
-                        std::fflush(stdout);
-                    }
-                }
-
-                const bool fullscreenNow = bar.fullscreenAppInFront;
-                if (fullscreenNow != bar.fullscreenLast) {
-                    bar.fullscreenLast = fullscreenNow;
-
-                    if (fullscreenNow) {
-                        if (systems.appBar.IsRegistered()) {
-                            systems.appBar.Release();
-                            island::LogAndPrint("  fullscreen: space released; the bar fills the band");
-                        } else {
-                            island::LogAndPrint("  fullscreen: the bar stands down");
-                        }
-                    } else if (systems.appBarResult == island::AppBarResult::Registered) {
-                        // Reclaimed only if it had been claimed: `--keep-taskbar` never claims, and
-                        // claiming on the way out of full-screen would reserve space never asked for.
-                        systems.appBarResult =
-                            systems.appBar.Claim(systems.window.Handle(), island::DockEdge::Top, barThicknessPx);
-                        island::LogAndPrint("  fullscreen: over, space re-claimed -- %ls",
-                                            island::AppBarResultName(systems.appBarResult));
-                    } else {
-                        island::LogAndPrint("  fullscreen: over, back to the pill");
-                    }
-                    std::fflush(stdout);
-                }
-            }
+            UpdateFullscreenStandDown(bar, systems, monitor, noFullscreen, kFullscreenCheckMs,
+                                      barThicknessPx);
 
             // --- the resting state ---
             //
