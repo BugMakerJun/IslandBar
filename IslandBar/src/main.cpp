@@ -1265,6 +1265,12 @@ struct BarRuntime {
     // pointer is on it. A TIMESTAMP rather than a flag, because the material must not change on the frames in
     // between (see FrameState::cardSurfaceMoving -- a per-frame flag is what made the card flicker).
     unsigned long long lastCardMotionMs = 0;
+    // The 声音输出 page own cache: whether it was up, how far it was scrolled, and the revision of the audio
+    // reading it was last drawn from. The mixer rows change on their own -- an application starts or stops
+    // playing -- so a change in the reading is a reason to draw, and nothing else on this bar is.
+    bool lastSoundPageOpen = false;
+    float lastSoundScroll = 0.0f;
+    unsigned long long lastSoundRevision = 0;
 };
 
 
@@ -2452,6 +2458,198 @@ static void FillStartCardFrame(island::FrameState& frame, island::BarState& bar,
                          bar.startPickerScroll);
 }
 
+// --- the panel content, level by level ---
+//
+// Moved out of the frame loop verbatim (indentation aside). The panel CONTENT is built whenever a card is up
+// OR ON ITS WAY, not only while the panel flag is set: building it only while the flag was set made the tiles
+// and the slider vanish the moment the panel was asked to close, and the exit then played on an empty card --
+// reported as the panel "appearing and disappearing" with the pointer. The SHOWN level builds the content,
+// not the request, for the same reason.
+static void FillPanelFrame(BarRuntime& runtime, island::FrameState& frame, island::BarState& bar,
+                           island::BarSystems& systems, bool soundPageShown, bool trayPageShown,
+                           bool startPageShown, float dt) {
+    // `cardUp` is computed here rather than handed in: it is one expression off the frame, and the block this
+    // phase was moved out of had it in a local right above itself.
+    const bool cardUp = frame.outerCardUp;
+    if (cardUp) {
+        // The SHOWN level builds the content, not the request: the 声音输出 page has to keep its
+        // rows while it leaves the screen, exactly as the tray page keeps its grid, or the exit
+        // plays on an empty card (which is the other half of the defect above -- reported once
+        // already, as the panel "appearing and disappearing").
+        if (soundPageShown) {
+            // --- the panel's second level: the 声音输出 page ---
+            //
+            // The worker is already running -- it starts with the bar, because the WeChat sound
+            // channel reads the same session list. This used to start it here, on the first open of
+            // the page, which quietly meant "nothing that needs the session list works until
+            // somebody opens the mixer".
+            //
+            // A snapshot per frame while the page is up. Cheap enough -- it is a copy of a list
+            // that changes about once a second -- and the alternative, holding the live object,
+            // would put the worker's own state on screen mid-update.
+            systems.soundOutput->Snapshot(systems.soundSnapshot.get());
+            float masterLevel = 0.0f;
+            const bool haveMaster = systems.volume.Get(&masterLevel);
+            // The device's own row is drawn at the chased value as well, and at the raw reading
+            // while that row is the one being dragged -- the same rule as the other two bars.
+            const float drawnMaster =
+                (bar.mixerSliderDragRow == 0 || bar.shownVolume < 0.0f) ? masterLevel : bar.shownVolume;
+            BuildSoundPage(*systems.soundSnapshot, systems.systemStatus, haveMaster, drawnMaster,
+                           systems.volume.IsMuted(), bar.soundPageScroll, &frame.soundPage);
+            frame.soundPageOpen = true;
+            runtime.lastSoundRevision = systems.soundOutput->Revision();
+            systems.window.SetSoundPage(frame.soundPage, bar.soundPageScroll);
+        } else {
+            // Rebuilding every frame is what the tiles need: their on/off state comes from the
+            // status readings, and the readings are sampled on a timer. The text is copied into
+            // the frame's own buffers, so nothing here points at a shorter-lived string.
+            float liveLevel = 0.0f;
+            const bool liveKnown = systems.volume.Get(&liveLevel);
+            BuildSystemPanel(systems.systemStatus, systems.statusReader.InstalledLayoutCount(), liveKnown,
+                             liveLevel, systems.volume.IsMuted(), &frame.systemPanel,
+                             bar.systemPanelPage);
+
+            // The volume's own percentage, shown while the slider is the control in hand: being
+            // dragged, used within the last second, or simply hovered. The handle's position is
+            // the only reading the slider carries by itself, and "about three quarters along" is
+            // not an answer to "how loud is it".
+            {
+                POINT echoPoint = {};
+                GetCursorPos(&echoPoint);
+                // WHICH ROW the pointer is on, for the handle's own size: the hit carries the
+                // row index (0 the volume, 1 the brightness), and a drag pins it to the row the
+                // gesture started on -- a handle that shrank because the pointer wandered off
+                // the bar.track mid-drag would be the slider losing the control being held.
+                const island::SystemPanelHit echoHit =
+                    systems.window.SystemPanelHitAtScreen(echoPoint);
+                const bool onSlider =
+                    echoHit.target == island::SystemPanelTarget::Slider;
+                const bool onVolumeRow =
+                    echoHit.target == island::SystemPanelTarget::Slider &&
+                    echoHit.index == 0;
+                const bool onBrightnessRow =
+                    echoHit.target == island::SystemPanelTarget::Slider &&
+                    echoHit.index == 1;
+                const float wanted[2] = {
+                    (onVolumeRow || (bar.panelSliderDrag && bar.panelSliderDragRow == 0)) ? 1.0f
+                                                                                 : 0.0f,
+                    (onBrightnessRow || (bar.panelSliderDrag && bar.panelSliderDragRow == 1))
+                        ? 1.0f
+                        : 0.0f,
+                };
+                for (int row = 0; row < 2; ++row) {
+                    // The same chase the volume uses, with its own (quicker) constant: the size
+                    // answers the pointer, so it should arrive about as fast as a hover.
+                    bar.sliderHandleGrowth[row] +=
+                        (wanted[row] - bar.sliderHandleGrowth[row]) *
+                        (1.0f - std::exp(-dt / kHandleGrowthSeconds));
+                    if (std::fabs(wanted[row] - bar.sliderHandleGrowth[row]) < 0.004f) {
+                        bar.sliderHandleGrowth[row] = wanted[row];
+                    }
+                    frame.systemPanel.sliderEmphasis[row] = bar.sliderHandleGrowth[row];
+                }
+                frame.systemPanel.showVolumePercent =
+                    bar.panelSliderDrag || onSlider ||
+                    GetTickCount64() < bar.panelVolumeEchoUntil;
+                // The panel's handle is drawn at the chased value too, and at the pointer's own
+                // value while it is being dragged -- the same rule as the card's bar.
+                frame.systemPanel.volume =
+                    bar.panelSliderDrag
+                        ? (liveKnown ? liveLevel : frame.systemPanel.volume)
+                        : (bar.shownVolume >= 0.0f ? bar.shownVolume : frame.systemPanel.volume);
+            }
+
+            // The brightness row, and its own percentage on the same terms.
+            //
+            // WHILE IT IS BEING DRAGGED the handle is drawn at the POINTER's position, not at the
+            // last value the monitor confirmed: a DDC/CI write is a round trip over the video
+            // cable, and drawing the confirmed value would make the handle lag behind the pointer
+            // by a visible fraction of a second -- the complaint "不顺滑" that the volume row
+            // already answered the same way.
+            frame.systemPanel.hasBrightness = bar.brightnessAvailable;
+            if (bar.brightnessAvailable) {
+                float dragged = 0.0f;
+                POINT echoPoint = {};
+                GetCursorPos(&echoPoint);
+                const island::SystemPanelHit echoHit =
+                    systems.window.SystemPanelHitAtScreen(echoPoint);
+                const bool onBrightnessRow =
+                    echoHit.target == island::SystemPanelTarget::Slider &&
+                    echoHit.index == 1;
+                const bool draggingBrightness =
+                    bar.panelSliderDrag && bar.panelSliderDragRow == 1;
+
+                if (draggingBrightness || onBrightnessRow) {
+                    dragged = echoHit.fraction;
+                }
+                frame.systemPanel.brightness =
+                    draggingBrightness ? dragged
+                                       : static_cast<float>(bar.brightnessPercent) / 100.0f;
+                frame.systemPanel.showBrightnessPercent =
+                    draggingBrightness || onBrightnessRow ||
+                    GetTickCount64() < bar.panelBrightnessEchoUntil;
+            }
+            // The page's hit test is closed the moment the page is not showing: leaving it open
+            // would let a click on the panel's tiles be read as a device row.
+            systems.window.CloseSoundPage();
+        }
+
+        // The card is CENTRED on the button that opened it -- the system button for the
+        // panel, the tray button for the tray page (see DeckCardAnchorCentre, and the latch
+        // just above this block).
+        //
+        // Chosen by the user after being shown the numbers: centring the card on the button
+        // puts its right half under the ISLAND, and the alternative -- keeping the card
+        // wholly to the island's left -- leaves its centre about 100 DIP left of the
+        // button's, which does not read as "under the button".
+        //
+        // The overlap is not a collision. The card hangs BELOW the bar (top at 50 while the
+        // island ends at 42), so the card's right half simply continues down the screen
+        // underneath the island; nothing of the bar's is covered, and the application icon
+        // row -- which is to the RIGHT of the island -- is never reached at all, so it stays
+        // exactly where it is.
+        //
+        // Left-aligning to the button instead -- tried first -- sent the card 520 DIP to the
+        // RIGHT, over the icon row, which then had to be pushed aside. The user reported
+        // exactly that: "the icons beside the island were all squeezed out".
+        //
+        // The anchor comes from the RESTING island, so the position does not move while the
+        // card's own width is animating.
+        const island::RoundedBox anchorIsland = systems.window.LayoutIslandFor();
+        // The centre of the control that opened the card: the system button for the panel, the
+        // tray button for the tray page, the START button for the Start card. See
+        // DeckCardAnchorCentre -- and its note about how the Start card came to be drawn under
+        // the system button, 200 DIP from the control that opened it, until the card was
+        // photographed.
+        const island::CardHang hang = trayPageShown  ? island::CardHang::TrayButton
+                                      : startPageShown ? island::CardHang::StartButton
+                                                       : island::CardHang::SystemButton;
+        const float buttonCentre = island::DeckCardAnchorCentre(anchorIsland, hang);
+        // WHICH THING THE CARD HANGS FROM DEPENDS ON WHICH CARD IT IS.
+        //
+        // The system panel hangs from the control that opened it: the user chose that
+        // ("面板居中于按钮", 7.76) and it is what a flyout does -- press a button, get a panel
+        // under that button.
+        //
+        // The other two belong to the ISLAND. The media card is the pill's own detail view, and a
+        // message is about the bar as a whole; both were originally centred under the pill (the
+        // screenshots in docs/ from that phase show it), and 7.76 moved all three together
+        // because the question was asked about the panel. Reported as "this should be under the
+        // island, not under this [the button]".
+        const float islandCentre = (anchorIsland.rect.left + anchorIsland.rect.right) * 0.5f;
+        const float anchorCentre = (runtime.cardOwner == island::CardOwner::SystemPanel)
+                                       ? buttonCentre
+                                       : islandCentre;
+        const float anchorLeft = anchorCentre - island::kExpandedWidthDip * 0.5f;
+        const float windowWidthDipNow =
+            static_cast<float>(systems.window.Monitor().screen.right -
+                               systems.window.Monitor().screen.left) /
+            systems.window.Scale();
+        frame.cardLeftDip = island::CardLeftFor(anchorLeft, island::kExpandedWidthDip,
+                                                windowWidthDipNow);
+    }
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -2970,12 +3168,6 @@ float musicWavePhase = 0.0f;
         unsigned long long musicPositionAt = GetTickCount64();
         long long lastShownSecond = -1;
         unsigned long long lastVolumeRevision = volumeAvailable ? systems.volume.Revision() : 0;
-        // The 声音输出 page: whether it is up, how far it is scrolled, and the revision of the audio reading
-        // it was last drawn from. The mixer's rows change on their own -- an application starts or stops
-        // playing -- so a change in the reading is a reason to draw, and nothing else on this bar is.
-        bool lastSoundPageOpen = false;
-        float lastSoundScroll = 0.0f;
-        unsigned long long lastSoundRevision = 0;
         constexpr unsigned long long kMemorySampleMs = 5ull * 60ull * 1000ull;
         // The card's owner and the copy of the message it is showing live in BarRuntime: the latch that
         // writes them and the drawing that reads them are in different phases of the same pass, which is
@@ -4559,10 +4751,10 @@ float musicWavePhase = 0.0f;
             // the audio reading behind it moved on. Read BEFORE the frame is built, because the build is
             // what records the new values.
             const bool soundPageChanged =
-                bar.soundPageOpen != lastSoundPageOpen ||
-                (bar.soundPageOpen && systems.window.SoundPageScroll() != lastSoundScroll) ||
+                bar.soundPageOpen != runtime.lastSoundPageOpen ||
+                (bar.soundPageOpen && systems.window.SoundPageScroll() != runtime.lastSoundScroll) ||
                 (bar.soundPageOpen && soundOutputStarted && systems.soundOutput &&
-                 systems.soundOutput->Revision() != lastSoundRevision);
+                 systems.soundOutput->Revision() != runtime.lastSoundRevision);
 
             // A call's level meter is the one thing on this bar that changes without an event, so it asks for
             // frames of its own. 20 Hz: twice a second looks broken, and sixty times a second is a meter nobody
@@ -4695,183 +4887,9 @@ float musicWavePhase = 0.0f;
                 // card: the panel's contents disappeared first and a blank rounded rectangle shrank
                 // afterwards. Reported as the panel "appearing and disappearing" with the pointer.
                 const bool cardUp = frame.outerCardUp;
-                if (cardUp) {
-                    // The SHOWN level builds the content, not the request: the 声音输出 page has to keep its
-                    // rows while it leaves the screen, exactly as the tray page keeps its grid, or the exit
-                    // plays on an empty card (which is the other half of the defect above -- reported once
-                    // already, as the panel "appearing and disappearing").
-                    if (soundPageShown) {
-                        // --- the panel's second level: the 声音输出 page ---
-                        //
-                        // The worker is already running -- it starts with the bar, because the WeChat sound
-                        // channel reads the same session list. This used to start it here, on the first open of
-                        // the page, which quietly meant "nothing that needs the session list works until
-                        // somebody opens the mixer".
-                        //
-                        // A snapshot per frame while the page is up. Cheap enough -- it is a copy of a list
-                        // that changes about once a second -- and the alternative, holding the live object,
-                        // would put the worker's own state on screen mid-update.
-                        systems.soundOutput->Snapshot(systems.soundSnapshot.get());
-                        float masterLevel = 0.0f;
-                        const bool haveMaster = systems.volume.Get(&masterLevel);
-                        // The device's own row is drawn at the chased value as well, and at the raw reading
-                        // while that row is the one being dragged -- the same rule as the other two bars.
-                        const float drawnMaster =
-                            (bar.mixerSliderDragRow == 0 || bar.shownVolume < 0.0f) ? masterLevel : bar.shownVolume;
-                        BuildSoundPage(*systems.soundSnapshot, systems.systemStatus, haveMaster, drawnMaster,
-                                       systems.volume.IsMuted(), bar.soundPageScroll, &frame.soundPage);
-                        frame.soundPageOpen = true;
-                        lastSoundRevision = systems.soundOutput->Revision();
-                        systems.window.SetSoundPage(frame.soundPage, bar.soundPageScroll);
-                    } else {
-                        // Rebuilding every frame is what the tiles need: their on/off state comes from the
-                        // status readings, and the readings are sampled on a timer. The text is copied into
-                        // the frame's own buffers, so nothing here points at a shorter-lived string.
-                        float liveLevel = 0.0f;
-                        const bool liveKnown = systems.volume.Get(&liveLevel);
-                        BuildSystemPanel(systems.systemStatus, systems.statusReader.InstalledLayoutCount(), liveKnown,
-                                         liveLevel, systems.volume.IsMuted(), &frame.systemPanel,
-                                         bar.systemPanelPage);
-
-                        // The volume's own percentage, shown while the slider is the control in hand: being
-                        // dragged, used within the last second, or simply hovered. The handle's position is
-                        // the only reading the slider carries by itself, and "about three quarters along" is
-                        // not an answer to "how loud is it".
-                        {
-                            POINT echoPoint = {};
-                            GetCursorPos(&echoPoint);
-                            // WHICH ROW the pointer is on, for the handle's own size: the hit carries the
-                            // row index (0 the volume, 1 the brightness), and a drag pins it to the row the
-                            // gesture started on -- a handle that shrank because the pointer wandered off
-                            // the bar.track mid-drag would be the slider losing the control being held.
-                            const island::SystemPanelHit echoHit =
-                                systems.window.SystemPanelHitAtScreen(echoPoint);
-                            const bool onSlider =
-                                echoHit.target == island::SystemPanelTarget::Slider;
-                            const bool onVolumeRow =
-                                echoHit.target == island::SystemPanelTarget::Slider &&
-                                echoHit.index == 0;
-                            const bool onBrightnessRow =
-                                echoHit.target == island::SystemPanelTarget::Slider &&
-                                echoHit.index == 1;
-                            const float wanted[2] = {
-                                (onVolumeRow || (bar.panelSliderDrag && bar.panelSliderDragRow == 0)) ? 1.0f
-                                                                                             : 0.0f,
-                                (onBrightnessRow || (bar.panelSliderDrag && bar.panelSliderDragRow == 1))
-                                    ? 1.0f
-                                    : 0.0f,
-                            };
-                            for (int row = 0; row < 2; ++row) {
-                                // The same chase the volume uses, with its own (quicker) constant: the size
-                                // answers the pointer, so it should arrive about as fast as a hover.
-                                bar.sliderHandleGrowth[row] +=
-                                    (wanted[row] - bar.sliderHandleGrowth[row]) *
-                                    (1.0f - std::exp(-dt / kHandleGrowthSeconds));
-                                if (std::fabs(wanted[row] - bar.sliderHandleGrowth[row]) < 0.004f) {
-                                    bar.sliderHandleGrowth[row] = wanted[row];
-                                }
-                                frame.systemPanel.sliderEmphasis[row] = bar.sliderHandleGrowth[row];
-                            }
-                            frame.systemPanel.showVolumePercent =
-                                bar.panelSliderDrag || onSlider ||
-                                GetTickCount64() < bar.panelVolumeEchoUntil;
-                            // The panel's handle is drawn at the chased value too, and at the pointer's own
-                            // value while it is being dragged -- the same rule as the card's bar.
-                            frame.systemPanel.volume =
-                                bar.panelSliderDrag
-                                    ? (liveKnown ? liveLevel : frame.systemPanel.volume)
-                                    : (bar.shownVolume >= 0.0f ? bar.shownVolume : frame.systemPanel.volume);
-                        }
-
-                        // The brightness row, and its own percentage on the same terms.
-                        //
-                        // WHILE IT IS BEING DRAGGED the handle is drawn at the POINTER's position, not at the
-                        // last value the monitor confirmed: a DDC/CI write is a round trip over the video
-                        // cable, and drawing the confirmed value would make the handle lag behind the pointer
-                        // by a visible fraction of a second -- the complaint "不顺滑" that the volume row
-                        // already answered the same way.
-                        frame.systemPanel.hasBrightness = bar.brightnessAvailable;
-                        if (bar.brightnessAvailable) {
-                            float dragged = 0.0f;
-                            POINT echoPoint = {};
-                            GetCursorPos(&echoPoint);
-                            const island::SystemPanelHit echoHit =
-                                systems.window.SystemPanelHitAtScreen(echoPoint);
-                            const bool onBrightnessRow =
-                                echoHit.target == island::SystemPanelTarget::Slider &&
-                                echoHit.index == 1;
-                            const bool draggingBrightness =
-                                bar.panelSliderDrag && bar.panelSliderDragRow == 1;
-
-                            if (draggingBrightness || onBrightnessRow) {
-                                dragged = echoHit.fraction;
-                            }
-                            frame.systemPanel.brightness =
-                                draggingBrightness ? dragged
-                                                   : static_cast<float>(bar.brightnessPercent) / 100.0f;
-                            frame.systemPanel.showBrightnessPercent =
-                                draggingBrightness || onBrightnessRow ||
-                                GetTickCount64() < bar.panelBrightnessEchoUntil;
-                        }
-                        // The page's hit test is closed the moment the page is not showing: leaving it open
-                        // would let a click on the panel's tiles be read as a device row.
-                        systems.window.CloseSoundPage();
-                    }
-
-                    // The card is CENTRED on the button that opened it -- the system button for the
-                    // panel, the tray button for the tray page (see DeckCardAnchorCentre, and the latch
-                    // just above this block).
-                    //
-                    // Chosen by the user after being shown the numbers: centring the card on the button
-                    // puts its right half under the ISLAND, and the alternative -- keeping the card
-                    // wholly to the island's left -- leaves its centre about 100 DIP left of the
-                    // button's, which does not read as "under the button".
-                    //
-                    // The overlap is not a collision. The card hangs BELOW the bar (top at 50 while the
-                    // island ends at 42), so the card's right half simply continues down the screen
-                    // underneath the island; nothing of the bar's is covered, and the application icon
-                    // row -- which is to the RIGHT of the island -- is never reached at all, so it stays
-                    // exactly where it is.
-                    //
-                    // Left-aligning to the button instead -- tried first -- sent the card 520 DIP to the
-                    // RIGHT, over the icon row, which then had to be pushed aside. The user reported
-                    // exactly that: "the icons beside the island were all squeezed out".
-                    //
-                    // The anchor comes from the RESTING island, so the position does not move while the
-                    // card's own width is animating.
-                    const island::RoundedBox anchorIsland = systems.window.LayoutIslandFor();
-                    // The centre of the control that opened the card: the system button for the panel, the
-                    // tray button for the tray page, the START button for the Start card. See
-                    // DeckCardAnchorCentre -- and its note about how the Start card came to be drawn under
-                    // the system button, 200 DIP from the control that opened it, until the card was
-                    // photographed.
-                    const island::CardHang hang = trayPageShown  ? island::CardHang::TrayButton
-                                                  : startPageShown ? island::CardHang::StartButton
-                                                                   : island::CardHang::SystemButton;
-                    const float buttonCentre = island::DeckCardAnchorCentre(anchorIsland, hang);
-                    // WHICH THING THE CARD HANGS FROM DEPENDS ON WHICH CARD IT IS.
-                    //
-                    // The system panel hangs from the control that opened it: the user chose that
-                    // ("面板居中于按钮", 7.76) and it is what a flyout does -- press a button, get a panel
-                    // under that button.
-                    //
-                    // The other two belong to the ISLAND. The media card is the pill's own detail view, and a
-                    // message is about the bar as a whole; both were originally centred under the pill (the
-                    // screenshots in docs/ from that phase show it), and 7.76 moved all three together
-                    // because the question was asked about the panel. Reported as "this should be under the
-                    // island, not under this [the button]".
-                    const float islandCentre = (anchorIsland.rect.left + anchorIsland.rect.right) * 0.5f;
-                    const float anchorCentre = (runtime.cardOwner == island::CardOwner::SystemPanel)
-                                                   ? buttonCentre
-                                                   : islandCentre;
-                    const float anchorLeft = anchorCentre - island::kExpandedWidthDip * 0.5f;
-                    const float windowWidthDipNow =
-                        static_cast<float>(systems.window.Monitor().screen.right -
-                                           systems.window.Monitor().screen.left) /
-                        systems.window.Scale();
-                    frame.cardLeftDip = island::CardLeftFor(anchorLeft, island::kExpandedWidthDip,
-                                                            windowWidthDipNow);
-                }
+                // The panel own content, level by level. The phase lives above RunBar; its place in the
+                // sequence is unchanged.
+                FillPanelFrame(runtime, frame, bar, systems, soundPageShown, trayPageShown, startPageShown, dt);
 
                 // Given to the window here as well, because the click handler reads it to work out which
                 // tile was pressed -- and the click handler runs near the TOP of the loop, before the
@@ -5729,8 +5747,8 @@ float musicWavePhase = 0.0f;
                 // What the page looked like, recorded AFTER the draw: these are the values the next
                 // iteration's redraw decision compares against, so recording them before the draw would
                 // swallow the very change that asked for it.
-                lastSoundPageOpen = bar.soundPageOpen;
-                lastSoundScroll = systems.window.SoundPageScroll();
+                runtime.lastSoundPageOpen = bar.soundPageOpen;
+                runtime.lastSoundScroll = systems.window.SoundPageScroll();
             }
 
             // Log the settled shape once per change. Without this, "the card never

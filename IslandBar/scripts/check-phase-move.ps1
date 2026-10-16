@@ -17,8 +17,9 @@
 #  the statements are.
 #
 #  TWO SUBSTITUTIONS, and both are named on the command line rather than hidden here:
-#    * `runtime.` is stripped from the current side: phases read cross-frame state through BarRuntime, which
-#      did not exist when the reference was written.
+#    * `runtime.` is stripped from BOTH sides: phases read cross-frame state through BarRuntime, which did not
+#      exist when the earliest references were written -- and does exist in the later ones, so stripping one
+#      side only produced a phantom difference the first time a reference already carried the prefix.
 #    * -Rename old=new applies to the REFERENCE side: a local that became a parameter changes its name at
 #      the call site and in the body. SEVERAL PAIRS GO IN ONE ARGUMENT, comma separated --
 #      `-Rename a=b,c=d` -- because PowerShell refuses the same parameter twice.
@@ -109,24 +110,24 @@ foreach ($piece in ($Rename -split ',')) {
 }
 if ($old -ne '') { $renamePairs += , @($old, $text) }
 
-function Normalize([string[]]$lines, [array]$renames, [bool]$stripRuntime) {
+function Normalize([string[]]$lines, [array]$renames) {
     $out = @()
     foreach ($line in $lines) {
         $text = $line.Trim()
         foreach ($pair in $renames) {
             $text = [regex]::Replace($text, ('(?<![\w\.])' + [regex]::Escape($pair[0]) + '(?![\w])'), $pair[1])
         }
-        if ($stripRuntime) { $text = $text -replace 'runtime\.', '' }
+        $text = $text -replace 'runtime\.', ''
         if ($text -ne '') { $out += $text }
     }
     return $out
 }
 
-$beforeText = Normalize $before $renamePairs $false
+$beforeText = Normalize $before $renamePairs
 # The body is everything between the function's own braces, and the region is everything between the block's
 # -- so neither side gets a brace added: appending the function's closing brace here is what made the first
 # version of this tool report a phantom difference of one line.
-$afterText = Normalize $bodyLines $renamePairs $true
+$afterText = Normalize $bodyLines $renamePairs
 
 if ($beforeText.Count -eq 0) { Write-Host 'check-phase-move: the reference region has no statements -- wrong line range?'; exit 2 }
 
