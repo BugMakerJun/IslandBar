@@ -1822,6 +1822,105 @@ static void RunStartTimerDiagnostic(DWORD autoStartMs, DWORD autoStartCycleMs, D
     }
 }
 
+
+// --- the tray, on its own cadence ---
+//
+// Moved out of the frame loop verbatim (indentation aside). Everything it keeps between ticks is BarState's
+// already; the two numbers it is driven by -- how often to look, and which work bit to report -- come in as
+// parameters rather than being duplicated, the same way the taskbar check does it.
+static void TickTray(island::BarState& bar, island::BarSystems& systems,
+                     unsigned long long& frameWork, unsigned long long refreshBit,
+                     unsigned long long refreshMs) {
+    // --- the tray, on its own cadence --------------------------------------------
+    //
+    // Refreshed here and not at the top of the loop so the count the frame draws, the count the
+    // row's sizing spent room on and the count the window hit-tests are all the same number.
+    if (GetTickCount64() - bar.lastTrayRefresh >= refreshMs) {
+        bar.lastTrayRefresh = GetTickCount64();
+        frameWork |= refreshBit;
+        // The other half of "is the shell holding this one": a registration whose window has
+        // gone belongs to an application that exited without saying so, which the registry
+        // cannot see either (see shell/TrayLearn.h). Swept BEFORE the refresh, so the list the
+        // card is about to draw has already lost it.
+        island::ForgetDeadTrayWindows();
+        const int trayNow = systems.trayIcons.Refresh();
+        if (trayNow != bar.lastTrayCount) {
+            bar.lastTrayCount = trayNow;
+            island::LogAndPrint(L"  tray: %d icon(s) %ls", trayNow,
+                                systems.trayIcons.SourceClause().c_str());
+            std::fflush(stdout);
+        }
+
+        // Whatever the resident module has written since the last tick. No injection, no
+        // broadcast, no waiting: an application that has already been reached keeps reporting
+        // every registration for the rest of the session, and this is where those become
+        // pressable (see shell/TrayLearn.h).
+        //
+        // ... EXCEPT WHILE A LEARNING PASS IS RUNNING, and that exception is a fix, not a
+        // precaution. The tick and a pass drain the SAME ring through the same cursor
+        // (shell/TrayLearn.cpp), and the pass DELETES the report file before it starts: records
+        // this tick consumed had their lines written into a file the pass then removed.
+        // MEASURED 2026-10-16: the first pass after Explorer restarted logged "0 registration(s)
+        // captured" while the ring held 63 registrations, because this tick had drained them a
+        // hundred milliseconds earlier. Nothing was lost -- the cache above is where they land --
+        // but the count a pass prints is the count the next person believes, so the two must not
+        // race over it.
+        const int harvested =
+            bar.learnInFlight->load() ? 0 : island::HarvestLearnedCallbacks();
+        if (harvested > 0) {
+            island::LogAndPrint("  tray learn: %d registration(s) arrived from applications "
+                                "already reached by the module -- %d of %d icon(s) have a "
+                                "callback entry now",
+                                harvested, island::CountCoveredIcons(systems.trayIcons), trayNow);
+            std::fflush(stdout);
+        }
+
+        // ... AND ONE MORE PASS ONLY WHEN THE SHELL ITSELF HAS TO BE TAUGHT AGAIN.
+        //
+        // The module lives in the process that receives tray registrations (the owner of
+        // Shell_TrayWnd), and it is pinned there for the life of that process. So the one event
+        // that costs the tray its learning is Explorer being replaced: a new process has none of
+        // the module, and every registration after that goes unread. This watches for exactly
+        // that, and for nothing else -- an application starting later needs no pass at all, which
+        // is the whole point of reading registrations where they arrive (shell/TrayLearn.h).
+        const DWORD shellNow = island::TrayShellProcessId();
+        if (shellNow != 0 && shellNow != bar.lastShellPid && !bar.learnInFlight->load() &&
+            GetTickCount64() - bar.lastLearnAttempt >= 15000) {
+            bar.lastShellPid = shellNow;
+            bar.lastLearnAttempt = GetTickCount64();
+            // THE NEW SHELL HOLDS NONE OF THEM. Every registration the old one was holding died
+            // with it, so the ledger is emptied before the module is offered again: until it
+            // reports back the card falls back to the registry list (see shell/TrayIcons.h)
+            // instead of drawing registrations no shell is holding any more.
+            island::ResetLiveTray();
+            bar.learnInFlight->store(true);
+            island::LogAndPrint("  tray learn: the shell is a new process (pid %lu) -- offering "
+                                "the module to it again (background)\n",
+                                static_cast<unsigned long>(shellNow));
+            std::fflush(stdout);
+            // The flag is captured INTO A LOCAL NAME: a capture list takes names, not members, and
+            // the worker outlives this scope -- it is detached, which is exactly why the flag is a
+            // shared_ptr on the heap (see app/BarState.h).
+            const std::shared_ptr<std::atomic<bool>> learnFlight = bar.learnInFlight;
+            std::thread([learnFlight]() {
+                island::TrayIcons icons;
+                icons.Refresh();
+                const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+                const std::wstring observer = island::ObserverClause(learned);
+                island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was "
+                                    "%s, %d registration(s) captured, %d new entr(ies) -- %d of "
+                                    "%d icon(s) have a callback entry (in %lld ms) -- %ls",
+                                    learned.appsTried,
+                                    learned.appsAlreadyWatched > 0 ? "already carrying the module"
+                                                                   : "given the module",
+                                    learned.captured, learned.newEntries, learned.covered,
+                                    learned.icons, learned.ms, observer.c_str());
+                learnFlight->store(false);
+            }).detach();
+        }
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -4129,94 +4228,9 @@ float musicWavePhase = 0.0f;
                 // only the island is drawn (see FrameState::fullscreenApp).
                 frame.fullscreenApp = bar.fullscreenAppInFront;
 
-                // --- the tray, on its own cadence --------------------------------------------
-                //
-                // Refreshed here and not at the top of the loop so the count the frame draws, the count the
-                // row's sizing spent room on and the count the window hit-tests are all the same number.
-                if (GetTickCount64() - bar.lastTrayRefresh >= kTrayRefreshMs) {
-                    bar.lastTrayRefresh = GetTickCount64();
-                    frameWork |= kWorkTrayRefresh;
-                    // The other half of "is the shell holding this one": a registration whose window has
-                    // gone belongs to an application that exited without saying so, which the registry
-                    // cannot see either (see shell/TrayLearn.h). Swept BEFORE the refresh, so the list the
-                    // card is about to draw has already lost it.
-                    island::ForgetDeadTrayWindows();
-                    const int trayNow = systems.trayIcons.Refresh();
-                    if (trayNow != bar.lastTrayCount) {
-                        bar.lastTrayCount = trayNow;
-                        island::LogAndPrint(L"  tray: %d icon(s) %ls", trayNow,
-                                            systems.trayIcons.SourceClause().c_str());
-                        std::fflush(stdout);
-                    }
-
-                    // Whatever the resident module has written since the last tick. No injection, no
-                    // broadcast, no waiting: an application that has already been reached keeps reporting
-                    // every registration for the rest of the session, and this is where those become
-                    // pressable (see shell/TrayLearn.h).
-                    //
-                    // ... EXCEPT WHILE A LEARNING PASS IS RUNNING, and that exception is a fix, not a
-                    // precaution. The tick and a pass drain the SAME ring through the same cursor
-                    // (shell/TrayLearn.cpp), and the pass DELETES the report file before it starts: records
-                    // this tick consumed had their lines written into a file the pass then removed.
-                    // MEASURED 2026-10-16: the first pass after Explorer restarted logged "0 registration(s)
-                    // captured" while the ring held 63 registrations, because this tick had drained them a
-                    // hundred milliseconds earlier. Nothing was lost -- the cache above is where they land --
-                    // but the count a pass prints is the count the next person believes, so the two must not
-                    // race over it.
-                    const int harvested =
-                        bar.learnInFlight->load() ? 0 : island::HarvestLearnedCallbacks();
-                    if (harvested > 0) {
-                        island::LogAndPrint("  tray learn: %d registration(s) arrived from applications "
-                                            "already reached by the module -- %d of %d icon(s) have a "
-                                            "callback entry now",
-                                            harvested, island::CountCoveredIcons(systems.trayIcons), trayNow);
-                        std::fflush(stdout);
-                    }
-
-                    // ... AND ONE MORE PASS ONLY WHEN THE SHELL ITSELF HAS TO BE TAUGHT AGAIN.
-                    //
-                    // The module lives in the process that receives tray registrations (the owner of
-                    // Shell_TrayWnd), and it is pinned there for the life of that process. So the one event
-                    // that costs the tray its learning is Explorer being replaced: a new process has none of
-                    // the module, and every registration after that goes unread. This watches for exactly
-                    // that, and for nothing else -- an application starting later needs no pass at all, which
-                    // is the whole point of reading registrations where they arrive (shell/TrayLearn.h).
-                    const DWORD shellNow = island::TrayShellProcessId();
-                    if (shellNow != 0 && shellNow != bar.lastShellPid && !bar.learnInFlight->load() &&
-                        GetTickCount64() - bar.lastLearnAttempt >= 15000) {
-                        bar.lastShellPid = shellNow;
-                        bar.lastLearnAttempt = GetTickCount64();
-                        // THE NEW SHELL HOLDS NONE OF THEM. Every registration the old one was holding died
-                        // with it, so the ledger is emptied before the module is offered again: until it
-                        // reports back the card falls back to the registry list (see shell/TrayIcons.h)
-                        // instead of drawing registrations no shell is holding any more.
-                        island::ResetLiveTray();
-                        bar.learnInFlight->store(true);
-                        island::LogAndPrint("  tray learn: the shell is a new process (pid %lu) -- offering "
-                                            "the module to it again (background)\n",
-                                            static_cast<unsigned long>(shellNow));
-                        std::fflush(stdout);
-                        // The flag is captured INTO A LOCAL NAME: a capture list takes names, not members, and
-                        // the worker outlives this scope -- it is detached, which is exactly why the flag is a
-                        // shared_ptr on the heap (see app/BarState.h).
-                        const std::shared_ptr<std::atomic<bool>> learnFlight = bar.learnInFlight;
-                        std::thread([learnFlight]() {
-                            island::TrayIcons icons;
-                            icons.Refresh();
-                            const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                            const std::wstring observer = island::ObserverClause(learned);
-                            island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was "
-                                                "%s, %d registration(s) captured, %d new entr(ies) -- %d of "
-                                                "%d icon(s) have a callback entry (in %lld ms) -- %ls",
-                                                learned.appsTried,
-                                                learned.appsAlreadyWatched > 0 ? "already carrying the module"
-                                                                               : "given the module",
-                                                learned.captured, learned.newEntries, learned.covered,
-                                                learned.icons, learned.ms, observer.c_str());
-                            learnFlight->store(false);
-                        }).detach();
-                    }
-                }
+                // The tray's own cadence: re-read what the shell is holding, harvest what the module saw, and
+                // start a learning pass only when the shell itself was replaced. The phase lives above RunBar.
+                TickTray(bar, systems, frameWork, kWorkTrayRefresh, kTrayRefreshMs);
                 frame.trayIcons = systems.trayIcons.Count() > 0 ? &systems.trayIcons.At(0) : nullptr;
                 frame.trayIconCount =
                     systems.trayIcons.Count() < island::kMaxTrayIcons ? systems.trayIcons.Count()
