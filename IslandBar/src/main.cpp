@@ -1314,6 +1314,19 @@ struct BarRuntime {
     unsigned long long lastLyricsRevision = 0;
     int lastLyricIndex = -2;        // -2 forces the first evaluation
     float lyricsScrollDip = 0.0f;
+    // --- what the loop last saw, so it can tell a CHANGE from a reading ---
+    //
+    // Every one of these is a comparison against the previous pass, and every one of them used to be a local
+    // in RunBar's scope -- which is exactly the state the phases that read them cannot see (see
+    // PollRedrawReasons and DecideNeedDraw). The clock's second, the last notification shown, the bar.track
+    // revision that was drawn, the second the card's printed time was drawn for, the volume revision and the
+    // pill's meter clock.
+    int lastSecond = -1;
+    long long lastNotificationId = 0;
+    unsigned long long lastDrawnMusicRevision = 0;
+    long long lastShownSecond = -1;
+    unsigned long long lastVolumeRevision = 0;
+    unsigned long long lastMusicMeterMs = 0;
 };
 
 
@@ -3185,6 +3198,110 @@ static void ApplyPressesAndClicks(island::BarState& bar, island::BarSystems& sys
         }
     }
 }
+
+// --- does anything ask for a frame this pass? ---
+//
+// Moved out of the frame loop verbatim (indentation aside), with one named deviation: the four answers the
+// loop's own counters read come back by reference, so the statements that were `bool x = false;` /
+// `const bool x = ...` are assignments to those parameters, and the last statement returns rather than
+// declaring `needDraw` for a reader that is one line below it. Everything the phase has to remember between
+// passes is BarRuntime's.
+//
+// What it answers is the only reason the loop draws at all: the shape is moving (the caller's `animating`),
+// the clock's second or the shown notification or a new bar.track changed (PollRedrawReasons), the lyric
+// asked for it, the card's printed time moved on, a reading behind the strip arrived (volume, weather, the
+// mixed-audio rows), one of the two meters is due, or the Start card's pointer moved. Nothing else can
+// alter a frame.
+static bool DecideNeedDraw(BarRuntime& runtime, island::BarState& bar, island::BarSystems& systems,
+                           bool animating, bool clockChanged, bool notificationChanged,
+                           bool musicChanged, bool lyricsScrolling, bool lyricLineChanged,
+                           bool lyricLineAnimating, bool musicResting, bool volumeAvailable,
+                           bool soundOutputStarted, bool haveDrawn, bool& progressChanged,
+                           bool& weatherChanged, bool& musicMeterDue, bool& startHoverChanged) {
+    // Does the card's printed position need to change?
+    //
+    // The bar and the elapsed time advance locally, so without this they would only be
+    // redrawn when the media session happened to report a new position -- every couple
+    // of seconds, which is the jumping the user saw. One redraw per second is enough
+    // for a text clock and a bar that moves about 1% a second, and it only applies
+    // while the card is actually open.
+    // ... and it is the SAME playhead the pill's line uses (see the top of this iteration), so
+    // the time printed on the card and the words on the island cannot disagree -- including for
+    // a session that sends no timeline, where both are the bar's own count.
+    const long long shownPosition =
+        (systems.window.State() == island::IslandState::Expanded) ? bar.track.ms : 0;
+    // The volume can be changed by the keyboard or the shell flyout, not only here, so
+    // it is a redraw reason too.
+    bool volumeChanged = false;
+    if (volumeAvailable && systems.volume.Revision() != runtime.lastVolumeRevision) {
+        runtime.lastVolumeRevision = systems.volume.Revision();
+        volumeChanged = true;
+    }
+
+    // A new weather reading is the same kind of reason: it arrives on its own schedule, and
+    // nothing else about the frame has to move for the strip to have something new to say.
+    if (systems.weather.Revision() != bar.lastWeatherRevision) {
+        bar.lastWeatherRevision = systems.weather.Revision();
+        weatherChanged = true;
+    }
+
+    progressChanged = (shownPosition / 1000) != runtime.lastShownSecond;
+    runtime.lastShownSecond = shownPosition / 1000;
+
+    // The page changes for three reasons of its own: it was opened or closed, it was scrolled, or
+    // the audio reading behind it moved on. Read BEFORE the frame is built, because the build is
+    // what records the new values.
+    const bool soundPageChanged =
+        bar.soundPageOpen != runtime.lastSoundPageOpen ||
+        (bar.soundPageOpen && systems.window.SoundPageScroll() != runtime.lastSoundScroll) ||
+        (bar.soundPageOpen && soundOutputStarted && systems.soundOutput &&
+         systems.soundOutput->Revision() != runtime.lastSoundRevision);
+
+    // A call's level meter is the one thing on this bar that changes without an event, so it asks for
+    // frames of its own. 20 Hz: twice a second looks broken, and sixty times a second is a meter nobody
+    // can see paid for with a loop that never idles during a call that may last an hour.
+    const bool callMeterDue = (systems.wechat.CallNotificationId() != 0) &&
+                              (GetTickCount64() - bar.lastCallMeterMs >= 50);
+    if (callMeterDue) bar.lastCallMeterMs = GetTickCount64();
+
+    // The pill's background meter is the other thing here that moves without an event, and it
+    // asks for frames at 30 Hz: the rate the reading behind it is refreshed at (see
+    // AudioVolume::Peak), and what a drifting shape needs to look continuous rather than stepped.
+    // Only while music is what the bar is showing: a wave nobody can see is a redraw nobody
+    // asked for.
+    musicMeterDue = musicResting && bar.activePlaying && volumeAvailable &&
+                    (GetTickCount64() - runtime.lastMusicMeterMs >= 33);
+    if (musicMeterDue) runtime.lastMusicMeterMs = GetTickCount64();
+
+    // The Start card's pointer and its scroll, as CHANGE rather than as state: the window answers
+    // where the pointer is, and only a different answer (or a different scroll offset) needs a
+    // frame. See the note in the condition below for what this cost.
+    {
+        const island::IslandWindow::StartHit hit = systems.window.StartHitHovered();
+        const int target = static_cast<int>(hit.target);
+        startHoverChanged = island::StartCardAsksForFrame(target, hit.index, bar.startPickerScroll,
+                                                         bar.lastStartHitTarget,
+                                                         bar.lastStartHitIndex,
+                                                         bar.lastStartScrollDip);
+        bar.lastStartHitTarget = target;
+        bar.lastStartHitIndex = hit.index;
+        bar.lastStartScrollDip = bar.startPickerScroll;
+    }
+
+    return animating || clockChanged || notificationChanged ||
+           musicChanged || lyricsScrolling || lyricLineChanged ||
+           lyricLineAnimating || progressChanged || musicMeterDue ||
+           bar.iconAnimating || bar.rowAppearAnimating || soundPageChanged ||
+           callMeterDue || bar.statusStripAnimating || weatherChanged ||
+           bar.controlWashAnimating ||
+           // ... and the Start card's own pointer and scroll. Neither is a state
+           // this loop watches anywhere else, and without them the highlight and the
+           // list moved only on the next clock tick -- measured, that is ONE redraw
+           // per second while idle, which is what "鼠标移上去卡卡的" was.
+           startHoverChanged || bar.startWashAnimating ||
+           !haveDrawn;
+}
+
 // --- the tray and the panel, told to the frame ---
 //
 // Moved out of the frame loop verbatim (indentation aside): the tray icons and their count, whether the
@@ -3192,6 +3309,37 @@ static void ApplyPressesAndClicks(island::BarState& bar, island::BarSystems& sys
 // card, which is what stopped "鼠标在上面移动卡片会闪"), the tray menu rows and their labels, the three
 // control washes, and the panel open flags. It reads the pass own animating flag, delta and tray-page
 // answer, and carries one timestamp between frames through BarRuntime.
+
+
+// --- the three reasons that come from a revision or a second ---
+//
+// Moved out of the frame loop verbatim (indentation aside), apart from the three answers: what the loop
+// hands back are the reasons the counters and the decision below read, so the three declarations became out
+// parameters and the statements that were `const bool x = ...` are assignments to them. Everything the
+// phase has to REMEMBER between passes is BarRuntime's now -- the clock's last second, the last
+// notification id and the last bar.track revision -- which is exactly what the struct is for, and what the
+// reference's `lastSecond`-style locals were doing in RunBar's scope.
+static void PollRedrawReasons(BarRuntime& runtime, island::BarSystems& systems,
+                              const island::Notification* active, bool& clockChanged,
+                              bool& notificationChanged, bool& musicChanged) {
+    // --- draw ---
+    //
+    // Three reasons to draw: the shape moved, the clock's second changed, or
+    // the notification being shown changed. Nothing else can alter a frame,
+    // so when none holds the loop does no drawing at all.
+    int second = -1;
+    systems.text.CurrentSecond(&second);
+    clockChanged = (second != runtime.lastSecond);
+    runtime.lastSecond = second;
+
+    const long long activeId = active ? active->id : 0;
+    notificationChanged = (activeId != runtime.lastNotificationId);
+    runtime.lastNotificationId = activeId;
+
+    // A bar.track change is a reason to redraw even when nothing moved.
+    musicChanged = (systems.music.Revision() != runtime.lastDrawnMusicRevision);
+    runtime.lastDrawnMusicRevision = systems.music.Revision();
+}
 
 // --- the lyric line the resting strip shows ---
 //
@@ -4749,8 +4897,6 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     //
     // Polled faster than the toast database because a WeChat popup is on screen for a few seconds: two
     // seconds of polling would miss it about as often as not. The scan is a handful of windows.
-// ... and the same clock for the pill's background meter (see musicMeterDue).
-unsigned long long lastMusicMeterMs = 0;
     std::fflush(stdout);
 
     // The two media sources. The phase lives above RunBar; the flags stay here because the frame loop
@@ -4807,8 +4953,6 @@ unsigned long long lastMusicMeterMs = 0;
         QueryPerformanceFrequency(&frequency);
         QueryPerformanceCounter(&previous);
 
-        int  lastSecond = -1;
-        long long lastNotificationId = 0;
         island::IslandState lastLogged = systems.window.State();
         bool haveDrawn = false;
         // The decoded pictures and the wave's colour are BarRuntime's now: they outlive a pass (see
@@ -4824,9 +4968,8 @@ unsigned long long lastMusicMeterMs = 0;
         // tab pauses a video would be worse than no feature at all.
         //
         // The reading itself, and everything that decides when to take a new one, is BarRuntime's now (see
-        // ReadWhatIsPlaying); `lastShownSecond` and `lastVolumeRevision` below are this pass's own.
-        long long lastShownSecond = -1;
-        unsigned long long lastVolumeRevision = volumeAvailable ? systems.volume.Revision() : 0;
+        // ReadWhatIsPlaying), and so is the last seen value of what the drawing watches (see PollRedrawReasons
+        // and DecideNeedDraw, and the note on those fields).
         // ISLANDBAR_MEM_MS=N puts the memory line on a faster cadence, and it is the switch that makes a
         // leak measurable at all. The line carries the handle, GDI, user-object, thread and bitmap counts
         // beside the bytes, so a run that drives one operation in a loop and samples every few seconds
@@ -4859,7 +5002,8 @@ unsigned long long lastMusicMeterMs = 0;
         // assignment each, here, because a default member initialiser cannot see `systems`.
         runtime.lastMusicRevision = systems.music.Revision();
         runtime.lastLyricsRevision = systems.lyrics.Revision();
-        unsigned long long lastDrawnMusicRevision = systems.music.Revision();
+        runtime.lastDrawnMusicRevision = systems.music.Revision();
+        runtime.lastVolumeRevision = volumeAvailable ? systems.volume.Revision() : 0;
         runtime.musicPositionAt = GetTickCount64();
 
         // --- diagnostic hooks, all off unless the environment asks for them ---
@@ -5375,23 +5519,12 @@ unsigned long long lastMusicMeterMs = 0;
             // the animation to its end, which would read as a jump cut.
             const bool animating = systems.window.Tick(dt > 0.1f ? 0.1f : dt);
 
-            // --- draw ---
-            //
-            // Three reasons to draw: the shape moved, the clock's second changed, or
-            // the notification being shown changed. Nothing else can alter a frame,
-            // so when none holds the loop does no drawing at all.
-            int second = -1;
-            systems.text.CurrentSecond(&second);
-            const bool clockChanged = (second != lastSecond);
-            lastSecond = second;
-
-            const long long activeId = active ? active->id : 0;
-            const bool notificationChanged = (activeId != lastNotificationId);
-            lastNotificationId = activeId;
-
-            // A bar.track change is a reason to redraw even when nothing moved.
-            const bool musicChanged = (systems.music.Revision() != lastDrawnMusicRevision);
-            lastDrawnMusicRevision = systems.music.Revision();
+            // The three reasons that come from a revision or a second rather than from a shape. The phase lives
+            // above RunBar; what it last saw is BarRuntime's, and the three answers come back by reference.
+            bool clockChanged = false;
+            bool notificationChanged = false;
+            bool musicChanged = false;
+            PollRedrawReasons(runtime, systems, active, clockChanged, notificationChanged, musicChanged);
 
             // --- the lyric line for the resting strip ---
             //
@@ -5430,91 +5563,20 @@ unsigned long long lastMusicMeterMs = 0;
                                  fallbackLine, lyricsScrolling, lyricLineAnimating, lyricLineChanged,
                                  musicWavePhase);
 
-            // Does the card's printed position need to change?
-            //
-            // The bar and the elapsed time advance locally, so without this they would only be
-            // redrawn when the media session happened to report a new position -- every couple
-            // of seconds, which is the jumping the user saw. One redraw per second is enough
-            // for a text clock and a bar that moves about 1% a second, and it only applies
-            // while the card is actually open.
-            // ... and it is the SAME playhead the pill's line uses (see the top of this iteration), so
-            // the time printed on the card and the words on the island cannot disagree -- including for
-            // a session that sends no timeline, where both are the bar's own count.
-            const long long shownPosition =
-                (systems.window.State() == island::IslandState::Expanded) ? bar.track.ms : 0;
-            // The volume can be changed by the keyboard or the shell flyout, not only here, so
-            // it is a redraw reason too.
-            bool volumeChanged = false;
-            if (volumeAvailable && systems.volume.Revision() != lastVolumeRevision) {
-                lastVolumeRevision = systems.volume.Revision();
-                volumeChanged = true;
-            }
-
-            // A new weather reading is the same kind of reason: it arrives on its own schedule, and
-            // nothing else about the frame has to move for the strip to have something new to say.
+            // Does the card's printed position need to change, did a reading behind the strip move, is one of
+            // the meters due -- and with all of that together, does ANYTHING ask for a frame this pass? The
+            // phase lives above RunBar; the four answers the counters below read come back by reference, and
+            // the ones only the decision itself needs stay inside it (the sound page's and the call meter's).
+            bool progressChanged = false;
             bool weatherChanged = false;
-            if (systems.weather.Revision() != bar.lastWeatherRevision) {
-                bar.lastWeatherRevision = systems.weather.Revision();
-                weatherChanged = true;
-            }
-
-            const bool progressChanged = (shownPosition / 1000) != (lastShownSecond);
-            lastShownSecond = shownPosition / 1000;
-
-            // The page changes for three reasons of its own: it was opened or closed, it was scrolled, or
-            // the audio reading behind it moved on. Read BEFORE the frame is built, because the build is
-            // what records the new values.
-            const bool soundPageChanged =
-                bar.soundPageOpen != runtime.lastSoundPageOpen ||
-                (bar.soundPageOpen && systems.window.SoundPageScroll() != runtime.lastSoundScroll) ||
-                (bar.soundPageOpen && soundOutputStarted && systems.soundOutput &&
-                 systems.soundOutput->Revision() != runtime.lastSoundRevision);
-
-            // A call's level meter is the one thing on this bar that changes without an event, so it asks for
-            // frames of its own. 20 Hz: twice a second looks broken, and sixty times a second is a meter nobody
-            // can see paid for with a loop that never idles during a call that may last an hour.
-            const bool callMeterDue = (systems.wechat.CallNotificationId() != 0) &&
-                                      (GetTickCount64() - bar.lastCallMeterMs >= 50);
-            if (callMeterDue) bar.lastCallMeterMs = GetTickCount64();
-
-            // The pill's background meter is the other thing here that moves without an event, and it
-            // asks for frames at 30 Hz: the rate the reading behind it is refreshed at (see
-            // AudioVolume::Peak), and what a drifting shape needs to look continuous rather than stepped.
-            // Only while music is what the bar is showing: a wave nobody can see is a redraw nobody
-            // asked for.
-            const bool musicMeterDue =
-                musicResting && bar.activePlaying &&
-                volumeAvailable && (GetTickCount64() - lastMusicMeterMs >= 33);
-            if (musicMeterDue) lastMusicMeterMs = GetTickCount64();
-
-            // The Start card's pointer and its scroll, as CHANGE rather than as state: the window answers
-            // where the pointer is, and only a different answer (or a different scroll offset) needs a
-            // frame. See the note in the condition below for what this cost.
+            bool musicMeterDue = false;
             bool startHoverChanged = false;
-            {
-                const island::IslandWindow::StartHit hit = systems.window.StartHitHovered();
-                const int target = static_cast<int>(hit.target);
-                startHoverChanged = island::StartCardAsksForFrame(target, hit.index, bar.startPickerScroll,
-                                                                 bar.lastStartHitTarget,
-                                                                 bar.lastStartHitIndex,
-                                                                 bar.lastStartScrollDip);
-                bar.lastStartHitTarget = target;
-                bar.lastStartHitIndex = hit.index;
-                bar.lastStartScrollDip = bar.startPickerScroll;
-            }
-
-            const bool needDraw = animating || clockChanged || notificationChanged ||
-                                  musicChanged || lyricsScrolling || lyricLineChanged ||
-                                  lyricLineAnimating || progressChanged || musicMeterDue ||
-                                  bar.iconAnimating || bar.rowAppearAnimating || soundPageChanged ||
-                                  callMeterDue || bar.statusStripAnimating || weatherChanged ||
-                                  bar.controlWashAnimating ||
-                                  // ... and the Start card's own pointer and scroll. Neither is a state
-                                  // this loop watches anywhere else, and without them the highlight and the
-                                  // list moved only on the next clock tick -- measured, that is ONE redraw
-                                  // per second while idle, which is what "鼠标移上去卡卡的" was.
-                                  startHoverChanged || bar.startWashAnimating ||
-                                  !haveDrawn;
+            const bool needDraw = DecideNeedDraw(runtime, bar, systems, animating, clockChanged,
+                                                 notificationChanged, musicChanged, lyricsScrolling,
+                                                 lyricLineChanged, lyricLineAnimating, musicResting,
+                                                 volumeAvailable, soundOutputStarted, haveDrawn,
+                                                 progressChanged, weatherChanged, musicMeterDue,
+                                                 startHoverChanged);
             if (needDraw) {
                 // Which condition forced this redraw, counted per report interval.
                 //
