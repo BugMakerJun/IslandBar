@@ -1310,6 +1310,118 @@ static void ReportIntervalAndThrottle(BarRuntime& runtime, island::BarSystems& s
 }
 
 
+
+// --- the volume and brightness sliders: follow the pointer, and let go ---
+//
+// Moved out of the frame loop verbatim (indentation aside). It follows a drag rather than handling a
+// click, because the movement is not an event: the press arrives once and the handle has to keep up for as
+// long as the button is held. It needs BarState, the window services, the monitor (a brightness write goes
+// to it) and whether the volume reader came up at all.
+static void FollowSliderDrags(island::BarState& bar, island::BarSystems& systems,
+                              const island::MonitorGeometry& monitor, bool volumeAvailable,
+                              bool soundOutputStarted) {
+    // The volume slider's DRAG is followed here rather than in the click handler, because the
+    // movement is not an event: a click arrives once, and the handle has to keep up with the
+    // pointer for as long as the button is held.
+    //
+    // The value is only pushed when the FRACTION changes. Every frame at 60 Hz would be sixty COM
+    // writes a second to the audio endpoint, each of which reopens the device on the worker -- the
+    // handle would still follow the pointer, but the level would arrive in a lagging stream behind
+    // it, which is half of what "不顺滑" meant.
+    if (bar.panelSliderDrag) {
+        POINT dragPoint = {};
+        GetCursorPos(&dragPoint);
+        // From the pointer's x alone, not from the hit test: see PanelSliderFractionForDrag.
+        float fraction = 0.0f;
+        if (bar.panelSliderDragRow == 1) {
+            // The brightness row. DDC/CI writes go over the video cable, so they are pushed on a
+            // coarser step than the volume's 0.4% and never more often than the echo deadline
+            // allows: a write per frame would queue up in the monitor and arrive behind the
+            // handle. The value shown follows the pointer either way (see the frame fill).
+            if (bar.brightnessAvailable &&
+                systems.window.PanelSliderFractionForDrag(1, dragPoint, &fraction)) {
+                const int wanted = static_cast<int>(fraction * 100.0f + 0.5f);
+                if (wanted != bar.lastAppliedBrightnessPercent &&
+                    (GetTickCount64() >= bar.brightnessWriteNotBefore ||
+                     std::abs(wanted - bar.lastAppliedBrightnessPercent) >= 5)) {
+                    int landed = wanted;
+                    const bool ok = island::SetBrightnessPercent(monitor.monitor, wanted,
+                                                                &landed);
+                    bar.lastAppliedBrightnessPercent = landed;
+                    bar.brightnessWriteNotBefore = GetTickCount64() + 60;
+                    if (std::abs(landed - bar.lastLoggedBrightnessPercent) >= 5 || !ok) {
+                        bar.lastLoggedBrightnessPercent = landed;
+                        island::LogAndPrint(
+                            "  brightness: dragging -> %d%% (asked %d, %ls)\n", landed,
+                            wanted, ok ? "landed" : "the monitor did not take it");
+                        std::fflush(stdout);
+                    }
+                }
+                bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
+            }
+        } else if (volumeAvailable &&
+                   systems.window.PanelSliderFractionForDrag(0, dragPoint, &fraction)) {
+            if (std::fabs(fraction - bar.lastAppliedVolumeFraction) > 0.004f) {
+                bar.lastAppliedVolumeFraction = fraction;
+                systems.volume.SetLevel(fraction);
+                // Reported per real step rather than per frame, so "the handle follows the pointer"
+                // and "it only moved twice" can be told apart in the log.
+                if (std::fabs(fraction - bar.lastLoggedVolumeFraction) >= 0.03f) {
+                    bar.lastLoggedVolumeFraction = fraction;
+                    island::LogAndPrint("  volume: dragging -> %.0f%%\n",
+                                        fraction * 100.0f);
+                    std::fflush(stdout);
+                }
+            }
+            bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
+        }
+        if (!systems.window.LeftButtonDown()) {
+            bar.panelSliderDrag = false;
+            if (bar.panelSliderDragRow == 1) {
+                int finalLevel = 0;
+                if (island::ReadBrightnessPercent(monitor.monitor, &finalLevel)) {
+                    island::LogAndPrint("  brightness: drag ended at %d%%\n", finalLevel);
+                } else {
+                    island::LogAndPrint("  brightness: drag ended (the monitor did not answer)\n");
+                }
+            } else {
+                float finalLevel = 0.0f;
+                if (systems.volume.Get(&finalLevel)) {
+                    island::LogAndPrint("  volume: drag ended at %.0f%%\n",
+                                        finalLevel * 100.0f);
+                } else {
+                    island::LogAndPrint("  volume: drag ended\n");
+                }
+            }
+            bar.panelSliderDragRow = 0;
+            std::fflush(stdout);
+        }
+    }
+
+    // The mixer's sliders are dragged the same way the panel's volume slider is, and for the same
+    // reason: a press sets the level, and HOLDING it has to keep the handle under the pointer.
+    if (bar.mixerSliderDragRow >= 0) {
+        POINT dragPoint = {};
+        GetCursorPos(&dragPoint);
+        float fraction = 0.0f;
+        if (systems.window.MixerSliderFractionForDrag(bar.mixerSliderDragRow, dragPoint, &fraction) &&
+            std::fabs(fraction - bar.lastAppliedMixerFraction) > 0.004f) {
+            bar.lastAppliedMixerFraction = fraction;
+            if (bar.mixerSliderDragRow == 0) {
+                if (volumeAvailable) systems.volume.SetLevel(fraction);
+            } else if (soundOutputStarted && systems.soundOutput) {
+                systems.soundOutput->SetSessionVolume(bar.mixerSliderDragPid, fraction);
+            }
+        }
+        if (!systems.window.LeftButtonDown()) {
+            bar.mixerSliderDragRow = -1;
+            bar.mixerSliderDragPid = 0;
+            island::LogAndPrint("  mixer: drag ended\n");
+            std::fflush(stdout);
+    }
+        }
+}
+
 // --- the tray page own menu, opened for one cell ---
 //
 // Moved out of the frame loop verbatim (indentation aside): it used to be the body of a lambda that three
@@ -3026,106 +3138,9 @@ float musicWavePhase = 0.0f;
             // A while loop, not an if: clicks are counted now, and two can arrive inside one
             // frame. With a flag the second was silently dropped.
             //
-            // The volume slider's DRAG is followed here rather than in the click handler, because the
-            // movement is not an event: a click arrives once, and the handle has to keep up with the
-            // pointer for as long as the button is held.
-            //
-            // The value is only pushed when the FRACTION changes. Every frame at 60 Hz would be sixty COM
-            // writes a second to the audio endpoint, each of which reopens the device on the worker -- the
-            // handle would still follow the pointer, but the level would arrive in a lagging stream behind
-            // it, which is half of what "不顺滑" meant.
-            if (bar.panelSliderDrag) {
-                POINT dragPoint = {};
-                GetCursorPos(&dragPoint);
-                // From the pointer's x alone, not from the hit test: see PanelSliderFractionForDrag.
-                float fraction = 0.0f;
-                if (bar.panelSliderDragRow == 1) {
-                    // The brightness row. DDC/CI writes go over the video cable, so they are pushed on a
-                    // coarser step than the volume's 0.4% and never more often than the echo deadline
-                    // allows: a write per frame would queue up in the monitor and arrive behind the
-                    // handle. The value shown follows the pointer either way (see the frame fill).
-                    if (bar.brightnessAvailable &&
-                        systems.window.PanelSliderFractionForDrag(1, dragPoint, &fraction)) {
-                        const int wanted = static_cast<int>(fraction * 100.0f + 0.5f);
-                        if (wanted != bar.lastAppliedBrightnessPercent &&
-                            (GetTickCount64() >= bar.brightnessWriteNotBefore ||
-                             std::abs(wanted - bar.lastAppliedBrightnessPercent) >= 5)) {
-                            int landed = wanted;
-                            const bool ok = island::SetBrightnessPercent(monitor.monitor, wanted,
-                                                                        &landed);
-                            bar.lastAppliedBrightnessPercent = landed;
-                            bar.brightnessWriteNotBefore = GetTickCount64() + 60;
-                            if (std::abs(landed - bar.lastLoggedBrightnessPercent) >= 5 || !ok) {
-                                bar.lastLoggedBrightnessPercent = landed;
-                                island::LogAndPrint(
-                                    "  brightness: dragging -> %d%% (asked %d, %ls)\n", landed,
-                                    wanted, ok ? "landed" : "the monitor did not take it");
-                                std::fflush(stdout);
-                            }
-                        }
-                        bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
-                    }
-                } else if (volumeAvailable &&
-                           systems.window.PanelSliderFractionForDrag(0, dragPoint, &fraction)) {
-                    if (std::fabs(fraction - bar.lastAppliedVolumeFraction) > 0.004f) {
-                        bar.lastAppliedVolumeFraction = fraction;
-                        systems.volume.SetLevel(fraction);
-                        // Reported per real step rather than per frame, so "the handle follows the pointer"
-                        // and "it only moved twice" can be told apart in the log.
-                        if (std::fabs(fraction - bar.lastLoggedVolumeFraction) >= 0.03f) {
-                            bar.lastLoggedVolumeFraction = fraction;
-                            island::LogAndPrint("  volume: dragging -> %.0f%%\n",
-                                                fraction * 100.0f);
-                            std::fflush(stdout);
-                        }
-                    }
-                    bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
-                }
-                if (!systems.window.LeftButtonDown()) {
-                    bar.panelSliderDrag = false;
-                    if (bar.panelSliderDragRow == 1) {
-                        int finalLevel = 0;
-                        if (island::ReadBrightnessPercent(monitor.monitor, &finalLevel)) {
-                            island::LogAndPrint("  brightness: drag ended at %d%%\n", finalLevel);
-                        } else {
-                            island::LogAndPrint("  brightness: drag ended (the monitor did not answer)\n");
-                        }
-                    } else {
-                        float finalLevel = 0.0f;
-                        if (systems.volume.Get(&finalLevel)) {
-                            island::LogAndPrint("  volume: drag ended at %.0f%%\n",
-                                                finalLevel * 100.0f);
-                        } else {
-                            island::LogAndPrint("  volume: drag ended\n");
-                        }
-                    }
-                    bar.panelSliderDragRow = 0;
-                    std::fflush(stdout);
-                }
-            }
-
-            // The mixer's sliders are dragged the same way the panel's volume slider is, and for the same
-            // reason: a press sets the level, and HOLDING it has to keep the handle under the pointer.
-            if (bar.mixerSliderDragRow >= 0) {
-                POINT dragPoint = {};
-                GetCursorPos(&dragPoint);
-                float fraction = 0.0f;
-                if (systems.window.MixerSliderFractionForDrag(bar.mixerSliderDragRow, dragPoint, &fraction) &&
-                    std::fabs(fraction - bar.lastAppliedMixerFraction) > 0.004f) {
-                    bar.lastAppliedMixerFraction = fraction;
-                    if (bar.mixerSliderDragRow == 0) {
-                        if (volumeAvailable) systems.volume.SetLevel(fraction);
-                    } else if (soundOutputStarted && systems.soundOutput) {
-                        systems.soundOutput->SetSessionVolume(bar.mixerSliderDragPid, fraction);
-                    }
-                }
-                if (!systems.window.LeftButtonDown()) {
-                    bar.mixerSliderDragRow = -1;
-                    bar.mixerSliderDragPid = 0;
-                    island::LogAndPrint("  mixer: drag ended\n");
-                    std::fflush(stdout);
-                }
-            }
+            // The sliders follow the pointer while the button is held, and let go with it. The phase lives
+            // above RunBar; its place in the sequence is unchanged.
+            FollowSliderDrags(bar, systems, monitor, volumeAvailable, soundOutputStarted);
 
             // The wheel, for the two lists that scroll (the sound page and the Start picker). The phase
             // lives above RunBar; it touches nothing but BarState and the window.
