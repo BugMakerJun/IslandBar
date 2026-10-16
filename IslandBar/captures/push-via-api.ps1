@@ -153,10 +153,29 @@ foreach ($commit in $commits) {
     $committer = Get-Identity $committerLine
 
     # --- the blobs -----------------------------------------------------
-    $changed = @(Invoke-Git diff --name-only $parent $commit)
+    # --no-renames, and it is not a detail: with rename detection on (the default), a rename comes back as
+    # ONE line -- the new path -- and the old path is never named, so the parent's copy of it was never
+    # dropped from the rebuilt tree. Measured on 35aea99, which renamed a review file: reviews/ came back
+    # from the API with a different hash, and the file that stayed behind was the raw transcript.
+    $changed = @(Invoke-Git diff --no-renames --name-only $parent $commit)
     $blobs = @{}
+    $deleted = @{}
     foreach ($path in $changed) {
-        $sha = @(Invoke-Git rev-parse "$($commit):$path")[0]
+        # A DELETED path has no blob in this commit, and `diff --name-only` names it all the same. Asking
+        # for "$commit:$path" then fails outright ("path 'docs/TRAY-RESEARCH-RETIRED.md' does not exist in
+        # <commit>") -- which is how the commit that deleted that file stopped the push. The absence IS the
+        # change: nothing to upload, and the entry is simply missing from the rebuilt tree below.
+        #
+        # `--quiet` with stderr dropped for the same reason the tree probe below does it: a native
+        # command's stderr becomes a TERMINATING error under this script's $ErrorActionPreference = 'Stop'
+        # before the exit code is ever read.
+        $probe = @(& git -C $Root rev-parse --verify --quiet "$($commit):$path" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $probe) {
+            $deleted[$path] = $true
+            Write-Host ("[api-push]   deleted {0}" -f $path)
+            continue
+        }
+        $sha = @($probe)[0]
         $bytes = Get-BlobBytes $sha
         $body = @{ content = [Convert]::ToBase64String($bytes); encoding = 'base64' }
         $uploaded = (Invoke-Api -Method POST -Path "repos/$Owner/$Repo/git/blobs" -Body $body | ConvertFrom-Json).sha
@@ -186,7 +205,21 @@ foreach ($commit in $commits) {
     )
     Write-Host "[api-push]   directories, deepest first: $(($ordered | ForEach-Object { if ($_ -eq '') { '<root>' } else { $_ } }) -join ' ')"
     $newTrees = @{}
+    $goneDirs = @{}
     foreach ($dir in $ordered) {
+        # A DELETED DIRECTORY is the file case one level up: a commit that removes "docs/" has no tree to
+        # build for it, and it has to be simply missing from its parent's rebuilt tree. Asking for
+        # "$commit:docs" is what told us so ("exists on disk, but not in <commit>") -- the second stop.
+        $exists = $null
+        if ($dir -ne '') {
+            $probe = @(& git -C $Root rev-parse --verify --quiet "$($commit):$dir" 2>$null)
+            if ($LASTEXITCODE -ne 0 -or -not $probe) {
+                $goneDirs[$dir] = $true
+                Write-Host ("[api-push]   directory {0} is gone in this commit" -f $dir)
+                continue
+            }
+            $exists = @($probe)[0]
+        }
         $prefix = if ($dir -eq '') { '' } else { "$dir/" }
         $entries = New-Object System.Collections.ArrayList
 
@@ -195,6 +228,13 @@ foreach ($commit in $commits) {
             if (-not $path.StartsWith($prefix)) { continue }
             $rest = $path.Substring($prefix.Length)
             if ($rest.Contains('/')) { continue }
+            # A DELETED path is not "no entry": base_tree ADDS what it is given and can only be told to drop
+            # something by naming it with a null sha. Leaving the entry out put the parent's copy straight
+            # back into the rebuilt tree, and the hash assertion caught it.
+            if ($deleted.ContainsKey($path)) {
+                [void]$entries.Add(@{ path = $rest; mode = '100644'; type = 'blob'; sha = $null })
+                continue
+            }
             [void]$entries.Add(@{ path = $rest; mode = '100644'; type = 'blob'; sha = $blobs[$path] })
         }
         # ... and the subdirectories that had to be rewritten.
@@ -202,6 +242,10 @@ foreach ($commit in $commits) {
             if ($sub -eq '' -or -not $sub.StartsWith($prefix)) { continue }
             $rest = $sub.Substring($prefix.Length)
             if ($rest -eq '' -or $rest.Contains('/')) { continue }
+            if ($goneDirs.ContainsKey($sub)) {                # deleted in this commit: drop the entry
+                [void]$entries.Add(@{ path = $rest; mode = '040000'; type = 'tree'; sha = $null })
+                continue
+            }
             if (-not $newTrees[$sub]) { throw "subtree '$sub' was never built; the ordering is wrong" }
             [void]$entries.Add(@{ path = $rest; mode = '040000'; type = 'tree'; sha = $newTrees[$sub] })
         }
@@ -222,7 +266,7 @@ foreach ($commit in $commits) {
             if ($LASTEXITCODE -eq 0 -and $probe) { $base = @($probe)[0] }
         }
         $expected = if ($dir -eq '') { @(Invoke-Git rev-parse "$($commit)^{tree}")[0] }
-                    else { @(Invoke-Git rev-parse "$($commit):$dir")[0] }
+                    else { $exists }
         $body = @{ tree = $entries }
         if ($base) { $body.base_tree = $base }
         $made = (Invoke-Api -Method POST -Path "repos/$Owner/$Repo/git/trees" -Body $body |
