@@ -72,6 +72,9 @@ $Dropped = @(
     'wechat: window appeared', 'taskbar icon: hwnd',
     # Live data, not behaviour: the weather reading changes between two runs a minute apart.
     '^weather: [\d\.-]+ C, code',
+    # The learning pass only runs when something HAS to be re-learned, so its completion line is absent in
+    # some runs and present in others. The line that says a pass was started is the lifecycle one, and stays.
+    '^tray learn: the shell \(',
     # The row's own contents: how many application icons it has is the user's window count, and the layout
     # itself is asserted by --self-test, which is where geometry belongs.
     '^row: '
@@ -79,7 +82,11 @@ $Dropped = @(
 
 # Lines written by a worker thread: content matters, order does not (see the note above).
 $Unordered = @(
-    'tray learn:', 'weather:', 'sound page:', 'system status:', 'toasts:', 'volume:'
+    'tray learn:', 'weather:', 'sound page:', 'system status:', 'toasts:', 'volume:',
+    # The memory line runs on its own five-minute clock and the interval report on its own four-second one, so
+    # which of them a pass emits first depends on where the two clocks happen to land. MEASURED: the same run
+    # shape put mem[after-event] before the interval lines once and after them the next time.
+    'mem\['
 )
 
 function Convert-Line([string]$line) {
@@ -95,6 +102,9 @@ function Convert-Line([string]$line) {
     $text = $text -replace '\s*\(not shown:[^)]*\)', ''
     $text = $text -replace '\d+\s+entr\(ies\)', 'entr(ies)'
     $text = $text -replace '\d+\s+process\(es\) seen', 'process(es) seen'
+    # The taskbar line's tail is the user's window list -- how many buttons, how many cloaked, and so on. The
+    # STATE is the bar's, and that is the part worth comparing.
+    $text = $text -replace '^(taskbar: state=\S+),.*$', '$1'
     foreach ($pattern in $Dropped) { if ($text -match $pattern) { return '' } }
     foreach ($pattern in $Strict) {
         if ($text -match $pattern) { return 'STRICT ' + ($text -replace '\s+', ' ') }

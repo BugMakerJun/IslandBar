@@ -1309,6 +1309,98 @@ static void ReportIntervalAndThrottle(BarRuntime& runtime, island::BarSystems& s
     }
 }
 
+
+// --- the tray page own menu, opened for one cell ---
+//
+// Moved out of the frame loop verbatim (indentation aside): it used to be the body of a lambda that three
+// places call. The lambda stays, one line long, so those call sites do not change.
+static void OpenBarTrayMenu(island::BarState& bar, island::BarSystems& systems, int cell) {
+    bar.trayMenuCell = cell;
+    island::TrayMenuFacts facts;
+    island::TrayMenuFactsFor(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, &facts);
+    bar.trayMenuActionCount = island::TrayMenuEntriesFor(facts, bar.trayMenuActions,
+                                                    island::kMaxTrayMenuEntries);
+    // Captured with the menu, because the 应用菜单 row's label depends on it and the verdict cannot
+    // change while that menu is on screen (a press is what changes it).
+    bar.trayMenuOwnMenuUnreachable = facts.ownMenuUnreachable;
+    systems.window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
+    bar.trayQuitArmed = false;   // a new menu starts unarmed
+    wchar_t flatMenuName[128] = {};
+    island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d callback=%d)\n",
+                        island::FlatName(systems.trayIcons.At(bar.trayMenuCell).name, flatMenuName, 128),
+                        bar.trayMenuActionCount, facts.hasWindow ? 1 : 0,
+                        facts.hasExePath ? 1 : 0, facts.hasCallback ? 1 : 0);
+    std::fflush(stdout);
+}
+
+
+// --- a right click: the bar own tray menu, and unpinning a pinned tile ---
+//
+// Moved out of the frame loop verbatim (indentation aside). It needs BarState and the window services and
+// nothing else, which is why it takes exactly those. The worker request is read here too, because it is
+// answered on the thread that owns the window -- see island::trayMenuRequestCell.
+static void ApplyRightClicks(island::BarState& bar, island::BarSystems& systems) {
+    // --- a RIGHT click, which so far means one thing -------------------------------------------
+    //
+    // A cell of the tray page: right-clicking one of the shell's tray icons opens the
+    // APPLICATION'S OWN MENU -- the menu with 退出 in it -- and there is no other way to reach it
+    // from here. UI Automation publishes no right-click pattern, so the press is a posted right
+    // button message to the shell's own panel (see TrayPress). The request is the same one the left
+    // click builds; only the message differs, which is why both go through island::StartTrayPress.
+    //
+    // Everywhere else on the bar a right click is still nothing: a control that quietly did
+    // something different on the other button would be worse than one that does nothing.
+    //
+    // ... AND A LEFT PRESS THAT HAD NOTHING TO SEND OPENS THE SAME MENU, which is why the opening is
+    // one piece of code and not two: since the real click was deleted there is no fallback left for a
+    // cell whose callback has never been learned, and the honest answer is this menu. What it holds
+    // depends on the cell: the two rows that ARE the icon's own action (打开, 应用自己的菜单…) need a
+    // learned callback and are left out without one, because a row that does nothing is worse than a
+    // row that is not there (requested by the user on 2026-10-15, see TrayMenuEntriesFor).
+    const auto openBarTrayMenu = [&](int cell) { OpenBarTrayMenu(bar, systems, cell); };
+    // The worker's request, answered on the thread that owns the window (see island::trayMenuRequestCell).
+    const int menuRequestCell = island::trayMenuRequestCell.exchange(-1);
+    if (menuRequestCell >= 0 && menuRequestCell < systems.trayIcons.Count()) {
+        island::LogAndPrint(L"  tray menu: nothing is known about cell %d yet, so the press opens "
+                            L"this bar's own menu instead\n", menuRequestCell);
+        openBarTrayMenu(menuRequestCell);
+    }
+    while (systems.window.TakeRightClick()) {
+        POINT rightCursor = {};
+        GetCursorPos(&rightCursor);
+        const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
+        if (bar.startPageOpen && bar.systemPanelOpen &&
+            startHit.target == island::IslandWindow::StartHitTarget::Pin) {
+            // A pinned tile, right-clicked: that is how it comes off again. Unpinning from the
+            // CARD rather than from a settings file is the whole point of the card being the
+            // user's own -- he said the upper area should be his to fill.
+            if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
+                const island::StartApp& app = systems.startApps.PinAt(startHit.index);
+                island::LogAndPrint("  start: unpinning '%ls'\n", app.name);
+                systems.startApps.Unpin(startHit.index);
+                bar.startPowerConfirm = -1;
+            }
+        } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
+                   systems.window.TrayCellHovered() >= 0 &&
+                   systems.window.TrayCellHovered() < systems.trayIcons.Count()) {
+            // THE BAR'S OWN MENU, not the shell's (HANDOFF 8.80).
+            //
+            // Right-clicking a cell used to ask the shell for the application's menu: show the
+            // taskbar invisibly, open the overflow panel, move the pointer onto the icon, click, put
+            // the pointer back -- three to six hundred milliseconds, the shell's panel briefly on
+            // screen (until 8.79), and the menu at the far corner of the screen rather than under
+            // the pointer that asked for it. This menu is instant, lands where the pointer is, and
+            // is drawn in the card the user is already looking at; the application's own menu is the
+            // LAST entry of it, for the things only the application knows ("退出微信").
+            openBarTrayMenu(systems.window.TrayCellHovered());
+        } else {
+            island::LogAndPrint("  right click: no tray cell under the pointer (%d,%d)\n",
+                                rightCursor.x, rightCursor.y);
+            std::fflush(stdout);
+        }
+    }
+}
+
 // --- who owns the card for this frame, and which message it is showing ---
 //
 // Moved out of the frame loop verbatim (indentation aside). The two things it carries between frames live in
@@ -3866,82 +3958,9 @@ float musicWavePhase = 0.0f;
                 }
             }
 
-            // --- a RIGHT click, which so far means one thing -------------------------------------------
-            //
-            // A cell of the tray page: right-clicking one of the shell's tray icons opens the
-            // APPLICATION'S OWN MENU -- the menu with 退出 in it -- and there is no other way to reach it
-            // from here. UI Automation publishes no right-click pattern, so the press is a posted right
-            // button message to the shell's own panel (see TrayPress). The request is the same one the left
-            // click builds; only the message differs, which is why both go through island::StartTrayPress.
-            //
-            // Everywhere else on the bar a right click is still nothing: a control that quietly did
-            // something different on the other button would be worse than one that does nothing.
-            //
-            // ... AND A LEFT PRESS THAT HAD NOTHING TO SEND OPENS THE SAME MENU, which is why the opening is
-            // one piece of code and not two: since the real click was deleted there is no fallback left for a
-            // cell whose callback has never been learned, and the honest answer is this menu. What it holds
-            // depends on the cell: the two rows that ARE the icon's own action (打开, 应用自己的菜单…) need a
-            // learned callback and are left out without one, because a row that does nothing is worse than a
-            // row that is not there (requested by the user on 2026-10-15, see TrayMenuEntriesFor).
-            const auto openBarTrayMenu = [&](int cell) {
-                bar.trayMenuCell = cell;
-                island::TrayMenuFacts facts;
-                island::TrayMenuFactsFor(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, &facts);
-                bar.trayMenuActionCount = island::TrayMenuEntriesFor(facts, bar.trayMenuActions,
-                                                                island::kMaxTrayMenuEntries);
-                // Captured with the menu, because the 应用菜单 row's label depends on it and the verdict cannot
-                // change while that menu is on screen (a press is what changes it).
-                bar.trayMenuOwnMenuUnreachable = facts.ownMenuUnreachable;
-                systems.window.OpenTrayMenu(bar.trayMenuCell, bar.trayMenuActionCount);
-                bar.trayQuitArmed = false;   // a new menu starts unarmed
-                wchar_t flatMenuName[128] = {};
-                island::LogAndPrint(L"  tray menu: opened for '%ls' (%d entries: window=%d path=%d callback=%d)\n",
-                                    island::FlatName(systems.trayIcons.At(bar.trayMenuCell).name, flatMenuName, 128),
-                                    bar.trayMenuActionCount, facts.hasWindow ? 1 : 0,
-                                    facts.hasExePath ? 1 : 0, facts.hasCallback ? 1 : 0);
-                std::fflush(stdout);
-            };
-            // The worker's request, answered on the thread that owns the window (see island::trayMenuRequestCell).
-            const int menuRequestCell = island::trayMenuRequestCell.exchange(-1);
-            if (menuRequestCell >= 0 && menuRequestCell < systems.trayIcons.Count()) {
-                island::LogAndPrint(L"  tray menu: nothing is known about cell %d yet, so the press opens "
-                                    L"this bar's own menu instead\n", menuRequestCell);
-                openBarTrayMenu(menuRequestCell);
-            }
-            while (systems.window.TakeRightClick()) {
-                POINT rightCursor = {};
-                GetCursorPos(&rightCursor);
-                const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
-                if (bar.startPageOpen && bar.systemPanelOpen &&
-                    startHit.target == island::IslandWindow::StartHitTarget::Pin) {
-                    // A pinned tile, right-clicked: that is how it comes off again. Unpinning from the
-                    // CARD rather than from a settings file is the whole point of the card being the
-                    // user's own -- he said the upper area should be his to fill.
-                    if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
-                        const island::StartApp& app = systems.startApps.PinAt(startHit.index);
-                        island::LogAndPrint("  start: unpinning '%ls'\n", app.name);
-                        systems.startApps.Unpin(startHit.index);
-                        bar.startPowerConfirm = -1;
-                    }
-                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
-                           systems.window.TrayCellHovered() >= 0 &&
-                           systems.window.TrayCellHovered() < systems.trayIcons.Count()) {
-                    // THE BAR'S OWN MENU, not the shell's (HANDOFF 8.80).
-                    //
-                    // Right-clicking a cell used to ask the shell for the application's menu: show the
-                    // taskbar invisibly, open the overflow panel, move the pointer onto the icon, click, put
-                    // the pointer back -- three to six hundred milliseconds, the shell's panel briefly on
-                    // screen (until 8.79), and the menu at the far corner of the screen rather than under
-                    // the pointer that asked for it. This menu is instant, lands where the pointer is, and
-                    // is drawn in the card the user is already looking at; the application's own menu is the
-                    // LAST entry of it, for the things only the application knows ("退出微信").
-                    openBarTrayMenu(systems.window.TrayCellHovered());
-                } else {
-                    island::LogAndPrint("  right click: no tray cell under the pointer (%d,%d)\n",
-                                        rightCursor.x, rightCursor.y);
-                    std::fflush(stdout);
-                }
-            }
+            // The right-click handling: the bar own tray menu, and unpinning from the Start card. The
+            // phase lives above RunBar.
+            ApplyRightClicks(bar, systems);
 
             // Held open for a photograph, if the diagnostic asked for it. Re-asserted AFTER the clicks above,
             // which is the only place either flag is cleared -- so the next frame draws the same level

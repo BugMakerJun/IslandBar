@@ -33,11 +33,10 @@ SHAPE  tray: <N> icon(s) -- the shell has not been asked for its registrations y
 SHAPE  start: <N> application(s) in shell:AppsFolder
 SHAPE  brightness: DDC/CI on 'Generic PnP Monitor', range <N>..<N>, now <N>
 SHAPE  brightness: the panel gets a brightness row (now <N>%)
-SHAPE  taskbar: state=collapsed, <N> buttons from <N> windows listed (<N> listed of <N>: <N> invisible, <N> cloaked, <N> untitled, <N> owned, <N> tool, <N> shell, <N> self)
+SHAPE  taskbar: state=collapsed
 SHAPE  glass: grain built, <N>x<N>, mean <N> (deterministic seed <H>)
 SHAPE  strip says: date (state collapsed, resting collapsed, cardUp <N>, intoPill <N>, box <N>..<N>)
 SHAPE  start button: island x [<N>, <N>] -> button x [<N>, <N>] y [<N>, <N>], fill.a <N>.<N>, opacity <N>.<N>, context <N>
-SHAPE  mem[start]: private=<N>.<N>MB ws=<N>.<N>MB vram=<N>.<N>/<N>.<N>MB handles=<N> threads=<N> gdi=<N> user=<N> cover=<N>B lyrics=<N> tray=<N> winicons=<N> bitmaps=<N> notify=<N> tasks=<N>
 SHAPE  interval [collapsed] drawn <N>: avg <N>.<N> ms, worst <N>.<N> ms, hitches(><N> ms) <N> | <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <N>+:<N> | idle <N> pass(es), worst wait <N>.<N> ms
 SHAPE  throttle: path=waitable frames=<N>/s waits=<N>/s maxLatency=<N>
 SHAPE  interval [collapsed] drawn <N>: avg <N>.<N> ms, worst <N>.<N> ms, hitches(><N> ms) <N> | <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <N>+:<N> | idle <N> pass(es), worst wait <N>.<N> ms
@@ -45,10 +44,11 @@ SHAPE  throttle: path=waitable frames=<N>/s waits=<N>/s maxLatency=<N>
 SHAPE  interval [collapsed] drawn <N>: avg <N>.<N> ms, worst <N>.<N> ms, hitches(><N> ms) <N> | <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <N>+:<N> | idle <N> pass(es), worst wait <N>.<N> ms
 SHAPE  throttle: path=waitable frames=<N>/s waits=<N>/s maxLatency=<N>
 SHAPE  tray: <N> icon(s) -- <N> live of <N> registry entr(ies)
-SHAPE  mem[after-event]: private=<N>.<N>MB ws=<N>.<N>MB vram=<N>.<N>/<N>.<N>MB handles=<N> threads=<N> gdi=<N> user=<N> cover=<N>B lyrics=<N> tray=<N> winicons=<N> bitmaps=<N> notify=<N> tasks=<N>
 SHAPE  interval [collapsed] drawn <N>: avg <N>.<N> ms, worst <N>.<N> ms, hitches(><N> ms) <N> | <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <<N>:<N> <N>+:<N> | idle <N> pass(es), worst wait <N>.<N> ms
 SHAPE  throttle: path=waitable frames=<N>/s waits=<N>/s maxLatency=<N>
 === unordered (worker threads; content only) ===
+SHAPE  mem[after-event]: private=<N>.<N>MB ws=<N>.<N>MB vram=<N>.<N>/<N>.<N>MB handles=<N> threads=<N> gdi=<N> user=<N> cover=<N>B lyrics=<N> tray=<N> winicons=<N> bitmaps=<N> notify=<N> tasks=<N>
+SHAPE  mem[start]: private=<N>.<N>MB ws=<N>.<N>MB vram=<N>.<N>/<N>.<N>MB handles=<N> threads=<N> gdi=<N> user=<N> cover=<N>B lyrics=<N> tray=<N> winicons=<N> bitmaps=<N> notify=<N> tasks=<N>
 SHAPE  sound page: <N> device(s), default '扬声器', <N> session(s) [devices=<N> sessions=<N>]
 SHAPE  system status: <N> keyboard layout(s) installed
 SHAPE  system status: bluetooth present=<N> on=<N> name='MAKER'
@@ -56,7 +56,6 @@ SHAPE  system status: WLAN client open (version <N>)
 SHAPE  toasts: reading '<PATH>
 SHAPE  toasts: starting after id <N>
 SHAPE  tray learn: <N> of <N> icon(s) known; asking the applications to register again (background)
-SHAPE  tray learn: the shell (<N> process(es) offered) was already carrying the module, <N> registration(s) captured, <N> new entr(ies) -- <N> of <N> icon(s) have a callback entry (in <N> ms) -- observer did not report in <N> ms (<N> of the hooked threads took the message that loads the module)
 SHAPE  volume: peak meter acquired
 SHAPE  weather: position from Windows -> <N>.<N>, <N>.<N>
 SHAPE  weather: position from Windows, forecast from Open-Meteo (weather.txt can pin a city instead)
