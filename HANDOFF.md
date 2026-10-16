@@ -13116,3 +13116,48 @@ SoundOutput / NotificationPipe / Lyrics / Weather / PlayerWindowWatch）把线�
 | `c05c624` | ✅ 零告警 | ✅ 621 条语句 = | 1010 OK / PASS | 0/62 行不同 |
 | `0c9f836` | ✅ 零告警 | ✅ 114 条语句 = | 1010 OK / PASS | 0/62 行不同 |
 | `c14cb4e` | ✅ 零告警 | 🟡 6 + 11 行（见 8.155.2） | 1010 OK / PASS | 0/62 行不同（`redraws: clock=4`，其余 0，与改前一致） |
+
+---
+
+## 8.156 **片 3.3：岛搬出 `main.cpp`，入口点变回入口点**（2026-10-16，提交 `51756a1`）
+
+### 8.156.1 用户：「继续 1 23」——这是其中的 3
+
+8.155.4 里写的做法就是这一轮做的：`app/BarLoop.h` 声明 `RunBar`，`app/BarLoop.cpp` 装它、43 个相位与只
+给它们用的两个 helper，`main.cpp` 只剩"解析参数 → 跑命令或跑岛"。
+
+**实测前后**：`main.cpp` **6,563 → 588 行**（`main()` 从第 257 行开始）；`app/BarLoop.cpp` **6,016 行**
+（`RunBar` 1,347 行，其中帧循环 835；上方 43 个相位）；新增 `app/BarLoop.h` 21 行。
+
+### 8.156.2 怎么保证"只是搬动"
+
+四个行区间（88..117 力量清单、291..4779 事件与全部相位、4780..6128 `RunBar`、6166..6225 电源执行器）由
+**一次性脚本按行区间搬**，并且在写任何东西之前**按内容断言每个边界**（每个区间的首行与末行、紧跟其后的
+一行、以及它将要删掉的三段孤儿注释）。写完之后把两个新文件**读回来**，与它们各自来自的行逐行**逐字节**
+比较：力量清单 30 行、相位 4,489 行、`RunPowerAction` 60 行、`RunBar` 1,349 行，留在 `main.cpp` 的
+`PrepareConsole`/`EnablePerMonitorV2`/`RunDemo` 151 行与 `ArgumentAsUtf8` 21 行；并反向断言 `main.cpp`
+里再没有那四个区间的首行。**没有一行是重新敲的。**脚本用完即删，进版本库的是它产出的文件。
+
+### 8.156.3 顺手清掉的三类死东西（都在搬动范围内）
+
+1. `main.cpp` 尾部**三段孤儿注释**：帧间隔报告、app 图标转 PNG、图标行命中测试——它们描述的函数早就搬走
+   了（"这段注释属于谁"在文件里已经看不出来，正是 3.3 要治的病）。
+2. **26 个头文件**随代码一起走：`main.cpp` 现在只留它真正用的（`app/AppBar.h`、`app/BarLoop.h`、
+   `app/IslandWindow.h`、`app/PlayerWindow.h`、`cli/Cli.h`、`core/Log.h`、`media/Lyrics.h`、
+   `platform/{Monitor,NativeTaskbar}.h`、`render/Renderer.h`、`selftest/Diagnostics.h`、
+   `services/{Notification,NotificationPipe}.h`、`shell/TrayPress.h`）。删多删少都由编译器当场判：第一次
+   构建失败（少了 `Renderer.h` 等），补上即过。
+3. `app/` **不许** include `cli/`：`BarLoop.cpp` 的 include 表里剔掉了 `cli/Cli.h`，这一条由每次构建的
+   `check-layers.ps1` 兜底（`layer check: clean (105 file(s) in 11 layer(s))`）。
+
+### 8.156.4 还没有做的（形状，不是债）
+
+`app/BarLoop.cpp` 一个翻译单元装着 43 个相位 + `RunBar`，与当年 `main.cpp` 是同一个形状，只是主题从"入口
+点"变成了"岛"。**再往下分成"一个主题一个文件"是可行的，但没有计划**——没有实测证据说它值得，而每一次这样
+的搬动都要付一遍 8.153.3 那套验收。`main.cpp` 那一半的债（第 4 节第 4 条）到此为止。
+
+### 8.156.5 验收
+
+Debug 与 Release 零告警、`layer check: clean (105 file(s) in 11 layer(s))`、`--self-test` 退出码 0（1010
+OK / 0 FAIL）、`island_smoke` RESULT: PASS、固定场景 0/62 行不同；部署后起栏看过日志（托盘 8/34、"窗口
+区域 2 applied"、`redraws: clock=4` 与改前一致）。
