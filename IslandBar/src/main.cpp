@@ -2037,6 +2037,92 @@ static void DismissPanelSurface(island::BarState& bar, island::BarSystems& syste
     systems.window.SetState(active == nullptr ? resting : island::IslandState::NoticeStrip);
 }
 
+// --- a press on the Start card ---
+//
+// Moved out of the frame loop verbatim (indentation aside), with the dismiss calls becoming
+// DismissPanelSurface for the same reason the outside-click phase does it: a free function cannot see a
+// lambda defined in the loop. Reached before the panel own controls, because the Start card IS the level
+// that is up: a press at the position of a tile would otherwise be read as a tile.
+static void ApplyStartCardPress(island::BarState& bar, island::BarSystems& systems,
+                                const island::Notification* active, island::IslandState resting) {
+    // --- A PRESS ON THE START CARD -----------------------------------------------------
+    //
+    // Reached before the panel's own controls, because the Start card IS the level that is
+    // up: a press at the position of a tile would otherwise be read as a tile.
+    //
+    // Every branch logs what it did: a launcher whose click does nothing is the hardest
+    // thing on this bar to tell from a click that never arrived.
+    const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
+    switch (startHit.target) {
+        case island::IslandWindow::StartHitTarget::Pin: {
+            if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
+                const island::StartApp& app = systems.startApps.PinAt(startHit.index);
+                island::LogAndPrint("  start: launching pinned '%ls'\n", app.name);
+                island::LaunchStartApp(app.target);
+            }
+            DismissPanelSurface(bar, systems, active, resting);
+            break;
+        }
+        case island::IslandWindow::StartHitTarget::PickerRow: {
+            if (startHit.index >= 0 && startHit.index < bar.startAppCount) {
+                const island::StartApp& app = systems.startApps.ListAt(startHit.index);
+                // The shortcut is NAMED after the application, which is also what the tile
+                // will show: renaming the file in Explorer renames the tile.
+                const bool added = systems.startApps.Pin(app.target, app.name);
+                island::LogAndPrint("  start: %ls '%ls' (%d pinned now)\n",
+                                    added ? "pinned" : "already pinned", app.name,
+                                    systems.startApps.PinCount());
+                // Back to the pins, which is where the new one just appeared: staying in a
+                // list of 121 with no sign of what happened is how a click reads as a dud.
+                bar.startPageState = 0;
+                bar.startPowerConfirm = -1;
+            }
+            break;
+        }
+        case island::IslandWindow::StartHitTarget::PowerRow: {
+            const int row = startHit.index;
+            if (row >= 0 && row <= 4) {
+                const PowerAction action = static_cast<PowerAction>(row);
+                if (PowerActionLosesWork(action) && bar.startPowerConfirm != row) {
+                    // Armed, not done: the list appears above a button the user was already
+                    // reaching for, and a mis-click there must not sign him out.
+                    bar.startPowerConfirm = row;
+                    island::LogAndPrint("  power: '%ls' armed (a second press does it)\n",
+                                        PowerActionName(action));
+                } else {
+                    island::LogAndPrint("  power: '%ls' pressed\n",
+                                        PowerActionName(action));
+                    bar.startPowerConfirm = -1;
+                    DismissPanelSurface(bar, systems, active, resting);
+                    RunPowerAction(action);
+                }
+            }
+            break;
+        }
+        case island::IslandWindow::StartHitTarget::PowerButton: {
+            if (bar.startPageState == 1) {
+                bar.startPageState = 0;   // the × on the picker: back to the pins
+            } else {
+                bar.startPageState = bar.startPageState == 2 ? 0 : 2;
+            }
+            bar.startPowerConfirm = -1;
+            break;
+        }
+        case island::IslandWindow::StartHitTarget::EmptyGrid: {
+            // The empty upper area is the way to fill it, which is what "上面的应该可以让用户
+            // 手动添加" asks for: the card itself is the control.
+            bar.startPageState = 1;
+            bar.startPickerScroll = 0;
+            island::LogAndPrint("  start: picker open (%d application(s))\n",
+                                bar.startAppCount);
+            break;
+        }
+        case island::IslandWindow::StartHitTarget::None:
+            break;
+    }
+    std::fflush(stdout);
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -3360,82 +3446,9 @@ float musicWavePhase = 0.0f;
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Start) &&
                            systems.window.StartHitHovered().target !=
                                island::IslandWindow::StartHitTarget::None) {
-                    // --- A PRESS ON THE START CARD -----------------------------------------------------
-                    //
-                    // Reached before the panel's own controls, because the Start card IS the level that is
-                    // up: a press at the position of a tile would otherwise be read as a tile.
-                    //
-                    // Every branch logs what it did: a launcher whose click does nothing is the hardest
-                    // thing on this bar to tell from a click that never arrived.
-                    const island::IslandWindow::StartHit startHit = systems.window.StartHitHovered();
-                    switch (startHit.target) {
-                        case island::IslandWindow::StartHitTarget::Pin: {
-                            if (startHit.index >= 0 && startHit.index < bar.startPinCount) {
-                                const island::StartApp& app = systems.startApps.PinAt(startHit.index);
-                                island::LogAndPrint("  start: launching pinned '%ls'\n", app.name);
-                                island::LaunchStartApp(app.target);
-                            }
-                            dismissPanel();
-                            break;
-                        }
-                        case island::IslandWindow::StartHitTarget::PickerRow: {
-                            if (startHit.index >= 0 && startHit.index < bar.startAppCount) {
-                                const island::StartApp& app = systems.startApps.ListAt(startHit.index);
-                                // The shortcut is NAMED after the application, which is also what the tile
-                                // will show: renaming the file in Explorer renames the tile.
-                                const bool added = systems.startApps.Pin(app.target, app.name);
-                                island::LogAndPrint("  start: %ls '%ls' (%d pinned now)\n",
-                                                    added ? "pinned" : "already pinned", app.name,
-                                                    systems.startApps.PinCount());
-                                // Back to the pins, which is where the new one just appeared: staying in a
-                                // list of 121 with no sign of what happened is how a click reads as a dud.
-                                bar.startPageState = 0;
-                                bar.startPowerConfirm = -1;
-                            }
-                            break;
-                        }
-                        case island::IslandWindow::StartHitTarget::PowerRow: {
-                            const int row = startHit.index;
-                            if (row >= 0 && row <= 4) {
-                                const PowerAction action = static_cast<PowerAction>(row);
-                                if (PowerActionLosesWork(action) && bar.startPowerConfirm != row) {
-                                    // Armed, not done: the list appears above a button the user was already
-                                    // reaching for, and a mis-click there must not sign him out.
-                                    bar.startPowerConfirm = row;
-                                    island::LogAndPrint("  power: '%ls' armed (a second press does it)\n",
-                                                        PowerActionName(action));
-                                } else {
-                                    island::LogAndPrint("  power: '%ls' pressed\n",
-                                                        PowerActionName(action));
-                                    bar.startPowerConfirm = -1;
-                                    dismissPanel();
-                                    RunPowerAction(action);
-                                }
-                            }
-                            break;
-                        }
-                        case island::IslandWindow::StartHitTarget::PowerButton: {
-                            if (bar.startPageState == 1) {
-                                bar.startPageState = 0;   // the × on the picker: back to the pins
-                            } else {
-                                bar.startPageState = bar.startPageState == 2 ? 0 : 2;
-                            }
-                            bar.startPowerConfirm = -1;
-                            break;
-                        }
-                        case island::IslandWindow::StartHitTarget::EmptyGrid: {
-                            // The empty upper area is the way to fill it, which is what "上面的应该可以让用户
-                            // 手动添加" asks for: the card itself is the control.
-                            bar.startPageState = 1;
-                            bar.startPickerScroll = 0;
-                            island::LogAndPrint("  start: picker open (%d application(s))\n",
-                                                bar.startAppCount);
-                            break;
-                        }
-                        case island::IslandWindow::StartHitTarget::None:
-                            break;
-                    }
-                    std::fflush(stdout);
+                    // The Start card own press handling. The phase lives above RunBar; the dismiss calls
+                    // inside it are the same four arguments the lambda used.
+                    ApplyStartCardPress(bar, systems, active, resting);
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
                            systems.window.TrayCellHovered() >= 0) {
                     // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only

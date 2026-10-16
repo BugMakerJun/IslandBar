@@ -91,13 +91,23 @@ if ($closeLine -le $openLine) { Write-Host 'check-phase-move: the function body 
 $bodyLines = $current[$openLine..($closeLine - 2)]     # after the opening brace, before the closing one
 if ($bodyLines.Count -lt 1) { Write-Host 'check-phase-move: the function body is empty -- refusing to compare nothing'; exit 2 }
 
+# Split on commas, but a piece WITHOUT an '=' is the continuation of the value before it: a replacement can
+# be a whole call, and a whole call has commas in it. MEASURED: `dismissPanel();=DismissPanelSurface(bar,
+# systems, active, resting);` came back as four pieces with the naive split.
 $renamePairs = @()
-foreach ($pair in ($Rename -split ',')) {
-    if ($pair.Trim() -eq '') { continue }
-    $parts = $pair -split '=', 2
-    if ($parts.Count -ne 2) { throw ("-Rename needs old=new pairs, got '" + $pair + "'") }
-    $renamePairs += , @($parts[0], $parts[1])
+$text = ''
+$old = ''
+foreach ($piece in ($Rename -split ',')) {
+    if ($piece.Contains('=')) {
+        if ($old -ne '') { $renamePairs += , @($old, $text) }
+        $bits = $piece -split '=', 2
+        $old = $bits[0]
+        $text = $bits[1]
+    } else {
+        $text += ',' + $piece
+    }
 }
+if ($old -ne '') { $renamePairs += , @($old, $text) }
 
 function Normalize([string[]]$lines, [array]$renames, [bool]$stripRuntime) {
     $out = @()
