@@ -1741,6 +1741,87 @@ static void ApplyOutsideClickDismissal(island::BarState& bar, island::BarSystems
     }
 }
 
+// --- the panel's own timer, when the diagnostic is on ---
+//
+// Moved out of the frame loop verbatim (indentation aside), with the dismiss call becoming
+// DismissPanelSurface for the same reason the outside-click phase does it: a free function cannot see a
+// lambda defined in the loop.
+static void RunPanelTimerDiagnostic(DWORD autoPanelMs, DWORD autoPanelCloseMs, DWORD autoPanelCycleMs,
+                                    DWORD diagnosticStart, const wchar_t* forcedState,
+                                    bool& autoPanelOpened, bool& autoPanelClosed,
+                                    island::BarState& bar, island::BarSystems& systems,
+                                    const island::Notification* active, island::IslandState resting) {
+    // Placed where a click would have left it -- `bar.systemPanelOpen` is the same flag the chevron
+    // sets -- so what the frame loop does next is what it does for a real press, with no
+    // pointer involved.
+    if (autoPanelMs > 0 && !forcedState) {
+        const DWORD diagnosticElapsed = GetTickCount() - diagnosticStart;
+        if (autoPanelCycleMs > 0 && autoPanelOpened && autoPanelClosed) {
+            // Open, close, open, close ... on a fixed period, which is what a user pressing the
+            // control repeatedly does.
+            const DWORD phase =
+                (diagnosticElapsed - autoPanelMs) / autoPanelCycleMs;
+            const bool wantOpen = (phase % 2) == 0;
+            if (wantOpen != bar.systemPanelOpen) {
+                bar.systemPanelOpen = wantOpen;
+                island::LogAndPrint("  diagnostic: panel %ls at %lu ms (cycle %lu)\n",
+                                    wantOpen ? L"opened" : L"closed",
+                                    static_cast<unsigned long>(diagnosticElapsed),
+                                    static_cast<unsigned long>(phase));
+                std::fflush(stdout);
+            }
+        } else if (!autoPanelOpened && diagnosticElapsed >= autoPanelMs) {
+            autoPanelOpened = true;
+            bar.systemPanelOpen = true;
+            island::LogAndPrint("  diagnostic: panel opened at %lu ms\n",
+                                static_cast<unsigned long>(diagnosticElapsed));
+            std::fflush(stdout);
+        } else if (autoPanelOpened && !autoPanelClosed &&
+                   diagnosticElapsed >= autoPanelCloseMs) {
+            autoPanelClosed = true;
+            // Through the same door a press uses, so the diagnostic reproduces the real thing rather
+            // than a version of it that leaves the shape where it was.
+            DismissPanelSurface(bar, systems, active, resting);
+            island::LogAndPrint("  diagnostic: panel closed at %lu ms\n",
+                                static_cast<unsigned long>(diagnosticElapsed));
+            std::fflush(stdout);
+        }
+    }
+}
+
+// --- the Start button's own timer, when the diagnostic is on ---
+//
+// Moved out of the frame loop verbatim (indentation aside).
+static void RunStartTimerDiagnostic(DWORD autoStartMs, DWORD autoStartCycleMs, DWORD diagnosticStart,
+                                    const wchar_t* forcedState, DWORD& lastStartTogglePhase) {
+    // This presses the control that has to inject input into the SHELL, on a period, so the one
+    // path that needs a hand on the mouse can be exercised from a script. It is a toggle, like the
+    // key: the first call opens the menu, the next closes it.
+    //
+    // The integrity level matters here and nowhere else in this program: UIPI discards synthetic
+    // input aimed at a process of a HIGHER integrity level, and the shell that answers Ctrl+Esc is
+    // Explorer. A bar started from a restricted launcher is below it, and the keystroke then goes
+    // nowhere with no error anywhere -- which is exactly what the report "the Start button no
+    // longer works" looked like. Whether that is the case is stated at startup ("native taskbar:
+    // CANNOT BE HIDDEN"), and repeated here with the result of the attempt.
+    if (autoStartMs > 0 && !forcedState) {
+        const DWORD diagnosticElapsed = GetTickCount() - diagnosticStart;
+        if (diagnosticElapsed >= autoStartMs) {
+            const DWORD period = (autoStartCycleMs > 0) ? autoStartCycleMs : 2000;
+            const DWORD phase = (diagnosticElapsed - autoStartMs) / period;
+            if (phase != lastStartTogglePhase) {
+                lastStartTogglePhase = phase;
+                const island::StartMenuResult startResult = island::ToggleStartMenu();
+                island::LogAndPrint("  diagnostic: start menu toggle %lu -> %ls at %lu ms\n",
+                                    static_cast<unsigned long>(phase),
+                                    island::StartMenuResultName(startResult),
+                                    static_cast<unsigned long>(diagnosticElapsed));
+                std::fflush(stdout);
+            }
+        }
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -3603,73 +3684,14 @@ float musicWavePhase = 0.0f;
             // used.
             ApplyOutsideClickDismissal(bar, systems, active, resting);
 
-            // --- the panel's own timer, when the diagnostic is on ---
-            //
-            // Placed where a click would have left it -- `bar.systemPanelOpen` is the same flag the chevron
-            // sets -- so what the frame loop does next is what it does for a real press, with no
-            // pointer involved.
-            if (autoPanelMs > 0 && !forcedState) {
-                const DWORD diagnosticElapsed = GetTickCount() - diagnosticStart;
-                if (autoPanelCycleMs > 0 && autoPanelOpened && autoPanelClosed) {
-                    // Open, close, open, close ... on a fixed period, which is what a user pressing the
-                    // control repeatedly does.
-                    const DWORD phase =
-                        (diagnosticElapsed - autoPanelMs) / autoPanelCycleMs;
-                    const bool wantOpen = (phase % 2) == 0;
-                    if (wantOpen != bar.systemPanelOpen) {
-                        bar.systemPanelOpen = wantOpen;
-                        island::LogAndPrint("  diagnostic: panel %ls at %lu ms (cycle %lu)\n",
-                                            wantOpen ? L"opened" : L"closed",
-                                            static_cast<unsigned long>(diagnosticElapsed),
-                                            static_cast<unsigned long>(phase));
-                        std::fflush(stdout);
-                    }
-                } else if (!autoPanelOpened && diagnosticElapsed >= autoPanelMs) {
-                    autoPanelOpened = true;
-                    bar.systemPanelOpen = true;
-                    island::LogAndPrint("  diagnostic: panel opened at %lu ms\n",
-                                        static_cast<unsigned long>(diagnosticElapsed));
-                    std::fflush(stdout);
-                } else if (autoPanelOpened && !autoPanelClosed &&
-                           diagnosticElapsed >= autoPanelCloseMs) {
-                    autoPanelClosed = true;
-                    // Through the same door a press uses, so the diagnostic reproduces the real thing rather
-                    // than a version of it that leaves the shape where it was.
-                    dismissPanel();
-                    island::LogAndPrint("  diagnostic: panel closed at %lu ms\n",
-                                        static_cast<unsigned long>(diagnosticElapsed));
-                    std::fflush(stdout);
-                }
-            }
-
-            // --- the Start button's own timer, when the diagnostic is on ---
-            //
-            // This presses the control that has to inject input into the SHELL, on a period, so the one
-            // path that needs a hand on the mouse can be exercised from a script. It is a toggle, like the
-            // key: the first call opens the menu, the next closes it.
-            //
-            // The integrity level matters here and nowhere else in this program: UIPI discards synthetic
-            // input aimed at a process of a HIGHER integrity level, and the shell that answers Ctrl+Esc is
-            // Explorer. A bar started from a restricted launcher is below it, and the keystroke then goes
-            // nowhere with no error anywhere -- which is exactly what the report "the Start button no
-            // longer works" looked like. Whether that is the case is stated at startup ("native taskbar:
-            // CANNOT BE HIDDEN"), and repeated here with the result of the attempt.
-            if (autoStartMs > 0 && !forcedState) {
-                const DWORD diagnosticElapsed = GetTickCount() - diagnosticStart;
-                if (diagnosticElapsed >= autoStartMs) {
-                    const DWORD period = (autoStartCycleMs > 0) ? autoStartCycleMs : 2000;
-                    const DWORD phase = (diagnosticElapsed - autoStartMs) / period;
-                    if (phase != lastStartTogglePhase) {
-                        lastStartTogglePhase = phase;
-                        const island::StartMenuResult startResult = island::ToggleStartMenu();
-                        island::LogAndPrint("  diagnostic: start menu toggle %lu -> %ls at %lu ms\n",
-                                            static_cast<unsigned long>(phase),
-                                            island::StartMenuResultName(startResult),
-                                            static_cast<unsigned long>(diagnosticElapsed));
-                        std::fflush(stdout);
-                    }
-                }
-            }
+            // The two diagnostic timers: the panel opening and closing on a schedule, and the Start button
+            // being pressed on one. Both phases live above RunBar and both are inert unless the environment
+            // asked for them.
+            RunPanelTimerDiagnostic(autoPanelMs, autoPanelCloseMs, autoPanelCycleMs, diagnosticStart,
+                                    forcedState, autoPanelOpened, autoPanelClosed, bar, systems, active,
+                                    resting);
+            RunStartTimerDiagnostic(autoStartMs, autoStartCycleMs, diagnosticStart, forcedState,
+                                    lastStartTogglePhase);
 
             // --- the pointer flicking in and out of the island, when the environment asks for it ---
             //
