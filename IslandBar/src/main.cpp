@@ -1261,6 +1261,10 @@ struct BarRuntime {
     // When the interval report was last written, and how many window regions had been applied then.
     unsigned long long lastIntervalReport = 0;
     unsigned long long lastRegionApplications = 0;
+    // When the card last had a reason to be drawn with the cheap material: while it animates, or while the
+    // pointer is on it. A TIMESTAMP rather than a flag, because the material must not change on the frames in
+    // between (see FrameState::cardSurfaceMoving -- a per-frame flag is what made the card flicker).
+    unsigned long long lastCardMotionMs = 0;
 };
 
 
@@ -2245,6 +2249,98 @@ static void ApplySoundPagePress(island::BarState& bar, island::BarSystems& syste
     std::fflush(stdout);
 }
 
+// --- the tray and the panel, told to the frame ---
+//
+// Moved out of the frame loop verbatim (indentation aside): the tray icons and their count, whether the
+// card surface is still moving (the latch that keeps the full material for as long as the pointer is on the
+// card, which is what stopped "鼠标在上面移动卡片会闪"), the tray menu rows and their labels, the three
+// control washes, and the panel open flags. It reads the pass own animating flag, delta and tray-page
+// answer, and carries one timestamp between frames through BarRuntime.
+static void FillTrayAndPanelFrame(BarRuntime& runtime, island::FrameState& frame, island::BarState& bar,
+                                 island::BarSystems& systems, bool animating, float dt,
+                                 bool forcedStartHover, bool trayPageShown) {
+    frame.trayIcons = systems.trayIcons.Count() > 0 ? &systems.trayIcons.At(0) : nullptr;
+    frame.trayIconCount =
+        systems.trayIcons.Count() < island::kMaxTrayIcons ? systems.trayIcons.Count()
+                                                  : island::kMaxTrayIcons;
+    frame.trayRevision = systems.trayIcons.Revision();
+    frame.trayHoveredIndex = systems.window.TrayCellHovered();
+    // ... AND WHETHER THE CARD'S SURFACE IS MOVING, which decides how much of the material is
+    // drawn this frame: the shadow and the grain are skipped while the card animates or while a
+    // moving pointer keeps changing which cell is hovered, and come back on the first frame that
+    // neither is true (see FrameState::cardSurfaceMoving and FillCardSurface).
+    //
+    // A cell CHANGE is the test rather than "the pointer is over the card", because the cost is
+    // paid per redraw: the pointer moving WITHIN one cell does not redraw anything, and using the
+    // hovered cell keeps the full material on screen for as long as the pointer is still.
+    //
+    // STICKY, NOT PER-FRAME, and that distinction is the whole of a report that came back the
+    // same evening: "鼠标在上面移动卡片会闪". Toggling the material on the frame the hovered cell
+    // changed and off again on the frame it did not meant a moving pointer produced
+    // shadow-frames and no-shadow-frames alternately -- the card visibly flickered between two
+    // materials. The state now lasts as long as the pointer is on the card (and for a further
+    // 200 ms, so it does not change in the gaps between cells), and the full material returns
+    // once, after the interaction is over.
+    const bool overTrayCell = frame.trayHoveredIndex >= 0;
+    const unsigned long long nowMs = GetTickCount64();
+    if (animating || overTrayCell) runtime.lastCardMotionMs = nowMs;
+    frame.cardSurfaceMoving = (nowMs - runtime.lastCardMotionMs) < 200;
+    frame.trayButtonHovered = systems.window.TrayButtonHovered();
+    // ... and the tray's own menu, when one is up: its rows come from the window (it owns the
+    // card and answers the hover test), its labels from here (user-facing text is not the
+    // renderer's to invent -- the same split as the page's title above).
+    frame.trayMenuOpen = systems.window.TrayMenuIsOpen();
+    frame.trayMenuHovered = systems.window.TrayMenuRowHovered();
+    if (frame.trayMenuOpen) {
+        const island::TrayMenuLayout& menu = systems.window.TrayMenu();
+        const int rows = menu.count < bar.trayMenuActionCount ? menu.count : bar.trayMenuActionCount;
+        frame.trayMenuRowCount = rows;
+        for (int i = 0; i < rows; ++i) {
+            frame.trayMenuRows[i] = menu.rows[i];
+            frame.trayMenuLabels[i] =
+                bar.trayQuitArmed ? island::TrayMenuArmedLabel(bar.trayMenuActions[i])
+                              : island::TrayMenuLabel(bar.trayMenuActions[i],
+                                                      bar.trayMenuOwnMenuUnreachable);
+        }
+    }
+    // ... and the three washes, each a spring toward "the pointer is on it" (see
+    // FrameState::startWash for why a wash cannot be a switch). Stepped here, before the
+    // frame is drawn, and reported in the frame as AMOUNTS rather than as the booleans.
+    {
+        const bool want[3] = {systems.window.StartHovered() || forcedStartHover,
+                              systems.window.SystemButtonHovered(),
+                              systems.window.TrayButtonHovered()};
+        bar.controlWashAnimating = false;
+        for (int i = 0; i < 3; ++i) {
+            if (island::ControlWashStep(&bar.controlWash[i], &bar.controlWashVelocity[i],
+                                        want[i] ? 1.0f : 0.0f, dt)) {
+                bar.controlWashAnimating = true;
+            }
+        }
+        frame.startWash = bar.controlWash[0];
+        frame.systemButtonWash = bar.controlWash[1];
+        frame.trayButtonWash = bar.controlWash[2];
+    }
+    // The level the card is SHOWING, not the page that was asked for: the two differ for the
+    // whole of the exit, and drawing the request is what put the tiles under a shrinking tray
+    // page. See NextPanelLevel.
+    frame.trayPageOpen = trayPageShown;
+    frame.trayPageTitle = trayPageShown ? L"\u6258\u76d8" : nullptr;   // 托盘
+    systems.window.SetTrayIconCount(frame.trayIconCount);
+
+    frame.systemPanelOpen = bar.systemPanelOpen;
+    // ... and WHICH CONTROL SHOULD LOOK OPEN, which is a question about the level and not about
+    // whether a card is up: every level sets `bar.systemPanelOpen` (that is what makes the card
+    // exist), so asking that flag lit the SYSTEM button's chevron for the tray page, for the
+    // Start card and for everything else. Reported as "点击 ⊞ 系统按钮也跟着变".
+    {
+        const island::ControlLit lit =
+            island::ControlLitFor(bar.panelLevel, frame.outerCardUp);
+        frame.systemButtonOpen = lit.system;
+        frame.startButtonOpen = lit.start;
+    }
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -2770,10 +2866,6 @@ float musicWavePhase = 0.0f;
         float lastSoundScroll = 0.0f;
         unsigned long long lastSoundRevision = 0;
         constexpr unsigned long long kMemorySampleMs = 5ull * 60ull * 1000ull;
-        // When the card last had a reason to be drawn with the cheap material: while it animates, or while
-        // the pointer is on it. A TIMESTAMP rather than a flag, because the material must not change on the
-        // frames in between (see cardSurfaceMoving -- a per-frame flag is what made the card flicker).
-        unsigned long long lastCardMotionMs = 0;
         // The card's owner and the copy of the message it is showing live in BarRuntime: the latch that
         // writes them and the drawing that reads them are in different phases of the same pass, which is
         // what the struct is for (see BarRuntime).
@@ -4468,86 +4560,10 @@ float musicWavePhase = 0.0f;
                 // The tray's own cadence: re-read what the shell is holding, harvest what the module saw, and
                 // start a learning pass only when the shell itself was replaced. The phase lives above RunBar.
                 TickTray(bar, systems, frameWork, kWorkTrayRefresh, kTrayRefreshMs);
-                frame.trayIcons = systems.trayIcons.Count() > 0 ? &systems.trayIcons.At(0) : nullptr;
-                frame.trayIconCount =
-                    systems.trayIcons.Count() < island::kMaxTrayIcons ? systems.trayIcons.Count()
-                                                              : island::kMaxTrayIcons;
-                frame.trayRevision = systems.trayIcons.Revision();
-                frame.trayHoveredIndex = systems.window.TrayCellHovered();
-                // ... AND WHETHER THE CARD'S SURFACE IS MOVING, which decides how much of the material is
-                // drawn this frame: the shadow and the grain are skipped while the card animates or while a
-                // moving pointer keeps changing which cell is hovered, and come back on the first frame that
-                // neither is true (see FrameState::cardSurfaceMoving and FillCardSurface).
-                //
-                // A cell CHANGE is the test rather than "the pointer is over the card", because the cost is
-                // paid per redraw: the pointer moving WITHIN one cell does not redraw anything, and using the
-                // hovered cell keeps the full material on screen for as long as the pointer is still.
-                //
-                // STICKY, NOT PER-FRAME, and that distinction is the whole of a report that came back the
-                // same evening: "鼠标在上面移动卡片会闪". Toggling the material on the frame the hovered cell
-                // changed and off again on the frame it did not meant a moving pointer produced
-                // shadow-frames and no-shadow-frames alternately -- the card visibly flickered between two
-                // materials. The state now lasts as long as the pointer is on the card (and for a further
-                // 200 ms, so it does not change in the gaps between cells), and the full material returns
-                // once, after the interaction is over.
-                const bool overTrayCell = frame.trayHoveredIndex >= 0;
-                const unsigned long long nowMs = GetTickCount64();
-                if (animating || overTrayCell) lastCardMotionMs = nowMs;
-                frame.cardSurfaceMoving = (nowMs - lastCardMotionMs) < 200;
-                frame.trayButtonHovered = systems.window.TrayButtonHovered();
-                // ... and the tray's own menu, when one is up: its rows come from the window (it owns the
-                // card and answers the hover test), its labels from here (user-facing text is not the
-                // renderer's to invent -- the same split as the page's title above).
-                frame.trayMenuOpen = systems.window.TrayMenuIsOpen();
-                frame.trayMenuHovered = systems.window.TrayMenuRowHovered();
-                if (frame.trayMenuOpen) {
-                    const island::TrayMenuLayout& menu = systems.window.TrayMenu();
-                    const int rows = menu.count < bar.trayMenuActionCount ? menu.count : bar.trayMenuActionCount;
-                    frame.trayMenuRowCount = rows;
-                    for (int i = 0; i < rows; ++i) {
-                        frame.trayMenuRows[i] = menu.rows[i];
-                        frame.trayMenuLabels[i] =
-                            bar.trayQuitArmed ? island::TrayMenuArmedLabel(bar.trayMenuActions[i])
-                                          : island::TrayMenuLabel(bar.trayMenuActions[i],
-                                                                  bar.trayMenuOwnMenuUnreachable);
-                    }
-                }
-                // ... and the three washes, each a spring toward "the pointer is on it" (see
-                // FrameState::startWash for why a wash cannot be a switch). Stepped here, before the
-                // frame is drawn, and reported in the frame as AMOUNTS rather than as the booleans.
-                {
-                    const bool want[3] = {systems.window.StartHovered() || forcedStartHover,
-                                          systems.window.SystemButtonHovered(),
-                                          systems.window.TrayButtonHovered()};
-                    bar.controlWashAnimating = false;
-                    for (int i = 0; i < 3; ++i) {
-                        if (island::ControlWashStep(&bar.controlWash[i], &bar.controlWashVelocity[i],
-                                                    want[i] ? 1.0f : 0.0f, dt)) {
-                            bar.controlWashAnimating = true;
-                        }
-                    }
-                    frame.startWash = bar.controlWash[0];
-                    frame.systemButtonWash = bar.controlWash[1];
-                    frame.trayButtonWash = bar.controlWash[2];
-                }
-                // The level the card is SHOWING, not the page that was asked for: the two differ for the
-                // whole of the exit, and drawing the request is what put the tiles under a shrinking tray
-                // page. See NextPanelLevel.
-                frame.trayPageOpen = trayPageShown;
-                frame.trayPageTitle = trayPageShown ? L"\u6258\u76d8" : nullptr;   // 托盘
-                systems.window.SetTrayIconCount(frame.trayIconCount);
-
-                frame.systemPanelOpen = bar.systemPanelOpen;
-                // ... and WHICH CONTROL SHOULD LOOK OPEN, which is a question about the level and not about
-                // whether a card is up: every level sets `bar.systemPanelOpen` (that is what makes the card
-                // exist), so asking that flag lit the SYSTEM button's chevron for the tray page, for the
-                // Start card and for everything else. Reported as "点击 ⊞ 系统按钮也跟着变".
-                {
-                    const island::ControlLit lit =
-                        island::ControlLitFor(bar.panelLevel, frame.outerCardUp);
-                    frame.systemButtonOpen = lit.system;
-                    frame.startButtonOpen = lit.start;
-                }
+                // The tray and the panel as the frame sees them. The phase lives above RunBar; the order
+                // against the Start card below is unchanged.
+                FillTrayAndPanelFrame(runtime, frame, bar, systems, animating, dt, forcedStartHover,
+                                      trayPageShown);
 
                 // --- the Start card, told to the frame and to the window --------------------------
                 //
