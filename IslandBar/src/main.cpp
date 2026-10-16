@@ -2650,6 +2650,42 @@ static void FillPanelFrame(BarRuntime& runtime, island::FrameState& frame, islan
     }
 }
 
+// --- pace ---
+//
+// Moved out of the frame loop verbatim (indentation aside), and it is the last thing a pass does: while
+// animating, wait for the next compositor tick (or a short message wait as a fallback); when idle, block on
+// input instead of spinning, because the clock only needs a wake-up once a second. It needs the window
+// services, whether the compositor clock answered, and the wait counter BarRuntime carries.
+static void PaceTheLoop(island::BarSystems& systems, bool clockDriven, BarRuntime& runtime) {
+    // --- pace ---
+    //
+    // While animating, wait for the next compositor tick (or a short
+    // message wait as a fallback). When idle, block on input instead of
+    // spinning: the clock only needs a wake-up once a second, so a 100 ms
+    // cap is plenty and costs nothing on an idle desktop.
+    if (systems.window.IsAnimating()) {
+        // Preferred order, and the reason for it: the swap chain's frame-latency waitable
+        // object is the compositor's own "the next frame may go now" signal, so a wait on it
+        // ends when there is a frame to draw instead of after a guess. The compositor clock
+        // comes second (it is the same idea through a different door), and a short message wait
+        // last. The 8 ms cap is a safety net for a signalled-but-unused object, not the pacing.
+        const HANDLE frameWait = systems.renderer.FrameLatencyWaitable();
+        if (frameWait) {
+            ::MsgWaitForMultipleObjectsEx(1, &frameWait, 8, QS_ALLINPUT,
+                                          MWMO_INPUTAVAILABLE);
+        } else if (clockDriven) {
+            systems.renderer.WaitForCompositorClock(8);
+        } else {
+            ::MsgWaitForMultipleObjectsEx(0, nullptr, 4, QS_ALLINPUT,
+                                          MWMO_INPUTAVAILABLE);
+        }
+        runtime.frameWaits += 1;
+    } else {
+        ::MsgWaitForMultipleObjectsEx(0, nullptr, 100, QS_ALLINPUT,
+                                      MWMO_INPUTAVAILABLE);
+    }
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -5808,33 +5844,9 @@ float musicWavePhase = 0.0f;
             // lives above RunBar; its cross-frame state is BarRuntime's.
             ReportIntervalAndThrottle(runtime, systems, pacingPath);
 
-            // --- pace ---
-            //
-            // While animating, wait for the next compositor tick (or a short
-            // message wait as a fallback). When idle, block on input instead of
-            // spinning: the clock only needs a wake-up once a second, so a 100 ms
-            // cap is plenty and costs nothing on an idle desktop.
-            if (systems.window.IsAnimating()) {
-                // Preferred order, and the reason for it: the swap chain's frame-latency waitable
-                // object is the compositor's own "the next frame may go now" signal, so a wait on it
-                // ends when there is a frame to draw instead of after a guess. The compositor clock
-                // comes second (it is the same idea through a different door), and a short message wait
-                // last. The 8 ms cap is a safety net for a signalled-but-unused object, not the pacing.
-                const HANDLE frameWait = systems.renderer.FrameLatencyWaitable();
-                if (frameWait) {
-                    ::MsgWaitForMultipleObjectsEx(1, &frameWait, 8, QS_ALLINPUT,
-                                                  MWMO_INPUTAVAILABLE);
-                } else if (clockDriven) {
-                    systems.renderer.WaitForCompositorClock(8);
-                } else {
-                    ::MsgWaitForMultipleObjectsEx(0, nullptr, 4, QS_ALLINPUT,
-                                                  MWMO_INPUTAVAILABLE);
-                }
-                runtime.frameWaits += 1;
-            } else {
-                ::MsgWaitForMultipleObjectsEx(0, nullptr, 100, QS_ALLINPUT,
-                                              MWMO_INPUTAVAILABLE);
-            }
+            // The wait that paces the loop. The phase lives above RunBar and it is the last thing a pass
+            // does; the work flags below are the loop own bookkeeping and stay here.
+            PaceTheLoop(systems, clockDriven, runtime);
 
             // What this pass did, for the slow-frame line above: the interval it will be measured against
             // is the gap from the END of this pass to the next, so these flags describe it.
