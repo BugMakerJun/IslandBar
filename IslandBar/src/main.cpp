@@ -2686,6 +2686,106 @@ static void PaceTheLoop(island::BarSystems& systems, bool clockDriven, BarRuntim
     }
 }
 
+// --- the CALL strip, and the date / time / weather strip ---
+//
+// Moved out of the frame loop verbatim (indentation aside, plus one line that a past edit had merged
+// with the brace above it and is split again here). The CALL strip is what WeChat call looks like in the
+// reference: an avatar, a green running timer counted from when the WATCHER saw the call start -- not from
+// this frame -- and a level meter from the output peak. The strip below it decides WHERE the pill own line
+// is drawn, asked once in StatusPlacementFor, because the one thing that must not happen is the same words
+// in both places at once.
+static void FillCallAndStatusStrip(island::FrameState& frame, island::BarState& bar,
+                                   island::BarSystems& systems, const island::Notification* active,
+                                   float lyricsScrollDip, float dt) {
+    // --- the CALL strip ------------------------------------------------------
+    //
+    // When the notification on show is WeChat's CALL one, the strip says it the way the reference
+    // does: an avatar, a green running timer, and a level meter from the output's peak. The timer
+    // counts from when the WATCHER saw the call begin, not from when this frame was drawn, so
+    // restarting the bar in the middle of a call does not restart the count.
+    if (active && systems.wechat.CallNotificationId() != 0 && active->id == systems.wechat.CallNotificationId()) {
+        frame.callUp = true;
+        // The avatar, looked up once per call: the icon of the process that is in it.
+        {
+            wchar_t source[260] = {};
+            if (ProcessImagePath(systems.wechat.CallPid(), source, 260) &&
+                std::wcscmp(source, callIconSource) != 0) {
+                wcscpy_s(callIconSource, 260, source);
+                callIconPixels.clear();
+                callIconWidth = 0;
+                callIconHeight = 0;
+                if (island::LoadNotificationIconPixels(source, &callIconPixels, &callIconWidth,
+                                                       &callIconHeight)) {
+                    ++callIconRevision;
+                    island::LogAndPrint(
+                        L"  wechat: call icon from '%ls' -> %dx%d\n", source, callIconWidth,
+                        callIconHeight);
+                    std::fflush(stdout);
+                }
+            }
+                    }
+                    const unsigned long long startedMs = systems.wechat.CallStartMs();
+        frame.callStrip.seconds =
+            startedMs != 0 ? static_cast<int>((GetTickCount64() - startedMs) / 1000) : 0;
+        float peak = 0.0f;
+        frame.callStrip.levelKnown = systems.volume.Peak(&peak);
+        frame.callStrip.level = peak;
+        frame.callStrip.iconPixels =
+            callIconPixels.empty() ? nullptr : callIconPixels.data();
+        frame.callStrip.iconWidth = callIconWidth;
+        frame.callStrip.iconHeight = callIconHeight;
+        frame.callStrip.iconRevision = callIconRevision;
+    }
+    frame.lyricScrollDip = lyricsScrollDip;
+
+    // --- the date, the weekday, the time and the weather --------------------------
+    //
+    // IS THE PILL'S OWN LINE TAKEN? That is the whole question, and it is exactly "the
+    // island has something else to say": a call, a message, or a lyric. The answer decides
+    // WHICH OF THE TWO HOMES the line is drawn in -- inside the pill, or beside the deck --
+    // and it is asked ONCE, in StatusPlacementFor, because the one thing that must not
+    // happen is the same words in both places at once.
+    //
+    // The three values are the ones the renderer chooses the pill's own content from, so
+    // the two draw sites cannot disagree: a pill showing the lyric always has the line
+    // beside it, and a pill showing the date and the time never has.
+    const bool islandLineTaken =
+        (frame.restingState == island::IslandState::MusicStrip &&
+         (frame.lyricLine || frame.fallbackLine)) ||
+        (frame.state == island::IslandState::NoticeStrip &&
+         (frame.callUp || (frame.noticeLine && frame.noticeLine[0] != '\0')));
+    const island::StatusPlacement placement =
+        island::StatusPlacementFor(islandLineTaken);
+
+    bar.statusStripOpacity =
+        island::StatusStripFadeStep(bar.statusStripOpacity, placement.besideDeck, dt);
+    frame.statusStripOpacity = bar.statusStripOpacity;
+
+    // The reading is COPIED into this scope's buffers rather than pointed at where the
+    // worker keeps it: the worker can publish between this line and the draw, and a frame
+    // that read half of one reading and half of the next would print a temperature that
+    // never happened.
+    //
+    // Two pieces, not one string: the line sets the word and the temperature apart (see
+    // FrameState::statusSky).
+    systems.weather.Pieces(bar.statusSkyText, 32, bar.statusTemperatureText, 32);
+    frame.statusSky = bar.statusSkyText[0] != L'\0' ? bar.statusSkyText : nullptr;
+    frame.statusTemperature =
+        bar.statusTemperatureText[0] != L'\0' ? bar.statusTemperatureText : nullptr;
+    // ... and the CODE the two pieces came from, because the mark before the word is drawn
+    // from it: the line used to draw one cloud-with-rain whatever the sky was.
+    {
+        double statusTemperatureC = 0.0;
+        int statusWeatherCode = -1;
+        frame.statusCode = systems.weather.Get(&statusTemperatureC, &statusWeatherCode)
+                               ? statusWeatherCode
+                               : -1;
+    }
+
+    // Read by the next pass's redraw decision, like the icon row's own arrival flags.
+    bar.statusStripAnimating = bar.statusStripOpacity > 0.001f && bar.statusStripOpacity < 0.999f;
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -5490,92 +5590,9 @@ float musicWavePhase = 0.0f;
                 frame.lyricLinePrevScrollDip = bar.replacedLyricScrollDip;
                 frame.noticeLine = noticeLine.empty() ? nullptr : noticeLine.c_str();
 
-                // --- the CALL strip ------------------------------------------------------
-                //
-                // When the notification on show is WeChat's CALL one, the strip says it the way the reference
-                // does: an avatar, a green running timer, and a level meter from the output's peak. The timer
-                // counts from when the WATCHER saw the call begin, not from when this frame was drawn, so
-                // restarting the bar in the middle of a call does not restart the count.
-                if (active && systems.wechat.CallNotificationId() != 0 && active->id == systems.wechat.CallNotificationId()) {
-                    frame.callUp = true;
-                    // The avatar, looked up once per call: the icon of the process that is in it.
-                    {
-                        wchar_t source[260] = {};
-                        if (ProcessImagePath(systems.wechat.CallPid(), source, 260) &&
-                            std::wcscmp(source, callIconSource) != 0) {
-                            wcscpy_s(callIconSource, 260, source);
-                            callIconPixels.clear();
-                            callIconWidth = 0;
-                            callIconHeight = 0;
-                            if (island::LoadNotificationIconPixels(source, &callIconPixels, &callIconWidth,
-                                                                   &callIconHeight)) {
-                                ++callIconRevision;
-                                island::LogAndPrint(
-                                    L"  wechat: call icon from '%ls' -> %dx%d\n", source, callIconWidth,
-                                    callIconHeight);
-                                std::fflush(stdout);
-                            }
-                        }
-                    }                    const unsigned long long startedMs = systems.wechat.CallStartMs();
-                    frame.callStrip.seconds =
-                        startedMs != 0 ? static_cast<int>((GetTickCount64() - startedMs) / 1000) : 0;
-                    float peak = 0.0f;
-                    frame.callStrip.levelKnown = systems.volume.Peak(&peak);
-                    frame.callStrip.level = peak;
-                    frame.callStrip.iconPixels =
-                        callIconPixels.empty() ? nullptr : callIconPixels.data();
-                    frame.callStrip.iconWidth = callIconWidth;
-                    frame.callStrip.iconHeight = callIconHeight;
-                    frame.callStrip.iconRevision = callIconRevision;
-                }
-                frame.lyricScrollDip = lyricsScrollDip;
-
-                // --- the date, the weekday, the time and the weather --------------------------
-                //
-                // IS THE PILL'S OWN LINE TAKEN? That is the whole question, and it is exactly "the
-                // island has something else to say": a call, a message, or a lyric. The answer decides
-                // WHICH OF THE TWO HOMES the line is drawn in -- inside the pill, or beside the deck --
-                // and it is asked ONCE, in StatusPlacementFor, because the one thing that must not
-                // happen is the same words in both places at once.
-                //
-                // The three values are the ones the renderer chooses the pill's own content from, so
-                // the two draw sites cannot disagree: a pill showing the lyric always has the line
-                // beside it, and a pill showing the date and the time never has.
-                const bool islandLineTaken =
-                    (frame.restingState == island::IslandState::MusicStrip &&
-                     (frame.lyricLine || frame.fallbackLine)) ||
-                    (frame.state == island::IslandState::NoticeStrip &&
-                     (frame.callUp || (frame.noticeLine && frame.noticeLine[0] != '\0')));
-                const island::StatusPlacement placement =
-                    island::StatusPlacementFor(islandLineTaken);
-
-                bar.statusStripOpacity =
-                    island::StatusStripFadeStep(bar.statusStripOpacity, placement.besideDeck, dt);
-                frame.statusStripOpacity = bar.statusStripOpacity;
-
-                // The reading is COPIED into this scope's buffers rather than pointed at where the
-                // worker keeps it: the worker can publish between this line and the draw, and a frame
-                // that read half of one reading and half of the next would print a temperature that
-                // never happened.
-                //
-                // Two pieces, not one string: the line sets the word and the temperature apart (see
-                // FrameState::statusSky).
-                systems.weather.Pieces(bar.statusSkyText, 32, bar.statusTemperatureText, 32);
-                frame.statusSky = bar.statusSkyText[0] != L'\0' ? bar.statusSkyText : nullptr;
-                frame.statusTemperature =
-                    bar.statusTemperatureText[0] != L'\0' ? bar.statusTemperatureText : nullptr;
-                // ... and the CODE the two pieces came from, because the mark before the word is drawn
-                // from it: the line used to draw one cloud-with-rain whatever the sky was.
-                {
-                    double statusTemperatureC = 0.0;
-                    int statusWeatherCode = -1;
-                    frame.statusCode = systems.weather.Get(&statusTemperatureC, &statusWeatherCode)
-                                           ? statusWeatherCode
-                                           : -1;
-                }
-
-                // Read by the next pass's redraw decision, like the icon row's own arrival flags.
-                bar.statusStripAnimating = bar.statusStripOpacity > 0.001f && bar.statusStripOpacity < 0.999f;
+                // The CALL strip and the date/weather strip. The phase lives above RunBar; its place in the
+                // sequence is unchanged.
+                FillCallAndStatusStrip(frame, bar, systems, active, lyricsScrollDip, dt);
 
                 // The card's printed time and the fill of its bar, from the ONE playhead at the top of
                 // this iteration -- the same number the pill's lyric line is chosen by.
