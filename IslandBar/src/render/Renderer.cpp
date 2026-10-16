@@ -11,9 +11,11 @@
 // executable-to-icon loader in the project.
 #include "media/MusicSession.h"
 #include "media/WicImage.h"
+#include "platform/IconRaster.h"   // an HICON to top-down BGRA pixels, shared with media/
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -1275,44 +1277,18 @@ ID2D1Bitmap1* Renderer::IconForWindow(HWND window) {
         return slot.bitmap;
     }
 
-    // An HICON has to be turned into pixels. Drawn into a top-down 32-bit DIB and then uploaded,
-    // which is the same route the icon loader uses, so there is one place that knows how to get
-    // from an icon to a bitmap rather than two.
-    const int side = 32;
-    BITMAPV5HEADER header = {};
-    header.bV5Size = sizeof(header);
-    header.bV5Width = side;
-    header.bV5Height = -side;   // top-down, matching the BGRA the GPU wants
-    header.bV5Planes = 1;
-    header.bV5BitCount = 32;
-    header.bV5Compression = BI_BITFIELDS;
-    header.bV5RedMask = 0x00FF0000;
-    header.bV5GreenMask = 0x0000FF00;
-    header.bV5BlueMask = 0x000000FF;
-    header.bV5AlphaMask = 0xFF000000;
-
-    void* bits = nullptr;
-    HDC screen = GetDC(nullptr);
-    HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
-    HBITMAP dib = memory ? CreateDIBSection(memory, reinterpret_cast<BITMAPINFO*>(&header),
-                                           DIB_RGB_COLORS, &bits, nullptr, 0)
-                         : nullptr;
-    if (dib && bits) {
-        HGDIOBJ previous = SelectObject(memory, dib);
-        DrawIconEx(memory, 0, 0, icon, side, side, 0, nullptr, DI_NORMAL);
-        GdiFlush();
-        SelectObject(memory, previous);
-
+    // An HICON has to be turned into pixels. The shared rasterizer draws it into a top-down BGRA buffer
+    // (platform/IconRaster.h) and this uploads what it made -- one place that knows how to get from an icon
+    // to a bitmap, which is what this comment claimed while being the second copy of it.
+    std::vector<uint8_t> pixels;
+    if (RasterizeIcon32(icon, pixels)) {
         const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
             D2D1_BITMAP_OPTIONS_NONE,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
             96.0f, 96.0f);
-        d2dContext_->CreateBitmap(D2D1::SizeU(side, side), bits, side * 4, &props,
-                                  &slot.bitmap);
+        d2dContext_->CreateBitmap(D2D1::SizeU(kIconRasterSide, kIconRasterSide), pixels.data(),
+                                  kIconRasterSide * 4, &props, &slot.bitmap);
     }
-    if (dib) DeleteObject(dib);
-    if (memory) DeleteDC(memory);
-    if (screen) ReleaseDC(nullptr, screen);
 
     return slot.bitmap;
 }

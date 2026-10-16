@@ -6,11 +6,11 @@
 
 #include <roapi.h>
 #include <shellapi.h>   // SHGetFileInfoW, for the source application's icon
-#include <objidl.h>     // BITMAPV5HEADER / CreateDIBSection
 
 
 
 #include "media/WicImage.h"
+#include "platform/IconRaster.h"   // an HICON to pixels: the same route the renderer uploads with
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -465,9 +465,10 @@ void FillAppDisplayName(const wchar_t* appId, const wchar_t* executablePath, cha
 // Loads an executable's icon and re-encodes it as a small PNG.
 //
 // The icon is drawn at 20 DIP, so the shell's 32x32 frame is plenty. `SHGetFileInfoW` with
-// SHGFI_ICON | SHGFI_SMALLICON gives a ready HICON, which is drawn into a top-down 32-bit DIB
-// and fed through the same PNG encoder the album art uses -- reading an HICON's pixels directly
-// would need GDI+.
+// SHGFI_ICON | SHGFI_SMALLICON gives a ready HICON, which the shared rasterizer draws into its
+// top-down BGRA buffer (platform/IconRaster.h -- the same code the renderer uploads its taskbar
+// icons with) and which is then fed through the same PNG encoder the album art uses. Reading an
+// HICON's pixels directly would need GDI+.
 size_t FetchAppIcon(const wchar_t* executablePath, uint8_t* out, size_t capacity) {
     if (!executablePath || executablePath[0] == L'\0' || !out || capacity == 0) return 0;
 
@@ -484,42 +485,13 @@ size_t FetchAppIcon(const wchar_t* executablePath, uint8_t* out, size_t capacity
     }
     if (!info.hIcon) return 0;
 
-    const int side = 32;
-    BITMAPV5HEADER header = {};
-    header.bV5Size = sizeof(header);
-    header.bV5Width = side;
-    header.bV5Height = -side;   // negative: top-down, matching the BGRA the renderer wants
-    header.bV5Planes = 1;
-    header.bV5BitCount = 32;
-    header.bV5Compression = BI_BITFIELDS;
-    header.bV5RedMask = 0x00FF0000;
-    header.bV5GreenMask = 0x0000FF00;
-    header.bV5BlueMask = 0x000000FF;
-    header.bV5AlphaMask = 0xFF000000;
-
-    void* bits = nullptr;
-    HDC screen = GetDC(nullptr);
-    HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
-    HBITMAP bitmap =
-        memory ? CreateDIBSection(memory, reinterpret_cast<BITMAPINFO*>(&header),
-                                  DIB_RGB_COLORS, &bits, nullptr, 0)
-               : nullptr;
-
+    std::vector<uint8_t> pixels;
     size_t written = 0;
-    if (bitmap && bits) {
-        HGDIOBJ previous = SelectObject(memory, bitmap);
-        // The DIB starts zeroed, so whatever the icon leaves alone stays transparent.
-        DrawIconEx(memory, 0, 0, info.hIcon, side, side, 0, nullptr, DI_NORMAL);
-        GdiFlush();
-        SelectObject(memory, previous);
-
-        written =
-            EncodeBgraToPng(static_cast<const uint8_t*>(bits), side, side, out, capacity);
+    if (RasterizeIcon32(info.hIcon, pixels)) {
+        written = EncodeBgraToPng(pixels.data(), kIconRasterSide, kIconRasterSide, out, capacity);
     }
 
-    if (bitmap) DeleteObject(bitmap);
-    if (memory) DeleteDC(memory);
-    if (screen) ReleaseDC(nullptr, screen);
+    // The icon is OURS: SHGetFileInfoW handed it over, and nothing else will release it.
     DestroyIcon(info.hIcon);
     return written;
 }

@@ -56,6 +56,7 @@ target_link_libraries(island_core PUBLIC island_domain)
 add_library(island_platform STATIC
     platform/DisplayBrightness.cpp
     platform/Http.cpp
+    platform/IconRaster.cpp
     platform/Monitor.cpp
     platform/NativeTaskbar.cpp
     platform/ThumbnailPreview.cpp
