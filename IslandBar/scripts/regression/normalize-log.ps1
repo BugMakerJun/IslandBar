@@ -49,10 +49,13 @@ New-Item -ItemType Directory -Force -Path $Baseline | Out-Null
 # NOT in here: the weather position, which is the Windows location service's answer and jitters in its fifth
 # decimal between two runs (MEASURED: 41.775621,123.441200 then 41.775624,123.441217).
 $Strict = @(
-    'theme:', 'monitor ', 'native taskbar:', 'work area:', 'notifications: ', 'music: reading',
+    'theme:', 'native taskbar:', 'work area:', 'notifications: ', 'music: reading',
     'music: player window titles', 'volume: reading', 'sound: audio sessions', 'lyrics: on demand',
     'preview: ', 'start: account'
 )
+# NOT STRICT, and it was: the monitor line ends with the taskbar's own inset -- 32 px on this machine, 0 px
+# after anything has touched the shell taskbar -- which is the machine's state and not the bar's. It is
+# compared as SHAPE instead.
 
 # Lines that are only measurements of the machinery, never of what the bar did.
 $Dropped = @(
@@ -64,6 +67,8 @@ $Dropped = @(
     # Machine-dependent events: which of the user's applications opened a window, and which taskbar
     # buttons exist right now. They change when the user does anything at all.
     'wechat: window appeared', 'taskbar icon: hwnd',
+    # Live data, not behaviour: the weather reading changes between two runs a minute apart.
+    '^weather: [\d\.-]+ C, code',
     # The row's own contents: how many application icons it has is the user's window count, and the layout
     # itself is asserted by --self-test, which is where geometry belongs.
     '^row: '

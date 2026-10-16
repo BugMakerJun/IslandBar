@@ -1194,6 +1194,66 @@ static void ReadTrayAndStartLearning(island::BarSystems& systems) {
 //  merged, nothing is moved earlier or later, and the call site replaces the block in place.
 // =====================================================================
 
+// --- what has to outlive a single pass through the loop ---
+//
+// WHY A STRUCT AND NOT PARAMETERS (round 46, the reviewers' (c)): the card's owner and the copy of
+// the message it is showing are written in one phase of the pass and read in another, so every phase
+// in between would carry three references that say nothing about the phase itself.
+//
+// WHAT BELONGS IN HERE, and the rule is narrow: a local that genuinely has to survive a pass, because
+// something written this frame is read next frame. A local that can live inside a phase stays inside
+// it, and nothing that owns policy, a resource or a lifetime moves in here.
+struct BarRuntime {
+    // Which card owns the shape, held for the whole life of the card rather than for the life of the
+    // request that opened it. See NextCardOwner.
+    island::CardOwner cardOwner = island::CardOwner::None;
+    // The message the card is showing, COPIED, and held for the same reason the owner is.
+    //
+    // A pointer into the notification store would be reused the moment the store's ring comes round
+    // -- and the card is still on screen while it retracts, so a new message arriving during the exit
+    // would change what the outgoing card says. The copy keeps the exit honest.
+    island::Notification notificationShown;
+    bool haveNotificationShown = false;
+};
+
+// --- who owns the card for this frame, and which message it is showing ---
+//
+// Moved out of the frame loop verbatim (indentation aside). The two things it carries between frames live in
+// BarRuntime, which is what that struct was added for; the rest -- the frame being filled in, the request
+// flags, the message that is up now and whether a session exists -- are the pass's own.
+static void UpdateCardOwner(BarRuntime& runtime, island::FrameState& frame, island::BarState& bar,
+                            island::BarSystems& systems, const island::Notification* active,
+                            bool musicPresent) {
+    // Who owns the card for this frame. The panel keeps it until the card is gone.
+    //
+    // `bar.systemPanelOpen` is the request, and the request is withdrawn the moment the control is
+    // pressed again; the card that request opened is still on screen for another 0.24 s.
+    // Drawing the panel only while the request was set made the retraction invisible -- the
+    // panel disappeared in one frame -- and, because the state had been left on the card, left
+    // the next press with no transition to animate at all. Both halves of the report are this
+    // one latch.
+    //
+    // `cardWanted` is the TARGET, which is the question "is a card still asked for" -- as
+    // opposed to `frame.state`, which is where the shape is now. While the answer is yes the
+    // owner is chosen afresh (panel, then a message, then what is playing); while it is no the
+    // owner is kept, so the card is drawn all the way out instead of vanishing on the first
+    // frame of its own exit.
+    const bool cardWanted = (systems.window.State() == island::IslandState::Expanded);
+    runtime.cardOwner = island::NextCardOwner(runtime.cardOwner, frame.outerCardUp, cardWanted,
+                                              bar.systemPanelOpen, active != nullptr, musicPresent);
+    frame.cardOwner = runtime.cardOwner;
+    // ... and the WINDOW is told too, because the cursor is decided there (WM_SETCURSOR) and it
+    // has to know which card's controls are the ones on screen. See SetCardOwner.
+    systems.window.SetCardOwner(runtime.cardOwner);
+
+    // The message the card is showing, held for the whole life of the card.
+    if (active) {
+        runtime.notificationShown = *active;
+        runtime.haveNotificationShown = true;
+    }
+    if (runtime.cardOwner != island::CardOwner::Notification) runtime.haveNotificationShown = false;
+}
+
 // --- the frame's own clock ---
 //
 // Moved out of the loop. `previous` is carried across frames, so it comes in by reference; `dt` is what every
@@ -2240,16 +2300,10 @@ float musicWavePhase = 0.0f;
         // frames in between (see cardSurfaceMoving -- a per-frame flag is what made the card flicker).
         unsigned long long lastCardMotionMs = 0;
         unsigned long long lastRegionApplications = 0;
-        // Which card owns the shape, held for the whole life of the card rather than for the life of the
-        // request that opened it. See NextCardOwner.
-        island::CardOwner cardOwner = island::CardOwner::None;
-        // The message the card is showing, COPIED, and held for the same reason the owner is.
-        //
-        // A pointer into the notification store would be reused the moment the store's ring comes round
-        // -- and the card is still on screen while it retracts, so a new message arriving during the exit
-        // would change what the outgoing card says. The copy keeps the exit honest.
-        island::Notification notificationShown;
-        bool haveNotificationShown = false;
+        // The card's owner and the copy of the message it is showing live in BarRuntime: the latch that
+        // writes them and the drawing that reads them are in different phases of the same pass, which is
+        // what the struct is for (see BarRuntime).
+        BarRuntime runtime;
         DWORD lastStartTogglePhase = 0xFFFFFFFFul;   // no toggle has happened yet
         int whyAnimating = 0, whyClock = 0, whyNotification = 0, whyMusic = 0;
         int whyLyrics = 0, whyProgress = 0, whyFirst = 0, whyStatusStrip = 0;
@@ -4484,35 +4538,9 @@ float musicWavePhase = 0.0f;
                 systems.window.SetStartState(startPageShown, bar.startPageState, bar.startPinCount, bar.startAppCount,
                                      bar.startPickerScroll);
 
-                // Who owns the card for this frame. The panel keeps it until the card is gone.
-                //
-                // `bar.systemPanelOpen` is the request, and the request is withdrawn the moment the control is
-                // pressed again; the card that request opened is still on screen for another 0.24 s.
-                // Drawing the panel only while the request was set made the retraction invisible -- the
-                // panel disappeared in one frame -- and, because the state had been left on the card, left
-                // the next press with no transition to animate at all. Both halves of the report are this
-                // one latch.
-                //
-                // `cardWanted` is the TARGET, which is the question "is a card still asked for" -- as
-                // opposed to `frame.state`, which is where the shape is now. While the answer is yes the
-                // owner is chosen afresh (panel, then a message, then what is playing); while it is no the
-                // owner is kept, so the card is drawn all the way out instead of vanishing on the first
-                // frame of its own exit.
-                const bool cardWanted = (systems.window.State() == island::IslandState::Expanded);
-                cardOwner = island::NextCardOwner(cardOwner, frame.outerCardUp, cardWanted,
-                                                 bar.systemPanelOpen, active != nullptr,
-                                                 nowPlaying.present);
-                frame.cardOwner = cardOwner;
-                // ... and the WINDOW is told too, because the cursor is decided there (WM_SETCURSOR) and it
-                // has to know which card's controls are the ones on screen. See SetCardOwner.
-                systems.window.SetCardOwner(cardOwner);
-
-                // The message the card is showing, held for the whole life of the card.
-                if (active) {
-                    notificationShown = *active;
-                    haveNotificationShown = true;
-                }
-                if (cardOwner != island::CardOwner::Notification) haveNotificationShown = false;
+                // Who owns the card, and which message it is showing. The phase lives above RunBar; the two
+                // things it carries between frames are BarRuntime's.
+                UpdateCardOwner(runtime, frame, bar, systems, active, nowPlaying.present);
                 frame.systemButtonHovered = systems.window.SystemButtonHovered();
                 frame.systemPanel.tileCount = 0;
                 frame.cardLeftDip = 0.0f;
@@ -4691,7 +4719,7 @@ float musicWavePhase = 0.0f;
                     // because the question was asked about the panel. Reported as "this should be under the
                     // island, not under this [the button]".
                     const float islandCentre = (anchorIsland.rect.left + anchorIsland.rect.right) * 0.5f;
-                    const float anchorCentre = (cardOwner == island::CardOwner::SystemPanel)
+                    const float anchorCentre = (runtime.cardOwner == island::CardOwner::SystemPanel)
                                                    ? buttonCentre
                                                    : islandCentre;
                     const float anchorLeft = anchorCentre - island::kExpandedWidthDip * 0.5f;
@@ -5209,8 +5237,8 @@ float musicWavePhase = 0.0f;
                 // the first frame of its own exit and the exit was invisible. The owner is held until the
                 // shape is back, so the content is there to be seen leaving.
                 frame.notification =
-                    (frame.cardOwner == island::CardOwner::Notification && haveNotificationShown)
-                        ? &notificationShown
+                    (frame.cardOwner == island::CardOwner::Notification && runtime.haveNotificationShown)
+                        ? &runtime.notificationShown
                         : nullptr;
                 // ... and the sender's icon, which is what makes the card say WHO as well as what.
                 //

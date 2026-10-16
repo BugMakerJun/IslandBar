@@ -7,7 +7,7 @@ STRICT theme: 示例青 (from themes\) -- ink contrast 17.6:1
 STRICT theme: 1 theme(s) loaded from themes\
 STRICT theme: 玻璃 (remembered by theme.txt) -- ink contrast 8.1:1
 SHAPE  IslandBar
-STRICT monitor 2560x1440, work 2560x1408, 96 dpi, taskbar inset 32 px
+SHAPE  monitor <N><H>, work <N><H>, <N> dpi, taskbar inset <N> px
 SHAPE  move the pointer onto the pill to spread it; click to open the card
 SHAPE  close the window to exit
 STRICT native taskbar: left alone (--keep-taskbar)
@@ -50,7 +50,6 @@ SHAPE  toasts: starting after id <N>
 SHAPE  tray learn: <N> of <N> icon(s) known; asking the applications to register again (background)
 SHAPE  tray learn: the shell (<N> process(es) offered) was already carrying the module, <N> registration(s) captured, <N> new entr(ies) -- <N> of <N> icon(s) have a callback entry (in <N> ms) -- observer did not report in <N> ms (<N> of the hooked threads took the message that loads the module)
 SHAPE  volume: peak meter acquired
-SHAPE  weather: <N>.<N> C, code <N> -> 晴 <N>°
 SHAPE  weather: position from Windows -> <N>.<N>, <N>.<N>
 SHAPE  weather: position from Windows, forecast from Open-Meteo (weather.txt can pin a city instead)
 STRICT volume: reading the default output endpoint
