@@ -2620,6 +2620,28 @@ wchar_t TextRenderer::IndicatorGlyph(IndicatorIcon icon, int value) {
     return 0;
 }
 
+// The stadium background the deck buttons are drawn with: one solid fill, plus a hairline stroke in the
+// SAME colour, which is what covers the antialiased fringe a Fill on its own leaves along the rounded
+// edges. The island carries the same line for the same reason.
+//
+// TWO CALLERS, and the reason they are one function is the stroke: it is not decoration, it is the reason
+// the shape has no ragged edge, and it was written out twice with only a comment's wording to tell them
+// apart (see check-duplicate-code.ps1). The guards are repeated at the call sites because they are about
+// control flow there -- the Start button draws a wash after this and must not do it for an empty box.
+static void FillStadiumBackground(ID2D1DeviceContext2* context, const RectF& box,
+                                  const D2D1_COLOR_F& fill) {
+    if (!context || box.right <= box.left || fill.a <= 0.001f) return;
+    const float radius = (box.bottom - box.top) * 0.5f;
+    const D2D1_ROUNDED_RECT rounded = {
+        D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
+    ID2D1SolidColorBrush* background = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(fill, &background)) && background) {
+        context->FillRoundedRectangle(&rounded, background);
+        context->DrawRoundedRectangle(&rounded, background, 1.0f);
+        background->Release();
+    }
+}
+
 void TextRenderer::DrawSystemButton(ID2D1DeviceContext2* context, const RectF& box, float wash,
                                     bool open, const D2D1_COLOR_F& fill, float opacity) {
     if (!context) return;
@@ -2627,17 +2649,7 @@ void TextRenderer::DrawSystemButton(ID2D1DeviceContext2* context, const RectF& b
 
     // The same background the other deck buttons get, in the island's own colour, so the Start button,
     // this button and the indicators read as one cluster rather than as marks on the wallpaper.
-    if (fill.a > 0.001f) {
-        const float radius = (box.bottom - box.top) * 0.5f;
-        const D2D1_ROUNDED_RECT rounded = {
-            D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
-        ID2D1SolidColorBrush* background = nullptr;
-        if (SUCCEEDED(context->CreateSolidColorBrush(fill, &background)) && background) {
-            context->FillRoundedRectangle(&rounded, background);
-            context->DrawRoundedRectangle(&rounded, background, 1.0f);
-            background->Release();
-        }
-    }
+    FillStadiumBackground(context, box, fill);
 
     // Spring-animated, like the other two washes (FrameState::systemButtonWash).
     if (wash > 0.01f && opacity > 0.01f) {
@@ -3621,19 +3633,7 @@ void TextRenderer::DrawStartButton(ID2D1DeviceContext2* context, const RoundedBo
     // The same background the icon buttons get, in the island's own colour, so the two ends of the bar
     // read as one object. Without it the Windows mark would sit on whatever the wallpaper happens to be,
     // which is the problem the icon buttons already had.
-    if (fill.a > 0.001f) {
-        const float radius = (box.bottom - box.top) * 0.5f;
-        const D2D1_ROUNDED_RECT rounded = {
-            D2D1::RectF(box.left, box.top, box.right, box.bottom), radius, radius};
-        ID2D1SolidColorBrush* background = nullptr;
-        if (SUCCEEDED(context->CreateSolidColorBrush(fill, &background)) && background) {
-            context->FillRoundedRectangle(&rounded, background);
-            // The hairline stroke in the same colour covers the antialiased fringe, for the reason the
-            // island itself has one.
-            context->DrawRoundedRectangle(&rounded, background, 1.0f);
-            background->Release();
-        }
-    }
+    FillStadiumBackground(context, box, fill);
 
     // The pointer on it gets the same wash the active window's button gets, so "this is under the
     // pointer" looks the same wherever it happens on the bar.
