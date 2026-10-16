@@ -3192,6 +3192,141 @@ static void ApplyPressesAndClicks(island::BarState& bar, island::BarSystems& sys
 // card, which is what stopped "鼠标在上面移动卡片会闪"), the tray menu rows and their labels, the three
 // control washes, and the panel open flags. It reads the pass own animating flag, delta and tray-page
 // answer, and carries one timestamp between frames through BarRuntime.
+
+// --- the lyric line the resting strip shows ---
+//
+// Moved out of the frame loop verbatim (indentation aside). It decides what the pill says this pass: which
+// line of the sheet the projected playhead is on, whether those words are NEW (a roll happens only then --
+// see the note in the block), how far the marquee has crept, and, when the sheet has nothing for this track,
+// the title as the honest fallback.
+//
+// The line, that fallback and the three answers the draw reads come back by reference; the sheet and the two
+// numbers that say which line was last picked out are BarRuntime's; the wave's PHASE comes in by reference
+// because it is the loop's own clock rather than state the drawing reads, and it is advanced here because
+// this is where the strip's frames are decided. `musicResting`, and not the state, is the question -- see the
+// note at the call site.
+static void PickRestingLyricLine(BarRuntime& runtime, island::BarState& bar, island::BarSystems& systems,
+                                  bool musicResting, float lyricScrollDipPerSec, float dt,
+                                  const char*& lyricLine, const char*& fallbackLine, bool& lyricsScrolling,
+                                  bool& lyricLineAnimating, bool& lyricLineChanged, float& musicWavePhase) {
+    if (musicResting) {
+        bar.lyricLineAge += static_cast<float>(dt > 0.1 ? 0.1 : dt);
+        // The wave drifts even while the level sits still, which is what keeps it looking
+        // alive between the beats. Wrapped, so a session that runs for hours cannot lose
+        // precision in the sine's argument.
+        musicWavePhase += static_cast<float>(dt > 0.1 ? 0.1 : dt) * 1.15f;
+        if (musicWavePhase > 6.2831853f * 64.0f) musicWavePhase -= 6.2831853f * 64.0f;
+        if (runtime.currentLyrics && !runtime.currentLyrics->Empty()) {
+            // The position is what selects the line, so it advances within a bar.track without the
+            // bar.track itself changing -- and it has to be the PROJECTED one, not the raw reading:
+            // the session reports once every second or two, so the line changed a couple of
+            // seconds after the words were sung ("现在歌词和唱的有点对应不上"). The same numbers
+            // the card's time and bar use are taken from the one playhead decided above, which
+            // falls back to the bar's own stopwatch for a session that sends no timeline at all
+            // -- NetEase Cloud Music does that, and the line sat on the first one for the whole
+            // song before this ("歌词不动"). See TrackPositionFor.
+            const long long sungMs = bar.track.ms;
+            const int index = runtime.currentLyrics->LineAt(sungMs);
+            const island::LyricLine* line = runtime.currentLyrics->At(index);
+            const char* nextText = (line && line->text[0] != '\0') ? line->text : "";
+            if (index != runtime.lastLyricIndex) {
+                runtime.lastLyricIndex = index;
+                // A ROLL ONLY WHEN THE WORDS CHANGE.
+                //
+                // The index is re-evaluated for a reason that is not a line change: the media
+                // session bumps its revision for a position update (once every second or two)
+                // and this loop then re-asks which line is current. Rolling on that put the SAME
+                // text on both sides of the window -- "歌词每1、2秒就会上下出现一模一样的歌词
+                // 然后和在一起似的" -- and it restarted a long line's marquee from the top.
+                if (island::LyricLineChanged(nextText, bar.shownLyricText)) {
+                    // The line being replaced is kept -- with the marquee offset it had reached --
+                    // because the cross-fade draws it in the same place for the whole change.
+                    strncpy_s(bar.replacedLyricText, sizeof(bar.replacedLyricText), bar.shownLyricText,
+                              _TRUNCATE);
+                    bar.replacedLyricScrollDip = runtime.lyricsScrollDip;
+                    runtime.lyricsScrollDip = 0.0f;   // a new line starts at its beginning
+                    bar.lyricLineAge = 0.0f;      // ... and fades in rather than appearing
+                    lyricLineChanged = true;
+                    // The WORDS are on the line too, not just the index: "which line is it" cannot
+                    // be checked from a number, and the whole point of this record is that the pill
+                    // and the log can be compared. Measured need: an empty LRC line used to blank
+                    // the pill and it showed the song title instead ("如果一句唱的慢的话 会显示歌
+                    // 曲名") -- with the text in the log that is visible in one grep.
+                    wchar_t wideLine[island::kLyricLineCapacity] = {};
+                    MultiByteToWideChar(CP_UTF8, 0, nextText, -1, wideLine,
+                                        static_cast<int>(island::kLyricLineCapacity));
+                    if (bar.track.fromSession) {
+                        island::LogAndPrint(
+                            L"  lyrics: line %d at %lld ms (the session last reported %lld ms): "
+                            L"%ls\n",
+                            index, sungMs, runtime.nowPlaying.positionMs, wideLine);
+                    } else if (bar.activeFromSession) {
+                        // A session that sends no timeline: the number is the bar's own stopwatch,
+                        // which is exactly what has to be checked when the words look out of step
+                        // with the singing. Measured on NetEase Cloud Music, which reports
+                        // `Position 00:00` for the whole song.
+                        island::LogAndPrint(
+                            L"  lyrics: line %d at %lld ms (counted by the bar -- this session"
+                            L" reports no position): %ls\n",
+                            index, sungMs, wideLine);
+                    } else {
+                        // No session, so no reading to compare against: the number is this
+                        // source's own count from the moment the window title appeared, which is
+                        // exactly what has to be checked when the words look out of step.
+                        island::LogAndPrint(
+                            L"  lyrics: line %d at %lld ms (counted from the player's window"
+                            L" title -- there is no session): %ls\n",
+                            index, sungMs, wideLine);
+                    }
+                }
+            }
+            lyricLineAnimating = bar.lyricLineAge < island::kLyricLineEnterSeconds;
+            // What is on screen, kept in step whether or not the words changed -- the
+            // comparison above is against this.
+            strncpy_s(bar.shownLyricText, sizeof(bar.shownLyricText), nextText, _TRUNCATE);
+
+            if (line && line->text[0] != '\0') {
+                lyricLine = line->text;
+
+                // Advance the marquee only when there is something to scroll: a
+                // line that fits is centred and stays put, so the loop can
+                // sleep instead of redrawing 60 times a second.
+                // The PILL's width, which is what the line is drawn in -- not `CurrentBox`,
+                // which is card-sized for the whole of a card transition and would tell the
+                // marquee the line fits while the renderer clips it to 220 DIP.
+                const island::RoundedBox lineBox =
+                    island::BoxForState(island::IslandState::Collapsed, systems.window.CurrentAnchor());
+                const float stripWidth = lineBox.rect.right - lineBox.rect.left;
+                wchar_t wide[512] = {};
+                if (MultiByteToWideChar(CP_UTF8, 0, line->text, -1, wide, 512) > 0) {
+                    // The same predicate the renderer uses to place the line.
+                    // They used to work it out separately from slightly different
+                    // numbers, so the renderer could centre a line while the loop
+                    // scrolled it -- the text would jump sideways for no reason.
+                    // ... and the same WIDTH measurement: `TrackLineWidth` is the width in the format
+                    // that draws the line. With `TextWidth` (the narrow, non-bold face) a line just
+                    // over the threshold was judged to fit, centred, and cut at both ends.
+                    if (island::LyricNeedsScroll(systems.text.TrackLineWidth(wide),
+                                                 stripWidth)) {
+                        // A PAUSED SESSION'S LINE STANDS STILL. The words stay on the pill -- they
+                        // are what it is for -- but a line that kept creeping across a paused player
+                        // would be reading a playhead that is not moving, and asking for frames
+                        // forever to do it.
+                        if (bar.activePlaying) {
+                            lyricsScrolling = true;
+                            runtime.lyricsScrollDip +=
+                                static_cast<float>(dt) * lyricScrollDipPerSec;
+                        }
+                    }
+                }
+            }
+        }
+        // No lyrics for this bar.track: the title is the honest fallback. The
+        // clock is only shown when there is no music at all.
+        if (!lyricLine) fallbackLine = bar.activeTitle;
+    }
+}
+
 static void FillTrayAndPanelFrame(BarRuntime& runtime, island::FrameState& frame, island::BarState& bar,
                                  island::BarSystems& systems, bool animating, float dt,
                                  bool forcedStartHover, bool trayPageShown) {
@@ -5291,122 +5426,9 @@ unsigned long long lastMusicMeterMs = 0;
             // Renderer.cpp), so the line has to be kept up to date then too. Keyed on the state, the
             // lyric vanished the moment the system button opened a panel, with the music still playing:
             // "我现在正在播放音乐 但是点击系统按钮的时候 灵动岛就不显示歌词了".
-            if (musicResting) {
-                bar.lyricLineAge += static_cast<float>(dt > 0.1 ? 0.1 : dt);
-                // The wave drifts even while the level sits still, which is what keeps it looking
-                // alive between the beats. Wrapped, so a session that runs for hours cannot lose
-                // precision in the sine's argument.
-                musicWavePhase += static_cast<float>(dt > 0.1 ? 0.1 : dt) * 1.15f;
-                if (musicWavePhase > 6.2831853f * 64.0f) musicWavePhase -= 6.2831853f * 64.0f;
-                if (runtime.currentLyrics && !runtime.currentLyrics->Empty()) {
-                    // The position is what selects the line, so it advances within a bar.track without the
-                    // bar.track itself changing -- and it has to be the PROJECTED one, not the raw reading:
-                    // the session reports once every second or two, so the line changed a couple of
-                    // seconds after the words were sung ("现在歌词和唱的有点对应不上"). The same numbers
-                    // the card's time and bar use are taken from the one playhead decided above, which
-                    // falls back to the bar's own stopwatch for a session that sends no timeline at all
-                    // -- NetEase Cloud Music does that, and the line sat on the first one for the whole
-                    // song before this ("歌词不动"). See TrackPositionFor.
-                    const long long sungMs = bar.track.ms;
-                    const int index = runtime.currentLyrics->LineAt(sungMs);
-                    const island::LyricLine* line = runtime.currentLyrics->At(index);
-                    const char* nextText = (line && line->text[0] != '\0') ? line->text : "";
-                    if (index != runtime.lastLyricIndex) {
-                        runtime.lastLyricIndex = index;
-                        // A ROLL ONLY WHEN THE WORDS CHANGE.
-                        //
-                        // The index is re-evaluated for a reason that is not a line change: the media
-                        // session bumps its revision for a position update (once every second or two)
-                        // and this loop then re-asks which line is current. Rolling on that put the SAME
-                        // text on both sides of the window -- "歌词每1、2秒就会上下出现一模一样的歌词
-                        // 然后和在一起似的" -- and it restarted a long line's marquee from the top.
-                        if (island::LyricLineChanged(nextText, bar.shownLyricText)) {
-                            // The line being replaced is kept -- with the marquee offset it had reached --
-                            // because the cross-fade draws it in the same place for the whole change.
-                            strncpy_s(bar.replacedLyricText, sizeof(bar.replacedLyricText), bar.shownLyricText,
-                                      _TRUNCATE);
-                            bar.replacedLyricScrollDip = runtime.lyricsScrollDip;
-                            runtime.lyricsScrollDip = 0.0f;   // a new line starts at its beginning
-                            bar.lyricLineAge = 0.0f;      // ... and fades in rather than appearing
-                            lyricLineChanged = true;
-                            // The WORDS are on the line too, not just the index: "which line is it" cannot
-                            // be checked from a number, and the whole point of this record is that the pill
-                            // and the log can be compared. Measured need: an empty LRC line used to blank
-                            // the pill and it showed the song title instead ("如果一句唱的慢的话 会显示歌
-                            // 曲名") -- with the text in the log that is visible in one grep.
-                            wchar_t wideLine[island::kLyricLineCapacity] = {};
-                            MultiByteToWideChar(CP_UTF8, 0, nextText, -1, wideLine,
-                                                static_cast<int>(island::kLyricLineCapacity));
-                            if (bar.track.fromSession) {
-                                island::LogAndPrint(
-                                    L"  lyrics: line %d at %lld ms (the session last reported %lld ms): "
-                                    L"%ls\n",
-                                    index, sungMs, runtime.nowPlaying.positionMs, wideLine);
-                            } else if (bar.activeFromSession) {
-                                // A session that sends no timeline: the number is the bar's own stopwatch,
-                                // which is exactly what has to be checked when the words look out of step
-                                // with the singing. Measured on NetEase Cloud Music, which reports
-                                // `Position 00:00` for the whole song.
-                                island::LogAndPrint(
-                                    L"  lyrics: line %d at %lld ms (counted by the bar -- this session"
-                                    L" reports no position): %ls\n",
-                                    index, sungMs, wideLine);
-                            } else {
-                                // No session, so no reading to compare against: the number is this
-                                // source's own count from the moment the window title appeared, which is
-                                // exactly what has to be checked when the words look out of step.
-                                island::LogAndPrint(
-                                    L"  lyrics: line %d at %lld ms (counted from the player's window"
-                                    L" title -- there is no session): %ls\n",
-                                    index, sungMs, wideLine);
-                            }
-                        }
-                    }
-                    lyricLineAnimating = bar.lyricLineAge < island::kLyricLineEnterSeconds;
-                    // What is on screen, kept in step whether or not the words changed -- the
-                    // comparison above is against this.
-                    strncpy_s(bar.shownLyricText, sizeof(bar.shownLyricText), nextText, _TRUNCATE);
-
-                    if (line && line->text[0] != '\0') {
-                        lyricLine = line->text;
-
-                        // Advance the marquee only when there is something to scroll: a
-                        // line that fits is centred and stays put, so the loop can
-                        // sleep instead of redrawing 60 times a second.
-                        // The PILL's width, which is what the line is drawn in -- not `CurrentBox`,
-                        // which is card-sized for the whole of a card transition and would tell the
-                        // marquee the line fits while the renderer clips it to 220 DIP.
-                        const island::RoundedBox lineBox =
-                            island::BoxForState(island::IslandState::Collapsed, systems.window.CurrentAnchor());
-                        const float stripWidth = lineBox.rect.right - lineBox.rect.left;
-                        wchar_t wide[512] = {};
-                        if (MultiByteToWideChar(CP_UTF8, 0, line->text, -1, wide, 512) > 0) {
-                            // The same predicate the renderer uses to place the line.
-                            // They used to work it out separately from slightly different
-                            // numbers, so the renderer could centre a line while the loop
-                            // scrolled it -- the text would jump sideways for no reason.
-                            // ... and the same WIDTH measurement: `TrackLineWidth` is the width in the format
-                            // that draws the line. With `TextWidth` (the narrow, non-bold face) a line just
-                            // over the threshold was judged to fit, centred, and cut at both ends.
-                            if (island::LyricNeedsScroll(systems.text.TrackLineWidth(wide),
-                                                         stripWidth)) {
-                                // A PAUSED SESSION'S LINE STANDS STILL. The words stay on the pill -- they
-                                // are what it is for -- but a line that kept creeping across a paused player
-                                // would be reading a playhead that is not moving, and asking for frames
-                                // forever to do it.
-                                if (bar.activePlaying) {
-                                    lyricsScrolling = true;
-                                    runtime.lyricsScrollDip +=
-                                        static_cast<float>(dt) * kLyricScrollDipPerSec;
-                                }
-                            }
-                        }
-                    }
-                }
-                // No lyrics for this bar.track: the title is the honest fallback. The
-                // clock is only shown when there is no music at all.
-                if (!lyricLine) fallbackLine = bar.activeTitle;
-            }
+            PickRestingLyricLine(runtime, bar, systems, musicResting, kLyricScrollDipPerSec, dt, lyricLine,
+                                 fallbackLine, lyricsScrolling, lyricLineAnimating, lyricLineChanged,
+                                 musicWavePhase);
 
             // Does the card's printed position need to change?
             //
