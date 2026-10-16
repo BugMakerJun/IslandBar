@@ -138,6 +138,16 @@ endif()
 #  Diagnostics.cpp is the -self-test entry point, so it belongs to the exe and may include every layer.
 add_executable(island_bar
     main.cpp
+    # --- selftest: the runtime assertions (-self-test), one file per subject -----------
+    #  Diagnostics.cpp keeps the two entry points; the checks live in Checks*.cpp and the
+    #  printing (Section/Check/Info) in Harness.cpp -- see selftest/Checks.h.
+    selftest/Harness.cpp
+    selftest/ChecksGeometry.cpp
+    selftest/ChecksWindow.cpp
+    selftest/ChecksMotion.cpp
+    selftest/ChecksJson.cpp
+    selftest/ChecksCards.cpp
+    selftest/ChecksInput.cpp
     selftest/Diagnostics.cpp
 )
 target_link_libraries(island_bar PRIVATE island_cli)
