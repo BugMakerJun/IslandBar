@@ -1214,7 +1214,100 @@ struct BarRuntime {
     // would change what the outgoing card says. The copy keeps the exit honest.
     island::Notification notificationShown;
     bool haveNotificationShown = false;
+    // --- the periodic reports, and the counters that say why a frame was drawn ---
+    //
+    // WHY THE redraw counters ARE HERE and not in the report: they are incremented all over the drawing
+    // code, once per reason, and read (and reset) once per interval by the report below. Ten terms
+    // because "the bar redrew fifty times a second" is not a fault on its own -- the report has to say
+    // which of them did it. The Start card's two are the only terms that are neither a state the loop
+    // watches nor the clock, and the defect they were added for ("鼠标移上去卡卡的") was exactly that: the
+    // card was drawn on the next clock tick, once a second, and the report said `clock=4` with everything
+    // else at zero.
+    int whyAnimating = 0;
+    int whyClock = 0;
+    int whyNotification = 0;
+    int whyMusic = 0;
+    int whyLyrics = 0;
+    int whyProgress = 0;
+    int whyFirst = 0;
+    int whyStatusStrip = 0;
+    int whyStartHover = 0;
+    int whyStartWash = 0;
+    // The frame times of the interval being measured, described and reset by the same report.
+    island::FrameStats liveStats;
+    // --- the memory line's own clock ------------------------------------------------------------------
+    //
+    // The bar is meant to sit on the desktop for days, so "it uses little memory" is a claim about a
+    // 24-hour curve rather than one reading. The curve is built from a line every five minutes plus one
+    // shortly after an operation suspected of growing the process: a card closing, a track change, a tray
+    // refresh. The steady line answers "does it grow at all"; the event line answers "which operation
+    // grows it". ProcessMetrics.h carries the rule for reading the two together.
+    unsigned long long lastMemorySample = 0;
+    // One line two seconds after startup, before the five-minute cadence has had a chance to run: it
+    // records the baseline the curve is measured against, and makes the line's presence checkable within
+    // seconds of a deploy instead of after five minutes of waiting.
+    unsigned long long memorySamplePendingAt = 0;
+    bool firstMemorySample = true;
+    unsigned long long lastMemoryMusicRevision = 0;
+    int lastMemoryTrayIcons = 0;
+    bool lastMemoryCardUp = false;
+    // --- the throttle line's own clock ----------------------------------------------------------------
+    //
+    // Frames presented and waits taken, both per second. The pair is the difference between "the loop
+    // paced itself on the compositor" and "the loop spun and presented whenever it happened to wake".
+    unsigned long long lastFramesPresented = 0;
+    unsigned long long frameWaits = 0;
+    unsigned long long lastFrameWaits = 0;
+    // When the interval report was last written, and how many window regions had been applied then.
+    unsigned long long lastIntervalReport = 0;
+    unsigned long long lastRegionApplications = 0;
 };
+
+
+// --- the interval and throttle lines ---
+//
+// Moved out of the frame loop verbatim (indentation aside). Everything it needs that outlives a pass is in
+// BarRuntime -- the ten redraw counters, the frame statistics, and the four numbers the throttle line
+// subtracts -- which is what that struct was extended for; the pacing path is the pass own.
+static void ReportIntervalAndThrottle(BarRuntime& runtime, island::BarSystems& systems,
+                                      const char* pacingPath) {
+    if (GetTickCount64() - runtime.lastIntervalReport >= 4000) {
+        runtime.lastIntervalReport = GetTickCount64();
+        wchar_t intervalSummary[256] = {};
+        runtime.liveStats.Describe(intervalSummary, 256);
+        island::LogAndPrint("  interval [%ls] %ls", island::StateName(systems.window.State()),
+                            intervalSummary);
+        island::LogAndPrint("  redraws: animating=%d clock=%d notify=%d music=%d "
+                            "lyrics=%d progress=%d strip=%d first=%d startHover=%d "
+                            "startWash=%d",
+                            runtime.whyAnimating, runtime.whyClock, runtime.whyNotification, runtime.whyMusic,
+                            runtime.whyLyrics, runtime.whyProgress, runtime.whyStatusStrip, runtime.whyFirst,
+                            runtime.whyStartHover, runtime.whyStartWash);
+        // Reported beside the frame intervals because the two are the same question: a region
+        // re-applied per frame is a window-manager call inside the animation's own loop. A
+        // hundred of them in a 4 s window containing one 0.36 s transition means the transition
+        // paid for them, and "one per state change" means it did not.
+        {
+            const unsigned long long applied = systems.window.RegionApplications();
+            island::LogAndPrint("  window region: %llu applied in total (%llu in the last 4 s)",
+                                applied, applied - runtime.lastRegionApplications);
+            runtime.lastRegionApplications = applied;
+        }
+        {
+            const unsigned long long frames = systems.renderer.FramesPresented();
+            island::LogAndPrint("  throttle: path=%s frames=%llu/s waits=%llu/s maxLatency=1",
+                                pacingPath, frames - runtime.lastFramesPresented,
+                                runtime.frameWaits - runtime.lastFrameWaits);
+            runtime.lastFramesPresented = frames;
+            runtime.lastFrameWaits = runtime.frameWaits;
+        }
+        std::fflush(stdout);
+        runtime.liveStats.Reset();
+        runtime.whyAnimating = runtime.whyClock = runtime.whyNotification = runtime.whyMusic = 0;
+        runtime.whyLyrics = runtime.whyProgress = runtime.whyFirst = runtime.whyStatusStrip = 0;
+        runtime.whyStartHover = runtime.whyStartWash = 0;
+    }
+}
 
 // --- who owns the card for this frame, and which message it is showing ---
 //
@@ -1989,11 +2082,8 @@ static void TickTray(island::BarState& bar, island::BarSystems& systems,
 // "a cache filled up" and "something is leaking" are told apart by whether they rise together (see
 // ProcessMetrics.h). The six things it carries between frames are RunBar's locals and come in by
 // reference; the two values it reads -- what is playing and the lyric sheet -- are the pass's own.
-static void ReportMemoryLine(unsigned long long& lastMemorySample, unsigned long long& memorySamplePendingAt,
-                             bool& firstMemorySample, unsigned long long& lastMemoryMusicRevision,
-                             int& lastMemoryTrayIcons, bool& lastMemoryCardUp, unsigned long long sampleMs,
-                             island::BarSystems& systems, const island::MusicInfo& nowPlaying,
-                             const island::Lyrics* currentLyrics) {
+static void ReportMemoryLine(BarRuntime& runtime, island::BarSystems& systems, unsigned long long sampleMs,
+                             const island::MusicInfo& nowPlaying, const island::Lyrics* currentLyrics) {
     // --- the memory line --------------------------------------------------------------------
     //
     // Emitted on a five-minute cadence and again shortly after a suspected grower. See the note
@@ -2010,23 +2100,23 @@ static void ReportMemoryLine(unsigned long long& lastMemorySample, unsigned long
         const bool cardUp = systems.window.State() == island::IslandState::Expanded ||
                             systems.window.FromState() == island::IslandState::Expanded;
 
-        if (musicRevision != lastMemoryMusicRevision) {
-            lastMemoryMusicRevision = musicRevision;
-            memorySamplePendingAt = nowTicks + 3000;   // once the new cover and lyric sheet land
+        if (musicRevision != runtime.lastMemoryMusicRevision) {
+            runtime.lastMemoryMusicRevision = musicRevision;
+            runtime.memorySamplePendingAt = nowTicks + 3000;   // once the new cover and lyric sheet land
         }
-        if (trayCount != lastMemoryTrayIcons) {
-            lastMemoryTrayIcons = trayCount;
-            memorySamplePendingAt = nowTicks + 3000;   // once the icons are decoded
+        if (trayCount != runtime.lastMemoryTrayIcons) {
+            runtime.lastMemoryTrayIcons = trayCount;
+            runtime.memorySamplePendingAt = nowTicks + 3000;   // once the icons are decoded
         }
-        if (lastMemoryCardUp && !cardUp) {
+        if (runtime.lastMemoryCardUp && !cardUp) {
             // Delayed rather than immediate: a card's bitmaps and text layouts are released as it
             // closes, and what the sample is for is what is STILL held after that.
-            memorySamplePendingAt = nowTicks + 30000;
+            runtime.memorySamplePendingAt = nowTicks + 30000;
         }
-        lastMemoryCardUp = cardUp;
+        runtime.lastMemoryCardUp = cardUp;
 
-        const bool steady = (nowTicks - lastMemorySample) >= sampleMs;
-        const bool afterEvent = memorySamplePendingAt != 0 && nowTicks >= memorySamplePendingAt;
+        const bool steady = (nowTicks - runtime.lastMemorySample) >= sampleMs;
+        const bool afterEvent = runtime.memorySamplePendingAt != 0 && nowTicks >= runtime.memorySamplePendingAt;
         if (steady || afterEvent) {
             island::ProcessMemorySample sample;
             island::SampleProcessMemory(&sample);
@@ -2041,12 +2131,12 @@ static void ReportMemoryLine(unsigned long long& lastMemorySample, unsigned long
             counts.notifications = systems.notifications.Count();
             systems.renderer.CacheCounts(&counts.bitmaps, &counts.windowIcons);
 
-            const char* reason = firstMemorySample ? "start"
+            const char* reason = runtime.firstMemorySample ? "start"
                                                   : (steady ? "5min" : "after-event");
             island::LogProcessMemory(reason, sample, counts);
-            firstMemorySample = false;
-            lastMemorySample = nowTicks;
-            memorySamplePendingAt = 0;
+            runtime.firstMemorySample = false;
+            runtime.lastMemorySample = nowTicks;
+            runtime.memorySamplePendingAt = 0;
         }
     }
 }
@@ -2267,54 +2357,16 @@ float musicWavePhase = 0.0f;
         bool lastSoundPageOpen = false;
         float lastSoundScroll = 0.0f;
         unsigned long long lastSoundRevision = 0;
-        unsigned long long lastIntervalReport = GetTickCount64();
-        // --- the memory line's own state -------------------------------------------------------
-        //
-        // The bar is meant to sit on the desktop for days, so "it uses little memory" is a claim about
-        // a 24-hour curve rather than about one reading. The curve is built from a line every five
-        // minutes plus one shortly after an operation that is suspected of growing the process: a card
-        // closing, a bar.track change, a tray refresh. The steady line answers "does it grow at all"; the
-        // event line answers "which operation grows it". ProcessMetrics.h carries the rule for reading
-        // the two together -- bytes rising with a count is a cache, bytes rising alone is a leak.
         constexpr unsigned long long kMemorySampleMs = 5ull * 60ull * 1000ull;
-        unsigned long long lastMemorySample = GetTickCount64();
-        // One line two seconds after startup, before the five-minute cadence has had a chance to run:
-        // it records the baseline the curve is measured against, and it makes the line's presence
-        // checkable within seconds of a deploy instead of after five minutes of waiting.
-        unsigned long long memorySamplePendingAt = GetTickCount64() + 2000;
-        bool firstMemorySample = true;
-        unsigned long long lastMemoryMusicRevision = systems.music.Revision();
-        int lastMemoryTrayIcons = systems.trayIcons.Count();
-        bool lastMemoryCardUp = false;
-        // --- the throttle line's own state -------------------------------------------------------
-        //
-        // Frames presented and waits taken, both reported per second. The pair is the difference
-        // between "the loop paced itself on the compositor" and "the loop spun and presented whenever
-        // it happened to wake": a frame count near the monitor's refresh rate WITH a wait count near it
-        // is the healthy shape, and a frame count far above it is the defect this change is about.
-        unsigned long long lastFramesPresented = systems.renderer.FramesPresented();
-        unsigned long long frameWaits = 0;
-        unsigned long long lastFrameWaits = 0;
         // When the card last had a reason to be drawn with the cheap material: while it animates, or while
         // the pointer is on it. A TIMESTAMP rather than a flag, because the material must not change on the
         // frames in between (see cardSurfaceMoving -- a per-frame flag is what made the card flicker).
         unsigned long long lastCardMotionMs = 0;
-        unsigned long long lastRegionApplications = 0;
         // The card's owner and the copy of the message it is showing live in BarRuntime: the latch that
         // writes them and the drawing that reads them are in different phases of the same pass, which is
         // what the struct is for (see BarRuntime).
         BarRuntime runtime;
         DWORD lastStartTogglePhase = 0xFFFFFFFFul;   // no toggle has happened yet
-        int whyAnimating = 0, whyClock = 0, whyNotification = 0, whyMusic = 0;
-        int whyLyrics = 0, whyProgress = 0, whyFirst = 0, whyStatusStrip = 0;
-        // ... and the Start card's own two: the pointer moving over it, and the highlights it left behind
-        // settling. Counted separately because they are the ONLY terms that are neither a state the loop
-        // watches nor the clock -- and the defect they were added for ("鼠标移上去卡卡的") was exactly this:
-        // the card was drawn on the next clock tick, once a second, and the redraw report said `clock=4`
-        // with everything else at zero, which named the clock as the cause without naming the omission.
-        int whyStartHover = 0, whyStartWash = 0;
-        island::FrameStats liveStats;
-        liveStats.Start();
         unsigned long long lastMusicRevision = systems.music.Revision();
         unsigned long long lastDrawnMusicRevision = systems.music.Revision();
         // Whether a reading has ever been taken from the session worker, so the FIRST one is taken
@@ -4300,19 +4352,19 @@ float musicWavePhase = 0.0f;
                 // symptom, not a cause. Without knowing which term keeps the condition true,
                 // the only options are to guess or to keep optimising the draw -- and the draw
                 // is already only 1.3 ms. This names the cause.
-                if (animating) ++whyAnimating;
-                if (clockChanged) ++whyClock;
-                if (notificationChanged) ++whyNotification;
-                if (musicChanged) ++whyMusic;
+                if (animating) ++runtime.whyAnimating;
+                if (clockChanged) ++runtime.whyClock;
+                if (notificationChanged) ++runtime.whyNotification;
+                if (musicChanged) ++runtime.whyMusic;
                 // The scrolling, the arrival of a new line and the entrance itself are all "the
                 // lyric asked for this frame" -- one counter, because that is the question it answers.
-                if (lyricsScrolling || lyricLineChanged || lyricLineAnimating) ++whyLyrics;
-                if (musicMeterDue) ++whyMusic;
-                if (progressChanged) ++whyProgress;
-                if (bar.statusStripAnimating || weatherChanged) ++whyStatusStrip;
-                if (startHoverChanged) ++whyStartHover;
-                if (bar.startWashAnimating) ++whyStartWash;
-                if (!haveDrawn) ++whyFirst;
+                if (lyricsScrolling || lyricLineChanged || lyricLineAnimating) ++runtime.whyLyrics;
+                if (musicMeterDue) ++runtime.whyMusic;
+                if (progressChanged) ++runtime.whyProgress;
+                if (bar.statusStripAnimating || weatherChanged) ++runtime.whyStatusStrip;
+                if (startHoverChanged) ++runtime.whyStartHover;
+                if (bar.startWashAnimating) ++runtime.whyStartWash;
+                if (!haveDrawn) ++runtime.whyFirst;
 
                 haveDrawn = true;
 
@@ -5621,7 +5673,7 @@ float musicWavePhase = 0.0f;
             // "something took 90 ms", and the last three rounds of guessing which periodic task it was
             // would have been three rounds of guessing.
             // ... and whether that pass drew, which is what separates a slow frame from a sleeping loop.
-            const double intervalMs = liveStats.Record((lastWork & kWorkDraw) != 0);
+            const double intervalMs = runtime.liveStats.Record((lastWork & kWorkDraw) != 0);
             if (intervalMs >= island::FrameStats::kSlowFrameMs) {
                 char work[192] = {};
                 auto add = [&work](const char* name) {
@@ -5642,46 +5694,11 @@ float musicWavePhase = 0.0f;
             }
             // The memory line: the five-minute cadence plus one shortly after a suspected grower. The phase
             // lives above RunBar; the cadence state it keeps is carried across frames through references.
-            ReportMemoryLine(lastMemorySample, memorySamplePendingAt, firstMemorySample,
-                             lastMemoryMusicRevision, lastMemoryTrayIcons, lastMemoryCardUp, kMemorySampleMs,
-                             systems, nowPlaying, currentLyrics);
+            ReportMemoryLine(runtime, systems, kMemorySampleMs, nowPlaying, currentLyrics);
 
-            if (GetTickCount64() - lastIntervalReport >= 4000) {
-                lastIntervalReport = GetTickCount64();
-                wchar_t intervalSummary[256] = {};
-                liveStats.Describe(intervalSummary, 256);
-                island::LogAndPrint("  interval [%ls] %ls", island::StateName(systems.window.State()),
-                                    intervalSummary);
-                island::LogAndPrint("  redraws: animating=%d clock=%d notify=%d music=%d "
-                                    "lyrics=%d progress=%d strip=%d first=%d startHover=%d "
-                                    "startWash=%d",
-                                    whyAnimating, whyClock, whyNotification, whyMusic,
-                                    whyLyrics, whyProgress, whyStatusStrip, whyFirst,
-                                    whyStartHover, whyStartWash);
-                // Reported beside the frame intervals because the two are the same question: a region
-                // re-applied per frame is a window-manager call inside the animation's own loop. A
-                // hundred of them in a 4 s window containing one 0.36 s transition means the transition
-                // paid for them, and "one per state change" means it did not.
-                {
-                    const unsigned long long applied = systems.window.RegionApplications();
-                    island::LogAndPrint("  window region: %llu applied in total (%llu in the last 4 s)",
-                                        applied, applied - lastRegionApplications);
-                    lastRegionApplications = applied;
-                }
-                {
-                    const unsigned long long frames = systems.renderer.FramesPresented();
-                    island::LogAndPrint("  throttle: path=%s frames=%llu/s waits=%llu/s maxLatency=1",
-                                        pacingPath, frames - lastFramesPresented,
-                                        frameWaits - lastFrameWaits);
-                    lastFramesPresented = frames;
-                    lastFrameWaits = frameWaits;
-                }
-                std::fflush(stdout);
-                liveStats.Reset();
-                whyAnimating = whyClock = whyNotification = whyMusic = 0;
-                whyLyrics = whyProgress = whyFirst = whyStatusStrip = 0;
-                whyStartHover = whyStartWash = 0;
-            }
+            // The two periodic reports: what the frames did, and whether the loop paced itself. The phase
+            // lives above RunBar; its cross-frame state is BarRuntime's.
+            ReportIntervalAndThrottle(runtime, systems, pacingPath);
 
             // --- pace ---
             //
@@ -5705,7 +5722,7 @@ float musicWavePhase = 0.0f;
                     ::MsgWaitForMultipleObjectsEx(0, nullptr, 4, QS_ALLINPUT,
                                                   MWMO_INPUTAVAILABLE);
                 }
-                frameWaits += 1;
+                runtime.frameWaits += 1;
             } else {
                 ::MsgWaitForMultipleObjectsEx(0, nullptr, 100, QS_ALLINPUT,
                                               MWMO_INPUTAVAILABLE);

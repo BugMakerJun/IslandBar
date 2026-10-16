@@ -59,8 +59,11 @@ $Strict = @(
 
 # Lines that are only measurements of the machinery, never of what the bar did.
 $Dropped = @(
-    'interval \[', 'throttle:', 'redraws:', 'window region:', 'messages/s:', 'slow frame:',
+    'redraws:', 'window region:', 'messages/s:', 'slow frame:',
     'tray ring:', 'tray hook:', 'draw ', 'anim:', 'loop:', 'icon decode',
+    # NOT dropped, like the mem[...] line and for the same reason: the interval and throttle lines are the
+    # only evidence that the two periodic reports still run and still carry their fields. Their numbers are
+    # measurements, so they are compared as SHAPE.
     # NOT dropped, and this is deliberate: the mem[...] line is the only evidence that the periodic memory
     # report still runs and still carries the same labels. Its numbers are noise, so it is compared as
     # SHAPE -- the whole line with every digit replaced -- rather than thrown away.
