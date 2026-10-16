@@ -32,15 +32,15 @@ const Theme kThemes[] = {
     //               shadow grain
     {L"\u9ED8\u8BA4",   {0.05f, 0.05f, 0.07f, 0.92f}, {0.04f, 0.05f, 0.08f, 0.98f}, 0.06f,
      {0.05f, 0.05f, 0.07f, 0.97f}, 0.13f, {0.0f, 0.47f, 0.83f, 0.95f}, {0.93f, 0.93f, 0.93f, 1.0f},
-     0.0f, 0.0f},
+     0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
     // 冰蓝
     {L"\u51B0\u84DD", {0.06f, 0.09f, 0.16f, 0.93f}, {0.02f, 0.03f, 0.07f, 0.97f}, 0.10f,
      {0.04f, 0.06f, 0.12f, 0.97f}, 0.16f, {0.20f, 0.62f, 0.98f, 0.95f}, {0.90f, 0.94f, 1.00f, 1.0f},
-     0.05f, 0.02f},
+     0.05f, 0.02f, 0.10f, 0.18f, 0.12f},
     // 石墨
     {L"\u77F3\u58A8", {0.13f, 0.13f, 0.14f, 0.94f}, {0.08f, 0.08f, 0.09f, 0.98f}, 0.05f,
      {0.11f, 0.11f, 0.12f, 0.97f}, 0.18f, {0.24f, 0.56f, 0.90f, 0.95f}, {0.99f, 0.99f, 0.99f, 1.0f},
-     0.05f, 0.0f},
+     0.05f, 0.0f, 0.06f, 0.16f, 0.10f},
     // 玻璃 -- asked for in these words: "加一个玻璃效果的".
     //
     // IT IS PAINTED GLASS, and the difference from real glass is measured rather than assumed. Three
@@ -62,7 +62,7 @@ const Theme kThemes[] = {
     // passes. What you see behind the bar is the desktop itself, unblurred.
     {L"\u73BB\u7483", {0.20f, 0.24f, 0.32f, 0.66f}, {0.06f, 0.08f, 0.14f, 0.82f}, 0.16f,
      {0.12f, 0.14f, 0.20f, 0.78f}, 0.34f, {0.42f, 0.78f, 1.00f, 0.95f}, {0.98f, 0.99f, 1.00f, 1.0f},
-     0.20f, 0.05f},
+     0.20f, 0.05f, 0.22f, 0.30f, 0.22f},
 };
 constexpr int kThemeCount = static_cast<int>(sizeof(kThemes) / sizeof(kThemes[0]));
 
@@ -157,7 +157,7 @@ bool DataFilePath(const wchar_t* file, wchar_t* out, size_t capacity) {
 void LogTheme(const Theme& theme, const wchar_t* how) {
     const float contrast = ThemeInkContrast(theme);
     LogLine(L"  theme: %ls (%ls) -- ink contrast %.1f:1%ls", theme.name, how, contrast,
-            contrast < 4.5f ? L"  BELOW THE 4.5 FLOOR: text may be hard to read" : L"");
+            contrast < kInkContrastFloor ? L"  BELOW THE 4.5 FLOOR: text may be hard to read" : L"");
 }
 
 } // namespace
@@ -213,6 +213,64 @@ float ThemeInkContrast(const Theme& theme) {
     const float darker = first > second ? second : first;
     return (lighter + 0.05f) / (darker + 0.05f);
 }
+
+// --- the liquid-glass layers: the wallpaper's colour, and the clamp that keeps the text readable -------
+
+namespace {
+
+// What the ink would be read against if a surface of this colour were the card: the same rule
+// ThemeInkContrast uses, so the clamp below and the floor the self-test asserts are the same question.
+float ContrastAgainst(const D2D1_COLOR_F& surface, const D2D1_COLOR_F& ink) {
+    const float a = Clamp01(surface.a);
+    const float backdrop = 0.9f;   // the bright desktop the floor is defined against
+    const D2D1_COLOR_F effective = D2D1::ColorF(surface.r * a + backdrop * (1.0f - a),
+                                              surface.g * a + backdrop * (1.0f - a),
+                                              surface.b * a + backdrop * (1.0f - a), 1.0f);
+    const float first = Luminance(ink);
+    const float second = Luminance(effective);
+    const float lighter = first > second ? first : second;
+    const float darker = first > second ? second : first;
+    return (lighter + 0.05f) / (darker + 0.05f);
+}
+
+D2D1_COLOR_F Mix(const D2D1_COLOR_F& from, const D2D1_COLOR_F& to, float amount) {
+    const float t = Clamp01(amount);
+    return D2D1::ColorF(from.r + (to.r - from.r) * t, from.g + (to.g - from.g) * t,
+                        from.b + (to.b - from.b) * t, from.a + (to.a - from.a) * t);
+}
+
+}  // namespace
+
+D2D1_COLOR_F TintedFill(const Theme& theme, const D2D1_COLOR_F& fill, const D2D1_COLOR_F& wallpaper,
+                        float amount) {
+    const float wanted = Clamp01(amount) * Clamp01(theme.tint);
+    if (wanted <= 0.001f) return fill;
+
+    // WALKED BACK, not clamped in luminance: the strength of the mix is what gives way, so a bright
+    // wallpaper tints the pill a little instead of being refused outright. Four halvings are enough for
+    // any wallpaper this side of white, and the loop is bounded rather than a bisection because the
+    // answer only has to be good enough to pass a floor -- not exact.
+    float applied = wanted;
+    for (int step = 0; step < 4; ++step) {
+        const D2D1_COLOR_F candidate = Mix(fill, wallpaper, applied);
+        if (ContrastAgainst(candidate, theme.ink) >= kInkContrastFloor) return candidate;
+        applied *= 0.5f;
+    }
+    return fill;
+}
+
+namespace {
+D2D1_COLOR_F g_wallpaperTint = D2D1::ColorF(0.5f, 0.5f, 0.5f, 1.0f);
+bool g_wallpaperKnown = false;
+}  // namespace
+
+void SetWallpaperTint(const D2D1_COLOR_F& tint, bool fromWallpaper) {
+    g_wallpaperTint = tint;
+    g_wallpaperKnown = fromWallpaper;
+}
+
+const D2D1_COLOR_F& WallpaperTint() { return g_wallpaperTint; }
+bool WallpaperTintIsKnown() { return g_wallpaperKnown; }
 
 // --- reading a theme from text -------------------------------------------------------------------
 
@@ -293,6 +351,12 @@ bool ThemeFromText(const char* utf8, Theme* out, std::string* why) {
             if (!scalarf(&theme.shadow)) return false;
         } else if (key == "grain") {
             if (!scalarf(&theme.grain)) return false;
+        } else if (key == "sweep") {
+            if (!scalarf(&theme.sweep)) return false;
+        } else if (key == "rim") {
+            if (!scalarf(&theme.rim)) return false;
+        } else if (key == "tint") {
+            if (!scalarf(&theme.tint)) return false;
         } else {
             if (why) *why = "unknown key: " + key;
             return false;

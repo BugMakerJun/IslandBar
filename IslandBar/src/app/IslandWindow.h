@@ -151,6 +151,11 @@ public:
     // --- pointer ---
     bool IsPointerInside() const { return forcedPointerMode_ > 0 ? true : pointerInside_; }
 
+    // Where the pointer was the last time the window looked, in SCREEN pixels. The liquid-glass sweep
+    // follows it along the pill (see FrameState::pillPointerFraction); ToLocalDip turns it into the
+    // window's own DIP first.
+    POINT LastPointer() const { return lastPointer_; }
+
     // The pass-through decision as a pure function, so a test can check it for
     // arbitrary points without moving the physical cursor (which races the
     // window's own poll and makes the result depend on which ran last).

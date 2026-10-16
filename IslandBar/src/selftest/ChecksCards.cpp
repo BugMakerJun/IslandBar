@@ -4691,7 +4691,64 @@ void TestMusicCardLayout() {
                     const Theme& theme = BuiltInTheme(i);
                     const float contrast = ThemeInkContrast(theme);
                     std::swprintf(dt6, 256, L"theme '%ls': ink contrast %.1f:1", theme.name, contrast);
-                    Check(contrast >= 4.5f, L"every built-in theme keeps its text readable", dt6);
+                    Check(contrast >= kInkContrastFloor, L"every built-in theme keeps its text readable",
+                          dt6);
+                }
+
+                // THE LIQUID-GLASS LAYERS (round 53). Two of them are pure arithmetic, which is the only
+                // reason they can be asserted here at all: the sweep's centre and the wallpaper tint's
+                // clamp. The third -- the drawing -- is checked by the screenshot, as every material is.
+                {
+                    // The sweep travels the INNER 80%: a pointer on either edge must not put the highlight
+                    // on the corner, and a pointer outside the pill must not move it off the glass at all.
+                    const float left = 100.0f;
+                    const float right = 300.0f;
+                    std::swprintf(dt6, 256, L"sweep centre: edge %.0f/%.0f, middle %.0f, past the edge %.0f",
+                                  SpecularCentreX(left, right, 0.0f), SpecularCentreX(left, right, 1.0f),
+                                  SpecularCentreX(left, right, 0.5f), SpecularCentreX(left, right, 4.0f));
+                    Check(Nearly(SpecularCentreX(left, right, 0.0f), left + 20.0f, 0.01f) &&
+                              Nearly(SpecularCentreX(left, right, 1.0f), right - 20.0f, 0.01f),
+                          L"the specular sweep stays inside the pill at both ends", dt6);
+                    Check(Nearly(SpecularCentreX(left, right, 0.5f), 200.0f, 0.01f),
+                          L"... and sits in the middle when the pointer is", dt6);
+                    Check(Nearly(SpecularCentreX(left, right, -3.0f),
+                                 SpecularCentreX(left, right, 0.0f), 0.01f) &&
+                              Nearly(SpecularCentreX(left, right, 4.0f),
+                                     SpecularCentreX(left, right, 1.0f), 0.01f),
+                          L"a pointer off the pill leaves the highlight on the glass", dt6);
+
+                    // The tint, on the one thing that must not break: a bright wallpaper may lighten the
+                    // pill, but the bar's own text has to stay readable over it -- the clamp walks the mix
+                    // back until the contrast passes, so a WHITE wallpaper is the worst case to assert.
+                    Theme tinted = BuiltInTheme(0);
+                    tinted.tint = 1.0f;
+                    const D2D1_COLOR_F white = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+                    const D2D1_COLOR_F dark = D2D1::ColorF(0.02f, 0.02f, 0.03f, 1.0f);
+                    const D2D1_COLOR_F fromWhite =
+                        TintedFill(tinted, tinted.cardFill, white, 1.0f);
+                    const D2D1_COLOR_F fromDark = TintedFill(tinted, tinted.cardFill, dark, 1.0f);
+                    std::swprintf(dt6, 256,
+                                  L"tint 1.0 with a WHITE wallpaper: card %.2f -> %.2f (contrast floor %.1f)",
+                                  tinted.cardFill.r, fromWhite.r, kInkContrastFloor);
+                    Check(fromWhite.r < 0.9f,
+                          L"a white wallpaper does not turn the card white", dt6);
+                    // The clamp's own promise, asked of the answer rather than of the code: take the colour
+                    // it handed back, put it on a theme, and ask the contrast floor again.
+                    Theme asIf = tinted;
+                    asIf.cardFill = fromWhite;
+                    std::swprintf(dt6, 256, L"after the white-wallpaper tint the ink contrast is %.1f:1",
+                                  ThemeInkContrast(asIf));
+                    Check(ThemeInkContrast(asIf) >= kInkContrastFloor,
+                          L"... and the text is still readable over the tinted surface", dt6);
+                    Check(fromDark.r <= tinted.cardFill.r + 0.001f,
+                          L"a dark wallpaper tints toward itself rather than away", dt6);
+                    // ... and with the tint OFF (默认, which is what the fixed scenario runs) the colour is
+                    // handed back untouched, bit for bit: that is what keeps the baseline's pixels valid.
+                    const D2D1_COLOR_F untouched = TintedFill(BuiltInTheme(0), BuiltInTheme(0).cardFill,
+                                                               white, 1.0f);
+                    Check(untouched.r == BuiltInTheme(0).cardFill.r &&
+                              untouched.a == BuiltInTheme(0).cardFill.a,
+                          L"a theme with tint 0 gets its own colour back untouched");
                 }
 
                 // The grain, on the two properties that make it a material rather than a random number:

@@ -250,4 +250,76 @@ void DrawGrain(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape, flo
     brush->Release();
 }
 
+void DrawSpecularSweep(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape, const Theme& theme,
+                       float pointerFraction, float opacity) {
+    if (!context || opacity <= 0.01f || theme.sweep <= 0.001f) return;
+    const float width = shape.rect.right - shape.rect.left;
+    const float height = shape.rect.bottom - shape.rect.top;
+    if (width < 24.0f || height < 6.0f) return;
+
+    // THE BAND THE LIGHT LIVES IN is the one the top gloss already uses (a share of the height, capped),
+    // so the two gradients read as one lighting rather than as two things happening on the surface.
+    const float band = min(height * 0.45f, 20.0f);
+    const float centreX = SpecularCentreX(shape.rect.left, shape.rect.right, pointerFraction);
+    const float centreY = shape.rect.top + band * 0.5f;
+    // Wide and flat rather than circular: on a 36 DIP pill a round spot is a dot, and the elongation is
+    // what makes it read as light travelling along a curved surface. The radial brush takes two radii, so
+    // this needs no transform.
+    const float radiusX = width * 0.30f;
+    const float radiusY = band * 1.15f;
+
+    const D2D1_GRADIENT_STOP stops[3] = {
+        {0.0f, ThemeInk(theme.sweep * 1.10f * opacity)},
+        {0.55f, ThemeInk(theme.sweep * 0.35f * opacity)},
+        {1.0f, ThemeInk(0.0f)},
+    };
+    ID2D1GradientStopCollection* collection = nullptr;
+    if (FAILED(context->CreateGradientStopCollection(stops, 3, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP,
+                                                     &collection)) ||
+        !collection) {
+        return;
+    }
+    ID2D1RadialGradientBrush* brush = nullptr;
+    const D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES properties = {
+        D2D1::Point2F(centreX, centreY), D2D1::Point2F(centreX, centreY), radiusX, radiusY};
+    if (SUCCEEDED(context->CreateRadialGradientBrush(properties, collection, &brush)) && brush) {
+        // Filled over the SHAPE, not over the highlight's own circle, for the reason DrawGrain records:
+        // a fill of the rounded rectangle cannot escape the glass, and the falloff is what limits it.
+        context->FillRoundedRectangle(&shape, brush);
+        brush->Release();
+    }
+    collection->Release();
+}
+
+void DrawGlassRim(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape, const Theme& theme,
+                  float opacity) {
+    if (!context || opacity <= 0.01f || theme.rim <= 0.001f) return;
+    if (shape.rect.right <= shape.rect.left || shape.rect.bottom <= shape.rect.top) return;
+
+    // THE OUTSIDE LINE, faint and dark: on the desktop side of the edge it separates the glass from
+    // whatever is behind it, and that separation is half of what reads as thickness.
+    ID2D1SolidColorBrush* dark = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(
+            D2D1::ColorF(0.0f, 0.0f, 0.0f, theme.rim * 0.22f * opacity), &dark)) &&
+        dark) {
+        context->DrawRoundedRectangle(&shape, dark, 1.0f);
+        dark->Release();
+    }
+
+    // ... and the bright line just inside it. A little further in than DrawSurfaceLighting's hairline
+    // (which is inset 1 DIP) so the two do not draw over one another.
+    const float inset = 1.75f;
+    const D2D1_ROUNDED_RECT inner = {
+        D2D1::RectF(shape.rect.left + inset, shape.rect.top + inset,
+                    shape.rect.right - inset, shape.rect.bottom - inset),
+        shape.radiusX > inset ? shape.radiusX - inset : 0.0f,
+        shape.radiusY > inset ? shape.radiusY - inset : 0.0f};
+    ID2D1SolidColorBrush* bright = nullptr;
+    if (SUCCEEDED(context->CreateSolidColorBrush(ThemeInk(theme.rim * 0.60f * opacity), &bright)) &&
+        bright) {
+        context->DrawRoundedRectangle(&inner, bright, 1.0f);
+        bright->Release();
+    }
+}
+
 } // namespace island

@@ -536,12 +536,20 @@ void Renderer::RenderFrame(const FrameState& frame) {
         // pixels. 18 DIP of reach is the brief's "blur 20px, opacity 20%", rounded to what the pill's own
         // size can carry without the shadow reading as a second object.
         island::DrawSoftShadow(d2dContext_, rounded, theme.shadow, 18.0f);
+        // ... and the WALLPAPER's own colour mixed into the fill, clamped so the ink keeps its contrast
+        // (see TintedFill). The bottom stop takes it a little less than the top: the surface is meant to
+        // be lighter where the light is, and a wallpaper colour that lightens both ends equally flattens
+        // the gradient that gives the pill its depth.
+        const D2D1_COLOR_F pillTopFill =
+            island::TintedFill(theme, theme.pillTop, island::WallpaperTint(), 1.0f);
+        const D2D1_COLOR_F pillBottomFill =
+            island::TintedFill(theme, theme.pillBottom, island::WallpaperTint(), 0.85f);
         ID2D1SolidColorBrush* edge = nullptr;
-        if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(theme.pillTop, &edge)) && edge) {
+        if (SUCCEEDED(d2dContext_->CreateSolidColorBrush(pillTopFill, &edge)) && edge) {
             ID2D1GradientStopCollection* stops = nullptr;
             const D2D1_GRADIENT_STOP gradientStops[2] = {
-                {0.0f, theme.pillTop},
-                {1.0f, theme.pillBottom},
+                {0.0f, pillTopFill},
+                {1.0f, pillBottomFill},
             };
             if (SUCCEEDED(d2dContext_->CreateGradientStopCollection(
                     gradientStops, 2, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, &stops)) &&
@@ -571,6 +579,12 @@ void Renderer::RenderFrame(const FrameState& frame) {
         // that fades down, a shade under it, and a hairline just inside the edge. It replaces two flat
         // bands of gloss, which were the same idea drawn without following the pill's curve.
         island::DrawSurfaceLighting(d2dContext_, rounded, theme, 1.0f);
+
+        // THE LIQUID-GLASS LAYERS (round 53, Theme.h): a specular highlight that follows the pointer along
+        // the top edge, and the double edge -- a faint dark line outside, a bright one inside -- that reads
+        // as the thickness of the glass. Both are drawn from the theme's own fields, so 默认 is unchanged.
+        island::DrawSpecularSweep(d2dContext_, rounded, theme, frame.pillPointerFraction, 1.0f);
+        island::DrawGlassRim(d2dContext_, rounded, theme, 1.0f);
 
         // ... and the grain over the whole surface, which is what keeps a flat translucent colour from
         // reading as plastic. Same rule as the shadow: a theme that asks for none gets none.

@@ -96,6 +96,7 @@ add_library(island_shell STATIC
     shell/TrayMenu.cpp
     shell/TrayPress.cpp
     shell/TrayUia.cpp
+    shell/WallpaperTint.cpp
     shell/Weather.cpp
 )
 target_link_libraries(island_shell PUBLIC island_services)

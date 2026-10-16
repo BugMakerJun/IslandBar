@@ -53,6 +53,34 @@ void DrawSoftShadow(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape
 // The grain over a surface, so it does not read as flat plastic. Clipped to the shape by a layer mask.
 void DrawGrain(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape, float opacity);
 
+// --- the two liquid-glass layers (round 53) ---------------------------------------------------------
+
+// Where the specular sweep's centre sits, given the pointer's position across the pill (0 = its left
+// edge, 1 = its right). PURE, so the self-test can assert the clamping rather than the drawing: a pointer
+// at or past an edge must not push the highlight off the glass and leave a bright spot on the corner.
+//
+// The highlight travels across the INNER 80% of the width. That margin is the only number here, and it
+// exists because the alternative -- a highlight allowed to reach the very end -- reads as a bloom on the
+// rounded corner rather than as light moving along a surface.
+inline float SpecularCentreX(float left, float right, float fraction) {
+    const float t = fraction < 0.0f ? 0.0f : (fraction > 1.0f ? 1.0f : fraction);
+    const float span = right - left;
+    return left + span * 0.1f + span * 0.8f * t;
+}
+
+// A soft specular highlight along the inside of the top edge, centred where the pointer is. Filled over
+// the shape with a radial brush, so it is clipped by the glass and needs no layer (see the note on
+// DrawGrain: a layer with a geometry mask cost this frame its island).
+void DrawSpecularSweep(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape, const Theme& theme,
+                       float pointerFraction, float opacity);
+
+// The double edge: a faint dark line on the outside of the shape and a bright one just inside it, which
+// together are what read as the THICKNESS of a piece of glass. It complements DrawSurfaceLighting's own
+// directional hairline (inset 1 DIP) rather than replacing it: that one is the light on the face, this is
+// the edge of the material.
+void DrawGlassRim(ID2D1DeviceContext2* context, const D2D1_ROUNDED_RECT& shape, const Theme& theme,
+                  float opacity);
+
 // The grain itself: 256x256 BGRA pixels (opaque grey), generated once from a fixed seed. Four bytes per
 // pixel and not an alpha-only texture -- see the note in the .cpp about what an A8 bitmap did to the frame.
 //

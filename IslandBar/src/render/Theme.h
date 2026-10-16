@@ -49,6 +49,23 @@ struct Theme {
     // built-in that existed before themes keeps its exact pixels -- a theme opts into a material.
     float shadow = 0.0f;            // 0..1: opacity of the shadow at its darkest
     float grain = 0.0f;             // 0..1: the grain's own alpha
+    // --- the liquid-glass layers (round 53, the user's "苹果那种液态玻璃") -----------------------
+    //
+    // THREE LAYERS, all of them drawn rather than sampled. What Apple's material actually does is refract
+    // the content behind it, and that needs pixels from behind the window -- which this window cannot have
+    // (three APIs measured, see the note on 玻璃 below and HANDOFF 8.163). So the three things that CAN be
+    // drawn are named here, each driven by its own field so a theme opts in and 默认 keeps its pixels.
+    //
+    //   sweep  a specular highlight along the top edge whose centre FOLLOWS THE POINTER across the pill
+    //          (the one part of the Apple material that is about the pointer rather than the background);
+    //   rim    a double edge: a bright hairline just inside the shape and a faint dark line on the
+    //          outside, which is what reads as the THICKNESS of a piece of glass;
+    //   tint   how much of the WALLPAPER's own average colour is mixed into the surface -- read ONCE from
+    //          the wallpaper file itself (shell/WallpaperTint.*), never captured, so a solid-colour
+    //          wallpaper still gives the bar something of its own colour to sit on.
+    float sweep = 0.0f;             // 0..1
+    float rim = 0.0f;               // 0..1
+    float tint = 0.0f;              // 0..1
 };
 
 // The theme in force.
@@ -76,10 +93,31 @@ void ApplyRememberedTheme();
 // 0.72" and the theme is what decides which colour that is.
 D2D1_COLOR_F ThemeInk(float alpha);
 
+// The contrast floor the ink has to keep against its own surface (WCAG's 4.5:1 for body text). Named so
+// that the theme loader's warning, the tint clamp and the self-test all quote one number.
+inline constexpr float kInkContrastFloor = 4.5f;
+
 // WCAG contrast between the ink and the card, as it would appear over a BRIGHT desktop -- the worst
 // case for light text on a translucent surface, and the one the plan's "do not over-transparent the
 // background" is about.
 float ThemeInkContrast(const Theme& theme);
+
+// A surface colour with the WALLPAPER's colour mixed into it, CLAMPED so the ink keeps its contrast floor.
+//
+// The clamp is the whole reason this is a function and not one lerp at the call site. `theme.tint` lets a
+// bright wallpaper lighten the pill, and a light enough pill makes the bar's own text unreadable -- which
+// is the failure the contrast floor exists to prevent (see ThemeInkContrast). So the mix is walked BACK
+// toward the theme's own colour until the contrast passes again; a wallpaper that would break it simply
+// tints less. Pure, so the self-test can assert it against a deliberately bright and a deliberately dark
+// wallpaper.
+D2D1_COLOR_F TintedFill(const Theme& theme, const D2D1_COLOR_F& fill, const D2D1_COLOR_F& wallpaper,
+                        float amount);
+
+// The wallpaper's average colour, read once at startup (shell/WallpaperTint.*) and handed here so the
+// renderer needs no new parameter: one decision for the whole bar, the same rule the theme follows.
+void SetWallpaperTint(const D2D1_COLOR_F& tint, bool fromWallpaper);
+const D2D1_COLOR_F& WallpaperTint();
+bool WallpaperTintIsKnown();
 
 // Reads a theme from the text of a `themes\*.txt`. PURE, so the format is testable without files:
 // one `key=value` per line, `#` for comments, components 0..1 and either three (RGB) or four (RGBA).

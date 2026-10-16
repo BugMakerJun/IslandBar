@@ -126,6 +126,12 @@ inline ContentStrengths ContentStrengthsFor(bool cardUp, float easedProgress, bo
 struct FrameState {
     PillAppearance pill;
 
+    // Where the pointer is ACROSS THE PILL, 0 = its left edge, 1 = its right. The specular sweep of the
+    // liquid-glass material follows it (round 53): light travelling along the glass as the pointer moves
+    // is the one part of Apple's material that is about the pointer rather than about the background.
+    // Clamped by SpecularCentreX, so a pointer outside the pill leaves the highlight on the glass.
+    float pillPointerFraction = 0.5f;
+
     // The RESTING pill's box, which is not the same thing as `pill.box`.
     //
     // `pill.box` is the ANIMATED shape: while the bar is opening or closing a card it is a card-sized

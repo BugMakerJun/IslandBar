@@ -58,6 +58,7 @@
 #include "shell/TrayLearn.h"
 #include "shell/TrayMenu.h"            // what a tray cell does: the press, and the menu the bar draws for it
 #include "shell/TrayPress.h"
+#include "shell/WallpaperTint.h"
 #include "platform/DisplayBrightness.h"   // the brightness row: DDC/CI, the only interface this machine has
 #include "shell/SystemToggles.h"       // Bluetooth / night light / live captions: the tiles that switch
 #include "render/Theme.h"               // the material: colours and edges, switchable, plus themes\*.txt
@@ -4678,6 +4679,14 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
     // `theme.txt` (see Theme.h). A missing file is the ordinary case.
     island::ApplyRememberedTheme();
 
+    // ... and the colour it stands on, read ONCE from the wallpaper file (see shell/WallpaperTint.h). A
+    // wallpaper that cannot be read logs one line and tints nothing, so this cannot stop the bar from
+    // starting.
+    {
+        const island::WallpaperTintResult wallpaper = island::ReadWallpaperTint();
+        island::SetWallpaperTint(wallpaper.colour, wallpaper.fromWallpaper);
+    }
+
     // The machine's own state, sampled on a timer rather than per frame.
 
     // THE THINGS THE BAR TALKS TO, in one named place: the window and the renderer, and one object per
@@ -5582,6 +5591,19 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
                 // ... and WHAT the bar shows at rest, which is what the pill's own line is chosen by
                 // (see FrameState::restingState). A card does not change this, which is the point.
                 frame.restingState = resting;
+
+                // ... and WHERE THE POINTER IS ACROSS IT, which the liquid-glass sweep follows. Taken from
+                // the pointer the window last saw, in window-local DIP, and expressed as a fraction of the
+                // resting pill's width; the renderer clamps it (SpecularCentreX), so a pointer off the pill
+                // leaves the highlight on the glass rather than pushing it away.
+                {
+                    float pointerX = 0.0f;
+                    float pointerY = 0.0f;
+                    systems.window.ToLocalDip(systems.window.LastPointer(), &pointerX, &pointerY);
+                    const float left = frame.restingPill.rect.left;
+                    const float right = frame.restingPill.rect.right;
+                    frame.pillPointerFraction = (right > left) ? (pointerX - left) / (right - left) : 0.5f;
+                }
 
                 if (GetTickCount64() - bar.lastTaskRefresh >= 500) {
                     bar.lastTaskRefresh = GetTickCount64();
