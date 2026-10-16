@@ -1299,6 +1299,74 @@ static void UpdateFullscreenStandDown(island::BarState& bar, island::BarSystems&
     }
 }
 
+// --- re-hiding the shell's taskbar, and giving the strip back again, on a slow cadence ---
+//
+// Moved out of the frame loop verbatim (indentation aside). The countdown and the work flags are RunBar's
+// locals and are carried between frames, so they come in by reference; `workBit` is the same
+// kWorkTaskbarCheck constant the slow-frame report reads.
+static void EnsureTaskbarStillHidden(bool hideNativeTaskbar, bool keepStrip, int& taskbarCheckCountdown,
+                                     unsigned long long& frameWork, unsigned long long workBit,
+                                     island::BarState& bar, island::BarSystems& systems,
+                                     const island::MonitorGeometry& monitor) {
+    // ... and NOT gated on `haveTaskbar`. That flag is "the taskbar was there when this process
+    // started", and a bar that starts at logon can easily start first -- see the note in
+    // NativeTaskbar::EnsureHidden, which is where the second look happens.
+    if (hideNativeTaskbar && --taskbarCheckCountdown <= 0) {
+        // 50 FRAMES, and the frame is the units of this counter -- not seconds. Measured on this
+        // machine (the `interval [music-strip]` line in the log): ~15 ms per frame, so this is
+        // about every 0.8 s. The comment here used to claim "roughly every 5 s at an 8 ms tick",
+        // and both numbers were wrong: an 8 ms timer from an earlier design that no longer exists.
+        // It cost a measurement -- a probe that put the work area back by hand and waited 8 s for
+        // "the bar's cycle" was looking at two cycles that had already been and gone (HANDOFF 8.86).
+        taskbarCheckCountdown = 50;
+        frameWork |= workBit;
+        // A full-screen application takes the tray with it, exactly as it takes the rest of the
+        // bar: keeping the tray visible is this mode's whole job, so it has to be told when NOT
+        // to (see NativeTaskbar::SetSuppressed).
+        if (systems.taskbar.KeepTrayVisible()) {
+            systems.taskbar.SetSuppressed(bar.fullscreenAppInFront);
+        }
+        // ... and none of the above needs to know whether a tray press is in flight. Since
+        // 2026-10-16 a press is ONE MESSAGE to the application's own window (route A: the module
+        // publishes the registration, the bar sends the click itself), so the shell's taskbar is
+        // never touched, never shown, never layered -- the borrowing described in the retired
+        // TrayPress notes is gone with the route that needed it.
+        if (systems.taskbar.EnsureHidden()) {
+            if (systems.taskbar.KeepTrayVisible()) {
+                island::LogAndPrint("  native taskbar: tray re-clipped (the shell had put the"
+                                    " taskbar back)\n");
+            } else {
+                island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
+            }
+            std::fflush(stdout);
+        }
+        // ... and the same question for the work area the hide used to reserve. The shell
+        // re-derives it from its own taskbar whenever the reservation is announced -- by any
+        // application, on a display change, or when it re-shows its taskbar -- and every one of
+        // those puts the strip back. Silent when nothing happened, which is the usual case.
+        if (!keepStrip) {
+            const island::NativeTaskbar::WorkAreaRelease again =
+                systems.taskbar.EnsureWorkAreaReleased();
+            if (again.changed) {
+                island::LogAndPrint("  work area: strip released again (it was back) -- "
+                                    "%ld,%ld - %ld,%ld  ->  %ld,%ld - %ld,%ld\n",
+                                    again.before.left, again.before.top, again.before.right,
+                                    again.before.bottom, again.after.left, again.after.top,
+                                    again.after.right, again.after.bottom);
+                // A window maximized while the strip was back is in the same state as the ones at
+                // startup: it will not follow the work area by itself.
+                const int nudged = island::NudgeStaleMaximizedWindows(monitor.screen,
+                                                                     again.before, again.after);
+                if (nudged) {
+                    island::LogAndPrint("  work area: %d already-maximized window(s) brought to "
+                                        "the full screen\n", nudged);
+                }
+                std::fflush(stdout);
+            }
+        }
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -1823,63 +1891,11 @@ float musicWavePhase = 0.0f;
         while (true) {
             if (!systems.window.PumpMessages()) break;
 
-            // ... and NOT gated on `haveTaskbar`. That flag is "the taskbar was there when this process
-            // started", and a bar that starts at logon can easily start first -- see the note in
-            // NativeTaskbar::EnsureHidden, which is where the second look happens.
-            if (hideNativeTaskbar && --taskbarCheckCountdown <= 0) {
-                // 50 FRAMES, and the frame is the units of this counter -- not seconds. Measured on this
-                // machine (the `interval [music-strip]` line in the log): ~15 ms per frame, so this is
-                // about every 0.8 s. The comment here used to claim "roughly every 5 s at an 8 ms tick",
-                // and both numbers were wrong: an 8 ms timer from an earlier design that no longer exists.
-                // It cost a measurement -- a probe that put the work area back by hand and waited 8 s for
-                // "the bar's cycle" was looking at two cycles that had already been and gone (HANDOFF 8.86).
-                taskbarCheckCountdown = 50;
-                frameWork |= kWorkTaskbarCheck;
-                // A full-screen application takes the tray with it, exactly as it takes the rest of the
-                // bar: keeping the tray visible is this mode's whole job, so it has to be told when NOT
-                // to (see NativeTaskbar::SetSuppressed).
-                if (systems.taskbar.KeepTrayVisible()) {
-                    systems.taskbar.SetSuppressed(bar.fullscreenAppInFront);
-                }
-                // ... and none of the above needs to know whether a tray press is in flight. Since
-                // 2026-10-16 a press is ONE MESSAGE to the application's own window (route A: the module
-                // publishes the registration, the bar sends the click itself), so the shell's taskbar is
-                // never touched, never shown, never layered -- the borrowing described in the retired
-                // TrayPress notes is gone with the route that needed it.
-                if (systems.taskbar.EnsureHidden()) {
-                    if (systems.taskbar.KeepTrayVisible()) {
-                        island::LogAndPrint("  native taskbar: tray re-clipped (the shell had put the"
-                                            " taskbar back)\n");
-                    } else {
-                        island::LogAndPrint("  native taskbar: re-hidden (the shell put it back)\n");
-                    }
-                    std::fflush(stdout);
-                }
-                // ... and the same question for the work area the hide used to reserve. The shell
-                // re-derives it from its own taskbar whenever the reservation is announced -- by any
-                // application, on a display change, or when it re-shows its taskbar -- and every one of
-                // those puts the strip back. Silent when nothing happened, which is the usual case.
-                if (!keepStrip) {
-                    const island::NativeTaskbar::WorkAreaRelease again =
-                        systems.taskbar.EnsureWorkAreaReleased();
-                    if (again.changed) {
-                        island::LogAndPrint("  work area: strip released again (it was back) -- "
-                                            "%ld,%ld - %ld,%ld  ->  %ld,%ld - %ld,%ld\n",
-                                            again.before.left, again.before.top, again.before.right,
-                                            again.before.bottom, again.after.left, again.after.top,
-                                            again.after.right, again.after.bottom);
-                        // A window maximized while the strip was back is in the same state as the ones at
-                        // startup: it will not follow the work area by itself.
-                        const int nudged = island::NudgeStaleMaximizedWindows(monitor.screen,
-                                                                             again.before, again.after);
-                        if (nudged) {
-                            island::LogAndPrint("  work area: %d already-maximized window(s) brought to "
-                                                "the full screen\n", nudged);
-                        }
-                        std::fflush(stdout);
-                    }
-                }
-            }
+            // The shell's taskbar, re-hidden on a slow cadence, and the strip given back if the shell
+            // took it again. The phase lives above RunBar; its countdown and the work flags are carried
+            // across frames, which is why they are handed in by reference.
+            EnsureTaskbarStillHidden(hideNativeTaskbar, keepStrip, taskbarCheckCountdown, frameWork,
+                                     kWorkTaskbarCheck, bar, systems, monitor);
 
             // --- notifications ---
             //
