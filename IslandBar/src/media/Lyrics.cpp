@@ -3,16 +3,13 @@
 // =====================================================================
 #include "media/Lyrics.h"
 
-#include <winhttp.h>
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "domain/MiniJson.h"
 #include "core/Log.h"
-
-#pragma comment(lib, "winhttp.lib")
+#include "platform/Http.h"
 
 namespace island {
 namespace {
@@ -114,103 +111,6 @@ void Utf8ToWide(const char* text, wchar_t* out, size_t capacity) {
     MultiByteToWideChar(CP_UTF8, 0, text, -1, out, static_cast<int>(capacity));
 }
 
-// One GET with a Referer, returning the body as UTF-8 and the HTTP status.
-//
-// The Referer is not optional: both services answer 403 or a redirect to a login page
-// without it, which reads as "no lyrics" if the status is not checked. The status is
-// reported for the same reason -- "the service said 403" and "the service said nothing"
-// need different fixes.
-//
-// WinHTTP rather than WinINet because this runs on a worker with no message pump:
-// WinINet's callbacks need one, WinHTTP's do not.
-bool HttpGetWithReferer(const wchar_t* host, const wchar_t* path, const wchar_t* referer,
-                        int timeoutMs, char* out, size_t capacity, size_t* outLength,
-                        DWORD* outStatus) {
-    if (outLength) *outLength = 0;
-    if (outStatus) *outStatus = 0;
-    if (!host || !path || !out || capacity == 0) return false;
-    out[0] = '\0';
-
-    // The services reject the default WinHTTP agent, so a browser-shaped one is sent.
-    HINTERNET session = WinHttpOpen(
-        L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        L"Chrome/122.0.0.0 Safari/537.36",
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS,
-        0);
-    if (!session) return false;
-
-    WinHttpSetTimeouts(session, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
-
-    HINTERNET connection = WinHttpConnect(session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!connection) {
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    HINTERNET request = WinHttpOpenRequest(connection, L"GET", path, nullptr, referer,
-                                           WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                           WINHTTP_FLAG_SECURE);
-    if (!request) {
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    bool ok = false;
-    if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(request, nullptr)) {
-        DWORD status = 0;
-        DWORD statusSize = sizeof(status);
-        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
-                            WINHTTP_NO_HEADER_INDEX);
-        if (outStatus) *outStatus = status;
-
-        if (status == 200) {
-            size_t total = 0;
-            DWORD available = 0;
-            ok = true;
-            do {
-                available = 0;
-                if (!WinHttpQueryDataAvailable(request, &available)) {
-                    ok = false;
-                    break;
-                }
-                if (available == 0) break;
-
-                // Never read more than the caller's buffer holds, and always leave a
-                // terminator: a huge or endless response must not overrun it.
-                DWORD chunk = available;
-                if (total + chunk >= capacity) chunk = static_cast<DWORD>(capacity - total - 1);
-                if (chunk == 0) break;
-
-                DWORD read = 0;
-                if (!WinHttpReadData(request, out + total, chunk, &read)) {
-                    ok = false;
-                    break;
-                }
-                if (read == 0) break;
-                total += read;
-            } while (available > 0);
-
-            out[total] = '\0';
-            if (outLength) *outLength = total;
-        }
-    }
-
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
-    return ok;
-}
-
-// The plain form, for callers that do not care about the status.
-bool HttpGet(const wchar_t* host, const wchar_t* path, int timeoutMs,
-             char* out, size_t capacity, size_t* outLength) {
-    return HttpGetWithReferer(host, path, WINHTTP_NO_REFERER, timeoutMs, out, capacity,
-                              outLength, nullptr);
-}
 
 } // namespace
 
@@ -724,9 +624,9 @@ bool FetchFromNetEase(const char* title, const char* artist, int timeoutMs, Lyri
     size_t searchLength = 0;
     DWORD searchStatus = 0;
     const bool searchOk =
-        HttpGetWithReferer(L"music.163.com", searchPath, L"https://music.163.com/",
-                           timeoutMs, searchBody, sizeof(searchBody), &searchLength,
-                           &searchStatus);
+        HttpGet(L"music.163.com", searchPath, L"https://music.163.com/",
+                timeoutMs, searchBody, sizeof(searchBody), &searchLength,
+                &searchStatus);
     if (report) {
         report->searchStatus = searchStatus;
         std::snprintf(report->searchUrl, sizeof(report->searchUrl), "%ls",
@@ -787,9 +687,9 @@ bool FetchFromNetEase(const char* title, const char* artist, int timeoutMs, Lyri
     size_t lyricLength = 0;
     DWORD lyricStatus = 0;
     const bool lyricOk =
-        HttpGetWithReferer(L"music.163.com", lyricPath, L"https://music.163.com/",
-                           timeoutMs, lyricBody, sizeof(lyricBody), &lyricLength,
-                           &lyricStatus);
+        HttpGet(L"music.163.com", lyricPath, L"https://music.163.com/",
+                timeoutMs, lyricBody, sizeof(lyricBody), &lyricLength,
+                &lyricStatus);
     if (report) {
         report->lyricStatus = lyricStatus;
         std::snprintf(report->lyricUrl, sizeof(report->lyricUrl), "%ls", lyricPath);
@@ -875,8 +775,8 @@ bool FetchFromQqMusic(const char* title, const char* artist, int timeoutMs, Lyri
     size_t searchLength = 0;
     DWORD searchStatus = 0;
     const bool searchOk =
-        HttpGetWithReferer(L"u.y.qq.com", searchPath, L"https://y.qq.com/", timeoutMs,
-                           searchBody, sizeof(searchBody), &searchLength, &searchStatus);
+        HttpGet(L"u.y.qq.com", searchPath, L"https://y.qq.com/", timeoutMs,
+                searchBody, sizeof(searchBody), &searchLength, &searchStatus);
     if (report) {
         report->searchStatus = searchStatus;
         std::snprintf(report->searchUrl, sizeof(report->searchUrl), "%ls", searchPath);
@@ -932,8 +832,8 @@ bool FetchFromQqMusic(const char* title, const char* artist, int timeoutMs, Lyri
     size_t lyricLength = 0;
     DWORD lyricStatus = 0;
     const bool lyricOk =
-        HttpGetWithReferer(L"c.y.qq.com", lyricPath, L"https://y.qq.com/", timeoutMs,
-                           lyricBody, sizeof(lyricBody), &lyricLength, &lyricStatus);
+        HttpGet(L"c.y.qq.com", lyricPath, L"https://y.qq.com/", timeoutMs,
+                lyricBody, sizeof(lyricBody), &lyricLength, &lyricStatus);
     if (report) {
         report->lyricStatus = lyricStatus;
         std::snprintf(report->lyricUrl, sizeof(report->lyricUrl), "%ls", lyricPath);

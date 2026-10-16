@@ -12,6 +12,7 @@
 #include "shell/Weather.h"
 
 #include "core/Log.h"
+#include "platform/Http.h"
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -22,16 +23,12 @@
 // function rather than the header.
 #include <roapi.h>
 
-#include <winhttp.h>
-
 #include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
-
-#pragma comment(lib, "winhttp.lib")
 
 namespace island {
 namespace {
@@ -45,87 +42,6 @@ constexpr wchar_t kForecastHost[] = L"api.open-meteo.com";
 // sit in one request for the rest of the session.
 constexpr int kTimeoutMs = 10000;
 
-// One GET over TLS, returning the body as bytes and the HTTP status.
-//
-// WinHTTP rather than WinINet for the reason the lyric fetcher gives: this runs on a
-// worker with no message pump, and WinINet's callbacks need one.
-bool HttpGet(const wchar_t* host, const wchar_t* path, char* out, size_t capacity,
-             size_t* outLength, DWORD* outStatus) {
-    if (outLength) *outLength = 0;
-    if (outStatus) *outStatus = 0;
-    if (!host || !path || !out || capacity == 0) return false;
-    out[0] = '\0';
-
-    HINTERNET session = WinHttpOpen(
-        L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        L"Chrome/122.0.0.0 Safari/537.36",
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) return false;
-
-    WinHttpSetTimeouts(session, kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
-
-    HINTERNET connection = WinHttpConnect(session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!connection) {
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    HINTERNET request = WinHttpOpenRequest(connection, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-                                           WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!request) {
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    bool ok = false;
-    if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
-                           0) &&
-        WinHttpReceiveResponse(request, nullptr)) {
-        DWORD status = 0;
-        DWORD statusSize = sizeof(status);
-        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
-                            WINHTTP_NO_HEADER_INDEX);
-        if (outStatus) *outStatus = status;
-
-        if (status == 200) {
-            size_t total = 0;
-            DWORD available = 0;
-            ok = true;
-            do {
-                available = 0;
-                if (!WinHttpQueryDataAvailable(request, &available)) {
-                    ok = false;
-                    break;
-                }
-                if (available == 0) break;
-
-                // Never read past the caller's buffer, and always leave a terminator: an
-                // unexpected answer must not be able to overrun it.
-                DWORD chunk = available;
-                if (total + chunk >= capacity) chunk = static_cast<DWORD>(capacity - total - 1);
-                if (chunk == 0) break;
-
-                DWORD read = 0;
-                if (!WinHttpReadData(request, out + total, chunk, &read)) {
-                    ok = false;
-                    break;
-                }
-                if (read == 0) break;
-                total += read;
-            } while (available > 0);
-
-            out[total] = '\0';
-            if (outLength) *outLength = total;
-        }
-    }
-
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
-    return ok;
-}
 
 // Where the city is read from: a file beside the executable, which is where the bar
 // itself lives (%USERPROFILE%\IslandBar). Beside the executable rather than in the
@@ -736,7 +652,8 @@ unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, dou
             char body[8192] = {};
             size_t length = 0;
             DWORD status = 0;
-            if (!HttpGet(kGeocodeHost, path, body, sizeof(body), &length, &status)) {
+            // No Referer for this service (null), and the reader's own ten-second timeout.
+            if (!HttpGet(kGeocodeHost, path, nullptr, kTimeoutMs, body, sizeof(body), &length, &status)) {
                 LogAndPrint(L"  weather: geocode failed (http %lu, %zu bytes)\n",
                             static_cast<unsigned long>(status), length);
                 std::fflush(stdout);
@@ -774,7 +691,7 @@ unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, dou
     char body[4096] = {};
     size_t length = 0;
     DWORD status = 0;
-    if (!HttpGet(kForecastHost, path, body, sizeof(body), &length, &status)) {
+    if (!HttpGet(kForecastHost, path, nullptr, kTimeoutMs, body, sizeof(body), &length, &status)) {
         LogAndPrint(L"  weather: forecast failed (http %lu, %zu bytes)\n",
                     static_cast<unsigned long>(status), length);
         std::fflush(stdout);
