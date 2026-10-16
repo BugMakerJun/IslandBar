@@ -42,6 +42,9 @@
 
 #include <cstddef>
 
+#include "platform/CriticalSection.h"
+#include "platform/WorkerThread.h"
+
 namespace island {
 
 // The WMO weather code, as the one word the strip has room for.
@@ -169,12 +172,11 @@ private:
     unsigned Refresh(char* resolvedCity, size_t resolvedCapacity, double* latitude,
                      double* longitude);
 
-    HANDLE        stopEvent_ = nullptr;
-    HANDLE        thread_ = nullptr;
+    // The stop event, the thread and the rule for ending both. See platform/WorkerThread.h.
+    WorkerThread  worker_;
     volatile bool running_ = false;
 
-    mutable CRITICAL_SECTION lock_{};
-    bool lockReady_ = false;
+    mutable CriticalSection lock_;
 
     bool           haveReading_ = false;
     double         temperatureC_ = 0.0;

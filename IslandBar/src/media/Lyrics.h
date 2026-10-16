@@ -23,6 +23,9 @@
 #include <cstddef>
 #include <cstring>
 
+#include "platform/CriticalSection.h"
+#include "platform/WorkerThread.h"
+
 namespace island {
 
 // One timed line. `text` is UTF-8.
@@ -309,13 +312,12 @@ private:
     static unsigned long __stdcall ThreadEntry(void* self);
     void Run();
 
-    HANDLE        stopEvent_ = nullptr;
+    // The stop event, the thread and the rule for ending both. See platform/WorkerThread.h.
+    WorkerThread  worker_;
     HANDLE        requestEvent_ = nullptr;   // auto-reset: a new request is waiting
-    HANDLE        thread_ = nullptr;
     volatile bool running_ = false;
 
-    mutable CRITICAL_SECTION lock_{};
-    bool lockReady_ = false;
+    mutable CriticalSection lock_;
 
     // The request, and what was last answered.
     char requestedTitle[256] = {};

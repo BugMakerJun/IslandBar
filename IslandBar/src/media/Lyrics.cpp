@@ -1068,42 +1068,33 @@ LyricsProvider::~LyricsProvider() {
 bool LyricsProvider::Start() {
     if (running_) return true;
 
-    InitializeCriticalSection(&lock_);
-    lockReady_ = true;
-
-    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     requestEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!stopEvent_ || !requestEvent_) return false;
+    // Stop() ends whatever exists rather than unwinding by hand (see platform/WorkerThread.h).
+    if (!worker_.Prepare() || !requestEvent_) {
+        Stop();
+        return false;
+    }
 
     DWORD threadId = 0;
-    thread_ = CreateThread(nullptr, 0, &LyricsProvider::ThreadEntry, this, 0, &threadId);
-    if (!thread_) return false;
+    HANDLE thread = CreateThread(nullptr, 0, &LyricsProvider::ThreadEntry, this, 0, &threadId);
+    if (!thread) {
+        Stop();
+        return false;
+    }
+    worker_.Attach(thread);
 
     running_ = true;
     return true;
 }
 
 void LyricsProvider::Stop() {
-    if (stopEvent_) SetEvent(stopEvent_);
-    if (thread_) {
-        // The worker may be inside a network call. It checks the stop event between
-        // requests, and its HTTP timeouts bound how long a single one can take, so
-        // this wait is finite rather than a hang.
-        WaitForSingleObject(thread_, 5000);
-        CloseHandle(thread_);
-        thread_ = nullptr;
-    }
-    if (stopEvent_) {
-        CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-    }
+    // The worker may be inside a network call. It checks the stop event between requests, and its HTTP
+    // timeouts bound how long a single one can take, so this wait is finite rather than a hang -- which is
+    // why the timeout here is 5000 ms and not the 3000 ms the local readers use.
+    worker_.Stop(5000);
     if (requestEvent_) {
         CloseHandle(requestEvent_);
         requestEvent_ = nullptr;
-    }
-    if (lockReady_) {
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
     }
     running_ = false;
 }
@@ -1111,7 +1102,7 @@ void LyricsProvider::Stop() {
 void LyricsProvider::Request(const char* title, const char* artist) {
     if (!running_ || !title || title[0] == '\0') return;
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     // Already asked about this track -- but only cache a PERMANENT answer.
     //
     // Caching everything was a bug with a nasty shape: a network hiccup, or a build whose
@@ -1125,7 +1116,7 @@ void LyricsProvider::Request(const char* title, const char* artist) {
     const bool permanentAnswer = sameTrack && !lastAnswerWasTransient_;
     const bool retryBudgetLeft = sameTrack ? (attemptCount_ < kMaxAttemptsPerTrack) : true;
     if (permanentAnswer || !retryBudgetLeft) {
-        LeaveCriticalSection(&lock_);
+        lock_.Leave();
         return;
     }
     // A different track starts its own budget.
@@ -1137,13 +1128,13 @@ void LyricsProvider::Request(const char* title, const char* artist) {
     haveAsked_ = true;
     ++attemptCount_;
     InterlockedExchange(&requestPending_, 1);
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 
     SetEvent(requestEvent_);
 }
 
 const Lyrics* LyricsProvider::Current() const {
-    if (!lockReady_ || !haveLyrics_) return nullptr;
+    if (!worker_.Prepared() || !haveLyrics_) return nullptr;
     // Deliberately no lock. The pointer refers to a member the worker replaces only
     // when a fetch completes, and the frame loop reads it within a single frame, so
     // the worst a race can do is show the previous track's line for one frame --
@@ -1152,14 +1143,14 @@ const Lyrics* LyricsProvider::Current() const {
 }
 
 bool LyricsProvider::Snapshot(Lyrics* out) const {
-    if (!out || !lockReady_) return false;
+    if (!out || !worker_.Prepared()) return false;
     bool have = false;
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     if (haveLyrics_) {
         *out = lyrics_;
         have = true;
     }
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     return have;
 }
 
@@ -1177,19 +1168,19 @@ void LyricsProvider::Run() {
     char artist[256] = {};
 
     while (true) {
-        HANDLE waits[2] = { stopEvent_, requestEvent_ };
+        HANDLE waits[2] = { worker_.StopEvent(), requestEvent_ };
         const DWORD signalled = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
         if (signalled == WAIT_OBJECT_0) break;   // stop
         if (signalled != WAIT_OBJECT_0 + 1) break;
 
         // Take the request, and only the fields needed for it, so a new request
         // arriving mid-fetch cannot change what this one is fetching.
-        EnterCriticalSection(&lock_);
+        lock_.Enter();
         haveAsked_ = true;
         strncpy_s(title, sizeof(title), requestedTitle, _TRUNCATE);
         strncpy_s(artist, sizeof(artist), requestedArtist, _TRUNCATE);
         InterlockedExchange(&requestPending_, 0);
-        LeaveCriticalSection(&lock_);
+        lock_.Leave();
 
         if (title[0] == '\0') continue;
 
@@ -1200,9 +1191,9 @@ void LyricsProvider::Run() {
         const FetchOutcome outcome =
             FetchLyricsDetailed(title, artist, 10000, &fetched, reason, sizeof(reason));
 
-        if (WaitForSingleObject(stopEvent_, 0) == WAIT_OBJECT_0) break;
+        if (WaitForSingleObject(worker_.StopEvent(), 0) == WAIT_OBJECT_0) break;
 
-        EnterCriticalSection(&lock_);
+        lock_.Enter();
         // Recorded so Request() knows whether this answer may be cached. A transient
         // failure -- a hiccup, an offline moment, a malformed request -- must not be
         // remembered as "this track has no lyrics" for the rest of its life.
@@ -1218,7 +1209,7 @@ void LyricsProvider::Run() {
             haveLyrics_ = false;
             InterlockedIncrement(&revision_);
         }
-        LeaveCriticalSection(&lock_);
+        lock_.Leave();
     }
 
     running_ = false;

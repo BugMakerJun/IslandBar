@@ -557,83 +557,61 @@ WeatherReader::~WeatherReader() {
 bool WeatherReader::Start() {
     if (running_) return true;
 
-    InitializeCriticalSection(&lock_);
-    lockReady_ = true;
+    // This Start() was the one that unwound correctly by hand -- Stop() now owns that unwinding for every
+    // reader, which is why the hand-written version above it is gone (see platform/WorkerThread.h).
+    if (!worker_.Prepare()) return false;
 
-    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!stopEvent_) {
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
+    HANDLE thread = CreateThread(nullptr, 0, &WeatherReader::ThreadEntry, this, 0, nullptr);
+    if (!thread) {
+        worker_.Stop();
         return false;
     }
-
-    thread_ = CreateThread(nullptr, 0, &WeatherReader::ThreadEntry, this, 0, nullptr);
-    if (!thread_) {
-        CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
-        return false;
-    }
+    worker_.Attach(thread);
 
     running_ = true;
     return true;
 }
 
 void WeatherReader::Stop() {
-    if (!running_ && !thread_) return;
-
-    if (stopEvent_) SetEvent(stopEvent_);
-    if (thread_) {
-        WaitForSingleObject(thread_, 5000);
-        CloseHandle(thread_);
-        thread_ = nullptr;
-    }
-    if (stopEvent_) {
-        CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-    }
-    if (lockReady_) {
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
-    }
+    // The worker may be inside a network call, so the timeout is the 5000 ms the reader chose for itself.
+    worker_.Stop(5000);
     running_ = false;
 }
 
 bool WeatherReader::Get(double* temperatureC, int* code) const {
-    if (!lockReady_ || !haveReading_) return false;
+    if (!worker_.Prepared() || !haveReading_) return false;
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     const bool have = haveReading_;
     if (have) {
         if (temperatureC) *temperatureC = temperatureC_;
         if (code) *code = code_;
     }
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     return have;
 }
 
 void WeatherReader::Line(wchar_t* out, size_t capacity) const {
     if (!out || capacity == 0) return;
     out[0] = L'\0';
-    if (!lockReady_) return;
+    if (!worker_.Prepared()) return;
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     if (haveReading_) wcsncpy_s(out, capacity, line_, _TRUNCATE);
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 }
 
 void WeatherReader::Pieces(wchar_t* sky, size_t skyCapacity, wchar_t* temperature,
                            size_t temperatureCapacity) const {
     if (sky && skyCapacity) sky[0] = L'\0';
     if (temperature && temperatureCapacity) temperature[0] = L'\0';
-    if (!lockReady_) return;
+    if (!worker_.Prepared()) return;
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     if (haveReading_) {
         WeatherPiecesFor(temperatureC_, code_, sky, skyCapacity, temperature, temperatureCapacity);
     }
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 }
 
 unsigned long long WeatherReader::Revision() const {
@@ -662,9 +640,9 @@ void WeatherReader::Run() {
     unsigned waitMs = 0;
     while (true) {
         if (waitMs > 0) {
-            if (WaitForSingleObject(stopEvent_, static_cast<DWORD>(waitMs)) == WAIT_OBJECT_0) break;
+            if (WaitForSingleObject(worker_.StopEvent(), static_cast<DWORD>(waitMs)) == WAIT_OBJECT_0) break;
         }
-        if (WaitForSingleObject(stopEvent_, 0) == WAIT_OBJECT_0) break;
+        if (WaitForSingleObject(worker_.StopEvent(), 0) == WAIT_OBJECT_0) break;
 
         if (!haveApartment) {
             LogAndPrint(L"  weather: no Windows Runtime apartment -- location cannot be asked for; "
@@ -814,12 +792,12 @@ unsigned WeatherReader::Refresh(char* resolvedCity, size_t resolvedCapacity, dou
     wchar_t line[64] = {};
     WeatherLineFor(temperature, code, line, 64);
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     temperatureC_ = temperature;
     code_ = code;
     wcsncpy_s(line_, 64, line, _TRUNCATE);
     haveReading_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     InterlockedIncrement(&revision_);
 
     LogAndPrint(L"  weather: %.1f C, code %d -> %ls\n", temperature, code, line);

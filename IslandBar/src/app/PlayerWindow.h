@@ -36,6 +36,9 @@
 
 #include <cstddef>
 
+#include "platform/CriticalSection.h"
+#include "platform/WorkerThread.h"
+
 namespace island {
 
 inline constexpr size_t kPlayerWindowTitleCapacity  = 192;
@@ -101,12 +104,11 @@ private:
     void Poll();
     void Publish(const PlayerWindowInfo& info);
 
-    HANDLE stopEvent_ = nullptr;
-    HANDLE thread_ = nullptr;
+    // The stop event, the thread and the rule for ending both. See platform/WorkerThread.h.
+    WorkerThread worker_;
     volatile bool running_ = false;
 
-    mutable CRITICAL_SECTION lock_{};
-    bool lockReady_ = false;
+    mutable CriticalSection lock_;
     PlayerWindowInfo published_{};
     volatile long revision_ = 0;
     volatile long pollCount_ = 0;

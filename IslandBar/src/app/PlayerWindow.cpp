@@ -161,45 +161,28 @@ bool ParsePlayerWindowTitle(const wchar_t* windowTitle, char* titleOut, size_t t
 
 PlayerWindowWatch::~PlayerWindowWatch() {
     Stop();
-    if (lockReady_) {
-        ::DeleteCriticalSection(&lock_);
-        lockReady_ = false;
-    }
 }
 
 bool PlayerWindowWatch::Start() {
     if (running_) return true;
 
-    stopEvent_ = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!stopEvent_) return false;
+    if (!worker_.Prepare()) return false;
 
-    ::InitializeCriticalSection(&lock_);
-    lockReady_ = true;
-
-    running_ = true;
-    thread_ = ::CreateThread(nullptr, 0, &PlayerWindowWatch::ThreadEntry, this, 0, nullptr);
-    if (!thread_) {
-        running_ = false;
-        ::CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
+    HANDLE thread = ::CreateThread(nullptr, 0, &PlayerWindowWatch::ThreadEntry, this, 0, nullptr);
+    if (!thread) {
+        worker_.Stop();
         return false;
     }
+    worker_.Attach(thread);
+    running_ = true;
     return true;
 }
 
 void PlayerWindowWatch::Stop() {
-    if (!running_) return;
+    // NO early return when running_ is false, which is what this used to do: the handles belong to the
+    // attempt, not to the flag, and a Start() that failed after preparing the event left it open forever.
     running_ = false;
-    if (stopEvent_) ::SetEvent(stopEvent_);
-    if (thread_) {
-        ::WaitForSingleObject(thread_, 3000);
-        ::CloseHandle(thread_);
-        thread_ = nullptr;
-    }
-    if (stopEvent_) {
-        ::CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-    }
+    worker_.Stop();
 }
 
 unsigned long __stdcall PlayerWindowWatch::ThreadEntry(void* self) {
@@ -213,7 +196,7 @@ void PlayerWindowWatch::Run() {
     while (true) {
         Poll();
         ::InterlockedIncrement(&pollCount_);
-        if (::WaitForSingleObject(stopEvent_, kPlayerWindowPollMs) != WAIT_TIMEOUT) break;
+        if (::WaitForSingleObject(worker_.StopEvent(), kPlayerWindowPollMs) != WAIT_TIMEOUT) break;
         if (!running_) break;
     }
 }
@@ -233,7 +216,7 @@ void PlayerWindowWatch::Poll() {
 }
 
 void PlayerWindowWatch::Publish(const PlayerWindowInfo& info) {
-    ::EnterCriticalSection(&lock_);
+    lock_.Enter();
     const bool same = published_.present == info.present &&
                       std::strcmp(published_.title, info.title) == 0 &&
                       std::strcmp(published_.artist, info.artist) == 0 &&
@@ -242,14 +225,14 @@ void PlayerWindowWatch::Publish(const PlayerWindowInfo& info) {
         published_ = info;
         ::InterlockedIncrement(&revision_);
     }
-    ::LeaveCriticalSection(&lock_);
+    lock_.Leave();
 }
 
 void PlayerWindowWatch::Snapshot(PlayerWindowInfo* out) const {
     if (!out) return;
-    ::EnterCriticalSection(&lock_);
+    lock_.Enter();
     *out = published_;
-    ::LeaveCriticalSection(&lock_);
+    lock_.Leave();
 }
 
 unsigned long long PlayerWindowWatch::Revision() const {
