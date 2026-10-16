@@ -1367,6 +1367,112 @@ static void EnsureTaskbarStillHidden(bool hideNativeTaskbar, bool keepStrip, int
     }
 }
 
+// --- the four channels that bring a message in ---
+//
+// Moved out of the frame loop verbatim (indentation aside). What they have in common is the answer to "did
+// anything arrive": each one pushes into the same store and asks the window for the notice strip. The
+// question of WHICH message is showing right now is NOT here -- that pointer is read by the pointer policy
+// and by the drawing further down the loop, so it is computed where it is used, from what this filled in.
+//
+// The three work bits are the loop's own report of which periodic task ran in a pass; they are handed in
+// rather than duplicated, exactly like the taskbar check's.
+static void PollNotificationChannels(bool listening, bool toastsAvailable, bool soundOutputStarted,
+                                     island::BarState& bar, island::BarSystems& systems,
+                                     unsigned long long& frameWork, unsigned long long toastPollBit,
+                                     unsigned long long wechatScanBit, unsigned long long wechatSoundBit) {
+    // --- notifications ---
+    //
+    // Drain everything the listener thread has received. Each one opens the
+    // card, so a burst ends with the last notification on screen rather than
+    // flashing through all of them.
+    if (listening) {
+        island::Notification incoming;
+        int drained = 0;
+        while (systems.notificationServer.Take(&incoming)) {
+            const island::Notification* stored = systems.notifications.Push(incoming);
+            ++drained;
+            if (stored) {
+                // Wide, and converted here: the store is UTF-8 and the narrow overload would print
+                // every Chinese character as its bytes ("¹¹½¨Íê³É" for 构建完成), which reads like a
+                // corrupt message rather than like a logging bug.
+                wchar_t appW[island::kAppNameCapacity] = {};
+                wchar_t titleW[island::kTitleCapacity] = {};
+                MultiByteToWideChar(CP_UTF8, 0, stored->app, -1, appW,
+                                    static_cast<int>(island::kAppNameCapacity));
+                MultiByteToWideChar(CP_UTF8, 0,
+                                    stored->title[0] ? stored->title : stored->body, -1, titleW,
+                                    static_cast<int>(island::kTitleCapacity));
+                island::LogAndPrint(L"  notification: [%ls] %ls\n",
+                                    stored->app[0] ? appW : L"?", titleW);
+                std::fflush(stdout);
+            }
+        }
+        if (drained > 0) {
+            // NOT a card any more. A message widens the island and shows itself inside it (see
+            // NextShape's notice strip); the card is what the pointer opens when it goes to the island
+            // to read the whole thing. Forcing Expanded here -- which is what this did -- would fight
+            // that on every arrival: the strip would exist and never be seen.
+            systems.window.SetState(island::IslandState::NoticeStrip);
+        }
+    }
+
+    // ... and the same for the OTHER channel, on a slow timer.
+    //
+    // Two seconds rather than every frame because it is a database query, and the delay is invisible:
+    // the shell's own toast appears at the same moment and the bar's card follows it. Nothing here
+    // depends on the push channel and nothing in the push channel depends on this.
+    if (toastsAvailable && GetTickCount64() - bar.lastToastPoll >= 2000) {
+        bar.lastToastPoll = GetTickCount64();
+        frameWork |= toastPollBit;
+        const int arrived = systems.toasts.Poll(&systems.notifications);
+        if (arrived > 0) {
+            island::LogAndPrint("  toasts: %d new system toast(s), %d taken in total", arrived,
+                                systems.toasts.Taken());
+            std::fflush(stdout);
+            // A message from another application deserves the same attention as one pushed here --
+            // which is the strip, not the card. See the push channel above.
+            systems.window.SetState(island::IslandState::NoticeStrip);
+        }
+    }
+
+    // ... and WeChat, which has no channel of its own and is recognised by its popup appearing.
+    if (GetTickCount64() - bar.lastWeChatPoll >= 500) {
+        bar.lastWeChatPoll = GetTickCount64();
+        frameWork |= wechatScanBit;
+        if (systems.wechat.Poll(&systems.notifications, GetTickCount64()) > 0) {
+            island::LogAndPrint("  wechat: %d message announcement(s) so far", systems.wechat.Announced());
+            std::fflush(stdout);
+            systems.window.SetState(island::IslandState::NoticeStrip);
+        }
+    }
+
+    // ... and the SOUND channel, which is the one signal WeChat gives when its window does nothing.
+    //
+    // Its own clock (200 ms) rather than the window scan's: a notification sound is about a second
+    // long, and a check every half second could read the session as active twice in a row and never
+    // see the edge -- the sound would play with no announcement and no evidence anywhere.
+    if (soundOutputStarted && systems.soundOutput && GetTickCount64() - bar.lastWeChatSoundPoll >= 200) {
+        bar.lastWeChatSoundPoll = GetTickCount64();
+        frameWork |= wechatSoundBit;
+        systems.soundOutput->Snapshot(systems.soundSnapshot.get());
+
+        // Is WeChat running, and is one of its audio sessions making sound?
+        const bool wechatRunning = island::AnyWeChatProcessRunning();
+        bool wechatSessionActive = false;
+        int wechatSessions = 0;
+        for (int i = 0; i < systems.soundSnapshot->sessionCount; ++i) {
+            const island::SoundSessionInfo& session = systems.soundSnapshot->sessions[i];
+            if (!island::IsWeChatProcess(session.pid)) continue;
+            ++wechatSessions;
+            if (session.active) wechatSessionActive = true;
+        }
+        if (systems.wechat.PollSound(&systems.notifications, wechatRunning, wechatSessionActive,
+                                     wechatSessions, GetTickCount64()) > 0) {
+            systems.window.SetState(island::IslandState::NoticeStrip);
+        }
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -1897,97 +2003,10 @@ float musicWavePhase = 0.0f;
             EnsureTaskbarStillHidden(hideNativeTaskbar, keepStrip, taskbarCheckCountdown, frameWork,
                                      kWorkTaskbarCheck, bar, systems, monitor);
 
-            // --- notifications ---
-            //
-            // Drain everything the listener thread has received. Each one opens the
-            // card, so a burst ends with the last notification on screen rather than
-            // flashing through all of them.
-            if (listening) {
-                island::Notification incoming;
-                int drained = 0;
-                while (systems.notificationServer.Take(&incoming)) {
-                    const island::Notification* stored = systems.notifications.Push(incoming);
-                    ++drained;
-                    if (stored) {
-                        // Wide, and converted here: the store is UTF-8 and the narrow overload would print
-                        // every Chinese character as its bytes ("¹¹½¨Íê³É" for 构建完成), which reads like a
-                        // corrupt message rather than like a logging bug.
-                        wchar_t appW[island::kAppNameCapacity] = {};
-                        wchar_t titleW[island::kTitleCapacity] = {};
-                        MultiByteToWideChar(CP_UTF8, 0, stored->app, -1, appW,
-                                            static_cast<int>(island::kAppNameCapacity));
-                        MultiByteToWideChar(CP_UTF8, 0,
-                                            stored->title[0] ? stored->title : stored->body, -1, titleW,
-                                            static_cast<int>(island::kTitleCapacity));
-                        island::LogAndPrint(L"  notification: [%ls] %ls\n",
-                                            stored->app[0] ? appW : L"?", titleW);
-                        std::fflush(stdout);
-                    }
-                }
-                if (drained > 0) {
-                    // NOT a card any more. A message widens the island and shows itself inside it (see
-                    // NextShape's notice strip); the card is what the pointer opens when it goes to the island
-                    // to read the whole thing. Forcing Expanded here -- which is what this did -- would fight
-                    // that on every arrival: the strip would exist and never be seen.
-                    systems.window.SetState(island::IslandState::NoticeStrip);
-                }
-            }
-
-            // ... and the same for the OTHER channel, on a slow timer.
-            //
-            // Two seconds rather than every frame because it is a database query, and the delay is invisible:
-            // the shell's own toast appears at the same moment and the bar's card follows it. Nothing here
-            // depends on the push channel and nothing in the push channel depends on this.
-            if (toastsAvailable && GetTickCount64() - bar.lastToastPoll >= 2000) {
-                bar.lastToastPoll = GetTickCount64();
-                frameWork |= kWorkToastPoll;
-                const int arrived = systems.toasts.Poll(&systems.notifications);
-                if (arrived > 0) {
-                    island::LogAndPrint("  toasts: %d new system toast(s), %d taken in total", arrived,
-                                        systems.toasts.Taken());
-                    std::fflush(stdout);
-                    // A message from another application deserves the same attention as one pushed here --
-                    // which is the strip, not the card. See the push channel above.
-                    systems.window.SetState(island::IslandState::NoticeStrip);
-                }
-            }
-
-            // ... and WeChat, which has no channel of its own and is recognised by its popup appearing.
-            if (GetTickCount64() - bar.lastWeChatPoll >= 500) {
-                bar.lastWeChatPoll = GetTickCount64();
-                frameWork |= kWorkWeChatScan;
-                if (systems.wechat.Poll(&systems.notifications, GetTickCount64()) > 0) {
-                    island::LogAndPrint("  wechat: %d message announcement(s) so far", systems.wechat.Announced());
-                    std::fflush(stdout);
-                    systems.window.SetState(island::IslandState::NoticeStrip);
-                }
-            }
-
-            // ... and the SOUND channel, which is the one signal WeChat gives when its window does nothing.
-            //
-            // Its own clock (200 ms) rather than the window scan's: a notification sound is about a second
-            // long, and a check every half second could read the session as active twice in a row and never
-            // see the edge -- the sound would play with no announcement and no evidence anywhere.
-            if (soundOutputStarted && systems.soundOutput && GetTickCount64() - bar.lastWeChatSoundPoll >= 200) {
-                bar.lastWeChatSoundPoll = GetTickCount64();
-                frameWork |= kWorkWeChatSound;
-                systems.soundOutput->Snapshot(systems.soundSnapshot.get());
-
-                // Is WeChat running, and is one of its audio sessions making sound?
-                const bool wechatRunning = island::AnyWeChatProcessRunning();
-                bool wechatSessionActive = false;
-                int wechatSessions = 0;
-                for (int i = 0; i < systems.soundSnapshot->sessionCount; ++i) {
-                    const island::SoundSessionInfo& session = systems.soundSnapshot->sessions[i];
-                    if (!island::IsWeChatProcess(session.pid)) continue;
-                    ++wechatSessions;
-                    if (session.active) wechatSessionActive = true;
-                }
-                if (systems.wechat.PollSound(&systems.notifications, wechatRunning, wechatSessionActive, wechatSessions,
-                                     GetTickCount64()) > 0) {
-                    systems.window.SetState(island::IslandState::NoticeStrip);
-                }
-            }
+            // The four channels that bring a message in. The phase lives above RunBar; which message is
+            // showing right now is worked out below, where the policy and the drawing read it.
+            PollNotificationChannels(listening, toastsAvailable, soundOutputStarted, bar, systems,
+                                     frameWork, kWorkToastPoll, kWorkWeChatScan, kWorkWeChatSound);
 
             // Is something asking for attention right now? Computed before the
             // pointer logic so both branches agree on the same answer.
