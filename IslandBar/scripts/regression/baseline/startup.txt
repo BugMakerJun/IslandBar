@@ -37,7 +37,9 @@ SHAPE  taskbar: state=collapsed, <N> buttons from <N> windows listed (<N> listed
 SHAPE  glass: grain built, <N>x<N>, mean <N> (deterministic seed <H>)
 SHAPE  strip says: date (state collapsed, resting collapsed, cardUp <N>, intoPill <N>, box <N>..<N>)
 SHAPE  start button: island x [<N>, <N>] -> button x [<N>, <N>] y [<N>, <N>], fill.a <N>.<N>, opacity <N>.<N>, context <N>
+SHAPE  mem[start]: private=<N>.<N>MB ws=<N>.<N>MB vram=<N>.<N>/<N>.<N>MB handles=<N> threads=<N> gdi=<N> user=<N> cover=<N>B lyrics=<N> tray=<N> winicons=<N> bitmaps=<N> notify=<N> tasks=<N>
 SHAPE  tray: <N> icon(s) -- <N> live of <N> registry entr(ies)
+SHAPE  mem[after-event]: private=<N>.<N>MB ws=<N>.<N>MB vram=<N>.<N>/<N>.<N>MB handles=<N> threads=<N> gdi=<N> user=<N> cover=<N>B lyrics=<N> tray=<N> winicons=<N> bitmaps=<N> notify=<N> tasks=<N>
 === unordered (worker threads; content only) ===
 SHAPE  sound page: <N> device(s), default '扬声器', <N> session(s) [devices=<N> sessions=<N>]
 SHAPE  system status: <N> keyboard layout(s) installed

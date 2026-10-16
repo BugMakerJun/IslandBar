@@ -1921,6 +1921,76 @@ static void TickTray(island::BarState& bar, island::BarSystems& systems,
     }
 }
 
+
+// --- the memory line ---
+//
+// Moved out of the frame loop verbatim (indentation aside). Emitted on a five-minute cadence and again
+// shortly after a suspected grower; the counts ride on the same line as the bytes on purpose, because
+// "a cache filled up" and "something is leaking" are told apart by whether they rise together (see
+// ProcessMetrics.h). The six things it carries between frames are RunBar's locals and come in by
+// reference; the two values it reads -- what is playing and the lyric sheet -- are the pass's own.
+static void ReportMemoryLine(unsigned long long& lastMemorySample, unsigned long long& memorySamplePendingAt,
+                             bool& firstMemorySample, unsigned long long& lastMemoryMusicRevision,
+                             int& lastMemoryTrayIcons, bool& lastMemoryCardUp, unsigned long long sampleMs,
+                             island::BarSystems& systems, const island::MusicInfo& nowPlaying,
+                             const island::Lyrics* currentLyrics) {
+    // --- the memory line --------------------------------------------------------------------
+    //
+    // Emitted on a five-minute cadence and again shortly after a suspected grower. See the note
+    // in ProcessMetrics.h: the counts ride on the same line as the bytes on purpose, because
+    // "a cache filled up" and "something is leaking" are told apart by whether they rise together.
+    {
+        const unsigned long long nowTicks = GetTickCount64();
+        const unsigned long long musicRevision = systems.music.Revision();
+        const int trayCount = systems.trayIcons.Count();
+        // The same expression the frame's own `outerCardUp` is built from (`frame` is declared in
+        // the inner block that draws, and is not visible here). Kept as one expression rather
+        // than two spellings of the same idea wherever it can be helped: this one only decides
+        // when to take a sample, so a disagreement would cost a sample rather than a drawing.
+        const bool cardUp = systems.window.State() == island::IslandState::Expanded ||
+                            systems.window.FromState() == island::IslandState::Expanded;
+
+        if (musicRevision != lastMemoryMusicRevision) {
+            lastMemoryMusicRevision = musicRevision;
+            memorySamplePendingAt = nowTicks + 3000;   // once the new cover and lyric sheet land
+        }
+        if (trayCount != lastMemoryTrayIcons) {
+            lastMemoryTrayIcons = trayCount;
+            memorySamplePendingAt = nowTicks + 3000;   // once the icons are decoded
+        }
+        if (lastMemoryCardUp && !cardUp) {
+            // Delayed rather than immediate: a card's bitmaps and text layouts are released as it
+            // closes, and what the sample is for is what is STILL held after that.
+            memorySamplePendingAt = nowTicks + 30000;
+        }
+        lastMemoryCardUp = cardUp;
+
+        const bool steady = (nowTicks - lastMemorySample) >= sampleMs;
+        const bool afterEvent = memorySamplePendingAt != 0 && nowTicks >= memorySamplePendingAt;
+        if (steady || afterEvent) {
+            island::ProcessMemorySample sample;
+            island::SampleProcessMemory(&sample);
+            sample.vramValid = systems.renderer.VideoMemory(&sample.vramLocalBytes,
+                                                    &sample.vramNonLocalBytes);
+
+            island::ProcessCacheCounts counts;
+            counts.coverBytes    = nowPlaying.artworkSize;
+            counts.lyricLines    = currentLyrics ? currentLyrics->count : 0;
+            counts.trayIcons     = trayCount;
+            counts.taskButtons   = systems.taskWindows.Count();
+            counts.notifications = systems.notifications.Count();
+            systems.renderer.CacheCounts(&counts.bitmaps, &counts.windowIcons);
+
+            const char* reason = firstMemorySample ? "start"
+                                                  : (steady ? "5min" : "after-event");
+            island::LogProcessMemory(reason, sample, counts);
+            firstMemorySample = false;
+            lastMemorySample = nowTicks;
+            memorySamplePendingAt = 0;
+        }
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -5542,61 +5612,11 @@ float musicWavePhase = 0.0f;
                                     work[0] ? work : "none logged",
                                     (lastWork & kWorkDraw) ? "" : " (no draw: the loop was waiting)");
             }
-            // --- the memory line --------------------------------------------------------------------
-            //
-            // Emitted on a five-minute cadence and again shortly after a suspected grower. See the note
-            // in ProcessMetrics.h: the counts ride on the same line as the bytes on purpose, because
-            // "a cache filled up" and "something is leaking" are told apart by whether they rise together.
-            {
-                const unsigned long long nowTicks = GetTickCount64();
-                const unsigned long long musicRevision = systems.music.Revision();
-                const int trayCount = systems.trayIcons.Count();
-                // The same expression the frame's own `outerCardUp` is built from (`frame` is declared in
-                // the inner block that draws, and is not visible here). Kept as one expression rather
-                // than two spellings of the same idea wherever it can be helped: this one only decides
-                // when to take a sample, so a disagreement would cost a sample rather than a drawing.
-                const bool cardUp = systems.window.State() == island::IslandState::Expanded ||
-                                    systems.window.FromState() == island::IslandState::Expanded;
-
-                if (musicRevision != lastMemoryMusicRevision) {
-                    lastMemoryMusicRevision = musicRevision;
-                    memorySamplePendingAt = nowTicks + 3000;   // once the new cover and lyric sheet land
-                }
-                if (trayCount != lastMemoryTrayIcons) {
-                    lastMemoryTrayIcons = trayCount;
-                    memorySamplePendingAt = nowTicks + 3000;   // once the icons are decoded
-                }
-                if (lastMemoryCardUp && !cardUp) {
-                    // Delayed rather than immediate: a card's bitmaps and text layouts are released as it
-                    // closes, and what the sample is for is what is STILL held after that.
-                    memorySamplePendingAt = nowTicks + 30000;
-                }
-                lastMemoryCardUp = cardUp;
-
-                const bool steady = (nowTicks - lastMemorySample) >= kMemorySampleMs;
-                const bool afterEvent = memorySamplePendingAt != 0 && nowTicks >= memorySamplePendingAt;
-                if (steady || afterEvent) {
-                    island::ProcessMemorySample sample;
-                    island::SampleProcessMemory(&sample);
-                    sample.vramValid = systems.renderer.VideoMemory(&sample.vramLocalBytes,
-                                                            &sample.vramNonLocalBytes);
-
-                    island::ProcessCacheCounts counts;
-                    counts.coverBytes    = nowPlaying.artworkSize;
-                    counts.lyricLines    = currentLyrics ? currentLyrics->count : 0;
-                    counts.trayIcons     = trayCount;
-                    counts.taskButtons   = systems.taskWindows.Count();
-                    counts.notifications = systems.notifications.Count();
-                    systems.renderer.CacheCounts(&counts.bitmaps, &counts.windowIcons);
-
-                    const char* reason = firstMemorySample ? "start"
-                                                          : (steady ? "5min" : "after-event");
-                    island::LogProcessMemory(reason, sample, counts);
-                    firstMemorySample = false;
-                    lastMemorySample = nowTicks;
-                    memorySamplePendingAt = 0;
-                }
-            }
+            // The memory line: the five-minute cadence plus one shortly after a suspected grower. The phase
+            // lives above RunBar; the cadence state it keeps is carried across frames through references.
+            ReportMemoryLine(lastMemorySample, memorySamplePendingAt, firstMemorySample,
+                             lastMemoryMusicRevision, lastMemoryTrayIcons, lastMemoryCardUp, kMemorySampleMs,
+                             systems, nowPlaying, currentLyrics);
 
             if (GetTickCount64() - lastIntervalReport >= 4000) {
                 lastIntervalReport = GetTickCount64();
