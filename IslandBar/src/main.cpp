@@ -1642,6 +1642,44 @@ static void ApplyWheelScroll(island::BarState& bar, island::BarSystems& systems)
     }
 }
 
+// --- what "put the card away" means ---
+//
+// Moved out of the frame loop verbatim (indentation aside): it used to be the body of a lambda that nine
+// places in the loop call, and those call sites are deliberately left alone -- the lambda stays, one line
+// long, so the shape of the code that reads as "dismiss the panel" does not change. `active` and `resting`
+// are the pass's own answers and are passed in.
+static void DismissPanelSurface(island::BarState& bar, island::BarSystems& systems,
+                                const island::Notification* active, island::IslandState resting) {
+    bar.systemPanelOpen = false;
+    bar.soundPageOpen = false;
+    // ... and the Start card, which is the fourth level of the same card and has to go with it
+    // for the same reason (see the note above about every level being cleared).
+    bar.startPageOpen = false;
+    // ... AND the tray's page, which is the third level of the same card. It used to be left
+    // set, which was harmless while the level was read from the request and is not now: a card
+    // put away by a click outside must take every level with it, exactly as a click on the
+    // system button does (see the click handler).
+    bar.trayPageOpen = false;
+    // ... and the tray's own menu, which is a thing in front of that page rather than a level
+    // of it, so it cannot outlive the card it was opened over.
+    systems.window.CloseTrayMenu();
+    bar.panelSliderDrag = false;
+    bar.mixerSliderDragRow = -1;
+    bar.mixerSliderDragPid = 0;
+    // TO THE NOTICE STRIP, NOT TO `resting`, WHILE A CALL OR A MESSAGE IS UP.
+    //
+    // `resting` is the ordinary shape -- the lyric strip, or the plain pill -- and putting the
+    // island there is what "变回普通" was. With a call running: a click on a button opened its
+    // card (correct), closing the card ran this line, and the island settled as the ordinary
+    // strip for 220 ms before the policy above put the notice back. The log has the pair:
+    // `state: music-strip` at 23:00:51.122 and `state: notice-strip` at 23:00:51.345.
+    //
+    // A notice is not a card, so dismissing a card has no business retiring it. This is the only
+    // place a card is put away -- every click-outside branch calls this lambda -- so the shape
+    // can now only ever go card -> notice strip while something is being announced.
+    systems.window.SetState(active == nullptr ? resting : island::IslandState::NoticeStrip);
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -2470,36 +2508,9 @@ float musicWavePhase = 0.0f;
             // With the shape told to go back to rest, cardWanted is false from that moment on, so the owner
             // is KEPT and the panel is drawn all the way out (see NextCardOwner): the card retracts, and
             // nothing takes its place.
-            const auto dismissPanel = [&]() {
-                bar.systemPanelOpen = false;
-                bar.soundPageOpen = false;
-                // ... and the Start card, which is the fourth level of the same card and has to go with it
-                // for the same reason (see the note above about every level being cleared).
-                bar.startPageOpen = false;
-                // ... AND the tray's page, which is the third level of the same card. It used to be left
-                // set, which was harmless while the level was read from the request and is not now: a card
-                // put away by a click outside must take every level with it, exactly as a click on the
-                // system button does (see the click handler).
-                bar.trayPageOpen = false;
-                // ... and the tray's own menu, which is a thing in front of that page rather than a level
-                // of it, so it cannot outlive the card it was opened over.
-                systems.window.CloseTrayMenu();
-                bar.panelSliderDrag = false;
-                bar.mixerSliderDragRow = -1;
-                bar.mixerSliderDragPid = 0;
-                // TO THE NOTICE STRIP, NOT TO `resting`, WHILE A CALL OR A MESSAGE IS UP.
-                //
-                // `resting` is the ordinary shape -- the lyric strip, or the plain pill -- and putting the
-                // island there is what "变回普通" was. With a call running: a click on a button opened its
-                // card (correct), closing the card ran this line, and the island settled as the ordinary
-                // strip for 220 ms before the policy above put the notice back. The log has the pair:
-                // `state: music-strip` at 23:00:51.122 and `state: notice-strip` at 23:00:51.345.
-                //
-                // A notice is not a card, so dismissing a card has no business retiring it. This is the only
-                // place a card is put away -- every click-outside branch calls this lambda -- so the shape
-                // can now only ever go card -> notice strip while something is being announced.
-                systems.window.SetState(active == nullptr ? resting : island::IslandState::NoticeStrip);
-            };
+            // The panel is put away in nine places down this loop. What that MEANS lives above RunBar now
+            // (see DismissPanelSurface); this name is kept so the call sites still read as they always did.
+            const auto dismissPanel = [&]() { DismissPanelSurface(bar, systems, active, resting); };
             // A click, routed to whatever it landed on. The icon row is checked FIRST because the
             // icons are not the island: a click on one asks to switch to that window, and must not
             // also be read as an acknowledgement of the notifications or as a transport control.
