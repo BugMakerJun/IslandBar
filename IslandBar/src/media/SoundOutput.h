@@ -31,6 +31,8 @@
 #include <cstddef>
 
 #include "domain/CardLayout.h"   // kMaxSoundDevices, kMaxSoundSessions
+#include "platform/CriticalSection.h"
+#include "platform/WorkerThread.h"
 
 namespace island {
 
@@ -124,13 +126,12 @@ private:
     bool IconForPid(unsigned long pid, const wchar_t* executable, unsigned char* out, size_t* written,
                     unsigned long long* revision);
 
-    HANDLE stopEvent_ = nullptr;
+    // The stop event, the thread and the rule for ending both. See platform/WorkerThread.h.
+    WorkerThread worker_;
     HANDLE workEvent_ = nullptr;    // auto-reset: a write or a refresh request
-    HANDLE thread_ = nullptr;
     volatile bool running_ = false;
 
-    mutable CRITICAL_SECTION lock_{};
-    bool lockReady_ = false;
+    mutable CriticalSection lock_;
 
     SoundOutputSnapshot snapshot_{};
     volatile long revision_ = 0;

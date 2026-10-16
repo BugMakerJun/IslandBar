@@ -636,16 +636,20 @@ MusicSession::~MusicSession() {
 bool MusicSession::Start() {
     if (running_) return true;
 
-    InitializeCriticalSection(&lock_);
-    lockReady_ = true;
-
-    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     toggleEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);   // auto-reset
-    if (!stopEvent_ || !toggleEvent_) return false;
+    // Stop() ends whatever exists rather than unwinding by hand (see platform/WorkerThread.h).
+    if (!worker_.Prepare() || !toggleEvent_) {
+        Stop();
+        return false;
+    }
 
     DWORD threadId = 0;
-    thread_ = CreateThread(nullptr, 0, &MusicSession::ThreadEntry, this, 0, &threadId);
-    if (!thread_) return false;
+    HANDLE thread = CreateThread(nullptr, 0, &MusicSession::ThreadEntry, this, 0, &threadId);
+    if (!thread) {
+        Stop();
+        return false;
+    }
+    worker_.Attach(thread);
 
     // Wait for the worker's first poll, so Start() returning true means the media
     // API actually answered.
@@ -669,32 +673,19 @@ bool MusicSession::Start() {
 }
 
 void MusicSession::Stop() {
-    if (stopEvent_) SetEvent(stopEvent_);
-    if (thread_) {
-        WaitForSingleObject(thread_, 3000);
-        CloseHandle(thread_);
-        thread_ = nullptr;
-    }
-    if (stopEvent_) {
-        CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-    }
+    worker_.Stop();
     if (toggleEvent_) {
         CloseHandle(toggleEvent_);
         toggleEvent_ = nullptr;
-    }
-    if (lockReady_) {
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
     }
     running_ = false;
 }
 
 void MusicSession::Snapshot(MusicInfo* out) const {
-    if (!out || !lockReady_) return;
-    EnterCriticalSection(&lock_);
+    if (!out || !worker_.Prepared()) return;
+    lock_.Enter();
     *out = current_;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 }
 
 unsigned long long MusicSession::Revision() const {
@@ -708,10 +699,10 @@ long long MusicSession::PollCount() const {
 bool MusicSession::RequestTransport(Transport action) {
     if (!running_ || !toggleEvent_) return false;
     // Under the lock so the worker cannot see the pending flag with a stale action.
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     pendingAction_ = action;
     InterlockedExchange(&togglePending_, 1);
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     // Waking the worker makes the action immediate instead of waiting up to two
     // seconds for the next poll, which is the difference between a button that feels
     // connected and one that feels broken.
@@ -761,7 +752,7 @@ void MusicSession::Run() {
         // Wake for either a toggle request or the next scheduled poll, whichever
         // comes first. Waiting on both is what makes the button responsive without
         // polling faster for everything else.
-        HANDLE waits[2] = { stopEvent_, toggleEvent_ };
+        HANDLE waits[2] = { worker_.StopEvent(), toggleEvent_ };
         const DWORD interval =
             static_cast<DWORD>(NextPollIntervalMs(GetTickCount(), lastSkip, lastTrackChange));
         const DWORD elapsed = GetTickCount() - lastPoll;
@@ -825,9 +816,9 @@ void MusicSession::Run() {
                             previous.state = (previous.state == PlaybackState::Playing)
                                                  ? PlaybackState::Paused
                                                  : PlaybackState::Playing;
-                            EnterCriticalSection(&lock_);
+                            lock_.Enter();
                             current_ = previous;
-                            LeaveCriticalSection(&lock_);
+                            lock_.Leave();
                             InterlockedIncrement(&revision_);
                         }
                     } catch (const winrt::hresult_error&) {
@@ -1033,9 +1024,9 @@ void MusicSession::Run() {
                 std::strcmp(fresh.app, previous.app) != 0;
 
             if (changed) {
-                EnterCriticalSection(&lock_);
+                lock_.Enter();
                 current_ = fresh;
-                LeaveCriticalSection(&lock_);
+                lock_.Leave();
                 InterlockedIncrement(&revision_);
                 previous = fresh;
             }

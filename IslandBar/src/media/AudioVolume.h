@@ -21,6 +21,9 @@
 
 #include <windows.h>
 
+#include "platform/CriticalSection.h"
+#include "platform/WorkerThread.h"
+
 namespace island {
 
 class AudioVolume {
@@ -79,14 +82,13 @@ private:
     // thirty times a second would cost more than everything else this class does put together.
     bool ReadPeakFromDevice();
 
-    HANDLE        stopEvent_ = nullptr;
+    // The stop event, the thread and the rule for ending both. See platform/WorkerThread.h.
+    WorkerThread worker_;
     // Auto-reset: a write request wakes the worker without a full poll interval of latency.
     HANDLE        writeEvent_ = nullptr;
-    HANDLE        thread_ = nullptr;
     volatile bool running_ = false;
 
-    mutable CRITICAL_SECTION lock_{};
-    bool lockReady_ = false;
+    mutable CriticalSection lock_;
 
     float          level_ = 0.0f;
     bool           muted_ = false;

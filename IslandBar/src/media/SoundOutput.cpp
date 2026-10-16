@@ -146,16 +146,20 @@ SoundOutput::~SoundOutput() {
 bool SoundOutput::Start() {
     if (running_) return true;
 
-    InitializeCriticalSection(&lock_);
-    lockReady_ = true;
-
-    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     workEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);   // auto-reset
-    if (!stopEvent_ || !workEvent_) return false;
+    // Stop() ends whatever exists rather than unwinding by hand (see platform/WorkerThread.h).
+    if (!worker_.Prepare() || !workEvent_) {
+        Stop();
+        return false;
+    }
 
     DWORD threadId = 0;
-    thread_ = CreateThread(nullptr, 0, &SoundOutput::ThreadEntry, this, 0, &threadId);
-    if (!thread_) return false;
+    HANDLE thread = CreateThread(nullptr, 0, &SoundOutput::ThreadEntry, this, 0, &threadId);
+    if (!thread) {
+        Stop();
+        return false;
+    }
+    worker_.Attach(thread);
 
     // Wait for the first reading, so the page has something to draw the first time it is opened rather
     // than filling in a second later.
@@ -163,40 +167,29 @@ bool SoundOutput::Start() {
         Sleep(5);
     }
     running_ = haveReading_;
+    // NOT stopped when the first reading never came: the worker keeps asking, and the page can still fill
+    // in later. What it must not do is leak the attempt -- Prepare() ends it before the next Start().
     return running_;
 }
 
 void SoundOutput::Stop() {
-    if (stopEvent_) SetEvent(stopEvent_);
-    if (thread_) {
-        WaitForSingleObject(thread_, 3000);
-        CloseHandle(thread_);
-        thread_ = nullptr;
-    }
-    if (stopEvent_) {
-        CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-    }
+    worker_.Stop();
     if (workEvent_) {
         CloseHandle(workEvent_);
         workEvent_ = nullptr;
-    }
-    if (lockReady_) {
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
     }
     running_ = false;
 }
 
 void SoundOutput::Snapshot(SoundOutputSnapshot* out) const {
     if (!out) return;
-    if (!lockReady_) {
+    if (!worker_.Prepared()) {
         *out = SoundOutputSnapshot{};
         return;
     }
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     *out = snapshot_;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 }
 
 unsigned long long SoundOutput::Revision() const {
@@ -204,31 +197,31 @@ unsigned long long SoundOutput::Revision() const {
 }
 
 void SoundOutput::Refresh() {
-    if (!lockReady_) return;
-    EnterCriticalSection(&lock_);
+    if (!worker_.Prepared()) return;
+    lock_.Enter();
     refreshRequested_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     if (workEvent_) SetEvent(workEvent_);
 }
 
 void SoundOutput::SetDefaultDevice(const wchar_t* deviceId) {
-    if (!lockReady_ || !deviceId) return;
-    EnterCriticalSection(&lock_);
+    if (!worker_.Prepared() || !deviceId) return;
+    lock_.Enter();
     CopyTo(pendingDevice_, 256, deviceId);
     pendingDefault_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     if (workEvent_) SetEvent(workEvent_);
 }
 
 void SoundOutput::SetSessionVolume(unsigned long pid, float level) {
-    if (!lockReady_) return;
+    if (!worker_.Prepared()) return;
     if (level < 0.0f) level = 0.0f;
     if (level > 1.0f) level = 1.0f;
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     pendingPid_ = pid;
     pendingLevel_ = level;
     pendingVolume_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     if (workEvent_) SetEvent(workEvent_);
 }
 
@@ -246,17 +239,17 @@ void SoundOutput::Run() {
     if (haveApartment) ReadAll();
 
     while (true) {
-        HANDLE waits[2] = {stopEvent_, workEvent_};
+        HANDLE waits[2] = {worker_.StopEvent(), workEvent_};
         const DWORD signalled = WaitForMultipleObjects(2, waits, FALSE, kSoundPollMs);
         if (signalled == WAIT_OBJECT_0) break;   // stop
         if (!haveApartment) break;
 
         bool wantRefresh = (signalled == WAIT_TIMEOUT);
         if (signalled == WAIT_OBJECT_0 + 1) {
-            EnterCriticalSection(&lock_);
+            lock_.Enter();
             wantRefresh = wantRefresh || refreshRequested_;
             refreshRequested_ = false;
-            LeaveCriticalSection(&lock_);
+            lock_.Leave();
         }
 
         if (wantRefresh) ReadAll();
@@ -272,11 +265,11 @@ void SoundOutput::ReadAll() {
     const bool devices = ReadDevices(fresh);
     const bool sessions = ReadSessions(fresh);
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     fresh.revision = static_cast<unsigned long long>(InterlockedIncrement(&revision_));
     snapshot_ = fresh;
     haveReading_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 
     // Reported ONCE PER CHANGE, because the page's own contents are the one thing about it that cannot be walked
     // backwards from the screen: "the mixer is empty" and "the mixer could not be read" look the same in a
@@ -507,7 +500,7 @@ void SoundOutput::ApplyWrites() {
     unsigned long pid = 0;
     float level = 0.0f;
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     if (pendingDefault_) {
         CopyTo(device, 256, pendingDevice_);
         pendingDefault_ = false;
@@ -519,7 +512,7 @@ void SoundOutput::ApplyWrites() {
         pendingVolume_ = false;
         doVolume = true;
     }
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 
     if (doDefault) {
         long result = 0;

@@ -25,5 +25,6 @@ void TestLyrics();
 void TestMusicCardLayout();
 void TestHoverSequence();
 void TestPointerStateCycle();
+void TestWorkerThread();
 
 } // namespace island

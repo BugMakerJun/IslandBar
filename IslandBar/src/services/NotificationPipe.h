@@ -23,6 +23,8 @@
 #include <cstdint>
 
 #include "services/Notification.h"
+#include "platform/CriticalSection.h"
+#include "platform/WorkerThread.h"
 
 namespace island {
 
@@ -65,14 +67,13 @@ private:
     void Run();
     void Enqueue(const Notification& notification);
 
-    HANDLE        stopEvent_ = nullptr;
-    HANDLE        thread_ = nullptr;
+    // The stop event, the thread and the rule for ending both. See platform/WorkerThread.h.
+    WorkerThread  worker_;
     wchar_t       name_[256] = {};   // full \\.\pipe\... path
     volatile bool running_ = false;
 
     // Received notifications awaiting pickup by the UI thread.
-    CRITICAL_SECTION lock_{};
-    bool             lockReady_ = false;
+    CriticalSection lock_;
     Notification     queue_[64] = {};
     int              queueCount_ = 0;
 

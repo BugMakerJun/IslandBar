@@ -316,6 +316,7 @@ int RunSelfTest() {
     TestNotifications();
     TestMotion(originX, originY, monitorWidthDip);
     TestClock();
+    TestWorkerThread();
 
     // Diagnostics has no direct access to the window's private clock; the
     // renderer's own check covers the compositor wait.

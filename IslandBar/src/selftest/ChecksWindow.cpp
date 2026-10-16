@@ -37,6 +37,7 @@
 #include "domain/TrayRegistration.h"
 #include "domain/TrayLedger.h"     // which registrations the shell is holding (see the tray checks)
 #include "platform/TrayRing.h"     // the channel the module publishes registrations on
+#include "platform/WorkerThread.h"   // the stop-event/thread rule the readers share (TestWorkerThread)
 #include "domain/CardLayout.h"
 #include "domain/StatePolicy.h"
 #include "domain/TrayEncoding.h"   // the only place a tray click is encoded (see its header)
@@ -2297,6 +2298,74 @@ void TestRenderer(IslandWindow& window) {
     // island could never be made fully opaque again by the frame loop.
     renderer.Shutdown();
     Check(!renderer.IsInitialized(), L"shutdown released the chain");
+}
+
+// --- the worker-thread rule ---------------------------------------------------------------------------
+//
+// WHAT THIS ASSERTS, and why it is a HANDLE COUNT rather than a reading of the code: the four readers that
+// used to hand-roll this dance each left something behind on the paths where Start() gave up -- an open
+// event, a running thread, an initialised critical section, or all three -- and the failure only shows up
+// when a start is RETRIED, which is exactly what the callers do. So the assertion performs the retry, many
+// times, and asks the process whether anything accumulated.
+//
+// The bound is not zero: the check itself is running inside a process that owns windows, threads and a
+// compositor, so a couple of handles moving during the loop is normal. What the old code did was grow by
+// ONE EVENT PER ITERATION, which fifty iterations make unmistakable.
+void TestWorkerThread() {
+    Section(L"worker thread teardown (platform)");
+
+    DWORD before = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &before);
+
+    {
+        WorkerThread worker;
+        for (int i = 0; i < 50; ++i) {
+            // The shape of a start that gives up half-way, then a retry.
+            worker.Prepare();
+            worker.Stop();
+        }
+        Check(!worker.Prepared(), L"after Stop() the worker reports nothing prepared");
+    }
+
+    {
+        // Prepare() WITHOUT a Stop() between, which is the leak the copies really had: each call used to
+        // create an event over the previous handle. Prepare() ends the previous attempt first.
+        WorkerThread worker;
+        for (int i = 0; i < 50; ++i) {
+            worker.Prepare();
+        }
+        Check(worker.Prepared(), L"the last of fifty prepares is the one that is armed");
+    }
+
+    {
+        // And the real thing: a thread that waits on the stop event, told to stop, joined and closed --
+        // three times over against ONE WorkerThread, because that is the sequence Start()/Stop()/Start()
+        // performs when a reader is restarted.
+        struct Helper {
+            static unsigned long __stdcall Entry(void* self) {
+                auto* worker = static_cast<WorkerThread*>(self);
+                WaitForSingleObject(worker->StopEvent(), 5000);
+                return 0;
+            }
+        };
+
+        WorkerThread worker;
+        for (int i = 0; i < 3; ++i) {
+            const bool prepared = worker.Prepare();
+            HANDLE thread = prepared ? CreateThread(nullptr, 0, &Helper::Entry, &worker, 0, nullptr)
+                                     : nullptr;
+            if (thread) worker.Attach(thread);
+            Check(prepared && thread != nullptr, L"a worker starts a real thread against its stop event");
+            Check(worker.Stop(3000), L"and Stop() sees that thread end rather than giving up on it");
+        }
+    }
+
+    DWORD after = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &after);
+
+    wchar_t detail[96] = {};
+    std::swprintf(detail, 96, L"after ~150 prepare/stop cycles: %lu -> %lu handle(s)", before, after);
+    Check(after <= before + 8, L"a retried start leaves no handles behind", detail);
 }
 
 } // namespace island

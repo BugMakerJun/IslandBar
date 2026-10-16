@@ -19,6 +19,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "platform/CriticalSection.h"
+#include "platform/WorkerThread.h"
+
 namespace island {
 
 // The position to DRAW for, given the last reading and how long ago it was taken.
@@ -195,12 +198,11 @@ private:
     static unsigned long __stdcall ThreadEntry(void* self);
     void Run();
 
-    HANDLE             stopEvent_ = nullptr;
-    HANDLE             thread_ = nullptr;
+    // The stop event, the thread and the rule for ending both. See platform/WorkerThread.h.
+    WorkerThread       worker_;
     volatile bool      running_ = false;
 
-    mutable CRITICAL_SECTION lock_{};
-    bool               lockReady_ = false;
+    mutable CriticalSection lock_;
     MusicInfo          current_{};
     // `long`, not `long long`: InterlockedIncrement operates on 32-bit values and
     // has no overload for a 64-bit volatile.

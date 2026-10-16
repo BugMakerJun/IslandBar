@@ -45,16 +45,22 @@ AudioVolume::~AudioVolume() {
 bool AudioVolume::Start() {
     if (running_) return true;
 
-    InitializeCriticalSection(&lock_);
-    lockReady_ = true;
-
-    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     writeEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);   // auto-reset
-    if (!stopEvent_ || !writeEvent_) return false;
+    // Stop() rather than a bare return: it is the one place that ends whatever exists, whether that is
+    // nothing, one event, or a thread that is already running. The copies this class used to have each
+    // unwound a different part of this by hand (see platform/WorkerThread.h).
+    if (!worker_.Prepare() || !writeEvent_) {
+        Stop();
+        return false;
+    }
 
     DWORD threadId = 0;
-    thread_ = CreateThread(nullptr, 0, &AudioVolume::ThreadEntry, this, 0, &threadId);
-    if (!thread_) return false;
+    HANDLE thread = CreateThread(nullptr, 0, &AudioVolume::ThreadEntry, this, 0, &threadId);
+    if (!thread) {
+        Stop();
+        return false;
+    }
+    worker_.Attach(thread);
 
     // Wait for the first read, so Start() returning true means the level is known and the
     // control can be drawn on the very first frame rather than popping in half a second later.
@@ -71,23 +77,10 @@ bool AudioVolume::Start() {
 }
 
 void AudioVolume::Stop() {
-    if (stopEvent_) SetEvent(stopEvent_);
-    if (thread_) {
-        WaitForSingleObject(thread_, 3000);
-        CloseHandle(thread_);
-        thread_ = nullptr;
-    }
-    if (stopEvent_) {
-        CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-    }
+    worker_.Stop();
     if (writeEvent_) {
         CloseHandle(writeEvent_);
         writeEvent_ = nullptr;
-    }
-    if (lockReady_) {
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
     }
     running_ = false;
 }
@@ -97,26 +90,26 @@ bool AudioVolume::Available() const {
 }
 
 bool AudioVolume::Get(float* level) const {
-    if (!level || !lockReady_ || !haveLevel_) return false;
-    EnterCriticalSection(&lock_);
+    if (!level || !worker_.Prepared() || !haveLevel_) return false;
+    lock_.Enter();
     *level = level_;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     return true;
 }
 
 bool AudioVolume::IsMuted() const {
-    if (!lockReady_) return false;
-    EnterCriticalSection(&lock_);
+    if (!worker_.Prepared()) return false;
+    lock_.Enter();
     const bool muted = muted_;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     return muted;
 }
 
 bool AudioVolume::Peak(float* level) const {
-    if (!level || !lockReady_ || !havePeak_) return false;
-    EnterCriticalSection(&lock_);
+    if (!level || !worker_.Prepared() || !havePeak_) return false;
+    lock_.Enter();
     *level = peak_;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     return true;
 }
 
@@ -131,31 +124,31 @@ void AudioVolume::Adjust(float delta) {
 }
 
 void AudioVolume::SetLevel(float level) {
-    if (!lockReady_) return;
+    if (!worker_.Prepared()) return;
 
     const float wanted = Clamp01(level);
 
     // Publish locally first, so the bar moves on the next frame instead of waiting for the
     // worker to get round to it. The worker reconciles with the device afterwards.
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     level_ = wanted;
     haveLevel_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     InterlockedIncrement(&revision_);
 
     // The device write needs the same interfaces as the poll, so it is handed to the worker
     // through a shared request rather than done here on the caller's thread.
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     pendingLevel_ = wanted;
     pendingWrite_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     SetEvent(writeEvent_);
 }
 
 void AudioVolume::ToggleMute() {
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     pendingToggleMute_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     SetEvent(writeEvent_);
 }
 
@@ -204,10 +197,10 @@ bool AudioVolume::ReadPeakFromDevice() {
     if (peak < 0.0f) peak = 0.0f;
     if (peak > 1.0f) peak = 1.0f;
 
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     peak_ = peak;
     havePeak_ = true;
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     return true;
 }
 
@@ -238,7 +231,7 @@ bool AudioVolume::ReadFromDevice() {
                     SUCCEEDED(volume->GetMute(&muted));
 
     if (ok) {
-        EnterCriticalSection(&lock_);
+        lock_.Enter();
         // Only accept the device's value when the user is not mid-adjustment: an in-flight
         // click would otherwise be overwritten by the level the device still reports, and the
         // bar would snap back.
@@ -247,7 +240,7 @@ bool AudioVolume::ReadFromDevice() {
             muted_ = muted != FALSE;
         }
         haveLevel_ = true;
-        LeaveCriticalSection(&lock_);
+        lock_.Leave();
     }
 
     volume->Release();
@@ -269,7 +262,7 @@ void AudioVolume::Run() {
     if (haveApartment) ReadFromDevice();
 
     while (true) {
-        HANDLE waits[2] = {stopEvent_, writeEvent_};
+        HANDLE waits[2] = {worker_.StopEvent(), writeEvent_};
         // The wait is the PEAK interval, not the volume's: the loop wakes often and does the cheap peak read
         // every time, while the volume re-read (which opens the device) only happens on its own slower clock.
         const DWORD signalled = WaitForMultipleObjects(2, waits, FALSE, kPeakIntervalMs);
@@ -284,7 +277,7 @@ void AudioVolume::Run() {
             bool doWrite = false;
             bool doToggleMute = false;
 
-            EnterCriticalSection(&lock_);
+            lock_.Enter();
             if (pendingWrite_) {
                 wanted = pendingLevel_;
                 pendingWrite_ = false;
@@ -294,7 +287,7 @@ void AudioVolume::Run() {
                 pendingToggleMute_ = false;
                 doToggleMute = true;
             }
-            LeaveCriticalSection(&lock_);
+            lock_.Leave();
 
             if (doWrite || doToggleMute) {
                 IMMDeviceEnumerator* enumerator = nullptr;

@@ -167,18 +167,22 @@ bool NotificationServer::Start(const wchar_t* pipeName) {
 
     swprintf(name_, 256, L"\\\\.\\pipe\\%s", pipeName ? pipeName : kPipeName);
 
-    InitializeCriticalSection(&lock_);
-    lockReady_ = true;
-
-    stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);   // manual reset
-    if (!stopEvent_) return false;
+    // Stop() ends whatever exists rather than unwinding by hand (see platform/WorkerThread.h).
+    if (!worker_.Prepare()) {
+        Stop();
+        return false;
+    }
 
     // Created on the listener thread rather than here, so a failure to create the
     // pipe surfaces as "not running" instead of as a thread that quietly does
     // nothing.
     DWORD threadId = 0;
-    thread_ = CreateThread(nullptr, 0, &NotificationServer::ThreadEntry, this, 0, &threadId);
-    if (!thread_) return false;
+    HANDLE thread = CreateThread(nullptr, 0, &NotificationServer::ThreadEntry, this, 0, &threadId);
+    if (!thread) {
+        Stop();
+        return false;
+    }
+    worker_.Attach(thread);
 
     // Give the thread a moment to create the pipe, so Start() returning true means
     // a client can actually connect.
@@ -189,28 +193,10 @@ bool NotificationServer::Start(const wchar_t* pipeName) {
 }
 
 void NotificationServer::Stop() {
-    if (stopEvent_) SetEvent(stopEvent_);
-
-    if (thread_) {
-        WaitForSingleObject(thread_, 3000);
-
-        // If the thread refused to end -- a blocked ConnectNamedPipe on a broken
-        // client can do that -- the handle must still be closed and the thread
-        // detached rather than waited on forever.
-        CloseHandle(thread_);
-        thread_ = nullptr;
-    }
-
-    if (stopEvent_) {
-        CloseHandle(stopEvent_);
-        stopEvent_ = nullptr;
-    }
-
-    if (lockReady_) {
-        DeleteCriticalSection(&lock_);
-        lockReady_ = false;
-    }
-
+    // The rule -- signal, wait with a timeout, close -- lives in WorkerThread, including the case its own
+    // comment describes: a blocked ConnectNamedPipe on a broken client means the thread may refuse to end,
+    // and the handle must be closed and the thread detached rather than waited on forever.
+    worker_.Stop();
     running_ = false;
 }
 
@@ -226,7 +212,7 @@ void NotificationServer::Run() {
     // The loop owns one pipe instance at a time: create, wait for a client, serve
     // it, and close. That serialises clients without any extra locking, and a
     // notification is a small message that is written and forgotten.
-    while (WaitForSingleObject(stopEvent_, 0) != WAIT_OBJECT_0) {
+    while (WaitForSingleObject(worker_.StopEvent(), 0) != WAIT_OBJECT_0) {
         HANDLE pipe = CreateNamedPipeW(
             name_,
             PIPE_ACCESS_DUPLEX,
@@ -251,7 +237,7 @@ void NotificationServer::Run() {
         const DWORD connectError = connected ? 0 : GetLastError();
         const bool clientPresent = connected || connectError == ERROR_PIPE_CONNECTED;
 
-        if (WaitForSingleObject(stopEvent_, 0) == WAIT_OBJECT_0) {
+        if (WaitForSingleObject(worker_.StopEvent(), 0) == WAIT_OBJECT_0) {
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
             break;
@@ -304,8 +290,8 @@ void NotificationServer::Run() {
 }
 
 void NotificationServer::Enqueue(const Notification& notification) {
-    if (!lockReady_) return;
-    EnterCriticalSection(&lock_);
+    if (!worker_.Prepared()) return;
+    lock_.Enter();
     if (queueCount_ < static_cast<int>(sizeof(queue_) / sizeof(queue_[0]))) {
         queue_[queueCount_++] = notification;
     } else {
@@ -316,13 +302,13 @@ void NotificationServer::Enqueue(const Notification& notification) {
         }
         queue_[queueCount_ - 1] = notification;
     }
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
 }
 
 bool NotificationServer::Take(Notification* out) {
-    if (!out || !lockReady_) return false;
+    if (!out || !worker_.Prepared()) return false;
     bool have = false;
-    EnterCriticalSection(&lock_);
+    lock_.Enter();
     if (queueCount_ > 0) {
         *out = queue_[0];
         for (int i = 1; i < queueCount_; ++i) {
@@ -331,7 +317,7 @@ bool NotificationServer::Take(Notification* out) {
         --queueCount_;
         have = true;
     }
-    LeaveCriticalSection(&lock_);
+    lock_.Leave();
     return have;
 }
 
