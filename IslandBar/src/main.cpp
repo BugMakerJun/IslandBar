@@ -1185,6 +1185,59 @@ static void ReadTrayAndStartLearning(island::BarSystems& systems) {
     }
 }
 
+// =====================================================================
+//  THE FRAME LOOP, ONE PHASE AT A TIME (2026-10-16)
+//
+//  Same deal as the startup phases above, with one difference worth knowing: the loop's statements sit at
+//  twelve spaces of indentation, so the code moved here is re-indented to four -- whitespace only, checked by
+//  comparing the trimmed lines before and after. The order of the phases is NOT part of this work: nothing is
+//  merged, nothing is moved earlier or later, and the call site replaces the block in place.
+// =====================================================================
+
+// --- the frame's own clock ---
+//
+// Moved out of the loop. `previous` is carried across frames, so it comes in by reference; `dt` is what every
+// later phase in this frame is driven by, so it is returned.
+static float AdvanceAnimationClock(LARGE_INTEGER& previous, const LARGE_INTEGER& frequency) {
+    LARGE_INTEGER now = {};
+    QueryPerformanceCounter(&now);
+    const float dt = static_cast<float>(
+        static_cast<double>(now.QuadPart - previous.QuadPart) /
+        static_cast<double>(frequency.QuadPart));
+    previous = now;
+    return dt;
+}
+
+// --- where the song is ---
+//
+// Moved out of the loop verbatim (apart from the indentation). It writes bar.track and bar.trackPlayedMs,
+// which are BarState's already, and reads the session's own answer.
+static void UpdateTrackPosition(island::BarState& bar, const island::MusicInfo& nowPlaying,
+                                unsigned long long musicPositionAt, float dt) {
+    // Asked ONCE per frame, here, because three readers come after this point and they must not
+    // answer it differently (see TrackPositionFor): the lyric line, the card's printed time and
+    // its bar, and the redraw cadence.
+    //
+    // The stopwatch is advanced only while the song is PLAYING, so a pause leaves the words where
+    // they are -- the same rule the session's projected reading has.
+    {
+        const bool sessionTimeline =
+            bar.activeFromSession &&
+            island::SessionReportsTimeline(nowPlaying.positionMs, nowPlaying.durationMs);
+        if (bar.activePresent && !sessionTimeline && bar.activePlaying) {
+            bar.trackPlayedMs += static_cast<double>(dt) * 1000.0;
+        }
+        bar.track = island::TrackPositionFor(
+            nowPlaying.positionMs, nowPlaying.durationMs,
+            static_cast<long long>(GetTickCount64() - musicPositionAt),
+            static_cast<long long>(bar.trackPlayedMs), bar.activePlaying);
+        // A session with a timeline but nothing playing yet: keep the caller's other sources out
+        // of it -- `TrackPositionFor` already answered, and `bar.activePresent` says whether there is
+        // anything on the pill at all.
+        if (!bar.activePresent) bar.track = island::TrackPosition();
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -3584,37 +3637,9 @@ float musicWavePhase = 0.0f;
             }
 
             // --- advance the animation ---
-            LARGE_INTEGER now = {};
-            QueryPerformanceCounter(&now);
-            const float dt = static_cast<float>(
-                static_cast<double>(now.QuadPart - previous.QuadPart) /
-                static_cast<double>(frequency.QuadPart));
-            previous = now;
-
-            // --- where the song is ------------------------------------------------------------
-            //
-            // Asked ONCE per frame, here, because three readers come after this point and they must not
-            // answer it differently (see TrackPositionFor): the lyric line, the card's printed time and
-            // its bar, and the redraw cadence.
-            //
-            // The stopwatch is advanced only while the song is PLAYING, so a pause leaves the words where
-            // they are -- the same rule the session's projected reading has.
-            {
-                const bool sessionTimeline =
-                    bar.activeFromSession &&
-                    island::SessionReportsTimeline(nowPlaying.positionMs, nowPlaying.durationMs);
-                if (bar.activePresent && !sessionTimeline && bar.activePlaying) {
-                    bar.trackPlayedMs += static_cast<double>(dt) * 1000.0;
-                }
-                bar.track = island::TrackPositionFor(
-                    nowPlaying.positionMs, nowPlaying.durationMs,
-                    static_cast<long long>(GetTickCount64() - musicPositionAt),
-                    static_cast<long long>(bar.trackPlayedMs), bar.activePlaying);
-                // A session with a timeline but nothing playing yet: keep the caller's other sources out
-                // of it -- `TrackPositionFor` already answered, and `bar.activePresent` says whether there is
-                // anything on the pill at all.
-                if (!bar.activePresent) bar.track = island::TrackPosition();
-            }
+            // The frame's own clock and the track position: both phases live above RunBar, in this order.
+            const float dt = AdvanceAnimationClock(previous, frequency);
+            UpdateTrackPosition(bar, nowPlaying, musicPositionAt, dt);
 
             // --- open the pointed-at icon button, over a few frames ----------------
             //
