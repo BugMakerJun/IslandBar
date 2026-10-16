@@ -1499,6 +1499,8 @@ static void OpenBarTrayMenu(island::BarState& bar, island::BarSystems& systems, 
 }
 
 
+
+
 // --- a right click: the bar own tray menu, and unpinning a pinned tile ---
 //
 // Moved out of the frame loop verbatim (indentation aside). It needs BarState and the window services and
@@ -2525,6 +2527,664 @@ static void ApplySoundPagePress(island::BarState& bar, island::BarSystems& syste
     std::fflush(stdout);
 }
 
+// --- the press, and the click it turns into ---
+//
+// Moved out of the frame loop verbatim (indentation aside), both blocks together, because they are one
+// gesture: a press on a slider is where a drag BEGINS and sets the value under the pointer at once, and the
+// release that follows is only the END of that gesture -- which is why the click chain below opens with the
+// dismissal of a drag. Everything it touches comes in explicitly: BarState and the window services, the
+// dismissal's four arguments, the monitor the brightness write needs, and the two flags that say whether the
+// volume reader and the mixer exist.
+//
+// A click is routed to whatever it landed on. The icon row is checked FIRST because the icons are not the
+// island: a click on one asks to switch to that window, and must not also be read as an acknowledgement of
+// the notifications or as a transport control. A while loop, not an if: clicks are counted now, and two can
+// arrive inside one frame -- with a flag the second was silently dropped.
+static void ApplyPressesAndClicks(island::BarState& bar, island::BarSystems& systems,
+                                  const island::Notification* active, island::IslandState resting,
+                                  const island::MonitorGeometry& monitor, bool volumeAvailable,
+                                  bool soundOutputStarted) {
+    {
+        POINT pressed = {};
+        while (systems.window.TakePress(&pressed)) {
+            if (!bar.systemPanelOpen) continue;
+            // The level that is SHOWING decides which control the press lands on, exactly as the click
+            // chain below does -- see the note at `panelHit`. Without it the mixer's rows answered
+            // while the tray page was up, because the two share the card.
+            if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
+                const island::SoundPageHit hit = systems.window.SoundPageHitAtScreen(pressed);
+                if (hit.target == island::SoundPageTarget::MixerSlider) {
+                    bar.mixerSliderDragRow = hit.index;
+                    bar.lastAppliedMixerFraction = hit.fraction;
+                    if (hit.index == 0) {
+                        if (volumeAvailable) systems.volume.SetLevel(hit.fraction);
+                    } else if (soundOutputStarted && systems.soundOutput &&
+                               hit.index - 1 < systems.soundSnapshot->sessionCount) {
+                        bar.mixerSliderDragPid = systems.soundSnapshot->sessions[hit.index - 1].pid;
+                        systems.soundOutput->SetSessionVolume(bar.mixerSliderDragPid, hit.fraction);
+                    }
+                    island::LogAndPrint("  mixer: press on row %d -> %.0f%%\n", hit.index,
+                                        hit.fraction * 100.0f);
+                    std::fflush(stdout);
+                }
+            } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles)) {
+                const island::SystemPanelHit hit = systems.window.SystemPanelHitAtScreen(pressed);
+                if (hit.target == island::SystemPanelTarget::Slider) {
+                    // WHICH slider, from the hit's own index: 0 is the volume row and 1 the
+                    // brightness row, and the drag that this press begins has to follow the row it
+                    // started on rather than whichever one is looked for first.
+                    if (hit.index == 1 && bar.brightnessAvailable) {
+                        bar.sliderPressHandled = true;
+                        bar.panelSliderDrag = true;
+                        bar.panelSliderDragRow = 1;
+                        int landed = 0;
+                        const int wanted = static_cast<int>(hit.fraction * 100.0f + 0.5f);
+                        const bool ok =
+                            island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
+                        bar.lastAppliedBrightnessPercent = landed;
+                        bar.lastLoggedBrightnessPercent = landed;
+                        bar.brightnessWriteNotBefore = GetTickCount64() + 60;
+                        bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                        island::LogAndPrint(
+                            "  brightness: press on the slider -> %d%% (asked %d, %ls)\n",
+                            landed, wanted, ok ? "landed" : "the monitor did not take it");
+                        std::fflush(stdout);
+                    } else if (volumeAvailable) {
+                        bar.sliderPressHandled = true;
+                        bar.panelSliderDrag = true;
+                        bar.panelSliderDragRow = 0;
+                        bar.lastAppliedVolumeFraction = hit.fraction;
+                        systems.volume.SetLevel(hit.fraction);
+                        bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
+                        island::LogAndPrint("  volume: press on the slider -> %.0f%%\n",
+                                            hit.fraction * 100.0f);
+                        std::fflush(stdout);
+                    }
+                }
+            }
+        }
+    }
+
+    while (systems.window.TakeClick()) {
+        POINT cursor = {};
+        GetCursorPos(&cursor);
+
+        // A release that ENDS a drag is not a click on whatever happens to be under the pointer. The
+        // value was already set by the press and by every frame of the drag in between; letting the
+        // click run as well would be a second handler for one gesture, and on the mixer it would
+        // re-apply the value to whichever row the pointer finished over.
+        if (bar.panelSliderDrag || bar.mixerSliderDragRow >= 0) {
+            const bool wasMixer = bar.mixerSliderDragRow >= 0;
+            bar.panelSliderDrag = false;
+            bar.mixerSliderDragRow = -1;
+            bar.mixerSliderDragPid = 0;
+            island::LogAndPrint("  %ls: drag ended by the release\n",
+                                wasMixer ? L"mixer" : L"volume");
+            std::fflush(stdout);
+            continue;
+        }
+
+        // THE TRAY'S OWN MENU, while it is up: a click on one of its rows runs that row, and a
+        // click anywhere else puts the menu away and does nothing else. The click that dismisses a
+        // menu is CONSUMED -- that is what every context menu does, and the alternative (dismiss and
+        // then act on whatever was underneath) presses a tray icon the user was only trying to get
+        // out from under the menu.
+        if (systems.window.TrayMenuIsOpen()) {
+            const int row = systems.window.TrayMenuRowHovered();
+            // ARMED, NOT DONE. 结束应用 is the one entry that cannot be taken back -- it ends the
+            // application's processes and gives it no chance to save -- so the first press only says
+            // what the second will do (the row's own label changes; see TrayMenuArmedLabel) and the
+            // menu stays open, so the second press is the same gesture in the same place. The Start
+            // card's power list is arranged the same way, for the same reason.
+            if (row >= 0 && row < bar.trayMenuActionCount &&
+                bar.trayMenuActions[row] == island::TrayMenuAction::QuitApplication &&
+                !bar.trayQuitArmed) {
+                bar.trayQuitArmed = true;
+                // WIDE, because this line is Chinese: the narrow overload widens its argument a byte
+                // at a time, which is how `结束应用` came out as `ç»æåºç¨` in the log while the
+                // lines around it read correctly (the same defect HANDOFF 8.72/8.73 records).
+                island::LogAndPrint(
+                    L"  tray menu: 结束应用 armed -- the same row again carries it out\n");
+                std::fflush(stdout);
+                continue;
+            }
+            systems.window.CloseTrayMenu();
+            bar.trayQuitArmed = false;
+            if (row >= 0 && row < bar.trayMenuActionCount) {
+                const island::TrayMenuAction action = bar.trayMenuActions[row];
+                island::LogAndPrint(L"  tray menu: %ls\n",
+                                    island::TrayMenuLabel(action, bar.trayMenuOwnMenuUnreachable));
+                std::fflush(stdout);
+                island::RunTrayMenuAction(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, action);
+                if (action == island::TrayMenuAction::Open ||
+                    action == island::TrayMenuAction::CloseWindow ||
+                    action == island::TrayMenuAction::ApplicationMenu) {
+                    // The card goes with the press, which is what the shell does with its own
+                    // flyout: the application's window or menu is what the user is waiting for.
+                    DismissPanelSurface(bar, systems, active, resting);
+                }
+            } else {
+                island::LogAndPrint("  tray menu: closed (the click was not on a row)\n");
+                std::fflush(stdout);
+            }
+            continue;
+        }
+
+        // What the panel's own controls are under the click, asked ONCE.
+        //
+        // The chain below asks this same question for every kind of target it knows, and each of
+        // those calls re-lays the panel out to answer it. One value, read once, so the answers cannot
+        // disagree with each other within a single click either.
+        const island::SystemPanelHit panelHit =
+            (bar.systemPanelOpen && island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles))
+                ? systems.window.SystemPanelHitAtScreen(cursor)
+                : island::SystemPanelHit{};
+
+        // ... AND ONLY WHILE THE TILES ARE THE LEVEL THAT IS SHOWING. All four levels share one card
+        // and one rectangle, so each of them has controls where another has empty space: the panel's
+        // volume slider lies exactly across the tray page's lower band, and dragging there moved the
+        // volume -- reported with a photograph of that band ("在托盘卡片红框的地方拖动 声音也会跟着
+        // 变"). Gating the question here gates every branch below that asks `panelHit`, which is why
+        // the answer is computed once, at the top, rather than re-asked per branch.
+
+        // What the click was shown to mean, before anything acts on it: which level is up, what the
+        // panel's own hit test answered, and what shape the window is in. Without this, "the tile did
+        // nothing" and "the click was routed somewhere else entirely" look the same from outside.
+        // The WIDE overload, and it matters: the narrow one byte-widens its output, which turns any
+        // non-ASCII argument into an invalid conversion -- and an invalid conversion makes the whole
+        // line EMPTY while still writing the newline. That is why "the tile did nothing" was the
+        // report for three rounds: the tile's own log line was being swallowed, and an empty line in
+        // the log looks like nothing happened.
+        island::LogAndPrint(L"  click: panel=%d soundPage=%d target=%d shape=%ls\n",
+                            bar.systemPanelOpen ? 1 : 0, bar.soundPageOpen ? 1 : 0,
+                            static_cast<int>(panelHit.target),
+                            island::StateName(systems.window.State()));
+
+        // Nothing about this can be concluded from a screenshot, so it reports what it
+        // decided: which icon was hit, which window that was, and whether the activation
+        // succeeded. A click that never arrives and a click that arrives and is ignored look
+        // identical from outside, and the two need opposite fixes -- that is why this exists.
+        // Bounded by the number of icons actually DRAWN, not by the number of windows in the
+        // list. `IconAtScreen` answers from the same count the window was given, so it cannot
+        // return more than that anyway -- but the list can hold windows the row had no room
+        // for, and indexing straight into it would switch to a window with no icon on screen.
+        const int icon = systems.window.IconAtScreen(cursor);
+        island::LogAndPrint("  click: icon under the pointer = %d\n", icon);
+
+        // The START BUTTON first, because it is on the far side of the island from the icons
+        // and a click on it must not be read as anything else.
+        //
+        // Its outcome is reported rather than assumed: asking for the Start menu can fail in
+        // ways that leave no trace afterwards, and "the button did nothing" is the same symptom
+        // for every one of them.
+        if (systems.window.StartAtScreen(cursor)) {
+            // THE BAR'S OWN START CARD, which is what was asked for: "能不能也自己画 而不是使用系统
+            // 的". The system menu is not gone -- the Windows key and Ctrl+Esc still open it -- it is
+            // simply no longer what THIS button does, and that is one line in the log rather than a
+            // silent change of behaviour: "start click: the bar's own card".
+            bar.startPageOpen = !bar.startPageOpen;
+            bar.systemPanelOpen = bar.startPageOpen;
+            bar.startPageState = 0;
+            bar.startPickerScroll = 0;
+            bar.startPowerConfirm = -1;
+            bar.trayPageOpen = false;
+            bar.soundPageOpen = false;
+            island::LogAndPrint("  start click: the bar's own card %ls\n",
+                                bar.startPageOpen ? L"open" : L"closed");
+            std::fflush(stdout);
+        } else if (systems.trayIcons.Count() > 0 && systems.window.TrayButtonAtScreen(cursor)) {
+            // THE TRAY BUTTON, at the other end of the bar from the system button, and a toggle
+            // for the same reason: pressing it again puts away what it opened.
+            //
+            // It opens the SAME CARD as the system panel, one level down (see TrayPageFor), so the
+            // two share a card, a position and an animation -- and the two flags have to be kept in
+            // step: opening one closes the other, or the card would be asked to be two pages at
+            // once.
+            const bool opening = !bar.trayPageOpen;
+            bar.trayPageOpen = opening;
+            bar.systemPanelOpen = opening;
+            bar.systemPanelPage = 0;
+            bar.soundPageOpen = false;
+            bar.panelSliderDrag = false;
+            bar.mixerSliderDragRow = -1;
+            bar.mixerSliderDragPid = 0;
+            island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
+            std::fflush(stdout);
+        } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Start) &&
+                   systems.window.StartHitHovered().target !=
+                       island::IslandWindow::StartHitTarget::None) {
+            // The Start card own press handling. The phase lives above RunBar; the dismiss calls
+            // inside it are the same four arguments the lambda used.
+            ApplyStartCardPress(bar, systems, active, resting);
+        } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
+                   systems.window.TrayCellHovered() >= 0) {
+            // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
+            // thing about the tray this bar cannot do itself -- the menu or the window that
+            // follows belongs to the application, and the shell is the one that knows how to ask
+            // for it. See TrayPress for the route, and for why it is by POSITION rather than by
+            // matching names.
+            //
+            // On a WORKER THREAD, because showing the shell's tray, opening its overflow and
+            // pressing through UI Automation takes a few hundred milliseconds, and the bar draws
+            // at the compositor's rate on this thread.
+            const int cell = systems.window.TrayCellHovered();
+            if (cell < systems.trayIcons.Count()) {
+                island::StartTrayPress(systems.trayIcons, cell, false);
+            }
+            // The card goes with the press, which is what the shell does with its own flyout: the
+            // application's window or menu is what the user is waiting for.
+            DismissPanelSurface(bar, systems, active, resting);
+        } else if (systems.window.SystemButtonAtScreen(cursor)) {
+            // The system panel is a TOGGLE, like the shell's own flyout: pressing the control
+            // again closes what it opened. Without that the only way out would be to click
+            // somewhere unrelated, which is not a way out a user can guess.
+            bar.systemPanelOpen = !bar.systemPanelOpen;
+            bar.systemPanelPage = 0;   // always opens on the first page, like the shell's flyout
+            // ... and the tray's page is a level of the same card, so it goes with it.
+            bar.trayPageOpen = false;
+            // The page is a LEVEL of the panel, so closing the panel closes it too -- and a drag
+            // left half-done is ended, or the next press anywhere would go on dragging a slider
+            // that is no longer on screen.
+            bar.soundPageOpen = false;
+            bar.mixerSliderDragRow = -1;
+            bar.mixerSliderDragPid = 0;
+            island::LogAndPrint("  system panel: %ls\n",
+                                bar.systemPanelOpen ? L"open" : L"closed");
+            std::fflush(stdout);
+        } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
+            // The 声音输出 page own controls. The phase lives above RunBar; the dismiss call inside
+            // it is the same four arguments the lambda used.
+            ApplySoundPagePress(bar, systems, cursor, volumeAvailable, active, resting);
+        } else if (bar.systemPanelOpen && panelHit.target ==
+                                          island::SystemPanelTarget::PageDown) {
+            const int pages = systems.window.SystemPanel().pageCount;
+            if (pages > 1) {
+                bar.systemPanelPage = (systems.window.SystemPanel().pageIndex + 1) % pages;
+                island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
+                                    pages);
+                std::fflush(stdout);
+            }
+        } else if (bar.systemPanelOpen && panelHit.target ==
+                                          island::SystemPanelTarget::PageUp) {
+            const int pages = systems.window.SystemPanel().pageCount;
+            if (pages > 1) {
+                bar.systemPanelPage = (systems.window.SystemPanel().pageIndex + pages - 1) % pages;
+                island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
+                                    pages);
+                std::fflush(stdout);
+            }
+        } else if (bar.systemPanelOpen && panelHit.target ==
+                                          island::SystemPanelTarget::Slider) {
+            // Already handled by the press that this release ends. Without this the same gesture
+            // would be applied twice -- once when the button went down and once when it came up --
+            // and the log would show a second "drag begins" for a drag that had just finished.
+            if (bar.sliderPressHandled) {
+                bar.sliderPressHandled = false;
+            } else if (panelHit.index == 1 && bar.brightnessAvailable) {
+                // Pressed without a press event having been seen -- a click that arrived on its
+                // own. The fraction comes from the same layout the bar was drawn from, so the
+                // handle goes exactly where the click was.
+                int landed = 0;
+                const int wanted = static_cast<int>(panelHit.fraction * 100.0f + 0.5f);
+                const bool ok =
+                    island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
+                bar.lastAppliedBrightnessPercent = landed;
+                bar.panelSliderDrag = true;
+                bar.panelSliderDragRow = 1;
+                bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
+                island::LogAndPrint(
+                    "  brightness: set to %d%% (drag begins; asked %d, %ls)\n", landed,
+                    wanted, ok ? "landed" : "the monitor did not take it");
+                std::fflush(stdout);
+            } else if (volumeAvailable) {
+                // Pressed without a press event having been seen -- a click that arrived on its own,
+                // which happens when the panel opened between the two. The fraction comes from the
+                // same layout the bar was drawn from, so the handle goes exactly where the click was.
+                systems.volume.SetLevel(panelHit.fraction);
+                bar.panelSliderDrag = true;   // and keep following the pointer while the button is held
+                bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
+                island::LogAndPrint("  volume: set to %.0f%% (drag begins)\n",
+                                    panelHit.fraction * 100.0f);
+                std::fflush(stdout);
+            }
+        } else if (bar.systemPanelOpen && panelHit.target ==
+                                          island::SystemPanelTarget::Speaker) {
+            // The speaker glyph is the mute control, as it is in the shell's own flyout.
+            if (volumeAvailable) {
+                systems.volume.ToggleMute();
+                bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
+                island::LogAndPrint("  volume: %ls\n",
+                                    systems.volume.IsMuted() ? L"muted" : L"unmuted");
+                std::fflush(stdout);
+            }
+        } else if (bar.systemPanelOpen && panelHit.target ==
+                                          island::SystemPanelTarget::VolumeDevice) {
+            // The output-device button: the shell's own second level, where the devices and the
+            // per-application mixer live.
+            bar.soundPageOpen = true;
+            bar.soundPageScroll = 0.0f;
+            island::LogAndPrint("  sound page: open\n");
+            std::fflush(stdout);
+        } else if (bar.systemPanelOpen && panelHit.target ==
+                                          island::SystemPanelTarget::Gear) {
+            // The settings button, which has been drawn since the panel was built and has never had an
+            // action. It opens the sound settings, which is where this panel's own contents live.
+            const HINSTANCE opened = ShellExecuteW(nullptr, L"open", L"ms-settings:sound",
+                                                   nullptr, nullptr, SW_SHOWNORMAL);
+            island::LogAndPrint("  system panel: gear -> ms-settings:sound (result %lld)\n",
+                                static_cast<long long>(reinterpret_cast<INT_PTR>(opened)));
+            // Same rule as the tiles that take the user elsewhere: the page they asked for is opening,
+            // so the panel gets out of the way.
+            DismissPanelSurface(bar, systems, active, resting);
+            std::fflush(stdout);
+        } else if (bar.systemPanelOpen && panelHit.target ==
+                                          island::SystemPanelTarget::Tile) {
+            // A tile was pressed. What it does is carried ON the tile, so this does not have to
+            // know which tile is which -- and renaming one cannot silently change its action.
+            //
+            // Read from the WINDOW rather than from a frame, because the click handler runs
+            // before this frame's state exists: the frame is filled further down the loop.
+            const int tileIndex = panelHit.index;
+            const island::TextRenderer::SystemPanelText& panel = systems.window.SystemPanel();
+            if (tileIndex >= 0 && tileIndex < panel.tileCount) {
+                const island::TextRenderer::SystemPanelTile& tile = panel.tiles[tileIndex];
+                island::LogAndPrint(L"  click: tile %d '%ls' action=%d chevron=%d\n", tileIndex,
+                                    tile.label ? tile.label : L"?",
+                                    static_cast<int>(tile.action), tile.chevron ? 1 : 0);
+                switch (tile.action) {
+                    case island::TextRenderer::PanelAction::OpenSettings: {
+                        // ShellExecute with the ms-settings URI, which is how the shell's own
+                        // flyout opens these pages. Reported with its result because "the tile
+                        // did nothing" and "the page failed to open" look identical otherwise.
+                        // A result above 32 means success; the numeric value is kept because
+                        // the failure codes are what would be needed to diagnose it.
+                        const HINSTANCE opened =
+                            tile.uri ? ShellExecuteW(nullptr, L"open", tile.uri, nullptr,
+                                                     nullptr, SW_SHOWNORMAL)
+                                     : nullptr;
+                        island::LogAndPrint(L"  tile %d '%ls' -> %ls (result %lld)\n",
+                                            tileIndex, tile.label ? tile.label : L"?",
+                                            tile.uri ? tile.uri : L"no uri",
+                                            static_cast<long long>(
+                                                reinterpret_cast<INT_PTR>(opened)));
+                        // ... and the panel puts itself away.
+                        //
+                        // This tile's whole job was to take the user somewhere else, and leaving the
+                        // card up would leave them looking at a flyout for a page they are no longer
+                        // on -- which is what "点击应该…自动收回去" asked for. The tiles that apply
+                        // their change HERE (the volume row, and any toggle) stay open instead, so
+                        // their new state is there to be seen and several can be flipped in a row.
+                        DismissPanelSurface(bar, systems, active, resting);
+                        break;
+                    }
+                    case island::TextRenderer::PanelAction::ToggleMute:
+                    case island::TextRenderer::PanelAction::None:
+                    default:
+                        island::LogAndPrint(L"  tile %d '%ls': no action yet\n", tileIndex,
+                                            tile.label ? tile.label : L"?");
+                        break;
+
+                    case island::TextRenderer::PanelAction::OpenSoundPage:
+                        // A tile that opens the sound page rather than a settings URI. None of them do
+                        // today -- the page is reached from the volume row's device button -- but the
+                        // action exists, so it is handled rather than falling into "no action yet".
+                        bar.soundPageOpen = true;
+                        bar.soundPageScroll = 0.0f;
+                        island::LogAndPrint(L"  tile %d '%ls' -> sound page\n", tileIndex,
+                                            tile.label ? tile.label : L"?");
+                        break;
+
+                    case island::TextRenderer::PanelAction::ToggleRadio: {
+                        // BOTH radios, which is what this tile has always claimed to be. The state is
+                        // read back on the next sample rather than flipped locally, so a switch the
+                        // machine refuses shows as what it really is.
+                        //
+                        // Off when anything is still on, on otherwise -- the same rule the shell's own
+                        // airplane mode follows, and the one a user expects from a toggle that is dark
+                        // while a radio beside it is lit.
+                        const bool wanted = systems.systemStatus.wifiRadioOn || systems.systemStatus.bluetoothOn;
+                        const bool started = island::RequestRadios(true, true, wanted);
+                        island::LogAndPrint(
+                            L"  tile %d '%ls' -> Wi-Fi and Bluetooth %ls (result %d)\n",
+                            tileIndex, tile.label ? tile.label : L"?",
+                            wanted ? L"off (airplane mode)" : L"on", started ? 1 : 0);
+                        // Deliberately NOT closed: a toggle applies its change here, and its new
+                        // state is the thing to look at. Several can be flipped in a row.
+                        break;
+                    }
+
+                    case island::TextRenderer::PanelAction::ToggleWifi: {
+                        // The Wi-Fi radio on its own, from the Wi-Fi tile. Its own switch and the
+                        // 飞行模式 tile's are the same mechanism at different scopes, which is why
+                        // they are one call with different arguments rather than two code paths.
+                        const bool wanted = !systems.systemStatus.wifiRadioOn;
+                        const bool started = island::RequestRadios(true, false, wanted);
+                        island::LogAndPrint(
+                            L"  tile %d '%ls' -> Wi-Fi radio %ls (%ls)\n", tileIndex,
+                            tile.label ? tile.label : L"?", wanted ? L"on" : L"off",
+                            started ? L"asked, the answer follows in the log"
+                                    : L"a switch is already running");
+                        break;
+                    }
+
+                    case island::TextRenderer::PanelAction::ProjectionModes: {
+                        // 投影, which the shell answers by sending Win+P. Synthetic input, so it is
+                        // dropped by UIPI when this process sits below the shell -- the same caveat
+                        // the Start button carries, and the reason the outcome is reported.
+                        island::SendWindowsKeyChord('P');
+                        island::LogAndPrint(L"  tile %d '%ls' -> Win+P (projection modes)\n",
+                                            tileIndex, tile.label ? tile.label : L"?");
+                        // The projection list is the shell's own flyout and appears over this one:
+                        // staying open would put two flyouts on top of each other.
+                        DismissPanelSurface(bar, systems, active, resting);
+                        break;
+                    }
+
+                    case island::TextRenderer::PanelAction::ToggleBluetooth: {
+                        // The radio, switched on a WORKER: the WinRT call blocks for a few hundred
+                        // milliseconds and the frame loop must not wait for it. The outcome is
+                        // collected in the loop below and logged there, and the caption is read back
+                        // from the machine on the next status sample rather than flipped here.
+                        const bool wanted = !systems.systemStatus.bluetoothOn;
+                        const bool started = island::RequestRadios(false, true, wanted);
+                        island::LogAndPrint(
+                            L"  tile %d '%ls' -> Bluetooth %ls (%ls)\n", tileIndex,
+                            tile.label ? tile.label : L"?", wanted ? L"on" : L"off",
+                            started ? L"asked, the answer follows in the log"
+                                    : L"a switch is already running");
+                        // Like the Wi-Fi tile: a toggle applies its change here, so the new state is
+                        // the thing to look at.
+                        break;
+                    }
+
+                    case island::TextRenderer::PanelAction::ToggleNightLight: {
+                        // Pressed on the Settings page's own switch, on a worker, because that page
+                        // takes seconds to load. The cost is stated in the log line: a Settings window
+                        // appears for the length of the operation.
+                        const bool wanted = !systems.systemStatus.nightLightOn;
+                        const bool started = island::RequestNightLight(wanted);
+                        island::LogAndPrint(
+                            L"  tile %d '%ls' -> night light %ls (%ls; this opens the Settings page"
+                            L" for a moment -- it has no API)\n",
+                            tileIndex, tile.label ? tile.label : L"?",
+                            wanted ? L"on" : L"off",
+                            started ? L"asked, the answer follows in the log"
+                                    : L"a switch is already running");
+                        break;
+                    }
+
+                    case island::TextRenderer::PanelAction::ToggleLiveCaptions: {
+                        // Win+Ctrl+L, the shortcut the feature is switched by. Sent here rather than on
+                        // a worker: the chord itself is a few milliseconds, and the state is read back
+                        // from the process list on the next status sample.
+                        const bool sent = island::ToggleLiveCaptions();
+                        island::LogAndPrint(
+                            L"  tile %d '%ls' -> Win+Ctrl+L (result %d; the tile's caption comes"
+                            L" from whether LiveCaptions.exe is running)\n",
+                            tileIndex, tile.label ? tile.label : L"?", sent ? 1 : 0);
+                        break;
+                    }
+
+                    case island::TextRenderer::PanelAction::CycleTheme: {
+                        // The whole material at once, and it takes effect on the NEXT frame
+                        // because every drawing call reads CurrentTheme(). The brush cache is
+                        // cleared with it: the cached brushes are keyed by colour, so a theme
+                        // change would otherwise leave every old colour in memory for the rest
+                        // of the session.
+                        const island::Theme& chosen = island::CycleTheme();
+                        systems.text.ClearBrushCache();
+                        island::LogAndPrint(
+                            L"  tile %d '%ls' -> theme %ls (%d of %d)\n", tileIndex,
+                            tile.label ? tile.label : L"?", chosen.name,
+                            island::CurrentThemeIndex() + 1, island::ThemeCount());
+                        // The tile's own caption is the theme's name, and it is built from the
+                        // frame's panel text -- which was assembled earlier in this same pass.
+                        // Redrawing on the next pass is what updates it, and the theme change
+                        // already asks for one.
+                        break;
+                    }
+                }
+                std::fflush(stdout);
+            }
+        } else if (bar.systemPanelOpen) {
+            // Anything else while the panel is open is treated as "put it away".
+            //
+            // A flyout closes when you click outside it, and on this bar the island IS outside
+            // it. Without this the island's own click was still handled as a request for the
+            // card, so pressing it opened a SECOND card-style surface while the panel was up --
+            // reported as "clicking this one opened it too".
+            //
+            // Closing on any other click is also the behaviour a user expects, and it is the only
+            // way out that does not require finding the chevron again.
+            DismissPanelSurface(bar, systems, active, resting);
+            island::LogAndPrint("  system panel: closed (click elsewhere)\n");
+            std::fflush(stdout);
+        } else if (icon >= 0 && icon < bar.taskWindowsShown) {
+            // The handle that was DRAWN at this position, not whatever the live list holds now.
+            const HWND target = bar.taskHandles[icon];
+            island::LogAndPrint("  icon click: index %d -> %p", icon,
+                                reinterpret_cast<void*>(target));
+
+            // The taskbar button is a TOGGLE: the window already in front is put away, any
+            // other comes forward. Without this the bar could only ever raise things, which is
+            // half the gesture -- reported as "clicking an application on the desktop does not
+            // minimise it".
+            //
+            // Asked LIVE rather than from the list's cached foreground, because the cache is
+            // refreshed twice a second and the whole question is which window is in front at
+            // the instant of the click.
+            const bool alreadyInFront = (GetForegroundWindow() == target);
+
+            if (alreadyInFront) {
+                if (systems.taskWindows.Minimize(target)) {
+                    island::LogAndPrint("  icon click: minimised %p (it was already in front)",
+                                        reinterpret_cast<void*>(target));
+                } else {
+                    island::LogAndPrint("  icon click: minimise FAILED for %p",
+                                        reinterpret_cast<void*>(target));
+                }
+            } else if (systems.taskWindows.Activate(target)) {
+                island::LogAndPrint("  icon click: activated %p",
+                                    reinterpret_cast<void*>(target));
+            } else {
+                // Not reported as success. A minimised window that stayed minimised, or a
+                // refused SetForegroundWindow, both land here -- and reporting "activated"
+                // regardless would make the next investigation start from a false fact.
+                island::LogAndPrint("  icon click: activation FAILED for %p",
+                                    reinterpret_cast<void*>(target));
+            }
+            std::fflush(stdout);
+        } else {
+            // A click that is not on an icon, reported with the numbers that decided it.
+            //
+            // "The click was never routed" and "it was routed and the hit test missed" are
+            // different faults and the log otherwise shows neither. This is the line that
+            // separates them.
+            island::LogAndPrint("  icon click: no icon (index %d, %d shown)", icon,
+                                bar.taskWindowsShown);
+            std::fflush(stdout);
+
+        const island::CardControl control = systems.window.MusicControlAtScreen(cursor);
+        // Every click reports what it was taken to mean.
+        //
+        // "The card does not respond" and "the click never reached the process" look the
+        // same from outside, and the second one cannot even be logged from in here -- so
+        // this line's presence or absence is itself the answer.
+        {
+            const char* what = "dismiss";
+            if (control == island::CardControl::Previous) {
+                what = "previous";
+            } else if (control == island::CardControl::PlayPause) {
+                what = "play/pause";
+            } else if (control == island::CardControl::Next) {
+                what = "next";
+            }
+            island::LogAndPrint("  click routed: state=%ls, meaning=%s",
+                                island::StateName(systems.window.State()), what);
+            std::fflush(stdout);
+        }
+        if (control != island::CardControl::None) {
+            island::MusicSession::Transport action =
+                island::MusicSession::Transport::PlayPause;
+            const char* name = "play/pause";
+            if (control == island::CardControl::Previous) {
+                action = island::MusicSession::Transport::Previous;
+                name = "previous";
+            } else if (control == island::CardControl::Next) {
+                action = island::MusicSession::Transport::Next;
+                name = "next";
+            }
+            if (systems.music.RequestTransport(action)) {
+                island::LogAndPrint("  music: %s requested", name);
+                std::fflush(stdout);
+            }
+        } else if (systems.window.State() == island::IslandState::NoticeStrip) {
+            // A PRESS WHILE A CALL OR A MESSAGE IS ON THE ISLAND LEAVES IT ALONE.
+            //
+            // Asked for in these words: "当通知和通话的时候点击 就通话和通知的样子" -- while the strip
+            // is up, a press on any of the bar's buttons (Start, the panel toggle, the tray button)
+            // must not send the island back to the plain pill, and neither must a press that lands on
+            // the strip's own body.
+            //
+            // It did. The log has the whole sequence: a press at (1420,27) was routed as
+            // "meaning=dismiss", marked one item read, and the strip retracted 157 ms later -- then
+            // came back 226 ms after that, because what had asked for it was still there. Both halves
+            // of that dismissal had to go together, and the reason is one line in the store:
+            // ActiveDisplay answers nullptr for an item that is `read`, so marking it read IS the
+            // retraction. Marking read and retracting cannot be separated; the press therefore no
+            // longer marks anything read.
+            //
+            // Nothing is lost by that: the unread count is not drawn anywhere (it is asserted in the
+            // self-test and read nowhere else), so a message that is left unread has no visible
+            // consequence. What ends the strip is unchanged and decided elsewhere: a message when its
+            // display window runs out, a call when the call does -- which is what the note that used
+            // to stand here said a call's lifetime is.
+            island::LogAndPrint("  click: kept -- a notice is up, so the press changed nothing");
+            std::fflush(stdout);
+        } else {
+            // A CLICK DISMISSES MESSAGES, NOT A CALL.
+            //
+            // Every other item on the strip is news: showing it for a few seconds and marking it read
+            // when it is clicked is what "read" means. A CALL is a STATE, and the user asked for it to
+            // stay on the island for as long as it lasts ("微信通话 也应该在灵动岛 上") -- so a click
+            // must leave it alone. It did not, and that is one of the two reasons the call strip
+            // disappeared for good: `notifications: 1 marked read (click)` at 13:43:19 with the call
+            // still up, after which the island never showed it again. The call is retired by the call
+            // ENDING, which the watcher detects and reports.
+            const int marked = systems.notifications.MarkAllReadExcept(systems.wechat.CallNotificationId());
+            if (marked > 0) {
+                island::LogAndPrint("  notifications: %d marked read (click)", marked);
+                std::fflush(stdout);
+                // Recompute immediately so the same frame reflects the click
+                // instead of waiting for the next tick to notice.
+                systems.window.SetState(systems.window.IsPointerInside()
+                                    ? island::IslandState::Hover
+                                    : resting);
+            }
+        }
+        }
+    }
+}
 // --- the tray and the panel, told to the frame ---
 //
 // Moved out of the frame loop verbatim (indentation aside): the tray icons and their count, whether the
@@ -4404,15 +5064,10 @@ unsigned long long lastMusicMeterMs = 0;
             // With the shape told to go back to rest, cardWanted is false from that moment on, so the owner
             // is KEPT and the panel is drawn all the way out (see NextCardOwner): the card retracts, and
             // nothing takes its place.
-            // The panel is put away in nine places down this loop. What that MEANS lives above RunBar now
-            // (see DismissPanelSurface); this name is kept so the call sites still read as they always did.
-            const auto dismissPanel = [&]() { DismissPanelSurface(bar, systems, active, resting); };
-            // A click, routed to whatever it landed on. The icon row is checked FIRST because the
-            // icons are not the island: a click on one asks to switch to that window, and must not
-            // also be read as an acknowledgement of the notifications or as a transport control.
-            // A while loop, not an if: clicks are counted now, and two can arrive inside one
-            // frame. With a flag the second was silently dropped.
-            //
+            // The panel is put away in nine places down this loop, and what that MEANS lives above RunBar
+            // (see DismissPanelSurface). Those nine places are inside the phases now -- the two presses,
+            // the outside-click dismissal, the panel's own controls -- so the local name they used to go
+            // through (`dismissPanel`, a lambda over the same four arguments) has nothing left to serve.
             // The sliders follow the pointer while the button is held, and let go with it. The phase lives
             // above RunBar; its place in the sequence is unchanged.
             FollowSliderDrags(bar, systems, monitor, volumeAvailable, soundOutputStarted);
@@ -4426,646 +5081,11 @@ unsigned long long lastMusicMeterMs = 0;
             // Handled before the clicks, because a press is the earlier event of the two and the value has to
             // be under the pointer from the moment the button goes down. The release that follows is then
             // only the END of the gesture: see the top of the click loop below.
-            {
-                POINT pressed = {};
-                while (systems.window.TakePress(&pressed)) {
-                    if (!bar.systemPanelOpen) continue;
-                    // The level that is SHOWING decides which control the press lands on, exactly as the click
-                    // chain below does -- see the note at `panelHit`. Without it the mixer's rows answered
-                    // while the tray page was up, because the two share the card.
-                    if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
-                        const island::SoundPageHit hit = systems.window.SoundPageHitAtScreen(pressed);
-                        if (hit.target == island::SoundPageTarget::MixerSlider) {
-                            bar.mixerSliderDragRow = hit.index;
-                            bar.lastAppliedMixerFraction = hit.fraction;
-                            if (hit.index == 0) {
-                                if (volumeAvailable) systems.volume.SetLevel(hit.fraction);
-                            } else if (soundOutputStarted && systems.soundOutput &&
-                                       hit.index - 1 < systems.soundSnapshot->sessionCount) {
-                                bar.mixerSliderDragPid = systems.soundSnapshot->sessions[hit.index - 1].pid;
-                                systems.soundOutput->SetSessionVolume(bar.mixerSliderDragPid, hit.fraction);
-                            }
-                            island::LogAndPrint("  mixer: press on row %d -> %.0f%%\n", hit.index,
-                                                hit.fraction * 100.0f);
-                            std::fflush(stdout);
-                        }
-                    } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles)) {
-                        const island::SystemPanelHit hit = systems.window.SystemPanelHitAtScreen(pressed);
-                        if (hit.target == island::SystemPanelTarget::Slider) {
-                            // WHICH slider, from the hit's own index: 0 is the volume row and 1 the
-                            // brightness row, and the drag that this press begins has to follow the row it
-                            // started on rather than whichever one is looked for first.
-                            if (hit.index == 1 && bar.brightnessAvailable) {
-                                bar.sliderPressHandled = true;
-                                bar.panelSliderDrag = true;
-                                bar.panelSliderDragRow = 1;
-                                int landed = 0;
-                                const int wanted = static_cast<int>(hit.fraction * 100.0f + 0.5f);
-                                const bool ok =
-                                    island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
-                                bar.lastAppliedBrightnessPercent = landed;
-                                bar.lastLoggedBrightnessPercent = landed;
-                                bar.brightnessWriteNotBefore = GetTickCount64() + 60;
-                                bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
-                                island::LogAndPrint(
-                                    "  brightness: press on the slider -> %d%% (asked %d, %ls)\n",
-                                    landed, wanted, ok ? "landed" : "the monitor did not take it");
-                                std::fflush(stdout);
-                            } else if (volumeAvailable) {
-                                bar.sliderPressHandled = true;
-                                bar.panelSliderDrag = true;
-                                bar.panelSliderDragRow = 0;
-                                bar.lastAppliedVolumeFraction = hit.fraction;
-                                systems.volume.SetLevel(hit.fraction);
-                                bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
-                                island::LogAndPrint("  volume: press on the slider -> %.0f%%\n",
-                                                    hit.fraction * 100.0f);
-                                std::fflush(stdout);
-                            }
-                        }
-                    }
-                }
-            }
-
-            while (systems.window.TakeClick()) {
-                POINT cursor = {};
-                GetCursorPos(&cursor);
-
-                // A release that ENDS a drag is not a click on whatever happens to be under the pointer. The
-                // value was already set by the press and by every frame of the drag in between; letting the
-                // click run as well would be a second handler for one gesture, and on the mixer it would
-                // re-apply the value to whichever row the pointer finished over.
-                if (bar.panelSliderDrag || bar.mixerSliderDragRow >= 0) {
-                    const bool wasMixer = bar.mixerSliderDragRow >= 0;
-                    bar.panelSliderDrag = false;
-                    bar.mixerSliderDragRow = -1;
-                    bar.mixerSliderDragPid = 0;
-                    island::LogAndPrint("  %ls: drag ended by the release\n",
-                                        wasMixer ? L"mixer" : L"volume");
-                    std::fflush(stdout);
-                    continue;
-                }
-
-                // THE TRAY'S OWN MENU, while it is up: a click on one of its rows runs that row, and a
-                // click anywhere else puts the menu away and does nothing else. The click that dismisses a
-                // menu is CONSUMED -- that is what every context menu does, and the alternative (dismiss and
-                // then act on whatever was underneath) presses a tray icon the user was only trying to get
-                // out from under the menu.
-                if (systems.window.TrayMenuIsOpen()) {
-                    const int row = systems.window.TrayMenuRowHovered();
-                    // ARMED, NOT DONE. 结束应用 is the one entry that cannot be taken back -- it ends the
-                    // application's processes and gives it no chance to save -- so the first press only says
-                    // what the second will do (the row's own label changes; see TrayMenuArmedLabel) and the
-                    // menu stays open, so the second press is the same gesture in the same place. The Start
-                    // card's power list is arranged the same way, for the same reason.
-                    if (row >= 0 && row < bar.trayMenuActionCount &&
-                        bar.trayMenuActions[row] == island::TrayMenuAction::QuitApplication &&
-                        !bar.trayQuitArmed) {
-                        bar.trayQuitArmed = true;
-                        // WIDE, because this line is Chinese: the narrow overload widens its argument a byte
-                        // at a time, which is how `结束应用` came out as `ç»æåºç¨` in the log while the
-                        // lines around it read correctly (the same defect HANDOFF 8.72/8.73 records).
-                        island::LogAndPrint(
-                            L"  tray menu: 结束应用 armed -- the same row again carries it out\n");
-                        std::fflush(stdout);
-                        continue;
-                    }
-                    systems.window.CloseTrayMenu();
-                    bar.trayQuitArmed = false;
-                    if (row >= 0 && row < bar.trayMenuActionCount) {
-                        const island::TrayMenuAction action = bar.trayMenuActions[row];
-                        island::LogAndPrint(L"  tray menu: %ls\n",
-                                            island::TrayMenuLabel(action, bar.trayMenuOwnMenuUnreachable));
-                        std::fflush(stdout);
-                        island::RunTrayMenuAction(systems.trayIcons, systems.taskWindows, bar.trayMenuCell, action);
-                        if (action == island::TrayMenuAction::Open ||
-                            action == island::TrayMenuAction::CloseWindow ||
-                            action == island::TrayMenuAction::ApplicationMenu) {
-                            // The card goes with the press, which is what the shell does with its own
-                            // flyout: the application's window or menu is what the user is waiting for.
-                            dismissPanel();
-                        }
-                    } else {
-                        island::LogAndPrint("  tray menu: closed (the click was not on a row)\n");
-                        std::fflush(stdout);
-                    }
-                    continue;
-                }
-
-                // What the panel's own controls are under the click, asked ONCE.
-                //
-                // The chain below asks this same question for every kind of target it knows, and each of
-                // those calls re-lays the panel out to answer it. One value, read once, so the answers cannot
-                // disagree with each other within a single click either.
-                const island::SystemPanelHit panelHit =
-                    (bar.systemPanelOpen && island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tiles))
-                        ? systems.window.SystemPanelHitAtScreen(cursor)
-                        : island::SystemPanelHit{};
-
-                // ... AND ONLY WHILE THE TILES ARE THE LEVEL THAT IS SHOWING. All four levels share one card
-                // and one rectangle, so each of them has controls where another has empty space: the panel's
-                // volume slider lies exactly across the tray page's lower band, and dragging there moved the
-                // volume -- reported with a photograph of that band ("在托盘卡片红框的地方拖动 声音也会跟着
-                // 变"). Gating the question here gates every branch below that asks `panelHit`, which is why
-                // the answer is computed once, at the top, rather than re-asked per branch.
-
-                // What the click was shown to mean, before anything acts on it: which level is up, what the
-                // panel's own hit test answered, and what shape the window is in. Without this, "the tile did
-                // nothing" and "the click was routed somewhere else entirely" look the same from outside.
-                // The WIDE overload, and it matters: the narrow one byte-widens its output, which turns any
-                // non-ASCII argument into an invalid conversion -- and an invalid conversion makes the whole
-                // line EMPTY while still writing the newline. That is why "the tile did nothing" was the
-                // report for three rounds: the tile's own log line was being swallowed, and an empty line in
-                // the log looks like nothing happened.
-                island::LogAndPrint(L"  click: panel=%d soundPage=%d target=%d shape=%ls\n",
-                                    bar.systemPanelOpen ? 1 : 0, bar.soundPageOpen ? 1 : 0,
-                                    static_cast<int>(panelHit.target),
-                                    island::StateName(systems.window.State()));
-
-                // Nothing about this can be concluded from a screenshot, so it reports what it
-                // decided: which icon was hit, which window that was, and whether the activation
-                // succeeded. A click that never arrives and a click that arrives and is ignored look
-                // identical from outside, and the two need opposite fixes -- that is why this exists.
-                // Bounded by the number of icons actually DRAWN, not by the number of windows in the
-                // list. `IconAtScreen` answers from the same count the window was given, so it cannot
-                // return more than that anyway -- but the list can hold windows the row had no room
-                // for, and indexing straight into it would switch to a window with no icon on screen.
-                const int icon = systems.window.IconAtScreen(cursor);
-                island::LogAndPrint("  click: icon under the pointer = %d\n", icon);
-
-                // The START BUTTON first, because it is on the far side of the island from the icons
-                // and a click on it must not be read as anything else.
-                //
-                // Its outcome is reported rather than assumed: asking for the Start menu can fail in
-                // ways that leave no trace afterwards, and "the button did nothing" is the same symptom
-                // for every one of them.
-                if (systems.window.StartAtScreen(cursor)) {
-                    // THE BAR'S OWN START CARD, which is what was asked for: "能不能也自己画 而不是使用系统
-                    // 的". The system menu is not gone -- the Windows key and Ctrl+Esc still open it -- it is
-                    // simply no longer what THIS button does, and that is one line in the log rather than a
-                    // silent change of behaviour: "start click: the bar's own card".
-                    bar.startPageOpen = !bar.startPageOpen;
-                    bar.systemPanelOpen = bar.startPageOpen;
-                    bar.startPageState = 0;
-                    bar.startPickerScroll = 0;
-                    bar.startPowerConfirm = -1;
-                    bar.trayPageOpen = false;
-                    bar.soundPageOpen = false;
-                    island::LogAndPrint("  start click: the bar's own card %ls\n",
-                                        bar.startPageOpen ? L"open" : L"closed");
-                    std::fflush(stdout);
-                } else if (systems.trayIcons.Count() > 0 && systems.window.TrayButtonAtScreen(cursor)) {
-                    // THE TRAY BUTTON, at the other end of the bar from the system button, and a toggle
-                    // for the same reason: pressing it again puts away what it opened.
-                    //
-                    // It opens the SAME CARD as the system panel, one level down (see TrayPageFor), so the
-                    // two share a card, a position and an animation -- and the two flags have to be kept in
-                    // step: opening one closes the other, or the card would be asked to be two pages at
-                    // once.
-                    const bool opening = !bar.trayPageOpen;
-                    bar.trayPageOpen = opening;
-                    bar.systemPanelOpen = opening;
-                    bar.systemPanelPage = 0;
-                    bar.soundPageOpen = false;
-                    bar.panelSliderDrag = false;
-                    bar.mixerSliderDragRow = -1;
-                    bar.mixerSliderDragPid = 0;
-                    island::LogAndPrint("  tray: %ls\n", opening ? L"card open" : L"card closed");
-                    std::fflush(stdout);
-                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Start) &&
-                           systems.window.StartHitHovered().target !=
-                               island::IslandWindow::StartHitTarget::None) {
-                    // The Start card own press handling. The phase lives above RunBar; the dismiss calls
-                    // inside it are the same four arguments the lambda used.
-                    ApplyStartCardPress(bar, systems, active, resting);
-                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Tray) &&
-                           systems.window.TrayCellHovered() >= 0) {
-                    // A CELL OF THE TRAY PAGE: press that application's tray icon, which is the only
-                    // thing about the tray this bar cannot do itself -- the menu or the window that
-                    // follows belongs to the application, and the shell is the one that knows how to ask
-                    // for it. See TrayPress for the route, and for why it is by POSITION rather than by
-                    // matching names.
-                    //
-                    // On a WORKER THREAD, because showing the shell's tray, opening its overflow and
-                    // pressing through UI Automation takes a few hundred milliseconds, and the bar draws
-                    // at the compositor's rate on this thread.
-                    const int cell = systems.window.TrayCellHovered();
-                    if (cell < systems.trayIcons.Count()) {
-                        island::StartTrayPress(systems.trayIcons, cell, false);
-                    }
-                    // The card goes with the press, which is what the shell does with its own flyout: the
-                    // application's window or menu is what the user is waiting for.
-                    dismissPanel();
-                } else if (systems.window.SystemButtonAtScreen(cursor)) {
-                    // The system panel is a TOGGLE, like the shell's own flyout: pressing the control
-                    // again closes what it opened. Without that the only way out would be to click
-                    // somewhere unrelated, which is not a way out a user can guess.
-                    bar.systemPanelOpen = !bar.systemPanelOpen;
-                    bar.systemPanelPage = 0;   // always opens on the first page, like the shell's flyout
-                    // ... and the tray's page is a level of the same card, so it goes with it.
-                    bar.trayPageOpen = false;
-                    // The page is a LEVEL of the panel, so closing the panel closes it too -- and a drag
-                    // left half-done is ended, or the next press anywhere would go on dragging a slider
-                    // that is no longer on screen.
-                    bar.soundPageOpen = false;
-                    bar.mixerSliderDragRow = -1;
-                    bar.mixerSliderDragPid = 0;
-                    island::LogAndPrint("  system panel: %ls\n",
-                                        bar.systemPanelOpen ? L"open" : L"closed");
-                    std::fflush(stdout);
-                } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
-                    // The 声音输出 page own controls. The phase lives above RunBar; the dismiss call inside
-                    // it is the same four arguments the lambda used.
-                    ApplySoundPagePress(bar, systems, cursor, volumeAvailable, active, resting);
-                } else if (bar.systemPanelOpen && panelHit.target ==
-                                                  island::SystemPanelTarget::PageDown) {
-                    const int pages = systems.window.SystemPanel().pageCount;
-                    if (pages > 1) {
-                        bar.systemPanelPage = (systems.window.SystemPanel().pageIndex + 1) % pages;
-                        island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
-                                            pages);
-                        std::fflush(stdout);
-                    }
-                } else if (bar.systemPanelOpen && panelHit.target ==
-                                                  island::SystemPanelTarget::PageUp) {
-                    const int pages = systems.window.SystemPanel().pageCount;
-                    if (pages > 1) {
-                        bar.systemPanelPage = (systems.window.SystemPanel().pageIndex + pages - 1) % pages;
-                        island::LogAndPrint("  system panel: page %d of %d\n", bar.systemPanelPage + 1,
-                                            pages);
-                        std::fflush(stdout);
-                    }
-                } else if (bar.systemPanelOpen && panelHit.target ==
-                                                  island::SystemPanelTarget::Slider) {
-                    // Already handled by the press that this release ends. Without this the same gesture
-                    // would be applied twice -- once when the button went down and once when it came up --
-                    // and the log would show a second "drag begins" for a drag that had just finished.
-                    if (bar.sliderPressHandled) {
-                        bar.sliderPressHandled = false;
-                    } else if (panelHit.index == 1 && bar.brightnessAvailable) {
-                        // Pressed without a press event having been seen -- a click that arrived on its
-                        // own. The fraction comes from the same layout the bar was drawn from, so the
-                        // handle goes exactly where the click was.
-                        int landed = 0;
-                        const int wanted = static_cast<int>(panelHit.fraction * 100.0f + 0.5f);
-                        const bool ok =
-                            island::SetBrightnessPercent(monitor.monitor, wanted, &landed);
-                        bar.lastAppliedBrightnessPercent = landed;
-                        bar.panelSliderDrag = true;
-                        bar.panelSliderDragRow = 1;
-                        bar.panelBrightnessEchoUntil = GetTickCount64() + 1200;
-                        island::LogAndPrint(
-                            "  brightness: set to %d%% (drag begins; asked %d, %ls)\n", landed,
-                            wanted, ok ? "landed" : "the monitor did not take it");
-                        std::fflush(stdout);
-                    } else if (volumeAvailable) {
-                        // Pressed without a press event having been seen -- a click that arrived on its own,
-                        // which happens when the panel opened between the two. The fraction comes from the
-                        // same layout the bar was drawn from, so the handle goes exactly where the click was.
-                        systems.volume.SetLevel(panelHit.fraction);
-                        bar.panelSliderDrag = true;   // and keep following the pointer while the button is held
-                        bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
-                        island::LogAndPrint("  volume: set to %.0f%% (drag begins)\n",
-                                            panelHit.fraction * 100.0f);
-                        std::fflush(stdout);
-                    }
-                } else if (bar.systemPanelOpen && panelHit.target ==
-                                                  island::SystemPanelTarget::Speaker) {
-                    // The speaker glyph is the mute control, as it is in the shell's own flyout.
-                    if (volumeAvailable) {
-                        systems.volume.ToggleMute();
-                        bar.panelVolumeEchoUntil = GetTickCount64() + 1200;
-                        island::LogAndPrint("  volume: %ls\n",
-                                            systems.volume.IsMuted() ? L"muted" : L"unmuted");
-                        std::fflush(stdout);
-                    }
-                } else if (bar.systemPanelOpen && panelHit.target ==
-                                                  island::SystemPanelTarget::VolumeDevice) {
-                    // The output-device button: the shell's own second level, where the devices and the
-                    // per-application mixer live.
-                    bar.soundPageOpen = true;
-                    bar.soundPageScroll = 0.0f;
-                    island::LogAndPrint("  sound page: open\n");
-                    std::fflush(stdout);
-                } else if (bar.systemPanelOpen && panelHit.target ==
-                                                  island::SystemPanelTarget::Gear) {
-                    // The settings button, which has been drawn since the panel was built and has never had an
-                    // action. It opens the sound settings, which is where this panel's own contents live.
-                    const HINSTANCE opened = ShellExecuteW(nullptr, L"open", L"ms-settings:sound",
-                                                           nullptr, nullptr, SW_SHOWNORMAL);
-                    island::LogAndPrint("  system panel: gear -> ms-settings:sound (result %lld)\n",
-                                        static_cast<long long>(reinterpret_cast<INT_PTR>(opened)));
-                    // Same rule as the tiles that take the user elsewhere: the page they asked for is opening,
-                    // so the panel gets out of the way.
-                    dismissPanel();
-                    std::fflush(stdout);
-                } else if (bar.systemPanelOpen && panelHit.target ==
-                                                  island::SystemPanelTarget::Tile) {
-                    // A tile was pressed. What it does is carried ON the tile, so this does not have to
-                    // know which tile is which -- and renaming one cannot silently change its action.
-                    //
-                    // Read from the WINDOW rather than from a frame, because the click handler runs
-                    // before this frame's state exists: the frame is filled further down the loop.
-                    const int tileIndex = panelHit.index;
-                    const island::TextRenderer::SystemPanelText& panel = systems.window.SystemPanel();
-                    if (tileIndex >= 0 && tileIndex < panel.tileCount) {
-                        const island::TextRenderer::SystemPanelTile& tile = panel.tiles[tileIndex];
-                        island::LogAndPrint(L"  click: tile %d '%ls' action=%d chevron=%d\n", tileIndex,
-                                            tile.label ? tile.label : L"?",
-                                            static_cast<int>(tile.action), tile.chevron ? 1 : 0);
-                        switch (tile.action) {
-                            case island::TextRenderer::PanelAction::OpenSettings: {
-                                // ShellExecute with the ms-settings URI, which is how the shell's own
-                                // flyout opens these pages. Reported with its result because "the tile
-                                // did nothing" and "the page failed to open" look identical otherwise.
-                                // A result above 32 means success; the numeric value is kept because
-                                // the failure codes are what would be needed to diagnose it.
-                                const HINSTANCE opened =
-                                    tile.uri ? ShellExecuteW(nullptr, L"open", tile.uri, nullptr,
-                                                             nullptr, SW_SHOWNORMAL)
-                                             : nullptr;
-                                island::LogAndPrint(L"  tile %d '%ls' -> %ls (result %lld)\n",
-                                                    tileIndex, tile.label ? tile.label : L"?",
-                                                    tile.uri ? tile.uri : L"no uri",
-                                                    static_cast<long long>(
-                                                        reinterpret_cast<INT_PTR>(opened)));
-                                // ... and the panel puts itself away.
-                                //
-                                // This tile's whole job was to take the user somewhere else, and leaving the
-                                // card up would leave them looking at a flyout for a page they are no longer
-                                // on -- which is what "点击应该…自动收回去" asked for. The tiles that apply
-                                // their change HERE (the volume row, and any toggle) stay open instead, so
-                                // their new state is there to be seen and several can be flipped in a row.
-                                dismissPanel();
-                                break;
-                            }
-                            case island::TextRenderer::PanelAction::ToggleMute:
-                            case island::TextRenderer::PanelAction::None:
-                            default:
-                                island::LogAndPrint(L"  tile %d '%ls': no action yet\n", tileIndex,
-                                                    tile.label ? tile.label : L"?");
-                                break;
-
-                            case island::TextRenderer::PanelAction::OpenSoundPage:
-                                // A tile that opens the sound page rather than a settings URI. None of them do
-                                // today -- the page is reached from the volume row's device button -- but the
-                                // action exists, so it is handled rather than falling into "no action yet".
-                                bar.soundPageOpen = true;
-                                bar.soundPageScroll = 0.0f;
-                                island::LogAndPrint(L"  tile %d '%ls' -> sound page\n", tileIndex,
-                                                    tile.label ? tile.label : L"?");
-                                break;
-
-                            case island::TextRenderer::PanelAction::ToggleRadio: {
-                                // BOTH radios, which is what this tile has always claimed to be. The state is
-                                // read back on the next sample rather than flipped locally, so a switch the
-                                // machine refuses shows as what it really is.
-                                //
-                                // Off when anything is still on, on otherwise -- the same rule the shell's own
-                                // airplane mode follows, and the one a user expects from a toggle that is dark
-                                // while a radio beside it is lit.
-                                const bool wanted = systems.systemStatus.wifiRadioOn || systems.systemStatus.bluetoothOn;
-                                const bool started = island::RequestRadios(true, true, wanted);
-                                island::LogAndPrint(
-                                    L"  tile %d '%ls' -> Wi-Fi and Bluetooth %ls (result %d)\n",
-                                    tileIndex, tile.label ? tile.label : L"?",
-                                    wanted ? L"off (airplane mode)" : L"on", started ? 1 : 0);
-                                // Deliberately NOT closed: a toggle applies its change here, and its new
-                                // state is the thing to look at. Several can be flipped in a row.
-                                break;
-                            }
-
-                            case island::TextRenderer::PanelAction::ToggleWifi: {
-                                // The Wi-Fi radio on its own, from the Wi-Fi tile. Its own switch and the
-                                // 飞行模式 tile's are the same mechanism at different scopes, which is why
-                                // they are one call with different arguments rather than two code paths.
-                                const bool wanted = !systems.systemStatus.wifiRadioOn;
-                                const bool started = island::RequestRadios(true, false, wanted);
-                                island::LogAndPrint(
-                                    L"  tile %d '%ls' -> Wi-Fi radio %ls (%ls)\n", tileIndex,
-                                    tile.label ? tile.label : L"?", wanted ? L"on" : L"off",
-                                    started ? L"asked, the answer follows in the log"
-                                            : L"a switch is already running");
-                                break;
-                            }
-
-                            case island::TextRenderer::PanelAction::ProjectionModes: {
-                                // 投影, which the shell answers by sending Win+P. Synthetic input, so it is
-                                // dropped by UIPI when this process sits below the shell -- the same caveat
-                                // the Start button carries, and the reason the outcome is reported.
-                                island::SendWindowsKeyChord('P');
-                                island::LogAndPrint(L"  tile %d '%ls' -> Win+P (projection modes)\n",
-                                                    tileIndex, tile.label ? tile.label : L"?");
-                                // The projection list is the shell's own flyout and appears over this one:
-                                // staying open would put two flyouts on top of each other.
-                                dismissPanel();
-                                break;
-                            }
-
-                            case island::TextRenderer::PanelAction::ToggleBluetooth: {
-                                // The radio, switched on a WORKER: the WinRT call blocks for a few hundred
-                                // milliseconds and the frame loop must not wait for it. The outcome is
-                                // collected in the loop below and logged there, and the caption is read back
-                                // from the machine on the next status sample rather than flipped here.
-                                const bool wanted = !systems.systemStatus.bluetoothOn;
-                                const bool started = island::RequestRadios(false, true, wanted);
-                                island::LogAndPrint(
-                                    L"  tile %d '%ls' -> Bluetooth %ls (%ls)\n", tileIndex,
-                                    tile.label ? tile.label : L"?", wanted ? L"on" : L"off",
-                                    started ? L"asked, the answer follows in the log"
-                                            : L"a switch is already running");
-                                // Like the Wi-Fi tile: a toggle applies its change here, so the new state is
-                                // the thing to look at.
-                                break;
-                            }
-
-                            case island::TextRenderer::PanelAction::ToggleNightLight: {
-                                // Pressed on the Settings page's own switch, on a worker, because that page
-                                // takes seconds to load. The cost is stated in the log line: a Settings window
-                                // appears for the length of the operation.
-                                const bool wanted = !systems.systemStatus.nightLightOn;
-                                const bool started = island::RequestNightLight(wanted);
-                                island::LogAndPrint(
-                                    L"  tile %d '%ls' -> night light %ls (%ls; this opens the Settings page"
-                                    L" for a moment -- it has no API)\n",
-                                    tileIndex, tile.label ? tile.label : L"?",
-                                    wanted ? L"on" : L"off",
-                                    started ? L"asked, the answer follows in the log"
-                                            : L"a switch is already running");
-                                break;
-                            }
-
-                            case island::TextRenderer::PanelAction::ToggleLiveCaptions: {
-                                // Win+Ctrl+L, the shortcut the feature is switched by. Sent here rather than on
-                                // a worker: the chord itself is a few milliseconds, and the state is read back
-                                // from the process list on the next status sample.
-                                const bool sent = island::ToggleLiveCaptions();
-                                island::LogAndPrint(
-                                    L"  tile %d '%ls' -> Win+Ctrl+L (result %d; the tile's caption comes"
-                                    L" from whether LiveCaptions.exe is running)\n",
-                                    tileIndex, tile.label ? tile.label : L"?", sent ? 1 : 0);
-                                break;
-                            }
-
-                            case island::TextRenderer::PanelAction::CycleTheme: {
-                                // The whole material at once, and it takes effect on the NEXT frame
-                                // because every drawing call reads CurrentTheme(). The brush cache is
-                                // cleared with it: the cached brushes are keyed by colour, so a theme
-                                // change would otherwise leave every old colour in memory for the rest
-                                // of the session.
-                                const island::Theme& chosen = island::CycleTheme();
-                                systems.text.ClearBrushCache();
-                                island::LogAndPrint(
-                                    L"  tile %d '%ls' -> theme %ls (%d of %d)\n", tileIndex,
-                                    tile.label ? tile.label : L"?", chosen.name,
-                                    island::CurrentThemeIndex() + 1, island::ThemeCount());
-                                // The tile's own caption is the theme's name, and it is built from the
-                                // frame's panel text -- which was assembled earlier in this same pass.
-                                // Redrawing on the next pass is what updates it, and the theme change
-                                // already asks for one.
-                                break;
-                            }
-                        }
-                        std::fflush(stdout);
-                    }
-                } else if (bar.systemPanelOpen) {
-                    // Anything else while the panel is open is treated as "put it away".
-                    //
-                    // A flyout closes when you click outside it, and on this bar the island IS outside
-                    // it. Without this the island's own click was still handled as a request for the
-                    // card, so pressing it opened a SECOND card-style surface while the panel was up --
-                    // reported as "clicking this one opened it too".
-                    //
-                    // Closing on any other click is also the behaviour a user expects, and it is the only
-                    // way out that does not require finding the chevron again.
-                    dismissPanel();
-                    island::LogAndPrint("  system panel: closed (click elsewhere)\n");
-                    std::fflush(stdout);
-                } else if (icon >= 0 && icon < bar.taskWindowsShown) {
-                    // The handle that was DRAWN at this position, not whatever the live list holds now.
-                    const HWND target = bar.taskHandles[icon];
-                    island::LogAndPrint("  icon click: index %d -> %p", icon,
-                                        reinterpret_cast<void*>(target));
-
-                    // The taskbar button is a TOGGLE: the window already in front is put away, any
-                    // other comes forward. Without this the bar could only ever raise things, which is
-                    // half the gesture -- reported as "clicking an application on the desktop does not
-                    // minimise it".
-                    //
-                    // Asked LIVE rather than from the list's cached foreground, because the cache is
-                    // refreshed twice a second and the whole question is which window is in front at
-                    // the instant of the click.
-                    const bool alreadyInFront = (GetForegroundWindow() == target);
-
-                    if (alreadyInFront) {
-                        if (systems.taskWindows.Minimize(target)) {
-                            island::LogAndPrint("  icon click: minimised %p (it was already in front)",
-                                                reinterpret_cast<void*>(target));
-                        } else {
-                            island::LogAndPrint("  icon click: minimise FAILED for %p",
-                                                reinterpret_cast<void*>(target));
-                        }
-                    } else if (systems.taskWindows.Activate(target)) {
-                        island::LogAndPrint("  icon click: activated %p",
-                                            reinterpret_cast<void*>(target));
-                    } else {
-                        // Not reported as success. A minimised window that stayed minimised, or a
-                        // refused SetForegroundWindow, both land here -- and reporting "activated"
-                        // regardless would make the next investigation start from a false fact.
-                        island::LogAndPrint("  icon click: activation FAILED for %p",
-                                            reinterpret_cast<void*>(target));
-                    }
-                    std::fflush(stdout);
-                } else {
-                    // A click that is not on an icon, reported with the numbers that decided it.
-                    //
-                    // "The click was never routed" and "it was routed and the hit test missed" are
-                    // different faults and the log otherwise shows neither. This is the line that
-                    // separates them.
-                    island::LogAndPrint("  icon click: no icon (index %d, %d shown)", icon,
-                                        bar.taskWindowsShown);
-                    std::fflush(stdout);
-
-                const island::CardControl control = systems.window.MusicControlAtScreen(cursor);
-                // Every click reports what it was taken to mean.
-                //
-                // "The card does not respond" and "the click never reached the process" look the
-                // same from outside, and the second one cannot even be logged from in here -- so
-                // this line's presence or absence is itself the answer.
-                {
-                    const char* what = "dismiss";
-                    if (control == island::CardControl::Previous) {
-                        what = "previous";
-                    } else if (control == island::CardControl::PlayPause) {
-                        what = "play/pause";
-                    } else if (control == island::CardControl::Next) {
-                        what = "next";
-                    }
-                    island::LogAndPrint("  click routed: state=%ls, meaning=%s",
-                                        island::StateName(systems.window.State()), what);
-                    std::fflush(stdout);
-                }
-                if (control != island::CardControl::None) {
-                    island::MusicSession::Transport action =
-                        island::MusicSession::Transport::PlayPause;
-                    const char* name = "play/pause";
-                    if (control == island::CardControl::Previous) {
-                        action = island::MusicSession::Transport::Previous;
-                        name = "previous";
-                    } else if (control == island::CardControl::Next) {
-                        action = island::MusicSession::Transport::Next;
-                        name = "next";
-                    }
-                    if (systems.music.RequestTransport(action)) {
-                        island::LogAndPrint("  music: %s requested", name);
-                        std::fflush(stdout);
-                    }
-                } else if (systems.window.State() == island::IslandState::NoticeStrip) {
-                    // A PRESS WHILE A CALL OR A MESSAGE IS ON THE ISLAND LEAVES IT ALONE.
-                    //
-                    // Asked for in these words: "当通知和通话的时候点击 就通话和通知的样子" -- while the strip
-                    // is up, a press on any of the bar's buttons (Start, the panel toggle, the tray button)
-                    // must not send the island back to the plain pill, and neither must a press that lands on
-                    // the strip's own body.
-                    //
-                    // It did. The log has the whole sequence: a press at (1420,27) was routed as
-                    // "meaning=dismiss", marked one item read, and the strip retracted 157 ms later -- then
-                    // came back 226 ms after that, because what had asked for it was still there. Both halves
-                    // of that dismissal had to go together, and the reason is one line in the store:
-                    // ActiveDisplay answers nullptr for an item that is `read`, so marking it read IS the
-                    // retraction. Marking read and retracting cannot be separated; the press therefore no
-                    // longer marks anything read.
-                    //
-                    // Nothing is lost by that: the unread count is not drawn anywhere (it is asserted in the
-                    // self-test and read nowhere else), so a message that is left unread has no visible
-                    // consequence. What ends the strip is unchanged and decided elsewhere: a message when its
-                    // display window runs out, a call when the call does -- which is what the note that used
-                    // to stand here said a call's lifetime is.
-                    island::LogAndPrint("  click: kept -- a notice is up, so the press changed nothing");
-                    std::fflush(stdout);
-                } else {
-                    // A CLICK DISMISSES MESSAGES, NOT A CALL.
-                    //
-                    // Every other item on the strip is news: showing it for a few seconds and marking it read
-                    // when it is clicked is what "read" means. A CALL is a STATE, and the user asked for it to
-                    // stay on the island for as long as it lasts ("微信通话 也应该在灵动岛 上") -- so a click
-                    // must leave it alone. It did not, and that is one of the two reasons the call strip
-                    // disappeared for good: `notifications: 1 marked read (click)` at 13:43:19 with the call
-                    // still up, after which the island never showed it again. The call is retired by the call
-                    // ENDING, which the watcher detects and reports.
-                    const int marked = systems.notifications.MarkAllReadExcept(systems.wechat.CallNotificationId());
-                    if (marked > 0) {
-                        island::LogAndPrint("  notifications: %d marked read (click)", marked);
-                        std::fflush(stdout);
-                        // Recompute immediately so the same frame reflects the click
-                        // instead of waiting for the next tick to notice.
-                        systems.window.SetState(systems.window.IsPointerInside()
-                                            ? island::IslandState::Hover
-                                            : resting);
-                    }
-                }
-                }
-            }
+            // A press AND a click, resolved together: the press is where a slider drag begins, the release
+            // that follows is only the end of that gesture, and the click chain decides which control was
+            // under the pointer. The phase lives above RunBar; the panel dismissal inside it is the same
+            // four arguments the lambda over there used to pass.
+            ApplyPressesAndClicks(bar, systems, active, resting, monitor, volumeAvailable, soundOutputStarted);
 
             // The right-click handling: the bar own tray menu, and unpinning from the Start card. The
             // phase lives above RunBar.
