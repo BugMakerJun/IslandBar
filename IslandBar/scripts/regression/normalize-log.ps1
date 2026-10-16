@@ -60,7 +60,10 @@ $Dropped = @(
     'tray ring:', 'tray hook:', 'draw ', 'anim:', 'loop:', 'mem\[', 'icon decode',
     # Machine-dependent events: which of the user's applications opened a window, and which taskbar
     # buttons exist right now. They change when the user does anything at all.
-    'wechat: window appeared', 'taskbar icon: hwnd'
+    'wechat: window appeared', 'taskbar icon: hwnd',
+    # The row's own contents: how many application icons it has is the user's window count, and the layout
+    # itself is asserted by --self-test, which is where geometry belongs.
+    '^row: '
 )
 
 # Lines written by a worker thread: content matters, order does not (see the note above).

@@ -902,6 +902,190 @@ static void StartOutputWorkers(bool& volumeAvailable, bool& soundOutputStarted, 
     std::fflush(stdout);
 }
 
+// --- the Start card's own state: the application list, the pins, the account picture and name ---
+//
+// Moved out of RunBar verbatim. It writes into `bar` (the account name and the avatar PNG are BarState's)
+// and starts a worker against `systems.startApps`; nothing new is stored here, and the two objects come in
+// by reference exactly as RunBar has them.
+static void StartStartCard(island::BarState& bar, island::BarSystems& systems) {
+    // The shell's application list is read on a WORKER: measured, 121 items cost about 600 ms, and the
+    // frame loop cannot spend that. Until it arrives the card has no applications to offer, which is a
+    // state the drawing handles (nothing to add yet) rather than something to wait for.
+    //
+    // The pins are the user's, in a text file beside the bar (see StartApps). The account picture and the
+    // name are read once: they are the two things in the card's footer and they change about as often as
+    // the user changes his picture.
+    // The pins are read on a worker, and it is handed the object BY REFERENCE under its own name: a capture
+    // list takes names, not member accesses (see the same trap in the tray learning pass), and naming it
+    // `apps` also says what the thread is for.
+    std::thread([&apps = systems.startApps]() {
+        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        apps.RefreshList();
+        if (SUCCEEDED(comHr)) CoUninitialize();
+    }).detach();
+    {
+        // The account picture: the registry entry the shell itself uses, largest first so a scaled-down
+        // draw has something to work with, with the generic picture as the fallback every account has.
+        wchar_t user[128] = {};
+        DWORD userSize = sizeof(user);
+        if (GetUserNameW(user, &userSize)) {
+            wcsncpy_s(bar.accountName, 64, user, _TRUNCATE);
+        }
+        // GetUserNameEx(NameDisplay) is the full name the shell shows in its own footer, which on this
+        // machine is not the account name at all; the account name is the fallback.
+        wchar_t display[128] = {};
+        ULONG displaySize = 128;
+        if (GetUserNameExW(NameDisplay, display, &displaySize) && display[0] != L'\0') {
+            wcsncpy_s(bar.accountName, 64, display, _TRUNCATE);
+        }
+        wchar_t sidText[128] = {};
+        HANDLE token = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            DWORD size = 0;
+            GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+            std::vector<uint8_t> buffer(size);
+            if (size > 0 && GetTokenInformation(token, TokenUser, buffer.data(), size, &size)) {
+                const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+                LPWSTR sidString = nullptr;
+                if (ConvertSidToStringSidW(tokenUser->User.Sid, &sidString) && sidString) {
+                    wcsncpy_s(sidText, 128, sidString, _TRUNCATE);
+                    LocalFree(sidString);
+                }
+            }
+            CloseHandle(token);
+        }
+        wchar_t picture[512] = {};
+        if (sidText[0] != L'\0') {
+            const std::wstring key =
+                std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AccountPicture\\Users\\") +
+                sidText;
+            for (const wchar_t* value : {L"Image240", L"Image192", L"Image96"}) {
+                HKEY handle = nullptr;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.c_str(), 0, KEY_QUERY_VALUE, &handle) !=
+                    ERROR_SUCCESS) {
+                    break;
+                }
+                DWORD type = 0;
+                DWORD bytes = sizeof(picture);
+                const LONG read = RegQueryValueExW(handle, value, nullptr, &type,
+                                                  reinterpret_cast<BYTE*>(picture), &bytes);
+                RegCloseKey(handle);
+                if (read == ERROR_SUCCESS && type == REG_SZ && picture[0] != L'\0') break;
+                picture[0] = L'\0';
+            }
+        }
+        // The generic picture if the account has none: a blank circle would be worse than a silhouette.
+        if (picture[0] == L'\0') {
+            wcsncpy_s(picture, 512, L"C:\\ProgramData\\Microsoft\\User Account Pictures\\user-192.png",
+                      _TRUNCATE);
+        }
+        // DECODED AS AN IMAGE, not asked for as a file's icon.
+        //
+        // The first version went through the notification-icon loader, which answers with the SHELL's icon
+        // for a path when it cannot read it as a picture -- and the footer then showed a generic
+        // image-file icon (a little photograph) where the account picture belongs. Photographed, which is
+        // how it was caught. WIC reads the JPEG the account picture actually is.
+        std::vector<uint8_t> fileBytes;
+        if (FILE* file = nullptr; _wfopen_s(&file, picture, L"rb") == 0 && file) {
+            std::fseek(file, 0, SEEK_END);
+            const long length = std::ftell(file);
+            std::fseek(file, 0, SEEK_SET);
+            if (length > 0 && length < 32 * 1024 * 1024) {
+                fileBytes.resize(static_cast<size_t>(length));
+                const size_t read = std::fread(fileBytes.data(), 1, fileBytes.size(), file);
+                fileBytes.resize(read);
+            }
+            std::fclose(file);
+        }
+        island::DecodedImage avatar;
+        if (!fileBytes.empty() && island::DecodeImage(fileBytes.data(), fileBytes.size(), &avatar) &&
+            avatar.pixels && avatar.width > 0) {
+            bar.accountAvatarPng.resize(512 * 1024);
+            const size_t size = island::EncodeBgraToPng(avatar.pixels, avatar.width, avatar.height,
+                                                       bar.accountAvatarPng.data(),
+                                                       bar.accountAvatarPng.size());
+            bar.accountAvatarPng.resize(size);
+            island::LogAndPrint("  start: account picture %dx%d -> %zu byte PNG from %ls", avatar.width,
+                                avatar.height, size, picture);
+        } else {
+            island::LogAndPrint("  start: no account picture (%ls)", picture);
+        }
+        island::LogAndPrint("  start: footer name '%ls'", bar.accountName);
+        systems.startApps.LoadPins();
+        std::fflush(stdout);
+    }
+}
+
+// --- the strip the shell's taskbar reserved: give it back ---
+//
+// Moved out of RunBar verbatim (see the note on the phase functions).
+static void ReleaseReservedStrip(bool hideNativeTaskbar, bool keepStrip,
+                                 const island::MonitorGeometry& monitor, island::BarSystems& systems) {
+    // --- the strip the work area reserves: give it back ----------------------
+    //
+    // A hidden AppBar keeps its claim. Hiding the shell's taskbar left the desktop's WORK AREA inset by
+    // its thickness, so a maximized window stopped below a band that holds nothing but our island -- and
+    // the user photographed the empty space either side of it: "是我把应用放到最大的时候 直接就顶满屏幕
+    // 而不是现在这样 有空白的".
+    //
+    // The release is deliberately SILENT (no SPIF_SENDCHANGE): measured on this desktop, the announced
+    // form of this call reports success and changes nothing, and announcing it ourselves afterwards puts
+    // the strip straight back, because the shell re-derives the work area from its own taskbar when it
+    // hears about the change. It is re-asserted on the same slow cadence as the re-hide.
+    //
+    // Skipped when the AppBar above claims the strip: that claim is the same strip, reserved on purpose,
+    // and releasing it would put maximized windows on top of the space just asked for.
+    if (!hideNativeTaskbar) {
+        island::LogAndPrint("  work area: left alone (--keep-taskbar)");
+    } else if (keepStrip) {
+        island::LogAndPrint("  work area: the strip is NOT released (--keep-strip);");
+        island::LogAndPrint("    a maximized window will keep the band the shell's taskbar reserves");
+    } else if (systems.appBarResult == island::AppBarResult::Registered) {
+        island::LogAndPrint("  work area: the strip stays reserved (the AppBar above claims it)");
+    } else {
+        const island::NativeTaskbar::WorkAreaRelease release = systems.taskbar.ReleaseWorkArea();
+        if (release.changed) {
+            island::LogAndPrint("  work area: the strip is released -- %ld,%ld - %ld,%ld  ->  "
+                                "%ld,%ld - %ld,%ld",
+                                release.before.left, release.before.top, release.before.right,
+                                release.before.bottom, release.after.left, release.after.top,
+                                release.after.right, release.after.bottom);
+            // A window that was ALREADY maximized does not follow the work area -- measured, neither
+            // Windows nor the application re-lays it out -- so it keeps the very band this is about.
+            const int nudged =
+                island::NudgeStaleMaximizedWindows(monitor.screen, release.before, release.after);
+            if (nudged) {
+                island::LogAndPrint("  work area: %d already-maximized window(s) brought to the full "
+                                    "screen", nudged);
+            }
+        } else if (release.released) {
+            island::LogAndPrint("  work area: nothing to release (it is already the whole monitor)");
+        } else {
+            island::LogAndPrint("  work area: NOT released -- the shell's taskbar is not hidden by "
+                                "this process, so its strip is not ours to give back");
+        }
+        std::fflush(stdout);
+    }
+}
+
+// --- the composition surface: the renderer and the text renderer ---
+//
+// Moved out of RunBar verbatim. Returns whether the surface came up, because the frame loop refuses to run
+// without it (and says so, at the point where it decides).
+static bool InitializeCompositionSurface(island::BarSystems& systems) {
+    const RECT rect = systems.window.WindowRect();
+    const bool renderOk = systems.renderer.Initialize(
+        systems.window.Handle(),
+        static_cast<UINT>(rect.right - rect.left),
+        static_cast<UINT>(rect.bottom - rect.top),
+        systems.window.Scale());
+
+    if (renderOk && systems.text.Initialize()) {
+        systems.renderer.SetTextRenderer(&systems.text);
+    }
+    return renderOk;
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -1007,62 +1191,10 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
         return 1;
     }
 
-    // --- the strip the work area reserves: give it back ----------------------
-    //
-    // A hidden AppBar keeps its claim. Hiding the shell's taskbar left the desktop's WORK AREA inset by
-    // its thickness, so a maximized window stopped below a band that holds nothing but our island -- and
-    // the user photographed the empty space either side of it: "是我把应用放到最大的时候 直接就顶满屏幕
-    // 而不是现在这样 有空白的".
-    //
-    // The release is deliberately SILENT (no SPIF_SENDCHANGE): measured on this desktop, the announced
-    // form of this call reports success and changes nothing, and announcing it ourselves afterwards puts
-    // the strip straight back, because the shell re-derives the work area from its own taskbar when it
-    // hears about the change. It is re-asserted on the same slow cadence as the re-hide.
-    //
-    // Skipped when the AppBar above claims the strip: that claim is the same strip, reserved on purpose,
-    // and releasing it would put maximized windows on top of the space just asked for.
-    if (!hideNativeTaskbar) {
-        island::LogAndPrint("  work area: left alone (--keep-taskbar)");
-    } else if (keepStrip) {
-        island::LogAndPrint("  work area: the strip is NOT released (--keep-strip);");
-        island::LogAndPrint("    a maximized window will keep the band the shell's taskbar reserves");
-    } else if (systems.appBarResult == island::AppBarResult::Registered) {
-        island::LogAndPrint("  work area: the strip stays reserved (the AppBar above claims it)");
-    } else {
-        const island::NativeTaskbar::WorkAreaRelease release = systems.taskbar.ReleaseWorkArea();
-        if (release.changed) {
-            island::LogAndPrint("  work area: the strip is released -- %ld,%ld - %ld,%ld  ->  "
-                                "%ld,%ld - %ld,%ld",
-                                release.before.left, release.before.top, release.before.right,
-                                release.before.bottom, release.after.left, release.after.top,
-                                release.after.right, release.after.bottom);
-            // A window that was ALREADY maximized does not follow the work area -- measured, neither
-            // Windows nor the application re-lays it out -- so it keeps the very band this is about.
-            const int nudged =
-                island::NudgeStaleMaximizedWindows(monitor.screen, release.before, release.after);
-            if (nudged) {
-                island::LogAndPrint("  work area: %d already-maximized window(s) brought to the full "
-                                    "screen", nudged);
-            }
-        } else if (release.released) {
-            island::LogAndPrint("  work area: nothing to release (it is already the whole monitor)");
-        } else {
-            island::LogAndPrint("  work area: NOT released -- the shell's taskbar is not hidden by "
-                                "this process, so its strip is not ours to give back");
-        }
-        std::fflush(stdout);
-    }
-
-    const RECT rect = systems.window.WindowRect();
-    const bool renderOk = systems.renderer.Initialize(
-        systems.window.Handle(),
-        static_cast<UINT>(rect.right - rect.left),
-        static_cast<UINT>(rect.bottom - rect.top),
-        systems.window.Scale());
-
-    if (renderOk && systems.text.Initialize()) {
-        systems.renderer.SetTextRenderer(&systems.text);
-    }
+    // The strip the shell's taskbar reserved, and the composition surface. Both phases live above RunBar;
+    // the order is unchanged.
+    ReleaseReservedStrip(hideNativeTaskbar, keepStrip, monitor, systems);
+    const bool renderOk = InitializeCompositionSurface(systems);
 
     // The two notification channels. The phase lives above RunBar; the flags stay here because the frame
     // loop reads them (see the note on the phase functions).
@@ -1182,114 +1314,9 @@ unsigned long long lastMusicMeterMs = 0;
         std::fflush(stdout);
     }
 
-    // --- the Start card's own state -------------------------------------------------------------------
-    //
-    // The shell's application list is read on a WORKER: measured, 121 items cost about 600 ms, and the
-    // frame loop cannot spend that. Until it arrives the card has no applications to offer, which is a
-    // state the drawing handles (nothing to add yet) rather than something to wait for.
-    //
-    // The pins are the user's, in a text file beside the bar (see StartApps). The account picture and the
-    // name are read once: they are the two things in the card's footer and they change about as often as
-    // the user changes his picture.
-    // The pins are read on a worker, and it is handed the object BY REFERENCE under its own name: a capture
-    // list takes names, not member accesses (see the same trap in the tray learning pass), and naming it
-    // `apps` also says what the thread is for.
-    std::thread([&apps = systems.startApps]() {
-        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        apps.RefreshList();
-        if (SUCCEEDED(comHr)) CoUninitialize();
-    }).detach();
-    {
-        // The account picture: the registry entry the shell itself uses, largest first so a scaled-down
-        // draw has something to work with, with the generic picture as the fallback every account has.
-        wchar_t user[128] = {};
-        DWORD userSize = sizeof(user);
-        if (GetUserNameW(user, &userSize)) {
-            wcsncpy_s(bar.accountName, 64, user, _TRUNCATE);
-        }
-        // GetUserNameEx(NameDisplay) is the full name the shell shows in its own footer, which on this
-        // machine is not the account name at all; the account name is the fallback.
-        wchar_t display[128] = {};
-        ULONG displaySize = 128;
-        if (GetUserNameExW(NameDisplay, display, &displaySize) && display[0] != L'\0') {
-            wcsncpy_s(bar.accountName, 64, display, _TRUNCATE);
-        }
-        wchar_t sidText[128] = {};
-        HANDLE token = nullptr;
-        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
-            DWORD size = 0;
-            GetTokenInformation(token, TokenUser, nullptr, 0, &size);
-            std::vector<uint8_t> buffer(size);
-            if (size > 0 && GetTokenInformation(token, TokenUser, buffer.data(), size, &size)) {
-                const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(buffer.data());
-                LPWSTR sidString = nullptr;
-                if (ConvertSidToStringSidW(tokenUser->User.Sid, &sidString) && sidString) {
-                    wcsncpy_s(sidText, 128, sidString, _TRUNCATE);
-                    LocalFree(sidString);
-                }
-            }
-            CloseHandle(token);
-        }
-        wchar_t picture[512] = {};
-        if (sidText[0] != L'\0') {
-            const std::wstring key =
-                std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AccountPicture\\Users\\") +
-                sidText;
-            for (const wchar_t* value : {L"Image240", L"Image192", L"Image96"}) {
-                HKEY handle = nullptr;
-                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.c_str(), 0, KEY_QUERY_VALUE, &handle) !=
-                    ERROR_SUCCESS) {
-                    break;
-                }
-                DWORD type = 0;
-                DWORD bytes = sizeof(picture);
-                const LONG read = RegQueryValueExW(handle, value, nullptr, &type,
-                                                  reinterpret_cast<BYTE*>(picture), &bytes);
-                RegCloseKey(handle);
-                if (read == ERROR_SUCCESS && type == REG_SZ && picture[0] != L'\0') break;
-                picture[0] = L'\0';
-            }
-        }
-        // The generic picture if the account has none: a blank circle would be worse than a silhouette.
-        if (picture[0] == L'\0') {
-            wcsncpy_s(picture, 512, L"C:\\ProgramData\\Microsoft\\User Account Pictures\\user-192.png",
-                      _TRUNCATE);
-        }
-        // DECODED AS AN IMAGE, not asked for as a file's icon.
-        //
-        // The first version went through the notification-icon loader, which answers with the SHELL's icon
-        // for a path when it cannot read it as a picture -- and the footer then showed a generic
-        // image-file icon (a little photograph) where the account picture belongs. Photographed, which is
-        // how it was caught. WIC reads the JPEG the account picture actually is.
-        std::vector<uint8_t> fileBytes;
-        if (FILE* file = nullptr; _wfopen_s(&file, picture, L"rb") == 0 && file) {
-            std::fseek(file, 0, SEEK_END);
-            const long length = std::ftell(file);
-            std::fseek(file, 0, SEEK_SET);
-            if (length > 0 && length < 32 * 1024 * 1024) {
-                fileBytes.resize(static_cast<size_t>(length));
-                const size_t read = std::fread(fileBytes.data(), 1, fileBytes.size(), file);
-                fileBytes.resize(read);
-            }
-            std::fclose(file);
-        }
-        island::DecodedImage avatar;
-        if (!fileBytes.empty() && island::DecodeImage(fileBytes.data(), fileBytes.size(), &avatar) &&
-            avatar.pixels && avatar.width > 0) {
-            bar.accountAvatarPng.resize(512 * 1024);
-            const size_t size = island::EncodeBgraToPng(avatar.pixels, avatar.width, avatar.height,
-                                                       bar.accountAvatarPng.data(),
-                                                       bar.accountAvatarPng.size());
-            bar.accountAvatarPng.resize(size);
-            island::LogAndPrint("  start: account picture %dx%d -> %zu byte PNG from %ls", avatar.width,
-                                avatar.height, size, picture);
-        } else {
-            island::LogAndPrint("  start: no account picture (%ls)", picture);
-        }
-        island::LogAndPrint("  start: footer name '%ls'", bar.accountName);
-        systems.startApps.LoadPins();
-        std::fflush(stdout);
-    }
+    // The Start card's own state. The phase lives above RunBar; the order is unchanged (see the note on the
+    // phase functions).
+    StartStartCard(bar, systems);
 
     // --- the taskbar's window list ---
     //

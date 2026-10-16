@@ -36,7 +36,6 @@ SHAPE  brightness: the panel gets a brightness row (now <N>%)
 SHAPE  taskbar: state=collapsed, <N> buttons from <N> windows listed (<N> listed of <N>: <N> invisible, <N> cloaked, <N> untitled, <N> owned, <N> tool, <N> shell, <N> self)
 SHAPE  glass: grain built, <N>x<N>, mean <N> (deterministic seed <H>)
 SHAPE  strip says: date (state collapsed, resting collapsed, cardUp <N>, intoPill <N>, box <N>..<N>)
-SHAPE  row: hovered=-<N>, <N> icons on the right [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>] [<N> <N>..<N> h<N>.<N>]
 SHAPE  start button: island x [<N>, <N>] -> button x [<N>, <N>] y [<N>, <N>], fill.a <N>.<N>, opacity <N>.<N>, context <N>
 SHAPE  tray: <N> icon(s) -- <N> live of <N> registry entr(ies)
 === unordered (worker threads; content only) ===
