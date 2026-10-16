@@ -2786,6 +2786,312 @@ static void FillCallAndStatusStrip(island::FrameState& frame, island::BarState& 
     bar.statusStripAnimating = bar.statusStripOpacity > 0.001f && bar.statusStripOpacity < 0.999f;
 }
 
+// --- the hover preview: a live thumbnail under the icon the pointer rests on ---
+//
+// Moved out of the frame loop verbatim (indentation aside; the last line of the block is the notice line,
+// which belongs to the same stretch of frame filling). AFTER A DWELL, not on arrival (see bar.previewTarget),
+// and not while a card is up: the media card and the system panel hang BELOW the bar, which is exactly where a
+// preview goes, so one would be drawn under the other. The box comes from the pure ThumbnailBoxFor and the SAME
+// icon rectangle the row was laid out with, so the preview cannot point at a different icon from the open one.
+static void FillHoverPreview(BarRuntime& runtime, island::FrameState& frame, island::BarState& bar,
+                             island::BarSystems& systems, const island::MusicInfo& nowPlaying,
+                             bool previewReady, int drawn, int listed, float dt,
+                             float musicWavePhase, island::AccentColour waveAccent,
+                             const char* lyricLine, const char* fallbackLine,
+                             const std::string& noticeLine, unsigned long long& frameWork,
+                             unsigned long long thumbnailBit, unsigned long long dwellMs,
+                             bool traceCardFrames) {
+    // `cardUp` is computed here rather than handed in, the same way FillPanelFrame does it: it is one
+    // expression off the frame.
+    const bool cardUp = frame.outerCardUp;
+    // --- the hover preview: a live thumbnail under the icon the pointer rests on -------
+    //
+    // AFTER A DWELL, not on arrival (see bar.previewTarget), and not while a card is up: the
+    // media card and the system panel hang BELOW the bar, which is exactly where a preview
+    // goes, so one would be drawn under the other.
+    //
+    // The box is computed by the pure ThumbnailBoxFor, from the SAME icon rectangle the row
+    // was laid out with -- so the preview cannot point at a different icon from the one
+    // that is open.
+    if (previewReady) {
+        const unsigned long long previewNow = GetTickCount64();
+        const int hoveredIcon = frame.taskHoveredIndex;
+        const HWND wanted = (hoveredIcon >= 0 && hoveredIcon < drawn)
+                                ? bar.taskHandles[hoveredIcon]
+                                : nullptr;
+        if (wanted != bar.previewTarget) {
+            bar.previewTarget = wanted;
+            bar.previewSinceMs = previewNow;
+        }
+
+        const bool rested = wanted && (previewNow - bar.previewSinceMs) >= dwellMs;
+        // ONCE IT IS UP, IT FOLLOWS THE POINTER ALONG THE ROW AT ONCE.
+        //
+        // The dwell exists to stop a preview flashing up for every icon the pointer passes on
+        // its way somewhere. Once one is already on screen the user has decided where to look,
+        // and making them wait again for the neighbour is the flicker rather than the cure:
+        // the preview would vanish and come back 350 ms later. It still goes away the moment
+        // the pointer leaves the row.
+        const bool follow = wanted != nullptr && systems.preview.Visible();
+        bool shown = false;
+        // The preview path registers a DWM thumbnail on the window and can redraw the live
+        // content every frame, so it is one of the things a slow frame may turn out to be.
+        frameWork |= thumbnailBit;
+        if ((rested || follow) && !frame.outerCardUp && IsWindow(wanted)) {
+            const RECT monitorPx = systems.window.Monitor().screen;
+            const float scale = systems.window.Scale();
+            // THE ROW THE PREVIEW HANGS OFF IS THE ROW THAT IS DRAWN, tray button and all.
+            //
+            // The application icons are painted from a box the tray button has moved along
+            // (see RowAnchorWithTray), and the preview is placed under "the icon the
+            // pointer is on". Measuring the button from the un-shifted box put the card
+            // one button to the LEFT of the icon it belongs to -- the same off-by-one
+            // button that made the FIRST icon open the SECOND, seen from the drawing side.
+            const island::RoundedBox islandBox = island::RowAnchorWithTray(
+                systems.window.LayoutIslandFor(), frame.trayIconCount > 0);
+            const island::RectF button = island::TaskIconButtonAtAmounts(
+                islandBox, hoveredIcon, drawn, bar.taskHoverAmount);
+            RECT iconPx = {};
+            iconPx.left = monitorPx.left +
+                          static_cast<LONG>(std::lround(button.left * scale));
+            iconPx.right = monitorPx.left +
+                           static_cast<LONG>(std::lround(button.right * scale));
+            iconPx.top = monitorPx.top + static_cast<LONG>(std::lround(button.top * scale));
+            iconPx.bottom =
+                monitorPx.top + static_cast<LONG>(std::lround(button.bottom * scale));
+
+            // THE COMPOSITOR'S OWN SIZE FIRST, then the geometry: it stretches its picture to
+            // fill whatever rectangle it is given, so the card has to be built around the shape
+            // IT reports. GetWindowRect is not that shape -- using it drew one window squashed
+            // into a flat strip (see ThumbnailPreview.h).
+            const SIZE sourceSize = systems.preview.Begin(wanted);
+            const island::ThumbnailPlacement placement = island::ThumbnailBoxFor(
+                sourceSize.cx, sourceSize.cy, iconPx, monitorPx, scale);
+            shown = placement.valid && systems.preview.Place(placement);
+
+            if (!bar.previewReported) {
+                bar.previewReported = true;
+                island::LogAndPrint(
+                    "  preview: hwnd %p -> card %ld,%ld %ldx%ld, picture %ldx%ld "
+                    "(compositor says %ldx%ld), shown=%d, hr=0x%08llX",
+                    reinterpret_cast<void*>(wanted), placement.card.left,
+                    placement.card.top, placement.card.right - placement.card.left,
+                    placement.card.bottom - placement.card.top,
+                    placement.picture.right - placement.picture.left,
+                    placement.picture.bottom - placement.picture.top, sourceSize.cx,
+                    sourceSize.cy, shown ? 1 : 0, systems.preview.LastResult());
+                std::fflush(stdout);
+            }
+        }
+
+        if (!shown) systems.preview.Hide();
+
+        // A refusal is reported once per count rather than once per frame: a window the
+        // compositor will not preview is a fact about that window, and repeating it 60 times
+        // a second would drown the log.
+        if (systems.preview.Refusals() != bar.previewLastRefusals) {
+            bar.previewLastRefusals = systems.preview.Refusals();
+            island::LogAndPrint("  preview: the compositor refused a thumbnail of hwnd %p "
+                                "(0x%08llX)",
+                                reinterpret_cast<void*>(wanted), systems.preview.LastResult());
+            std::fflush(stdout);
+        }
+    }
+
+    // Each icon gets a background in the island's own colour, so the row reads as part
+    // of the island rather than as icons floating on the wallpaper -- a bright
+    // wallpaper made both the icons and their titles unreadable.
+    //
+    // Only the COLOUR is set here; the rectangle is derived inside the draw from the
+    // same layout call that positions the button. Computing it here as well would
+    // mean the layout was evaluated twice, and the two would part company the moment
+    // one of them used a different hovered index.
+    for (int i = 0; i < drawn; ++i) {
+        frame.taskButtons[i].fill = frame.pill.fill;
+        // Handed over from the animation, which runs before this draw. An icon on its way OUT
+        // is never widened: the amount belongs to the slot it used to occupy.
+        frame.taskButtons[i].hoverAmount = (i < listed) ? bar.taskHoverAmount[i] : 0.0f;
+    }
+    // What the loop worked out, before the draw: the pointer's icon, and the two
+    // animated amounts for the first button.
+    //
+    // Both halves of the row are now reported -- this says what the loop DECIDED, and
+    // the renderer's own `row:` line says what the layout PRODUCED. A row that does not
+    // move is either a decision that never changed or a layout that ignored it, and only
+    // having both makes the difference visible.
+    if (systems.window.HoveredIcon() != bar.lastReportedHoveredIcon ||
+        bar.taskHoverAmount[0] != bar.lastReportedHoverAmount) {
+        bar.lastReportedHoveredIcon = systems.window.HoveredIcon();
+        bar.lastReportedHoverAmount = bar.taskHoverAmount[0];
+        island::LogAndPrint("  loop: hoveredIcon=%d, button0 hover=%.2f, %d icons",
+                            systems.window.HoveredIcon(), bar.taskHoverAmount[0],
+                            systems.window.IconCount());
+        std::fflush(stdout);
+    }
+
+    frame.clock = (frame.state == island::IslandState::Expanded)
+                      ? island::ClockStyle::Card
+                      : island::ClockStyle::Compact;
+
+    // What the taskbar actually got, when it changed.
+    //
+    // "No buttons appear" cannot be diagnosed from the development machine: the sandbox
+    // has its own cursor, so a real hover can never be performed here, and the preview
+    // forces the state directly -- which proves the drawing works and says nothing about
+    // whether the state is ever reached. This line separates the two: it reports the
+    // shape the loop is drawing, how many windows were listed, and how many buttons the
+    // frame was given. If the shape is not Hover, the problem is the pointer; if it is
+    // Hover with zero windows, the problem is the enumeration; if the count is right and
+    // nothing is on screen, the problem is the drawing.
+    if (frame.taskButtonCount != bar.lastReportedButtons ||
+        frame.state != bar.lastReportedState) {
+        bar.lastReportedButtons = frame.taskButtonCount;
+        bar.lastReportedState = frame.state;
+        island::LogAndPrint("  taskbar: state=%ls, %d buttons from %d windows listed "
+                            "(%ls)",
+                            island::StateName(frame.state), frame.taskButtonCount,
+                            systems.taskWindows.Count(), systems.taskWindows.LastSummary());
+        std::fflush(stdout);
+    }
+    // The system panel is a request for the CARD, so the frame has to be told about it in
+    // EVERY state -- including the card itself.
+    //
+    // This lived inside the `shortShape` block, which by definition EXCLUDES Expanded. The
+    // result was a flag that was true at the top of the loop and never reached the frame:
+    // the policy promoted the bar to the card, the renderer then checked a flag that had
+    // silently stayed false, and the panel was never composed. Nothing errored, and the only
+    // symptom was an empty card-shaped outline -- which is what made it expensive to find.
+    // The window region LAST, once the state and the flag for this frame are both settled.
+    //
+    // `UpdatePointerState` applies it too, but that runs near the TOP of the loop and knows
+    // only what the previous frame concluded. The region follows the animated shape, so a
+    // region applied one frame late keeps the CARD clipped to the pill's height for as long
+    // as the panel is open -- which is what "the panel is open but I only see its top edge"
+    // was. Harmless to call again: it returns immediately when the rectangle is unchanged.
+    // The strip's own telling, before the region is applied: the band's width while the line
+    // is beside the deck, zero while it is inside the pill. The window needs it because the
+    // region DECIDES which pixels belong to this window, so a strip outside it is clipped --
+    // see SetStatusStripWidth. Keyed on the FADE rather than on the placement flag, because
+    // the strip is still on screen for the length of its exit.
+    systems.window.SetStatusStripWidth(bar.statusStripOpacity > 0.001f
+                                   ? island::kStatusStripWidthDip
+                                   : 0.0f);
+
+    systems.window.ApplyInputRegion();
+
+    // HOW STRONG, and for WHOM. The card's own content follows the reveal; the BAR's does
+    // not fade at all.
+    //
+    // FADED with the animation, not switched at the end of it. This was
+    // `IsAnimating() ? 0.35f : 1.0f`, which is a step: the panel's own fill is 0.97 * this
+    // number, so for the whole 0.36 s of the slide the card was drawn at 34% alpha -- the
+    // desktop showing straight through it -- and then went to 97% in a single frame. A
+    // one-frame change of that size at the end of a movement is what reads as a stutter, and
+    // it was the one part of this animation that no amount of easing or duration could fix.
+    //
+    // The eased progress and not the linear one, because the reveal is masked by the shape
+    // drawn from that same eased value: driven by the linear clock the fade would run ahead
+    // of the edge and then wait for it.
+    //
+    // AND ONLY THE CARD'S. One number used to serve both, so entering the island with music
+    // playing (which opens the music card) dimmed the deck, the icon row and the lyric line
+    // to 35% and ramped them back -- the bar itself blinking for a card that grows BELOW it
+    // and never touches it. Reported as "点击系统按钮 或者 播放音乐的时候 鼠标移入灵动岛时候
+    // 图片中红框里的会闪一下". See ContentStrengthsFor.
+    const island::ContentStrengths strengths =
+        island::ContentStrengthsFor(cardUp, systems.window.EasedProgress(),
+                                    systems.window.State() == island::IslandState::Expanded);
+    frame.contentOpacity = strengths.bar;
+    frame.cardOpacity = strengths.card;
+
+    // One line per frame of a card transition, when asked for.
+    //
+    // Everything that decides how this movement LOOKS, on one line: how long the frame took,
+    // how far the curve has pushed the shape, where the card is, how solid its content is,
+    // and how much of the window the region admits. "It looks janky" becomes checkable --
+    // uneven intervals, a rectangle that jumps, an opacity that steps.
+    if (traceCardFrames && frame.outerCardUp) {
+        const island::RoundedBox animated = frame.pill.box;
+        const float animatedHeight = animated.rect.bottom - animated.rect.top;
+        const float cardTopDip = frame.restingPill.rect.bottom + island::kCardTopGapDip;
+        const RECT applied = systems.window.AppliedRegion();
+        island::LogAndPrint("  card dt=%5.1fms eased=%.3f h=%5.1f left=%.0f "
+                            "rect=[%.0f,%.0f %.0f,%.0f] cardOpacity=%.2f barOpacity=%.2f "
+                            "region=[%ld,%ld %ld,%ld] panel=%d state=%ls",
+                            dt * 1000.0f, systems.window.EasedProgress(), animatedHeight,
+                            frame.cardLeftDip, frame.cardLeftDip, cardTopDip,
+                            frame.cardLeftDip + island::kExpandedWidthDip,
+                            cardTopDip + animatedHeight, frame.cardOpacity,
+                            frame.contentOpacity,
+                            applied.left, applied.top, applied.right, applied.bottom,
+                            static_cast<int>(frame.cardOwner),
+                            island::StateName(frame.state));
+        std::fflush(stdout);
+    }
+    // What the card shows, decided by its OWNER rather than by the state.
+    //
+    // `state == Expanded` was false for the whole of a retraction, so the content vanished on
+    // the first frame of its own exit and the exit was invisible. The owner is held until the
+    // shape is back, so the content is there to be seen leaving.
+    frame.notification =
+        (frame.cardOwner == island::CardOwner::Notification && runtime.haveNotificationShown)
+            ? &runtime.notificationShown
+            : nullptr;
+    // ... and the sender's icon, which is what makes the card say WHO as well as what.
+    //
+    // Resolved once per change rather than per frame: getting an executable's icon is a trip to
+    // the shell and the disk, and a notification is on screen for six seconds -- about 360
+    // frames of the same image.
+    if (frame.notification) {
+        wchar_t source[260] = {};
+        if (NotificationIconSource(*frame.notification, source, 260)) {
+            if (std::wcscmp(source, notificationIconSource) != 0) {
+                wcscpy_s(notificationIconSource, 260, source);
+                notificationIconPixels.clear();
+                notificationIconWidth = 0;
+                notificationIconHeight = 0;
+                if (island::LoadNotificationIconPixels(source, &notificationIconPixels,
+                                                 &notificationIconWidth,
+                                                 &notificationIconHeight)) {
+                    // nothing more to do: the pixels are the frame's
+                }
+                ++notificationIconRevision;
+                island::LogAndPrint(
+                    L"  notification: icon from '%ls' -> %dx%d, %zu byte(s)\n", source,
+                    notificationIconWidth, notificationIconHeight,
+                    notificationIconPixels.size());
+                std::fflush(stdout);
+            }
+            frame.notificationIconPixels =
+                notificationIconPixels.empty() ? nullptr : notificationIconPixels.data();
+            frame.notificationIconWidth = notificationIconWidth;
+            frame.notificationIconHeight = notificationIconHeight;
+            frame.notificationIconRevision = notificationIconRevision;
+        }
+    }
+    // Music is offered only when the card is the media card, matching the renderer's
+    // one-message-per-card rule.
+    frame.music = (frame.cardOwner == island::CardOwner::Music && nowPlaying.present)
+                      ? &nowPlaying
+                      : nullptr;
+    // The output's peak, for the pill's background meter. This is the reader's CACHED
+    // sample -- its worker refreshes it about thirty times a second (see
+    // AudioVolume::Peak) -- so this is a load rather than a trip to the audio engine.
+    frame.musicLevelKnown = systems.volume.Peak(&frame.musicLevel);
+    frame.musicWavePhase = musicWavePhase;
+    frame.musicAccent = D2D1::ColorF(waveAccent.r, waveAccent.g, waveAccent.b, 1.0f);
+    frame.transportGlyph =
+        (nowPlaying.state == island::PlaybackState::Playing) ? ">" : "||";
+    frame.lyricLine = lyricLine;
+    frame.fallbackLine = fallbackLine;
+    // How far through its arrival the pill's line is, and what it is replacing: 1 and
+    // nothing once it has settled.
+    frame.lyricLineRoll = island::LyricLineRollFor(bar.lyricLineAge);
+    frame.lyricLinePrev = bar.replacedLyricText[0] != '\0' ? bar.replacedLyricText : nullptr;
+    frame.lyricLinePrevScrollDip = bar.replacedLyricScrollDip;
+    frame.noticeLine = noticeLine.empty() ? nullptr : noticeLine.c_str();
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -5022,7 +5328,6 @@ float musicWavePhase = 0.0f;
                 // close, the tiles and the slider vanished and the close animation played on an EMPTY
                 // card: the panel's contents disappeared first and a blank rounded rectangle shrank
                 // afterwards. Reported as the panel "appearing and disappearing" with the pointer.
-                const bool cardUp = frame.outerCardUp;
                 // The panel own content, level by level. The phase lives above RunBar; its place in the
                 // sequence is unchanged.
                 FillPanelFrame(runtime, frame, bar, systems, soundPageShown, trayPageShown, startPageShown, dt);
@@ -5303,292 +5608,11 @@ float musicWavePhase = 0.0f;
                 frame.taskHoveredIndex = systems.window.HoveredIcon();
                 frame.startHovered = systems.window.StartHovered() || forcedStartHover;
 
-                // --- the hover preview: a live thumbnail under the icon the pointer rests on -------
-                //
-                // AFTER A DWELL, not on arrival (see bar.previewTarget), and not while a card is up: the
-                // media card and the system panel hang BELOW the bar, which is exactly where a preview
-                // goes, so one would be drawn under the other.
-                //
-                // The box is computed by the pure ThumbnailBoxFor, from the SAME icon rectangle the row
-                // was laid out with -- so the preview cannot point at a different icon from the one
-                // that is open.
-                if (previewReady) {
-                    const unsigned long long previewNow = GetTickCount64();
-                    const int hoveredIcon = frame.taskHoveredIndex;
-                    const HWND wanted = (hoveredIcon >= 0 && hoveredIcon < drawn)
-                                            ? bar.taskHandles[hoveredIcon]
-                                            : nullptr;
-                    if (wanted != bar.previewTarget) {
-                        bar.previewTarget = wanted;
-                        bar.previewSinceMs = previewNow;
-                    }
-
-                    const bool rested = wanted && (previewNow - bar.previewSinceMs) >= kThumbnailDwellMs;
-                    // ONCE IT IS UP, IT FOLLOWS THE POINTER ALONG THE ROW AT ONCE.
-                    //
-                    // The dwell exists to stop a preview flashing up for every icon the pointer passes on
-                    // its way somewhere. Once one is already on screen the user has decided where to look,
-                    // and making them wait again for the neighbour is the flicker rather than the cure:
-                    // the preview would vanish and come back 350 ms later. It still goes away the moment
-                    // the pointer leaves the row.
-                    const bool follow = wanted != nullptr && systems.preview.Visible();
-                    bool shown = false;
-                    // The preview path registers a DWM thumbnail on the window and can redraw the live
-                    // content every frame, so it is one of the things a slow frame may turn out to be.
-                    frameWork |= kWorkThumbnail;
-                    if ((rested || follow) && !frame.outerCardUp && IsWindow(wanted)) {
-                        const RECT monitorPx = systems.window.Monitor().screen;
-                        const float scale = systems.window.Scale();
-                        // THE ROW THE PREVIEW HANGS OFF IS THE ROW THAT IS DRAWN, tray button and all.
-                        //
-                        // The application icons are painted from a box the tray button has moved along
-                        // (see RowAnchorWithTray), and the preview is placed under "the icon the
-                        // pointer is on". Measuring the button from the un-shifted box put the card
-                        // one button to the LEFT of the icon it belongs to -- the same off-by-one
-                        // button that made the FIRST icon open the SECOND, seen from the drawing side.
-                        const island::RoundedBox islandBox = island::RowAnchorWithTray(
-                            systems.window.LayoutIslandFor(), frame.trayIconCount > 0);
-                        const island::RectF button = island::TaskIconButtonAtAmounts(
-                            islandBox, hoveredIcon, drawn, bar.taskHoverAmount);
-                        RECT iconPx = {};
-                        iconPx.left = monitorPx.left +
-                                      static_cast<LONG>(std::lround(button.left * scale));
-                        iconPx.right = monitorPx.left +
-                                       static_cast<LONG>(std::lround(button.right * scale));
-                        iconPx.top = monitorPx.top + static_cast<LONG>(std::lround(button.top * scale));
-                        iconPx.bottom =
-                            monitorPx.top + static_cast<LONG>(std::lround(button.bottom * scale));
-
-                        // THE COMPOSITOR'S OWN SIZE FIRST, then the geometry: it stretches its picture to
-                        // fill whatever rectangle it is given, so the card has to be built around the shape
-                        // IT reports. GetWindowRect is not that shape -- using it drew one window squashed
-                        // into a flat strip (see ThumbnailPreview.h).
-                        const SIZE sourceSize = systems.preview.Begin(wanted);
-                        const island::ThumbnailPlacement placement = island::ThumbnailBoxFor(
-                            sourceSize.cx, sourceSize.cy, iconPx, monitorPx, scale);
-                        shown = placement.valid && systems.preview.Place(placement);
-
-                        if (!bar.previewReported) {
-                            bar.previewReported = true;
-                            island::LogAndPrint(
-                                "  preview: hwnd %p -> card %ld,%ld %ldx%ld, picture %ldx%ld "
-                                "(compositor says %ldx%ld), shown=%d, hr=0x%08llX",
-                                reinterpret_cast<void*>(wanted), placement.card.left,
-                                placement.card.top, placement.card.right - placement.card.left,
-                                placement.card.bottom - placement.card.top,
-                                placement.picture.right - placement.picture.left,
-                                placement.picture.bottom - placement.picture.top, sourceSize.cx,
-                                sourceSize.cy, shown ? 1 : 0, systems.preview.LastResult());
-                            std::fflush(stdout);
-                        }
-                    }
-
-                    if (!shown) systems.preview.Hide();
-
-                    // A refusal is reported once per count rather than once per frame: a window the
-                    // compositor will not preview is a fact about that window, and repeating it 60 times
-                    // a second would drown the log.
-                    if (systems.preview.Refusals() != bar.previewLastRefusals) {
-                        bar.previewLastRefusals = systems.preview.Refusals();
-                        island::LogAndPrint("  preview: the compositor refused a thumbnail of hwnd %p "
-                                            "(0x%08llX)",
-                                            reinterpret_cast<void*>(wanted), systems.preview.LastResult());
-                        std::fflush(stdout);
-                    }
-                }
-
-                // Each icon gets a background in the island's own colour, so the row reads as part
-                // of the island rather than as icons floating on the wallpaper -- a bright
-                // wallpaper made both the icons and their titles unreadable.
-                //
-                // Only the COLOUR is set here; the rectangle is derived inside the draw from the
-                // same layout call that positions the button. Computing it here as well would
-                // mean the layout was evaluated twice, and the two would part company the moment
-                // one of them used a different hovered index.
-                for (int i = 0; i < drawn; ++i) {
-                    frame.taskButtons[i].fill = frame.pill.fill;
-                    // Handed over from the animation, which runs before this draw. An icon on its way OUT
-                    // is never widened: the amount belongs to the slot it used to occupy.
-                    frame.taskButtons[i].hoverAmount = (i < listed) ? bar.taskHoverAmount[i] : 0.0f;
-                }
-                // What the loop worked out, before the draw: the pointer's icon, and the two
-                // animated amounts for the first button.
-                //
-                // Both halves of the row are now reported -- this says what the loop DECIDED, and
-                // the renderer's own `row:` line says what the layout PRODUCED. A row that does not
-                // move is either a decision that never changed or a layout that ignored it, and only
-                // having both makes the difference visible.
-                if (systems.window.HoveredIcon() != bar.lastReportedHoveredIcon ||
-                    bar.taskHoverAmount[0] != bar.lastReportedHoverAmount) {
-                    bar.lastReportedHoveredIcon = systems.window.HoveredIcon();
-                    bar.lastReportedHoverAmount = bar.taskHoverAmount[0];
-                    island::LogAndPrint("  loop: hoveredIcon=%d, button0 hover=%.2f, %d icons",
-                                        systems.window.HoveredIcon(), bar.taskHoverAmount[0],
-                                        systems.window.IconCount());
-                    std::fflush(stdout);
-                }
-
-                frame.clock = (frame.state == island::IslandState::Expanded)
-                                  ? island::ClockStyle::Card
-                                  : island::ClockStyle::Compact;
-
-                // What the taskbar actually got, when it changed.
-                //
-                // "No buttons appear" cannot be diagnosed from the development machine: the sandbox
-                // has its own cursor, so a real hover can never be performed here, and the preview
-                // forces the state directly -- which proves the drawing works and says nothing about
-                // whether the state is ever reached. This line separates the two: it reports the
-                // shape the loop is drawing, how many windows were listed, and how many buttons the
-                // frame was given. If the shape is not Hover, the problem is the pointer; if it is
-                // Hover with zero windows, the problem is the enumeration; if the count is right and
-                // nothing is on screen, the problem is the drawing.
-                if (frame.taskButtonCount != bar.lastReportedButtons ||
-                    frame.state != bar.lastReportedState) {
-                    bar.lastReportedButtons = frame.taskButtonCount;
-                    bar.lastReportedState = frame.state;
-                    island::LogAndPrint("  taskbar: state=%ls, %d buttons from %d windows listed "
-                                        "(%ls)",
-                                        island::StateName(frame.state), frame.taskButtonCount,
-                                        systems.taskWindows.Count(), systems.taskWindows.LastSummary());
-                    std::fflush(stdout);
-                }
-                // The system panel is a request for the CARD, so the frame has to be told about it in
-                // EVERY state -- including the card itself.
-                //
-                // This lived inside the `shortShape` block, which by definition EXCLUDES Expanded. The
-                // result was a flag that was true at the top of the loop and never reached the frame:
-                // the policy promoted the bar to the card, the renderer then checked a flag that had
-                // silently stayed false, and the panel was never composed. Nothing errored, and the only
-                // symptom was an empty card-shaped outline -- which is what made it expensive to find.
-                // The window region LAST, once the state and the flag for this frame are both settled.
-                //
-                // `UpdatePointerState` applies it too, but that runs near the TOP of the loop and knows
-                // only what the previous frame concluded. The region follows the animated shape, so a
-                // region applied one frame late keeps the CARD clipped to the pill's height for as long
-                // as the panel is open -- which is what "the panel is open but I only see its top edge"
-                // was. Harmless to call again: it returns immediately when the rectangle is unchanged.
-                // The strip's own telling, before the region is applied: the band's width while the line
-                // is beside the deck, zero while it is inside the pill. The window needs it because the
-                // region DECIDES which pixels belong to this window, so a strip outside it is clipped --
-                // see SetStatusStripWidth. Keyed on the FADE rather than on the placement flag, because
-                // the strip is still on screen for the length of its exit.
-                systems.window.SetStatusStripWidth(bar.statusStripOpacity > 0.001f
-                                               ? island::kStatusStripWidthDip
-                                               : 0.0f);
-
-                systems.window.ApplyInputRegion();
-
-                // HOW STRONG, and for WHOM. The card's own content follows the reveal; the BAR's does
-                // not fade at all.
-                //
-                // FADED with the animation, not switched at the end of it. This was
-                // `IsAnimating() ? 0.35f : 1.0f`, which is a step: the panel's own fill is 0.97 * this
-                // number, so for the whole 0.36 s of the slide the card was drawn at 34% alpha -- the
-                // desktop showing straight through it -- and then went to 97% in a single frame. A
-                // one-frame change of that size at the end of a movement is what reads as a stutter, and
-                // it was the one part of this animation that no amount of easing or duration could fix.
-                //
-                // The eased progress and not the linear one, because the reveal is masked by the shape
-                // drawn from that same eased value: driven by the linear clock the fade would run ahead
-                // of the edge and then wait for it.
-                //
-                // AND ONLY THE CARD'S. One number used to serve both, so entering the island with music
-                // playing (which opens the music card) dimmed the deck, the icon row and the lyric line
-                // to 35% and ramped them back -- the bar itself blinking for a card that grows BELOW it
-                // and never touches it. Reported as "点击系统按钮 或者 播放音乐的时候 鼠标移入灵动岛时候
-                // 图片中红框里的会闪一下". See ContentStrengthsFor.
-                const island::ContentStrengths strengths =
-                    island::ContentStrengthsFor(cardUp, systems.window.EasedProgress(),
-                                                systems.window.State() == island::IslandState::Expanded);
-                frame.contentOpacity = strengths.bar;
-                frame.cardOpacity = strengths.card;
-
-                // One line per frame of a card transition, when asked for.
-                //
-                // Everything that decides how this movement LOOKS, on one line: how long the frame took,
-                // how far the curve has pushed the shape, where the card is, how solid its content is,
-                // and how much of the window the region admits. "It looks janky" becomes checkable --
-                // uneven intervals, a rectangle that jumps, an opacity that steps.
-                if (traceCardFrames && frame.outerCardUp) {
-                    const island::RoundedBox animated = frame.pill.box;
-                    const float animatedHeight = animated.rect.bottom - animated.rect.top;
-                    const float cardTopDip = frame.restingPill.rect.bottom + island::kCardTopGapDip;
-                    const RECT applied = systems.window.AppliedRegion();
-                    island::LogAndPrint("  card dt=%5.1fms eased=%.3f h=%5.1f left=%.0f "
-                                        "rect=[%.0f,%.0f %.0f,%.0f] cardOpacity=%.2f barOpacity=%.2f "
-                                        "region=[%ld,%ld %ld,%ld] panel=%d state=%ls",
-                                        dt * 1000.0f, systems.window.EasedProgress(), animatedHeight,
-                                        frame.cardLeftDip, frame.cardLeftDip, cardTopDip,
-                                        frame.cardLeftDip + island::kExpandedWidthDip,
-                                        cardTopDip + animatedHeight, frame.cardOpacity,
-                                        frame.contentOpacity,
-                                        applied.left, applied.top, applied.right, applied.bottom,
-                                        static_cast<int>(frame.cardOwner),
-                                        island::StateName(frame.state));
-                    std::fflush(stdout);
-                }
-                // What the card shows, decided by its OWNER rather than by the state.
-                //
-                // `state == Expanded` was false for the whole of a retraction, so the content vanished on
-                // the first frame of its own exit and the exit was invisible. The owner is held until the
-                // shape is back, so the content is there to be seen leaving.
-                frame.notification =
-                    (frame.cardOwner == island::CardOwner::Notification && runtime.haveNotificationShown)
-                        ? &runtime.notificationShown
-                        : nullptr;
-                // ... and the sender's icon, which is what makes the card say WHO as well as what.
-                //
-                // Resolved once per change rather than per frame: getting an executable's icon is a trip to
-                // the shell and the disk, and a notification is on screen for six seconds -- about 360
-                // frames of the same image.
-                if (frame.notification) {
-                    wchar_t source[260] = {};
-                    if (NotificationIconSource(*frame.notification, source, 260)) {
-                        if (std::wcscmp(source, notificationIconSource) != 0) {
-                            wcscpy_s(notificationIconSource, 260, source);
-                            notificationIconPixels.clear();
-                            notificationIconWidth = 0;
-                            notificationIconHeight = 0;
-                            if (island::LoadNotificationIconPixels(source, &notificationIconPixels,
-                                                             &notificationIconWidth,
-                                                             &notificationIconHeight)) {
-                                // nothing more to do: the pixels are the frame's
-                            }
-                            ++notificationIconRevision;
-                            island::LogAndPrint(
-                                L"  notification: icon from '%ls' -> %dx%d, %zu byte(s)\n", source,
-                                notificationIconWidth, notificationIconHeight,
-                                notificationIconPixels.size());
-                            std::fflush(stdout);
-                        }
-                        frame.notificationIconPixels =
-                            notificationIconPixels.empty() ? nullptr : notificationIconPixels.data();
-                        frame.notificationIconWidth = notificationIconWidth;
-                        frame.notificationIconHeight = notificationIconHeight;
-                        frame.notificationIconRevision = notificationIconRevision;
-                    }
-                }
-                // Music is offered only when the card is the media card, matching the renderer's
-                // one-message-per-card rule.
-                frame.music = (frame.cardOwner == island::CardOwner::Music && nowPlaying.present)
-                                  ? &nowPlaying
-                                  : nullptr;
-                // The output's peak, for the pill's background meter. This is the reader's CACHED
-                // sample -- its worker refreshes it about thirty times a second (see
-                // AudioVolume::Peak) -- so this is a load rather than a trip to the audio engine.
-                frame.musicLevelKnown = systems.volume.Peak(&frame.musicLevel);
-                frame.musicWavePhase = musicWavePhase;
-                frame.musicAccent = D2D1::ColorF(waveAccent.r, waveAccent.g, waveAccent.b, 1.0f);
-                frame.transportGlyph =
-                    (nowPlaying.state == island::PlaybackState::Playing) ? ">" : "||";
-                frame.lyricLine = lyricLine;
-                frame.fallbackLine = fallbackLine;
-                // How far through its arrival the pill's line is, and what it is replacing: 1 and
-                // nothing once it has settled.
-                frame.lyricLineRoll = island::LyricLineRollFor(bar.lyricLineAge);
-                frame.lyricLinePrev = bar.replacedLyricText[0] != '\0' ? bar.replacedLyricText : nullptr;
-                frame.lyricLinePrevScrollDip = bar.replacedLyricScrollDip;
-                frame.noticeLine = noticeLine.empty() ? nullptr : noticeLine.c_str();
+                // The hover preview (and the notice line that shares this stretch). The phase lives above
+                // RunBar; the drawn count it needs is the one the row was laid out with, above.
+                FillHoverPreview(runtime, frame, bar, systems, nowPlaying, previewReady, drawn, listed, dt,
+                                 musicWavePhase, waveAccent, lyricLine, fallbackLine, noticeLine, frameWork,
+                                 kWorkThumbnail, kThumbnailDwellMs, traceCardFrames);
 
                 // The CALL strip and the date/weather strip. The phase lives above RunBar; its place in the
                 // sequence is unchanged.
