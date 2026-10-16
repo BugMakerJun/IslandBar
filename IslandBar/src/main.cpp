@@ -1527,6 +1527,89 @@ static void PollPointerState(island::BarSystems& systems) {
     systems.window.TakeLayoutChanged();
 }
 
+// --- the shape the pointer asks for, once the motion has settled ---
+//
+// Moved out of the frame loop verbatim (indentation aside). The rule itself is the pure function in
+// StatePolicy.h; what this phase does is describe the situation to it and act on the answer. `resting` and
+// `active` are computed earlier in the pass and handed in; `musicPresent` is the session's own answer
+// (`nowPlaying.present`), passed as a bool so the phase does not have to know about a MusicInfo.
+static void ApplyPointerShapePolicy(island::BarState& bar, island::BarSystems& systems,
+                                    const island::Notification* active, island::IslandState resting,
+                                    bool musicPresent, const wchar_t* forcedState) {
+    // --- pointer -> shape, once the motion has settled ---
+    //
+    // The rule itself lives in StatePolicy.h as a pure function, so the frame loop
+    // has no policy of its own to drift from what the tests check. It used to be
+    // three inline conditions with the promotion to the card buried inside the
+    // branch that lowers an already-open card, so nothing ever moved
+    // Hover -> Expanded and the card was unreachable while music played.
+    //
+    // Only consulted when the motion has stopped, so a shape is never re-targeted
+    // mid-flight (that would restart the animation every frame).
+    if (!systems.window.IsAnimating()) {
+        // The icon row is described to the policy so it can tell "the pointer is on the
+        // island" from "the pointer is on one of the icons". Those need different answers:
+        // the first widens the island, the second widens one icon and leaves the island
+        // exactly as it is.
+        island::PointerContext context;
+        context.shape = systems.window.State();
+        context.resting = resting;
+        context.pointerInside = systems.window.IsPointerInside();
+        context.notificationActive = active != nullptr;
+        // ... and whether there is a player at all: a PAUSED session still opens the card, which
+        // is how the play button is reached after a pause (see ShouldPromoteToCard).
+        //
+        // This is the SESSION, not "the pill has a lyric": a player read from its own window
+        // title (see PlayerWindow.h) fills the pill's line but has no cover, no position and no
+        // transport keys to put on a card, and the card is exactly those three things.
+        context.musicPresent = musicPresent;
+        context.fullscreenApp = bar.fullscreenAppInFront;
+        // The panel is a request for the CARD, so the policy has to know about it -- otherwise
+        // the state stays Hover and the card is never drawn. That was a whole debugging round:
+        // the flag was set, the renderer read it, and the shape never changed.
+        context.systemPanelOpen = bar.systemPanelOpen;
+        context.iconCount = systems.window.IconCount();
+        context.hoveredIcon = systems.window.HoveredIcon();
+        // Where the pointer is, for the rule that gives the card up: an icon or a deck button is
+        // asking about itself, not about the island. The window is the only thing that knows where
+        // those buttons are.
+        context.pointerOnDeck = systems.window.SystemButtonHovered() || systems.window.StartHovered();
+        // ... and whether it is on the PILL rather than elsewhere on the bar. The card is the
+        // pill's, so this, not `pointerInside`, is what asks for it.
+        context.pointerOnIsland = systems.window.IsPointerOnIsland();
+        // ... and whether it is in the CARD's COLUMN -- the card and the gap between it and the bar.
+        // That column is the pill's territory as much as the pill is: the pointer has to be able to
+        // walk from the pill down onto the card whose buttons it wants, and the gap is part of the walk.
+        context.pointerInCardColumn = systems.window.IsPointerInCardColumn();
+
+        const island::IslandState next = island::NextShape(context);
+
+        if (forcedState) {
+            // Pinned. The policy above still ran and is still reported; its answer is simply not
+            // acted on, so what is on screen is a named state rather than whatever the pointer
+            // happened to be doing.
+            const island::IslandState pinned = island::StateFromName(forcedState);
+            if (systems.window.State() != pinned) systems.window.SetState(pinned);
+        } else if (next != systems.window.State()) {
+            systems.window.SetState(next);
+        }
+
+        // A DRAG UNDER WAY HOLDS THE CARD OPEN, whatever the pointer does.
+        //
+        // A slider's gesture is "press it, drag anywhere, release" -- the pointer leaves the row,
+        // leaves the card, and often leaves the bar itself on its way to the end of the bar.track. With
+        // the policy left in charge the card retracted mid-drag: the handle stopped updating at the
+        // exact moment the user was watching it, which is the other half of "卡卡的，没有过渡".
+        // Same shape as the rule that already holds the card for a notification: something explicit
+        // is in progress, so the pointer's position is not the question.
+        if (bar.panelSliderDrag || bar.mixerSliderDragRow >= 0) {
+            if (systems.window.State() != island::IslandState::Expanded) {
+                systems.window.SetState(island::IslandState::Expanded);
+            }
+        }
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -3620,78 +3703,9 @@ float musicWavePhase = 0.0f;
             // RunBar; it needs nothing but the window, and what the pointer MEANS is decided below.
             PollPointerState(systems);
 
-            // --- pointer -> shape, once the motion has settled ---
-            //
-            // The rule itself lives in StatePolicy.h as a pure function, so the frame loop
-            // has no policy of its own to drift from what the tests check. It used to be
-            // three inline conditions with the promotion to the card buried inside the
-            // branch that lowers an already-open card, so nothing ever moved
-            // Hover -> Expanded and the card was unreachable while music played.
-            //
-            // Only consulted when the motion has stopped, so a shape is never re-targeted
-            // mid-flight (that would restart the animation every frame).
-            if (!systems.window.IsAnimating()) {
-                // The icon row is described to the policy so it can tell "the pointer is on the
-                // island" from "the pointer is on one of the icons". Those need different answers:
-                // the first widens the island, the second widens one icon and leaves the island
-                // exactly as it is.
-                island::PointerContext context;
-                context.shape = systems.window.State();
-                context.resting = resting;
-                context.pointerInside = systems.window.IsPointerInside();
-                context.notificationActive = active != nullptr;
-                // ... and whether there is a player at all: a PAUSED session still opens the card, which
-                // is how the play button is reached after a pause (see ShouldPromoteToCard).
-                //
-                // This is the SESSION, not "the pill has a lyric": a player read from its own window
-                // title (see PlayerWindow.h) fills the pill's line but has no cover, no position and no
-                // transport keys to put on a card, and the card is exactly those three things.
-                context.musicPresent = nowPlaying.present;
-                context.fullscreenApp = bar.fullscreenAppInFront;
-                // The panel is a request for the CARD, so the policy has to know about it -- otherwise
-                // the state stays Hover and the card is never drawn. That was a whole debugging round:
-                // the flag was set, the renderer read it, and the shape never changed.
-                context.systemPanelOpen = bar.systemPanelOpen;
-                context.iconCount = systems.window.IconCount();
-                context.hoveredIcon = systems.window.HoveredIcon();
-                // Where the pointer is, for the rule that gives the card up: an icon or a deck button is
-                // asking about itself, not about the island. The window is the only thing that knows where
-                // those buttons are.
-                context.pointerOnDeck = systems.window.SystemButtonHovered() || systems.window.StartHovered();
-                // ... and whether it is on the PILL rather than elsewhere on the bar. The card is the
-                // pill's, so this, not `pointerInside`, is what asks for it.
-                context.pointerOnIsland = systems.window.IsPointerOnIsland();
-                // ... and whether it is in the CARD's COLUMN -- the card and the gap between it and the bar.
-                // That column is the pill's territory as much as the pill is: the pointer has to be able to
-                // walk from the pill down onto the card whose buttons it wants, and the gap is part of the walk.
-                context.pointerInCardColumn = systems.window.IsPointerInCardColumn();
-
-                const island::IslandState next = island::NextShape(context);
-
-                if (forcedState) {
-                    // Pinned. The policy above still ran and is still reported; its answer is simply not
-                    // acted on, so what is on screen is a named state rather than whatever the pointer
-                    // happened to be doing.
-                    const island::IslandState pinned = island::StateFromName(forcedState);
-                    if (systems.window.State() != pinned) systems.window.SetState(pinned);
-                } else if (next != systems.window.State()) {
-                    systems.window.SetState(next);
-                }
-
-                // A DRAG UNDER WAY HOLDS THE CARD OPEN, whatever the pointer does.
-                //
-                // A slider's gesture is "press it, drag anywhere, release" -- the pointer leaves the row,
-                // leaves the card, and often leaves the bar itself on its way to the end of the bar.track. With
-                // the policy left in charge the card retracted mid-drag: the handle stopped updating at the
-                // exact moment the user was watching it, which is the other half of "卡卡的，没有过渡".
-                // Same shape as the rule that already holds the card for a notification: something explicit
-                // is in progress, so the pointer's position is not the question.
-                if (bar.panelSliderDrag || bar.mixerSliderDragRow >= 0) {
-                    if (systems.window.State() != island::IslandState::Expanded) {
-                        systems.window.SetState(island::IslandState::Expanded);
-                    }
-                }
-            }
+            // The shape the pointer asks for. The phase lives above RunBar; `resting` and `active` were
+            // worked out earlier in this pass and are handed in with the session's own answer.
+            ApplyPointerShapePolicy(bar, systems, active, resting, nowPlaying.present, forcedState);
 
             // --- advance the animation ---
             // The frame's own clock and the track position: both phases live above RunBar, in this order.
