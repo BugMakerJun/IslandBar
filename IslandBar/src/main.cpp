@@ -1271,6 +1271,33 @@ struct BarRuntime {
     bool lastSoundPageOpen = false;
     float lastSoundScroll = 0.0f;
     unsigned long long lastSoundRevision = 0;
+    // --- the decoded pictures, and the revisions they came from ---
+    //
+    // The renderer caches its GPU bitmaps against these POINTERS and against the revision fields they are
+    // published with (see FrameState::artworkRevision), so the pair has to survive a pass: one decode per
+    // revision, and every frame in between draws from whatever the decode left here. What did not survive
+    // a pass used to be decoded and uploaded again -- that is what these caches were added for.
+    const uint8_t* artworkPixels = nullptr;
+    int artworkWidth = 0;
+    int artworkHeight = 0;
+    unsigned long long lastDecodedArtworkRevision = 0;
+    // The wash behind the card, built from the same cover; it belongs to the same revision.
+    const uint8_t* backgroundPixels = nullptr;
+    int backgroundWidth = 0;
+    int backgroundHeight = 0;
+    // The source application's icon: the same one-decode-per-revision rule, with a revision of its own,
+    // because an icon can change while the artwork does not.
+    const uint8_t* iconPixels = nullptr;
+    int iconWidth = 0;
+    int iconHeight = 0;
+    unsigned long long lastDecodedIconRevision = 0;
+    // The icon line is written when the SIZE or the fact of a decode changes rather than once per frame,
+    // so these two remember what was last reported (see FillDecodedPictures).
+    int lastReportedIconWidth = -1;
+    bool iconWasDecoded = false;
+    // The wave's colour, taken from the cover in the same decode (see AccentColourFromArtwork); the default
+    // is what a bar.track with no artwork -- or an unsaturated one -- keeps.
+    island::AccentColour waveAccent;
 };
 
 
@@ -3092,6 +3119,170 @@ static void FillHoverPreview(BarRuntime& runtime, island::FrameState& frame, isl
     frame.noticeLine = noticeLine.empty() ? nullptr : noticeLine.c_str();
 }
 
+// --- the album art, the wash behind it, and the source application's icon ---
+//
+// Moved out of the frame loop verbatim (indentation aside; the moved text is otherwise untouched,
+// down to the identifiers, which now read and write BarRuntime). Nothing about WHAT it does changed:
+// one decode per revision, the wash built from the same bytes, and the cover dropped when the track
+// has none. What changed is WHERE the results live, and that is not tidiness: the renderer caches its
+// GPU bitmaps against exactly these pointers and revisions, so a picture that did not survive a pass
+// would be decoded and uploaded again on the next one -- which is what the caches were added for.
+static void FillDecodedPictures(BarRuntime& runtime, island::FrameState& frame,
+                                const island::MusicInfo& nowPlaying) {
+    // Album art is decoded once per artwork revision, not per frame: the
+    // decode is the expensive part and the bytes only change when the
+    // bar.track does. The blurred background is built here too -- it is a
+    // second encode/decode pair, and doing it per frame would be wasteful
+    // for a wash that only changes with the bar.track.
+    //
+    // ... AND IT IS DECODED WHETHER OR NOT THE CARD IS UP.
+    //
+    // This used to be gated on `frame.music` -- "nothing is displaying it, so do not decode it" --
+    // and that gate had two costs, which the user found one after the other:
+    //
+    //   * the pill's audio wave takes its COLOUR from this same decode, so with the card closed the
+    //     strip kept the previous bar.track's accent for the whole song. Reported as "歌词后面的 随音乐
+    //     跳动的的颜色 如果鼠标不移入 就一直一个颜色" -- the colour only changed when the pointer
+    //     went onto the island, because that is what opened the card, and opening the card is what
+    //     ran the decode.
+    //   * a cover that arrived while the card was closed had not been decoded by the time the card
+    //     opened, so the card showed the placeholder for a moment and then caught up.
+    //
+    // One decode per bar.track either way: the same work the card would have done a moment later.
+    if (nowPlaying.artworkSize > 0) {
+        if (nowPlaying.artworkRevision != runtime.lastDecodedArtworkRevision) {
+            runtime.lastDecodedArtworkRevision = nowPlaying.artworkRevision;
+            island::DecodedImage decoded;
+            // Its own slot: the blurred background below is decoded in the same frame, and
+            // sharing one buffer is what drew the cover out of the blur's bytes (see
+            // DecodeSlot).
+            if (island::DecodeImage(nowPlaying.artwork, nowPlaying.artworkSize, &decoded,
+                                    island::DecodeSlot::Artwork)) {
+                runtime.artworkPixels = decoded.pixels;
+                runtime.artworkWidth = decoded.width;
+                runtime.artworkHeight = decoded.height;
+                // The wave's colour, taken from the same decode: once per cover, not per
+                // frame. See AccentColourFromArtwork.
+                runtime.waveAccent = island::AccentColourFromArtwork(decoded.pixels, decoded.width,
+                                                             decoded.height);
+            } else {
+                runtime.artworkPixels = nullptr;
+                runtime.artworkWidth = 0;
+                runtime.artworkHeight = 0;
+                runtime.waveAccent = island::AccentColour{};
+            }
+
+            // THE ONE CASE THE LINE ABOVE CANNOT TELL: bytes arrived and would not decode. A cover
+            // that never appears looks exactly like a cover that was never sent (`music: cover
+            // NONE`), and this is the line that tells the two apart.
+            island::LogAndPrint("  music: cover %ls %dx%d\n",
+                                runtime.artworkPixels ? L"decoded" : L"COULD NOT DECODE",
+                                runtime.artworkWidth, runtime.artworkHeight);
+            std::fflush(stdout);
+
+            // The card is 420x236 DIP; a wash at a quarter of that is
+            // plenty, since it is out of focus by construction.
+            static uint8_t backgroundPng[island::kMusicArtworkCapacity] = {};
+            const size_t backgroundSize = island::MakeBlurredBackgroundPng(
+                nowPlaying.artwork, nowPlaying.artworkSize, 105, 59,
+                backgroundPng, sizeof(backgroundPng));
+            if (backgroundSize > 0) {
+                island::DecodedImage blurred;
+                if (island::DecodeImage(backgroundPng, backgroundSize, &blurred,
+                                        island::DecodeSlot::Background)) {
+                    runtime.backgroundPixels = blurred.pixels;
+                    runtime.backgroundWidth = blurred.width;
+                    runtime.backgroundHeight = blurred.height;
+                } else {
+                    runtime.backgroundPixels = nullptr;
+                }
+            } else {
+                runtime.backgroundPixels = nullptr;
+            }
+        }
+        if (runtime.artworkPixels) {
+            frame.artworkPixels = runtime.artworkPixels;
+            frame.artworkWidth = runtime.artworkWidth;
+            frame.artworkHeight = runtime.artworkHeight;
+            // The renderer caches the GPU bitmap against this, so it is
+            // uploaded once per bar.track rather than once per frame.
+            frame.artworkRevision = nowPlaying.artworkRevision;
+        }
+        if (runtime.backgroundPixels) {
+            frame.backgroundPixels = runtime.backgroundPixels;
+            frame.backgroundWidth = runtime.backgroundWidth;
+            frame.backgroundHeight = runtime.backgroundHeight;
+            // Derived from the artwork revision: the wash is a function of the
+            // same cover, so it changes exactly when the cover does.
+            frame.backgroundRevision = nowPlaying.artworkRevision;
+            // The card's own fill has to become translucent or the wash
+            // would be hidden behind it -- and only the CARD's: with no card up this would change
+            // the island's own fill, which is the one thing the wash has nothing to do with.
+            if (frame.music) {
+                frame.pill.fill = island::CurrentTheme().pillTop;
+            }
+        }
+    } else if (nowPlaying.artworkRevision == 0 && runtime.lastDecodedArtworkRevision != 0) {
+        // THE COVER BELONGS TO THE TRACK, SO DROP IT WHEN THE TRACK HAS NONE.
+        //
+        // Everything the block above produces lives on in `runtime.artworkPixels` and `runtime.backgroundPixels`
+        // -- file-scope pointers the renderer caches its GPU copies against -- and that block only
+        // runs while the session HAS artwork. So a bar.track that starts without any kept drawing the
+        // PREVIOUS bar.track's cover: reported as "歌曲切换了 但是封面图没有换", which is the opposite
+        // of the complaint before it (an empty slot) and the same root cause seen from the other
+        // side.
+        //
+        // A revision of 0 is the session saying "this bar.track has no cover yet", and the retry in
+        // MusicSession keeps asking for one -- when it arrives the revision goes to 1 and the
+        // decode above takes over. Until then the card shows the PLACEHOLDER (see DrawMusicCard),
+        // not someone else's album art.
+        runtime.lastDecodedArtworkRevision = 0;
+        runtime.artworkPixels = nullptr;
+        runtime.artworkWidth = 0;
+        runtime.artworkHeight = 0;
+        runtime.backgroundPixels = nullptr;
+        runtime.backgroundWidth = 0;
+        runtime.backgroundHeight = 0;
+        runtime.waveAccent = island::AccentColour{};
+        island::LogAndPrint("  music: cover dropped (the new bar.track has none yet)\n");
+        std::fflush(stdout);
+    }
+
+    // The source application's icon, decoded once per icon revision. It is not
+    // inside the artwork block: it does not depend on the album art at all, and it
+    // must still show for a session that publishes no cover.
+    if (nowPlaying.iconSize > 0 &&
+        nowPlaying.iconRevision != runtime.lastDecodedIconRevision) {
+        runtime.lastDecodedIconRevision = nowPlaying.iconRevision;
+        island::DecodedImage decodedIcon;
+        if (island::DecodeImage(nowPlaying.icon, nowPlaying.iconSize, &decodedIcon,
+                                island::DecodeSlot::Icon)) {
+            runtime.iconPixels = decodedIcon.pixels;
+            runtime.iconWidth = decodedIcon.width;
+            runtime.iconHeight = decodedIcon.height;
+        } else {
+            runtime.iconPixels = nullptr;
+        }
+    }
+    if (runtime.iconPixels) {
+        frame.iconPixels = runtime.iconPixels;
+        frame.iconWidth = runtime.iconWidth;
+        frame.iconHeight = runtime.iconHeight;
+        frame.iconRevision = nowPlaying.iconRevision;
+    }
+    // Reported whenever the answer changes, so "the icon is missing" splits into: no
+    // bytes, bytes that will not decode, or bytes that decode and are never drawn.
+    // Those have three different fixes, and from the screen they look identical.
+    if (runtime.iconWidth != runtime.lastReportedIconWidth ||
+        (runtime.iconPixels != nullptr) != runtime.iconWasDecoded) {
+        runtime.lastReportedIconWidth = runtime.iconWidth;
+        runtime.iconWasDecoded = runtime.iconPixels != nullptr;
+        island::LogAndPrint("  icon decode: %s, %dx%d, rev %llu",
+                            runtime.iconPixels ? "ok" : "NO PIXELS", runtime.iconWidth, runtime.iconHeight,
+                            nowPlaying.iconRevision);
+    }
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -3582,23 +3773,10 @@ unsigned long long lastMusicMeterMs = 0;
         long long lastNotificationId = 0;
         island::IslandState lastLogged = systems.window.State();
         bool haveDrawn = false;
-        unsigned long long lastDecodedArtworkRevision = 0;
-        const uint8_t* artworkPixels = nullptr;
-// The wave's colour, taken from the cover when it is decoded (see AccentColourFromArtwork). The default
-// is what a bar.track with no artwork -- or an unsaturated one -- keeps.
-island::AccentColour waveAccent;
-float musicWavePhase = 0.0f;
-        int artworkWidth = 0;
-        int artworkHeight = 0;
-        const uint8_t* iconPixels = nullptr;
-        int iconWidth = 0;
-        int iconHeight = 0;
-        unsigned long long lastDecodedIconRevision = 0;
-        int lastReportedIconWidth = -1;
-        bool iconWasDecoded = false;
-        const uint8_t* backgroundPixels = nullptr;
-        int backgroundWidth = 0;
-        int backgroundHeight = 0;
+        // The decoded pictures and the wave's colour are BarRuntime's now: they outlive a pass (see
+        // FillDecodedPictures). The wave PHASE stays here -- this is the loop's own clock, not state the
+        // drawing reads.
+        float musicWavePhase = 0.0f;
 
         // --- now-playing display policy ---
         //
@@ -5611,7 +5789,7 @@ float musicWavePhase = 0.0f;
                 // The hover preview (and the notice line that shares this stretch). The phase lives above
                 // RunBar; the drawn count it needs is the one the row was laid out with, above.
                 FillHoverPreview(runtime, frame, bar, systems, nowPlaying, previewReady, drawn, listed, dt,
-                                 musicWavePhase, waveAccent, lyricLine, fallbackLine, noticeLine, frameWork,
+                                 musicWavePhase, runtime.waveAccent, lyricLine, fallbackLine, noticeLine, frameWork,
                                  kWorkThumbnail, kThumbnailDwellMs, traceCardFrames);
 
                 // The CALL strip and the date/weather strip. The phase lives above RunBar; its place in the
@@ -5665,158 +5843,9 @@ float musicWavePhase = 0.0f;
                     }
                 }
 
-                // Album art is decoded once per artwork revision, not per frame: the
-                // decode is the expensive part and the bytes only change when the
-                // bar.track does. The blurred background is built here too -- it is a
-                // second encode/decode pair, and doing it per frame would be wasteful
-                // for a wash that only changes with the bar.track.
-                //
-                // ... AND IT IS DECODED WHETHER OR NOT THE CARD IS UP.
-                //
-                // This used to be gated on `frame.music` -- "nothing is displaying it, so do not decode it" --
-                // and that gate had two costs, which the user found one after the other:
-                //
-                //   * the pill's audio wave takes its COLOUR from this same decode, so with the card closed the
-                //     strip kept the previous bar.track's accent for the whole song. Reported as "歌词后面的 随音乐
-                //     跳动的的颜色 如果鼠标不移入 就一直一个颜色" -- the colour only changed when the pointer
-                //     went onto the island, because that is what opened the card, and opening the card is what
-                //     ran the decode.
-                //   * a cover that arrived while the card was closed had not been decoded by the time the card
-                //     opened, so the card showed the placeholder for a moment and then caught up.
-                //
-                // One decode per bar.track either way: the same work the card would have done a moment later.
-                if (nowPlaying.artworkSize > 0) {
-                    if (nowPlaying.artworkRevision != lastDecodedArtworkRevision) {
-                        lastDecodedArtworkRevision = nowPlaying.artworkRevision;
-                        island::DecodedImage decoded;
-                        // Its own slot: the blurred background below is decoded in the same frame, and
-                        // sharing one buffer is what drew the cover out of the blur's bytes (see
-                        // DecodeSlot).
-                        if (island::DecodeImage(nowPlaying.artwork, nowPlaying.artworkSize, &decoded,
-                                                island::DecodeSlot::Artwork)) {
-                            artworkPixels = decoded.pixels;
-                            artworkWidth = decoded.width;
-                            artworkHeight = decoded.height;
-                            // The wave's colour, taken from the same decode: once per cover, not per
-                            // frame. See AccentColourFromArtwork.
-                            waveAccent = island::AccentColourFromArtwork(decoded.pixels, decoded.width,
-                                                                         decoded.height);
-                        } else {
-                            artworkPixels = nullptr;
-                            artworkWidth = 0;
-                            artworkHeight = 0;
-                            waveAccent = island::AccentColour{};
-                        }
-
-                        // THE ONE CASE THE LINE ABOVE CANNOT TELL: bytes arrived and would not decode. A cover
-                        // that never appears looks exactly like a cover that was never sent (`music: cover
-                        // NONE`), and this is the line that tells the two apart.
-                        island::LogAndPrint("  music: cover %ls %dx%d\n",
-                                            artworkPixels ? L"decoded" : L"COULD NOT DECODE",
-                                            artworkWidth, artworkHeight);
-                        std::fflush(stdout);
-
-                        // The card is 420x236 DIP; a wash at a quarter of that is
-                        // plenty, since it is out of focus by construction.
-                        static uint8_t backgroundPng[island::kMusicArtworkCapacity] = {};
-                        const size_t backgroundSize = island::MakeBlurredBackgroundPng(
-                            nowPlaying.artwork, nowPlaying.artworkSize, 105, 59,
-                            backgroundPng, sizeof(backgroundPng));
-                        if (backgroundSize > 0) {
-                            island::DecodedImage blurred;
-                            if (island::DecodeImage(backgroundPng, backgroundSize, &blurred,
-                                                    island::DecodeSlot::Background)) {
-                                backgroundPixels = blurred.pixels;
-                                backgroundWidth = blurred.width;
-                                backgroundHeight = blurred.height;
-                            } else {
-                                backgroundPixels = nullptr;
-                            }
-                        } else {
-                            backgroundPixels = nullptr;
-                        }
-                    }
-                    if (artworkPixels) {
-                        frame.artworkPixels = artworkPixels;
-                        frame.artworkWidth = artworkWidth;
-                        frame.artworkHeight = artworkHeight;
-                        // The renderer caches the GPU bitmap against this, so it is
-                        // uploaded once per bar.track rather than once per frame.
-                        frame.artworkRevision = nowPlaying.artworkRevision;
-                    }
-                    if (backgroundPixels) {
-                        frame.backgroundPixels = backgroundPixels;
-                        frame.backgroundWidth = backgroundWidth;
-                        frame.backgroundHeight = backgroundHeight;
-                        // Derived from the artwork revision: the wash is a function of the
-                        // same cover, so it changes exactly when the cover does.
-                        frame.backgroundRevision = nowPlaying.artworkRevision;
-                        // The card's own fill has to become translucent or the wash
-                        // would be hidden behind it -- and only the CARD's: with no card up this would change
-                        // the island's own fill, which is the one thing the wash has nothing to do with.
-                        if (frame.music) {
-                            frame.pill.fill = island::CurrentTheme().pillTop;
-                        }
-                    }
-                } else if (nowPlaying.artworkRevision == 0 && lastDecodedArtworkRevision != 0) {
-                    // THE COVER BELONGS TO THE TRACK, SO DROP IT WHEN THE TRACK HAS NONE.
-                    //
-                    // Everything the block above produces lives on in `artworkPixels` and `backgroundPixels`
-                    // -- file-scope pointers the renderer caches its GPU copies against -- and that block only
-                    // runs while the session HAS artwork. So a bar.track that starts without any kept drawing the
-                    // PREVIOUS bar.track's cover: reported as "歌曲切换了 但是封面图没有换", which is the opposite
-                    // of the complaint before it (an empty slot) and the same root cause seen from the other
-                    // side.
-                    //
-                    // A revision of 0 is the session saying "this bar.track has no cover yet", and the retry in
-                    // MusicSession keeps asking for one -- when it arrives the revision goes to 1 and the
-                    // decode above takes over. Until then the card shows the PLACEHOLDER (see DrawMusicCard),
-                    // not someone else's album art.
-                    lastDecodedArtworkRevision = 0;
-                    artworkPixels = nullptr;
-                    artworkWidth = 0;
-                    artworkHeight = 0;
-                    backgroundPixels = nullptr;
-                    backgroundWidth = 0;
-                    backgroundHeight = 0;
-                    waveAccent = island::AccentColour{};
-                    island::LogAndPrint("  music: cover dropped (the new bar.track has none yet)\n");
-                    std::fflush(stdout);
-                }
-
-                // The source application's icon, decoded once per icon revision. It is not
-                // inside the artwork block: it does not depend on the album art at all, and it
-                // must still show for a session that publishes no cover.
-                if (nowPlaying.iconSize > 0 &&
-                    nowPlaying.iconRevision != lastDecodedIconRevision) {
-                    lastDecodedIconRevision = nowPlaying.iconRevision;
-                    island::DecodedImage decodedIcon;
-                    if (island::DecodeImage(nowPlaying.icon, nowPlaying.iconSize, &decodedIcon,
-                                            island::DecodeSlot::Icon)) {
-                        iconPixels = decodedIcon.pixels;
-                        iconWidth = decodedIcon.width;
-                        iconHeight = decodedIcon.height;
-                    } else {
-                        iconPixels = nullptr;
-                    }
-                }
-                if (iconPixels) {
-                    frame.iconPixels = iconPixels;
-                    frame.iconWidth = iconWidth;
-                    frame.iconHeight = iconHeight;
-                    frame.iconRevision = nowPlaying.iconRevision;
-                }
-                // Reported whenever the answer changes, so "the icon is missing" splits into: no
-                // bytes, bytes that will not decode, or bytes that decode and are never drawn.
-                // Those have three different fixes, and from the screen they look identical.
-                if (iconWidth != lastReportedIconWidth ||
-                    (iconPixels != nullptr) != iconWasDecoded) {
-                    lastReportedIconWidth = iconWidth;
-                    iconWasDecoded = iconPixels != nullptr;
-                    island::LogAndPrint("  icon decode: %s, %dx%d, rev %llu",
-                                        iconPixels ? "ok" : "NO PIXELS", iconWidth, iconHeight,
-                                        nowPlaying.iconRevision);
-                }
+                // The album art, the wash built from it, and the source application's icon. The phase
+                // lives above RunBar; its place in the sequence is unchanged.
+                FillDecodedPictures(runtime, frame, nowPlaying);
 
                 systems.renderer.Render(frame);
                 frameWork |= kWorkDraw;
