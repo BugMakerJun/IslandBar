@@ -2123,6 +2123,128 @@ static void ApplyStartCardPress(island::BarState& bar, island::BarSystems& syste
     std::fflush(stdout);
 }
 
+// --- a press on the 声音输出 page own controls ---
+//
+// Moved out of the frame loop verbatim (indentation aside), with the dismiss call becoming
+// DismissPanelSurface for the same reason the other phases do it. Reached BEFORE the panel own controls,
+// because the two are laid out over the same card: while this level is showing, a click at the position of
+// a tile is a click on a device row, and asking the panel first would fire the wrong action entirely.
+static void ApplySoundPagePress(island::BarState& bar, island::BarSystems& systems, POINT cursor,
+                                bool volumeAvailable, const island::Notification* active,
+                                island::IslandState resting) {
+    // --- the 声音输出 page's own controls ---
+    //
+    // Reached BEFORE the panel's, because the two are laid out over the same card: while this
+    // level is showing, a click at the position of a tile is a click on a device row, and
+    // asking the panel first would fire the wrong action entirely.
+    const island::SoundPageHit soundHit = systems.window.SoundPageHitAtScreen(cursor);
+    switch (soundHit.target) {
+        case island::SoundPageTarget::Back:
+            bar.soundPageOpen = false;
+            island::LogAndPrint("  sound page: back to the panel\n");
+            break;
+
+        case island::SoundPageTarget::Device:
+            if (soundHit.index >= 0 &&
+                soundHit.index < systems.soundSnapshot->deviceCount) {
+                const island::SoundDeviceInfo& wanted =
+                    systems.soundSnapshot->devices[soundHit.index];
+                if (wanted.isDefault) {
+                    island::LogAndPrint(
+                        L"  sound page: device %d '%ls' is already the default\n",
+                        soundHit.index, wanted.name);
+                } else {
+                    // Handed to the worker: switching the default goes through an interface
+                    // that has no public documentation (see SoundOutput), and the worker's
+                    // own log line is what says whether it took.
+                    systems.soundOutput->SetDefaultDevice(wanted.id);
+                    // And a fresh reading asked for at once, rather than up to a second of
+                    // showing the old device as the current one.
+                    systems.soundOutput->Refresh();
+                    island::LogAndPrint(
+                        L"  sound page: switching the default device to %d '%ls'\n",
+                        soundHit.index, wanted.name);
+                }
+            }
+            break;
+
+        case island::SoundPageTarget::Spatial:
+            // Reported rather than pretended: there is no public interface for reading or
+            // writing the spatial-sound setting, so the page shows the shell's two choices
+            // and says so when one is pressed.
+            island::LogAndPrint(
+                "  sound page: spatial sound row %d -- no public interface to change it;"
+                " open 更多音量设置 for this one\n",
+                soundHit.index);
+            break;
+
+        case island::SoundPageTarget::MixerSlider: {
+            const int row = soundHit.index;
+            if (row == 0) {
+                // The device's own row is the master volume, which is AudioVolume's.
+                if (volumeAvailable) {
+                    systems.volume.SetLevel(soundHit.fraction);
+                    bar.mixerSliderDragRow = 0;
+                    bar.mixerSliderDragPid = 0;
+                    island::LogAndPrint("  mixer: master -> %.0f%%\n",
+                                        soundHit.fraction * 100.0f);
+                }
+            } else if (row - 1 < systems.soundSnapshot->sessionCount) {
+                const island::SoundSessionInfo& session =
+                    systems.soundSnapshot->sessions[row - 1];
+                systems.soundOutput->SetSessionVolume(session.pid, soundHit.fraction);
+                bar.mixerSliderDragRow = row;
+                bar.mixerSliderDragPid = session.pid;
+                island::LogAndPrint(L"  mixer: '%ls' (pid %lu) -> %.0f%%\n",
+                                    session.name, session.pid,
+                                    soundHit.fraction * 100.0f);
+            }
+            std::fflush(stdout);
+            break;
+        }
+
+        case island::SoundPageTarget::MixerGear:
+        case island::SoundPageTarget::Footer: {
+            // 更多音量设置, and the mixer's own gear: both are the settings page, which is
+            // where the parts of this page that have no interface of their own live.
+            const HINSTANCE opened = ShellExecuteW(nullptr, L"open", L"ms-settings:sound",
+                                                   nullptr, nullptr, SW_SHOWNORMAL);
+            island::LogAndPrint(
+                "  sound page: %ls -> ms-settings:sound (result %lld)\n",
+                soundHit.target == island::SoundPageTarget::Footer
+                    ? L"more volume settings"
+                    : L"mixer gear",
+                static_cast<long long>(reinterpret_cast<INT_PTR>(opened)));
+            // The settings page is opening, so the card steps aside -- the same rule the
+            // panel's tiles follow.
+            DismissPanelSurface(bar, systems, active, resting);
+            break;
+        }
+
+        case island::SoundPageTarget::Scrollbar: {
+            // A press on the bar.track moves the page a screenful towards where it was pressed,
+            // which is what the shell's own scrollbar does. The window says WHICH WAY -- it is
+            // the one that knows where the thumb is, from the same layout the press was
+            // hit-tested against -- and the OFFSET stays here with the page it belongs to.
+            const int jump = systems.window.SoundScrollJumpFor(cursor);
+            if (jump != 0) {
+                bar.soundPageScroll += static_cast<float>(jump) * 140.0f;
+                systems.window.SetSoundPageScroll(bar.soundPageScroll);
+                bar.soundPageScroll = systems.window.SoundPageScroll();
+                island::LogAndPrint("  sound page: scroll -> %.0f\n", bar.soundPageScroll);
+            }
+            break;
+        }
+
+        case island::SoundPageTarget::None:
+        default:
+            // Anything else on the page -- the padding between rows, a section label -- is
+            // the page itself, and pressing it means nothing rather than "close".
+            break;
+    }
+    std::fflush(stdout);
+}
+
 // --- a click outside the bar puts the panel away ---
 //
 // Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
@@ -3485,117 +3607,9 @@ float musicWavePhase = 0.0f;
                                         bar.systemPanelOpen ? L"open" : L"closed");
                     std::fflush(stdout);
                 } else if (island::LevelAnswersInput(bar.panelLevel, island::PanelLevel::Sound)) {
-                    // --- the 声音输出 page's own controls ---
-                    //
-                    // Reached BEFORE the panel's, because the two are laid out over the same card: while this
-                    // level is showing, a click at the position of a tile is a click on a device row, and
-                    // asking the panel first would fire the wrong action entirely.
-                    const island::SoundPageHit soundHit = systems.window.SoundPageHitAtScreen(cursor);
-                    switch (soundHit.target) {
-                        case island::SoundPageTarget::Back:
-                            bar.soundPageOpen = false;
-                            island::LogAndPrint("  sound page: back to the panel\n");
-                            break;
-
-                        case island::SoundPageTarget::Device:
-                            if (soundHit.index >= 0 &&
-                                soundHit.index < systems.soundSnapshot->deviceCount) {
-                                const island::SoundDeviceInfo& wanted =
-                                    systems.soundSnapshot->devices[soundHit.index];
-                                if (wanted.isDefault) {
-                                    island::LogAndPrint(
-                                        L"  sound page: device %d '%ls' is already the default\n",
-                                        soundHit.index, wanted.name);
-                                } else {
-                                    // Handed to the worker: switching the default goes through an interface
-                                    // that has no public documentation (see SoundOutput), and the worker's
-                                    // own log line is what says whether it took.
-                                    systems.soundOutput->SetDefaultDevice(wanted.id);
-                                    // And a fresh reading asked for at once, rather than up to a second of
-                                    // showing the old device as the current one.
-                                    systems.soundOutput->Refresh();
-                                    island::LogAndPrint(
-                                        L"  sound page: switching the default device to %d '%ls'\n",
-                                        soundHit.index, wanted.name);
-                                }
-                            }
-                            break;
-
-                        case island::SoundPageTarget::Spatial:
-                            // Reported rather than pretended: there is no public interface for reading or
-                            // writing the spatial-sound setting, so the page shows the shell's two choices
-                            // and says so when one is pressed.
-                            island::LogAndPrint(
-                                "  sound page: spatial sound row %d -- no public interface to change it;"
-                                " open 更多音量设置 for this one\n",
-                                soundHit.index);
-                            break;
-
-                        case island::SoundPageTarget::MixerSlider: {
-                            const int row = soundHit.index;
-                            if (row == 0) {
-                                // The device's own row is the master volume, which is AudioVolume's.
-                                if (volumeAvailable) {
-                                    systems.volume.SetLevel(soundHit.fraction);
-                                    bar.mixerSliderDragRow = 0;
-                                    bar.mixerSliderDragPid = 0;
-                                    island::LogAndPrint("  mixer: master -> %.0f%%\n",
-                                                        soundHit.fraction * 100.0f);
-                                }
-                            } else if (row - 1 < systems.soundSnapshot->sessionCount) {
-                                const island::SoundSessionInfo& session =
-                                    systems.soundSnapshot->sessions[row - 1];
-                                systems.soundOutput->SetSessionVolume(session.pid, soundHit.fraction);
-                                bar.mixerSliderDragRow = row;
-                                bar.mixerSliderDragPid = session.pid;
-                                island::LogAndPrint(L"  mixer: '%ls' (pid %lu) -> %.0f%%\n",
-                                                    session.name, session.pid,
-                                                    soundHit.fraction * 100.0f);
-                            }
-                            std::fflush(stdout);
-                            break;
-                        }
-
-                        case island::SoundPageTarget::MixerGear:
-                        case island::SoundPageTarget::Footer: {
-                            // 更多音量设置, and the mixer's own gear: both are the settings page, which is
-                            // where the parts of this page that have no interface of their own live.
-                            const HINSTANCE opened = ShellExecuteW(nullptr, L"open", L"ms-settings:sound",
-                                                                   nullptr, nullptr, SW_SHOWNORMAL);
-                            island::LogAndPrint(
-                                "  sound page: %ls -> ms-settings:sound (result %lld)\n",
-                                soundHit.target == island::SoundPageTarget::Footer
-                                    ? L"more volume settings"
-                                    : L"mixer gear",
-                                static_cast<long long>(reinterpret_cast<INT_PTR>(opened)));
-                            // The settings page is opening, so the card steps aside -- the same rule the
-                            // panel's tiles follow.
-                            dismissPanel();
-                            break;
-                        }
-
-                        case island::SoundPageTarget::Scrollbar: {
-                            // A press on the bar.track moves the page a screenful towards where it was pressed,
-                            // which is what the shell's own scrollbar does. The window says WHICH WAY -- it is
-                            // the one that knows where the thumb is, from the same layout the press was
-                            // hit-tested against -- and the OFFSET stays here with the page it belongs to.
-                            const int jump = systems.window.SoundScrollJumpFor(cursor);
-                            if (jump != 0) {
-                                bar.soundPageScroll += static_cast<float>(jump) * 140.0f;
-                                systems.window.SetSoundPageScroll(bar.soundPageScroll);
-                                bar.soundPageScroll = systems.window.SoundPageScroll();
-                                island::LogAndPrint("  sound page: scroll -> %.0f\n", bar.soundPageScroll);
-                            }
-                            break;
-                        }
-
-                        case island::SoundPageTarget::None:
-                        default:
-                            // Anything else on the page -- the padding between rows, a section label -- is
-                            // the page itself, and pressing it means nothing rather than "close".
-                            break;
-                    }
-                    std::fflush(stdout);
+                    // The 声音输出 page own controls. The phase lives above RunBar; the dismiss call inside
+                    // it is the same four arguments the lambda used.
+                    ApplySoundPagePress(bar, systems, cursor, volumeAvailable, active, resting);
                 } else if (bar.systemPanelOpen && panelHit.target ==
                                                   island::SystemPanelTarget::PageDown) {
                     const int pages = systems.window.SystemPanel().pageCount;
