@@ -1473,6 +1473,60 @@ static void PollNotificationChannels(bool listening, bool toastsAvailable, bool 
     }
 }
 
+// --- the pointer is polled, and the window's edges are drained ---
+//
+// Moved out of the frame loop verbatim (indentation aside). It needs nothing but the window: the decision
+// about what the pointer MEANS is the policy's, further down the loop (see NextShape), and this phase only
+// makes sure the window knows where the pointer is and that its one-shot flags do not pile up.
+static void PollPointerState(island::BarSystems& systems) {
+    // --- pointer -> state ---
+    //
+    // The pointer is polled HERE, from the frame loop, rather than only from a window
+    // timer.
+    //
+    // The window ran an 8 ms timer for this and reported it as running, but a trace of the
+    // messages actually delivered to the window procedure showed `WM_TIMER=0`: the timer
+    // message never arrived, so this poll effectively never happened, `pointerInside_`
+    // stayed false for the life of the process, the shape never promoted to a card, and no
+    // click was ever accepted. It was silent -- the bar drew perfectly and ignored the
+    // pointer.
+    //
+    // The frame loop runs at the compositor's rate, which is better than 8 ms and cannot
+    // be starved, so it is the reliable place to ask. The timer is left in place as a
+    // fallback for the paths that do not pump this loop.
+    systems.window.UpdatePointerState();
+
+    // The window only reports that the pointer entered or left; what that
+    // means is decided here, which keeps the window procedure free of policy.
+    //
+    // Pointer handling must not fight the notification state: while a
+    // notification is showing, leaving the pill returns to the card rather
+    // than collapsing it, or an arriving message would be cut off the instant
+    // the pointer drifted away.
+    bool pointerInside = false;
+    if (systems.window.TakePointerInsideChanged(&pointerInside)) {
+        // THE EDGE IS CONSUMED AND NOTHING ELSE HAPPENS HERE.
+        //
+        // The state is the POLICY's answer (NextShape, below). Every state this handler used to
+        // pick was a second policy, and the two could disagree -- which is what kept the
+        // notification card on screen after it was removed on request:
+        //
+        //   * with the pointer inside, this frame asked for Expanded (`active` -- a message must
+        //     not be cut off when the pointer drifts away) while the policy asked for the notice
+        //     strip, so the two alternated every frame;
+        //   * measured in the bar's own log: `state: notice-strip` and `state: expanded` swapping
+        //     every ~0.35 s while a notification was up, and a screenshot of the card STILL being
+        //     drawn after the card had been removed. Reported as "但是现在还是会触发啊".
+        //
+        // The panel's case below is the policy's too: `bar.systemPanelOpen` returns Expanded whatever
+        // the pointer is doing, so nothing was lost by deleting this.
+        (void)pointerInside;
+    }
+    // A layout change (DPI, work-area change) has already been applied by
+    // the window; draining the flag keeps it from accumulating.
+    systems.window.TakeLayoutChanged();
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -3562,52 +3616,9 @@ float musicWavePhase = 0.0f;
                 std::fflush(stdout);
             }
 
-            // --- pointer -> state ---
-            //
-            // The pointer is polled HERE, from the frame loop, rather than only from a window
-            // timer.
-            //
-            // The window ran an 8 ms timer for this and reported it as running, but a trace of the
-            // messages actually delivered to the window procedure showed `WM_TIMER=0`: the timer
-            // message never arrived, so this poll effectively never happened, `pointerInside_`
-            // stayed false for the life of the process, the shape never promoted to a card, and no
-            // click was ever accepted. It was silent -- the bar drew perfectly and ignored the
-            // pointer.
-            //
-            // The frame loop runs at the compositor's rate, which is better than 8 ms and cannot
-            // be starved, so it is the reliable place to ask. The timer is left in place as a
-            // fallback for the paths that do not pump this loop.
-            systems.window.UpdatePointerState();
-
-            // The window only reports that the pointer entered or left; what that
-            // means is decided here, which keeps the window procedure free of policy.
-            //
-            // Pointer handling must not fight the notification state: while a
-            // notification is showing, leaving the pill returns to the card rather
-            // than collapsing it, or an arriving message would be cut off the instant
-            // the pointer drifted away.
-            bool pointerInside = false;
-            if (systems.window.TakePointerInsideChanged(&pointerInside)) {
-                // THE EDGE IS CONSUMED AND NOTHING ELSE HAPPENS HERE.
-                //
-                // The state is the POLICY's answer (NextShape, below). Every state this handler used to
-                // pick was a second policy, and the two could disagree -- which is what kept the
-                // notification card on screen after it was removed on request:
-                //
-                //   * with the pointer inside, this frame asked for Expanded (`active` -- a message must
-                //     not be cut off when the pointer drifts away) while the policy asked for the notice
-                //     strip, so the two alternated every frame;
-                //   * measured in the bar's own log: `state: notice-strip` and `state: expanded` swapping
-                //     every ~0.35 s while a notification was up, and a screenshot of the card STILL being
-                //     drawn after the card had been removed. Reported as "但是现在还是会触发啊".
-                //
-                // The panel's case below is the policy's too: `bar.systemPanelOpen` returns Expanded whatever
-                // the pointer is doing, so nothing was lost by deleting this.
-                (void)pointerInside;
-            }
-            // A layout change (DPI, work-area change) has already been applied by
-            // the window; draining the flag keeps it from accumulating.
-            systems.window.TakeLayoutChanged();
+            // The pointer is polled, and the window's one-shot flags are drained. The phase lives above
+            // RunBar; it needs nothing but the window, and what the pointer MEANS is decided below.
+            PollPointerState(systems);
 
             // --- pointer -> shape, once the motion has settled ---
             //
