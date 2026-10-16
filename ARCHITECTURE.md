@@ -83,6 +83,7 @@ scripts/            build.ps1 / capture-*.ps1 / snapshot.ps1
 | 通知纸条 | `services/`（Toast 读取）加 `app/IslandWindow` 的 NoticeStrip 状态 | |
 | 与 Win32 对话的细节 | `platform/` | 不要在 `core/` 里加 `<windows.h>` |
 | 一条诊断命令（"这个图标到底有没有回调"这类） | `cli/Cli.cpp` | 参数解析留在 `main.cpp`；命令只负责干活并返回退出码 |
+| **帧循环里的一段逻辑（相位）** | `src/main.cpp` 里 `RunBar` **上方**的自由静态函数（名字就是它干的事：`FillPanelFrame`、`PollPointerState`…），按调用顺序排列 | 跨帧存活的东西进 `app/BarState.h` 的 `BarRuntime`，**不**留在函数里；搬动必须过 `scripts/check-phase-move.ps1`（见第 7 节） |
 
 ## 5. 构建、自检、冒烟、部署
 
@@ -117,8 +118,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\IslandBar\scripts\build.p
 ## 7. 已知的架构债（写在明处，不是等人发现）
 
 - **层的边界已经锁住（2026-10-16）**：`domain/` 的纯度是编译期护栏，其余各层是"一个静态库 + 只向下链接"，include 那一半由 `scripts/check-layers.ps1` 在每次构建时检查（见第 3 节）。**还欠的是"层内"**：一层内部的文件之间没有约定——`render/TextRenderer.*` 想拿 `shell/` 的什么就拿、`shell/` 内部各文件互相拿类型。要收紧得靠更小的目标或前置声明，目前没做。
-- **`main.cpp` 与 `selftest/Diagnostics.cpp` 仍然太大**（5.9k / 9.0k 行，2026-10-16）。已经搬出去的三块：托盘的行为去了 `shell/TrayMenu.*`（10-15 曾随托盘一起删掉，10-16 托盘回来后重写，现在 275 行）、代替岛运行的那些命令去了 `cli/Cli.cpp`（约 950 行）、`RunBar` 里跨帧状态去了 `app/BarState.h`。
-  `main.cpp` 剩下的主体仍是 `RunBar`——约 5,000 行的帧循环，装着窗口、渲染、媒体、通知、天气和系统面板的全部驱动逻辑。**状态迁移是"一组一组来"的**：每组搬完都全量重建两套配置 + 自检 + 冒烟 + 部署，这样出错一定归因到刚搬的那组（整块机械替换的风险是"静默用了外层状态"，编译器抓不住）。顺序：面板与声音页那组 → 通知与媒体那组 → 对象组（window / renderer / text / 会话）。等这些搬完，`RunBar` 才谈得上按相位切成函数。
+- **`main.cpp` 仍然太大，但已经不是"一个 5,000 行的函数"**（2026-10-16 实测：`main.cpp` **6,407 行**，`RunBar` **2,375 行**，其中帧循环 **1,878 行**）。搬出去过的东西：托盘的行为 `shell/TrayMenu.*`、代替岛运行的那些命令 `cli/Cli.cpp`（约 950 行）、`RunBar` 里跨帧状态 `app/BarState.h`（`BarRuntime`）、自检从 8,968 行拆成 `selftest/` 里 11 个文件（`Diagnostics.cpp` 只剩两个入口，**567 行**）。
+  **帧循环现在是一串具名相位**：相位 = 自由静态函数 + 显式参数（`FillPanelFrame` / `PollPointerState` / `FillDecodedPictures`…），从循环里搬出去时**逐字移动**，只有缩进和"跨帧状态加前缀"这两处变化。**跨帧存活的东西一律进 `BarRuntime`**，因为编译器抓不住"静默用了外层状态"这件事。每片都要走完：两套配置零告警、`--self-test`、`island_smoke`、固定场景日志对照（`scripts/regression/`）、部署跑一遍。
+  **搬动由 `scripts/check-phase-move.ps1` 校验**，它是文件而不是几行临时命令：它拿参考提交里的行区间与函数体现在的内容逐条规范化后比较（去空白、去 `runtime.` 前缀），**空区域算错误**——手写版本在同一个会话里给出过三次"假绿"。边界要单独断言（起始行、结束行、紧跟其后的是什么），因为"比较结果为相同"也可能是两边都空。
+  **还欠的**：循环里仍剩 **202 条顶层语句**（输入与点击消解那一大段、媒体读取、重绘决策、歌词行的挑选），`RunBar` 里 2,375 行的大部分是它们；这些切完，`ROADMAP.md` 第 4 节第 4 条（`RunBar` 里只剩"取事件 → 消解 → 画"）才成立。
 - **已还的债**（留着这几行是为了说明它们不再是问题）：`core/` 已抽成 `island_domain` 独立静态库（编译期护栏见第 3 节）；模块↔主程序的通道是**共享内存环 + ABI 版本号**（`platform/TrayRing.h`），同步路径里没有磁盘 I/O；安装器的载荷里带 `island_tray_hook.dll`（构建输出那行 `Copying island_bar.exe and island_tray_hook.dll into the setup payload`）。
 - **托盘是"岛里我们自己的那一页"**（2026-10-16，HANDOFF 8.144/8.145/8.146/8.147），**默认整条隐藏原生任务栏**；`--native-tray` 才是 2026-10-15 那套"把任务栏裁到只剩通知区域、屏幕上留系统自己的托盘"，`--keep-taskbar` 是完全不动它。按压的唯一编码入口是 `domain/TrayEncoding.h`（`PlanTrayClick`）：把应用自己的 `uCallbackMessage` 投递到它自己的托盘窗口；学不到回调的格子（有应用窗口活着但不应答、或从来没注册过回调的）开我们自己的菜单，并如实标注"应用菜单（本机拿不到）"。
 - **卡片画什么 = 注册表 ∩ shell 里真的注册着的**（2026-10-16，HANDOFF 8.151）。注册表 `HKCU\Control Panel\NotifyIconSettings` 给图标 PNG 与身份（uid / guid），`domain/TrayLedger.h` 的账本给"现在是否真的活着"——账本由模块在 shell 里看到的 `NIM_ADD`/`NIM_MODIFY`/`NIM_DELETE` 记出来，窗口没了就剔除；第一趟学习跑完之前用注册表列表兜底。**旧口径**（只按"这条记录的 exe 有进程在跑"过滤）会把 NVIDIA 的三个常驻条目和一条死掉的 explorer 记录也画出来——实测 **13 格 vs 系统托盘的 9 个**。
