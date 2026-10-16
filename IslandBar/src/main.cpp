@@ -1680,6 +1680,67 @@ static void DismissPanelSurface(island::BarState& bar, island::BarSystems& syste
     systems.window.SetState(active == nullptr ? resting : island::IslandState::NoticeStrip);
 }
 
+// --- a click outside the bar puts the panel away ---
+//
+// Moved out of the frame loop verbatim (indentation aside), with one deliberate change: the call to the
+// dismiss lambda became a call to DismissPanelSurface with the same four arguments the lambda would have
+// used, because a free function cannot see a lambda defined in the loop.
+static void ApplyOutsideClickDismissal(island::BarState& bar, island::BarSystems& systems,
+                                       const island::Notification* active, island::IslandState resting) {
+    // --- a click OUTSIDE the bar puts the panel away -------------------------------
+    //
+    // The card is open until the user says otherwise, and "otherwise" is a click that the bar never
+    // hears about: the window is CLICK-THROUGH everywhere except the pill and the card, so a click on
+    // the desktop, on another application, or in the shell's own tray is delivered to whatever was
+    // clicked and not to us. The panel therefore looked stuck -- reported as exactly that, with the
+    // card sitting over a window the user had already clicked into.
+    //
+    // So the button is LOOKED AT rather than waited on. This is what the shell's own flyout does as
+    // well: its outside click dismisses the flyout and also acts on whatever was clicked.
+    //
+    // Polled, not hooked. A WH_MOUSE_LL hook would see the click first, and it would also mean this
+    // process watching every click on the machine for days at a time for the sake of one flyout --
+    // a disproportionate thing for a bar to do, and the kind of thing that gets a program flagged.
+    if (bar.injectClickAtMs_ != 0 && GetTickCount64() >= bar.injectClickAtMs_) {
+        bar.injectClickAtMs_ = 0;
+        island::LogAndPrint("  diagnostic: clicking at (%ld,%ld) from the bar itself\n",
+                            bar.injectClick_, bar.injectClickY_);
+        std::fflush(stdout);
+        SetCursorPos(bar.injectClick_, bar.injectClickY_);
+        Sleep(80);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        Sleep(80);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    }
+    if (bar.systemPanelOpen) {
+        POINT where = {};
+        GetCursorPos(&where);
+        const bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        if (leftDown && !bar.leftWasDown) {
+            // Reported even when the press was on the bar: "the panel did not close" and "the press
+            // was never seen" are different faults, and only this line tells them apart.
+            const bool onBar = systems.window.HitTestScreen(where);
+            island::LogAndPrint(
+                "  system panel: a press at (%ld,%ld) %ls the bar\n", where.x, where.y,
+                onBar ? L"on" : L"outside");
+            if (onBar) {
+                // A press on the bar has its own meaning, decided by the click handler; this poll is
+                // only about the presses the bar never hears about.
+            } else {
+                DismissPanelSurface(bar, systems, active, resting);
+                island::LogAndPrint("  system panel: closed (a click outside the bar)\n");
+                std::fflush(stdout);
+            }
+        }
+        bar.leftWasDown = leftDown;
+    } else {
+        // The state is tracked even while the panel is shut, so that a panel OPENED by pressing the
+        // deck button -- which is itself a click -- is not dismissed by the button being down at the
+        // moment it opened.
+        bar.leftWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -3537,58 +3598,10 @@ float musicWavePhase = 0.0f;
                 if (bar.lockedSoundPage) bar.soundPageOpen = true;
             }
 
-            // --- a click OUTSIDE the bar puts the panel away -------------------------------
-            //
-            // The card is open until the user says otherwise, and "otherwise" is a click that the bar never
-            // hears about: the window is CLICK-THROUGH everywhere except the pill and the card, so a click on
-            // the desktop, on another application, or in the shell's own tray is delivered to whatever was
-            // clicked and not to us. The panel therefore looked stuck -- reported as exactly that, with the
-            // card sitting over a window the user had already clicked into.
-            //
-            // So the button is LOOKED AT rather than waited on. This is what the shell's own flyout does as
-            // well: its outside click dismisses the flyout and also acts on whatever was clicked.
-            //
-            // Polled, not hooked. A WH_MOUSE_LL hook would see the click first, and it would also mean this
-            // process watching every click on the machine for days at a time for the sake of one flyout --
-            // a disproportionate thing for a bar to do, and the kind of thing that gets a program flagged.
-            if (bar.injectClickAtMs_ != 0 && GetTickCount64() >= bar.injectClickAtMs_) {
-                bar.injectClickAtMs_ = 0;
-                island::LogAndPrint("  diagnostic: clicking at (%ld,%ld) from the bar itself\n",
-                                    bar.injectClick_, bar.injectClickY_);
-                std::fflush(stdout);
-                SetCursorPos(bar.injectClick_, bar.injectClickY_);
-                Sleep(80);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                Sleep(80);
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            }
-            if (bar.systemPanelOpen) {
-                POINT where = {};
-                GetCursorPos(&where);
-                const bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-                if (leftDown && !bar.leftWasDown) {
-                    // Reported even when the press was on the bar: "the panel did not close" and "the press
-                    // was never seen" are different faults, and only this line tells them apart.
-                    const bool onBar = systems.window.HitTestScreen(where);
-                    island::LogAndPrint(
-                        "  system panel: a press at (%ld,%ld) %ls the bar\n", where.x, where.y,
-                        onBar ? L"on" : L"outside");
-                    if (onBar) {
-                        // A press on the bar has its own meaning, decided by the click handler; this poll is
-                        // only about the presses the bar never hears about.
-                    } else {
-                        dismissPanel();
-                        island::LogAndPrint("  system panel: closed (a click outside the bar)\n");
-                        std::fflush(stdout);
-                    }
-                }
-                bar.leftWasDown = leftDown;
-            } else {
-                // The state is tracked even while the panel is shut, so that a panel OPENED by pressing the
-                // deck button -- which is itself a click -- is not dismissed by the button being down at the
-                // moment it opened.
-                bar.leftWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-            }
+            // A press outside the bar puts the card away, and the diagnostic click-injection lands here too.
+            // The phase lives above RunBar; the dismiss call inside it is the same four arguments the lambda
+            // used.
+            ApplyOutsideClickDismissal(bar, systems, active, resting);
 
             // --- the panel's own timer, when the diagnostic is on ---
             //
