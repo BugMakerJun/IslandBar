@@ -1086,6 +1086,105 @@ static bool InitializeCompositionSurface(island::BarSystems& systems) {
     return renderOk;
 }
 
+// --- the weather reader, and the hover preview window ---
+//
+// Moved out of RunBar verbatim. The weather flag is asked about nowhere else, so it stays local here; the
+// preview's is read by the frame loop, so it comes back by reference.
+static void StartWeatherAndPreview(bool& previewReady, island::BarSystems& systems) {
+    // --- the weather on the status strip ----------------------------------
+    //
+    // Polled on a worker, like the lyrics and for the same reason: it is a network call, and a
+    // slow or unreachable service must not be able to stall the animation.
+    //
+    // Started unconditionally. A machine with no weather.txt (or no network) is the ordinary
+    // case for a first run: the reader logs where the city goes and the strip shows the date and
+    // the time without a reading, which is what it is designed to do.
+    const bool weatherAvailable = systems.weather.Start();
+    island::LogAndPrint(weatherAvailable
+                            ? "  weather: position from Windows, forecast from Open-Meteo "
+                              "(weather.txt can pin a city instead)"
+                            : "  weather: DISABLED (the worker could not start)");
+    std::fflush(stdout);
+
+    // --- the hover preview ---------------------------------------------------
+    //
+    // A live thumbnail of the window under the pointer, hanging below the bar. A window of its own,
+    // because a DWM thumbnail is drawn by the compositor into an HWND rather than handed over as a
+    // bitmap -- see ThumbnailPreview.h.
+    // Owned by the bar's window, so it can never be covered by it (see Create).
+    previewReady = systems.preview.Create(systems.window.Handle());
+    island::LogAndPrint(previewReady
+                            ? "  preview: resting on a task icon shows a live thumbnail"
+                            : "  preview: DISABLED (the preview window could not be created)");
+    std::fflush(stdout);
+}
+
+// --- the tray at startup, and the learning pass that follows it ---
+//
+// Moved out of RunBar verbatim, both blocks together: the first count is the one the second reports against,
+// and nothing outside asks about it, so it stays local.
+static void ReadTrayAndStartLearning(island::BarSystems& systems) {
+    // --- the system tray ------------------------------------------------------
+    //
+    // Read from the registry rather than from the shell's tray: the classic route through
+    // Shell_TrayWnd/ToolbarWindow32 does not exist on Windows 11, and UI Automation only answers while
+    // the taskbar is visible -- which this bar hides. See TrayIcons.h.
+    //
+    // Read here once so the first frame has icons, and refreshed from the frame loop on a timer: the tray
+    // changes when applications start and stop, which is a scale of seconds, not frames.
+
+    const int trayAtStart = systems.trayIcons.Refresh();
+    // THE ONE LINE THAT SAYS WHICH LIST THIS IS. The card draws what the shell is HOLDING, not what the
+    // registry remembers (see shell/TrayIcons.h). At this point in the startup the module has not reported
+    // from the shell yet, so what prints here is the fallback clause; the frame loop's tick prints the real
+    // one as soon as the ledger fills, which is a few seconds later.
+    island::LogAndPrint(L"  tray: %d icon(s) %ls", trayAtStart, systems.trayIcons.SourceClause().c_str());
+    std::fflush(stdout);
+
+    // --- learning every tray callback, on a worker, once a session --------------------------------
+    //
+    // A press is invisible only when it is the application's OWN callback message posted to its own tray
+    // window, and that message number used to be learned by hand, one application at a time, with an
+    // administrator prompt and a third-party program in the room. It is learned here instead: a small module
+    // is offered to every running tray application, every application is asked to register its icon again
+    // (the standard TaskbarCreated broadcast), and what comes back is written into the cache the press path
+    // reads (see shell/TrayLearn.h -- including what this cannot reach).
+    //
+    // ON A WORKER because it takes about three seconds, and SKIPPED when every icon is already known: the
+    // broadcast makes applications re-add their icons, which is harmless but pointless to repeat once the
+    // answers are in the file.
+    {
+        // THE MODULE GOES IN FIRST, on this thread, before any learning pass: it is offered to the one
+        // process that receives tray registrations (see shell/TrayLearn.h), and from then on the card can
+        // press an application the moment it registers -- no per-application pass, and no pass at all when a
+        // new application starts.
+        island::InstallTrayHook();
+        const int coveredNow = island::CountCoveredIcons(systems.trayIcons);
+        if (coveredNow >= trayAtStart) {
+            island::LogAndPrint("  tray learn: %d of %d icon(s) already have a callback entry -- not asking "
+                                "again", coveredNow, trayAtStart);
+        } else {
+            island::LogAndPrint("  tray learn: %d of %d icon(s) known; asking the applications to register "
+                                "again (background)", coveredNow, trayAtStart);
+            std::thread([]() {
+                island::TrayIcons icons;
+                icons.Refresh();
+                const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
+                const std::wstring observer = island::ObserverClause(learned);
+                island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was %s, %d "
+                                    "registration(s) captured, %d new entr(ies) -- %d of %d icon(s) have a "
+                                    "callback entry (in %lld ms) -- %ls",
+                                    learned.appsTried,
+                                    learned.appsAlreadyWatched > 0 ? "already carrying the module"
+                                                                   : "given the module",
+                                    learned.captured, learned.newEntries, learned.covered, learned.icons,
+                                    learned.ms, observer.c_str());
+            }).detach();
+        }
+        std::fflush(stdout);
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -1227,92 +1326,11 @@ unsigned long long lastMusicMeterMs = 0;
     bool lyricsAvailable = false;
     StartOutputWorkers(volumeAvailable, soundOutputStarted, lyricsAvailable, systems);
 
-    // --- the weather on the status strip ----------------------------------
-    //
-    // Polled on a worker, like the lyrics and for the same reason: it is a network call, and a
-    // slow or unreachable service must not be able to stall the animation.
-    //
-    // Started unconditionally. A machine with no weather.txt (or no network) is the ordinary
-    // case for a first run: the reader logs where the city goes and the strip shows the date and
-    // the time without a reading, which is what it is designed to do.
-    const bool weatherAvailable = systems.weather.Start();
-    island::LogAndPrint(weatherAvailable
-                            ? "  weather: position from Windows, forecast from Open-Meteo "
-                              "(weather.txt can pin a city instead)"
-                            : "  weather: DISABLED (the worker could not start)");
-    std::fflush(stdout);
-
-    // --- the hover preview ---------------------------------------------------
-    //
-    // A live thumbnail of the window under the pointer, hanging below the bar. A window of its own,
-    // because a DWM thumbnail is drawn by the compositor into an HWND rather than handed over as a
-    // bitmap -- see ThumbnailPreview.h.
-    // Owned by the bar's window, so it can never be covered by it (see Create).
-    const bool previewReady = systems.preview.Create(systems.window.Handle());
-    island::LogAndPrint(previewReady
-                            ? "  preview: resting on a task icon shows a live thumbnail"
-                            : "  preview: DISABLED (the preview window could not be created)");
-    std::fflush(stdout);
-
-    // --- the system tray ------------------------------------------------------
-    //
-    // Read from the registry rather than from the shell's tray: the classic route through
-    // Shell_TrayWnd/ToolbarWindow32 does not exist on Windows 11, and UI Automation only answers while
-    // the taskbar is visible -- which this bar hides. See TrayIcons.h.
-    //
-    // Read here once so the first frame has icons, and refreshed from the frame loop on a timer: the tray
-    // changes when applications start and stop, which is a scale of seconds, not frames.
-
-    const int trayAtStart = systems.trayIcons.Refresh();
-    // THE ONE LINE THAT SAYS WHICH LIST THIS IS. The card draws what the shell is HOLDING, not what the
-    // registry remembers (see shell/TrayIcons.h). At this point in the startup the module has not reported
-    // from the shell yet, so what prints here is the fallback clause; the frame loop's tick prints the real
-    // one as soon as the ledger fills, which is a few seconds later.
-    island::LogAndPrint(L"  tray: %d icon(s) %ls", trayAtStart, systems.trayIcons.SourceClause().c_str());
-    std::fflush(stdout);
-
-    // --- learning every tray callback, on a worker, once a session --------------------------------
-    //
-    // A press is invisible only when it is the application's OWN callback message posted to its own tray
-    // window, and that message number used to be learned by hand, one application at a time, with an
-    // administrator prompt and a third-party program in the room. It is learned here instead: a small module
-    // is offered to every running tray application, every application is asked to register its icon again
-    // (the standard TaskbarCreated broadcast), and what comes back is written into the cache the press path
-    // reads (see shell/TrayLearn.h -- including what this cannot reach).
-    //
-    // ON A WORKER because it takes about three seconds, and SKIPPED when every icon is already known: the
-    // broadcast makes applications re-add their icons, which is harmless but pointless to repeat once the
-    // answers are in the file.
-    {
-        // THE MODULE GOES IN FIRST, on this thread, before any learning pass: it is offered to the one
-        // process that receives tray registrations (see shell/TrayLearn.h), and from then on the card can
-        // press an application the moment it registers -- no per-application pass, and no pass at all when a
-        // new application starts.
-        island::InstallTrayHook();
-        const int coveredNow = island::CountCoveredIcons(systems.trayIcons);
-        if (coveredNow >= trayAtStart) {
-            island::LogAndPrint("  tray learn: %d of %d icon(s) already have a callback entry -- not asking "
-                                "again", coveredNow, trayAtStart);
-        } else {
-            island::LogAndPrint("  tray learn: %d of %d icon(s) known; asking the applications to register "
-                                "again (background)", coveredNow, trayAtStart);
-            std::thread([]() {
-                island::TrayIcons icons;
-                icons.Refresh();
-                const island::TrayLearnResult learned = island::LearnTrayCallbacks(icons, true);
-                const std::wstring observer = island::ObserverClause(learned);
-                island::LogAndPrint("  tray learn: the shell (%d process(es) offered) was %s, %d "
-                                    "registration(s) captured, %d new entr(ies) -- %d of %d icon(s) have a "
-                                    "callback entry (in %lld ms) -- %ls",
-                                    learned.appsTried,
-                                    learned.appsAlreadyWatched > 0 ? "already carrying the module"
-                                                                   : "given the module",
-                                    learned.captured, learned.newEntries, learned.covered, learned.icons,
-                                    learned.ms, observer.c_str());
-            }).detach();
-        }
-        std::fflush(stdout);
-    }
+    // The weather reader, the hover preview, and the tray's own startup (its first read and the learning
+    // pass). The phases live above RunBar; the order is unchanged. Only the preview's flag is read later.
+    bool previewReady = false;
+    StartWeatherAndPreview(previewReady, systems);
+    ReadTrayAndStartLearning(systems);
 
     // The Start card's own state. The phase lives above RunBar; the order is unchanged (see the note on the
     // phase functions).
