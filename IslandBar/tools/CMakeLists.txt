@@ -52,3 +52,12 @@ option(ISLANDBAR_BUILD_THUMBPROBE "Build the DWM thumbnail probe" ON)
 if(ISLANDBAR_BUILD_THUMBPROBE)
     add_subdirectory(thumbprobe)
 endif()
+
+# Asks whether a PILL-SIZED window can get a real blurred backdrop. The bar's three attempts were all made
+# on a full-width 360 DIP window, where the one that worked (acrylic) would have smeared a blurred band
+# across the top of the screen because it ignores the window region. A window whose rectangle IS the pill
+# has no such band left to leak into -- so the only question is whether the blur stops at the corners.
+option(ISLANDBAR_BUILD_GLASSPROBE "Build the acrylic pill probe" ON)
+if(ISLANDBAR_BUILD_GLASSPROBE)
+    add_subdirectory(glassprobe)
+endif()
