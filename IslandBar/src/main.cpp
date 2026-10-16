@@ -783,6 +783,125 @@ static bool CreateBarWindowAndClaimAppBar(bool claimAppBar, const island::Monito
     return true;
 }
 
+// --- the two notification channels: the local pipe, and the shell's own toast database ---
+//
+// Moved out of RunBar verbatim, with the two results coming back by reference instead of being declared
+// here: the frame loop reads them, so they stay RunBar's locals (see the note on the phase functions).
+static void StartNotificationChannels(bool& listening, bool& toastsAvailable, island::BarSystems& systems) {
+    // Started before the loop so a sender that connects immediately is served
+    // rather than refused. A failure here is reported and the bar keeps working:
+    // the clock and the hover states do not depend on notifications.
+    listening = systems.notificationServer.Start();
+    island::LogAndPrint(listening ? "  notifications: listening on \\\\.\\pipe\\%ls"
+                                  : "  notifications: DISABLED (could not create the pipe)",
+                        island::kPipeName);
+
+    // The SECOND notification channel: Windows' own toasts, read out of the database the notification centre
+    // uses. Polled on the frame loop's slow timer rather than by a thread of its own -- one indexed SELECT
+    // every couple of seconds costs less than a thread would -- and a failure to read it leaves the bar exactly
+    // as it was, because the push channel does not depend on it.
+    toastsAvailable = systems.toasts.Start();
+    if (!toastsAvailable) {
+        island::LogAndPrint("  notifications: system toasts are NOT being read (see above)");
+    }
+}
+
+// --- the two media sources: the system session, and the player that never publishes one ---
+//
+// Moved out of RunBar verbatim, with the two results coming back by reference (the frame loop reads them).
+// The two environment switches are read HERE and stay local: nothing outside this block asks about them.
+static void StartMediaReaders(bool& musicAvailable, bool& playerWindowAvailable,
+                              island::BarSystems& systems) {
+    // --- what is playing ---
+    //
+    // Polled on a worker thread; the frame loop only reads a snapshot. A failure
+    // here is not fatal: the bar is a taskbar replacement, not a music player.
+    //
+    // ISLANDBAR_NO_MEDIA=1 leaves the reader unstarted, which is how the bar looks on a machine
+    // where nothing is playing -- a state that cannot otherwise be photographed on this one, whose
+    // owner keeps a player running all day. It is the switch the idle island's own line needs: with
+    // no session the pill shows the date and the time, and with one it shows the lyric and the line
+    // stands beside the deck (see StatusPlacementFor).
+    wchar_t noMediaSetting[8] = {};
+    const bool noMedia = GetEnvironmentVariableW(L"ISLANDBAR_NO_MEDIA", noMediaSetting, 8) > 0 &&
+                         noMediaSetting[0] == L'1';
+    // ISLANDBAR_NO_SESSION=1 leaves the SESSION reader unstarted while the window-title source below
+    // stays on. That is the switch for exercising the fallback on a machine whose player does publish
+    // a session -- this one, since NetEase's own switch was turned on (HANDOFF 8.72) -- because the
+    // fallback only reads while there is no session at all.
+    wchar_t noSessionSetting[8] = {};
+    const bool noSession = GetEnvironmentVariableW(L"ISLANDBAR_NO_SESSION", noSessionSetting, 8) > 0 &&
+                           noSessionSetting[0] == L'1';
+    musicAvailable = !noMedia && !noSession && systems.music.Start();
+    island::LogAndPrint(musicAvailable
+                            ? "  music: reading the system media session"
+                            : (noMedia ? "  music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were"
+                                         " playing)"
+                                       : (noSession ? "  music: the session reader is DISABLED BY"
+                                                      " ISLANDBAR_NO_SESSION (the window-title source"
+                                                      " below is what is left)"
+                                                    : "  music: DISABLED (the media API is"
+                                                      " unavailable)")));
+    std::fflush(stdout);
+
+    // --- the player that never publishes a session ------------------------------
+    //
+    // Its own window title is then the only thing it says out loud, and that is enough for the words
+    // (the lyrics come from the online lyric APIs by title and artist). Read ONLY while there is no
+    // session: a session carries the cover, the position and the transport keys as well, and it wins
+    // every time. See PlayerWindow.h for what this source cannot do.
+    //
+    // Off under ISLANDBAR_NO_MEDIA, which means "as if nothing were playing" -- the idle island's own
+    // screenshot depends on that meaning exactly what it says.
+    playerWindowAvailable = !noMedia && systems.playerWindow.Start();
+    island::LogAndPrint(playerWindowAvailable
+                            ? "  music: player window titles are watched too (used only while no"
+                              " session exists)"
+                            : "  music: player window titles DISABLED");
+    std::fflush(stdout);
+}
+
+// --- the output side: the volume reader, the sound page's own data, and the lyric fetcher ---
+//
+// Moved out of RunBar verbatim, with the three results coming back by reference (the frame loop reads them).
+static void StartOutputWorkers(bool& volumeAvailable, bool& soundOutputStarted, bool& lyricsAvailable,
+                               island::BarSystems& systems) {
+    // --- the output volume ---
+    //
+    // On its own worker, because IMMDeviceEnumerator touches the audio service and can block
+    // for tens of milliseconds; blocking the frame loop is exactly what the stutter reports
+    // were about.
+    volumeAvailable = systems.volume.Start();
+    island::LogAndPrint(volumeAvailable ? "  volume: reading the default output endpoint"
+                                        : "  volume: DISABLED (no audio endpoint)");
+    std::fflush(stdout);
+
+    // --- the 声音输出 page's own data -------------------------------------
+    //
+    // The output devices and the per-application mixer, on a worker of its own for the same reason the
+    // volume is: enumeration touches the audio service, and an application's icon comes off the disk.
+    //
+    // On the HEAP, because the object carries the mixer's icons and a whole snapshot of the list -- tens of
+    // kilobytes -- and this function's own frame is not the place for that.
+    //
+    // STARTED AT STARTUP, not when the 声音输出 page is first opened, and that changed when the WeChat channel
+    // was added: its SOUND signal is read from the per-application session list, and that signal has to work
+    // whether or not anybody has ever looked at the mixer. (It did not, silently: the page's lazy start meant
+    // the list was never read at all, and the sound channel sat there with nothing to look at.)
+    soundOutputStarted = systems.soundOutput->Start();
+    island::LogAndPrint(soundOutputStarted
+                            ? "  sound: audio sessions are being read (for the mixer and the WeChat channel)"
+                            : "  sound: audio sessions are NOT readable; the mixer and the WeChat sound"
+                              " channel are unavailable");
+    std::fflush(stdout);
+
+    lyricsAvailable = systems.lyrics.Start();
+    island::LogAndPrint(lyricsAvailable
+                            ? "  lyrics: on demand, NetEase then QQ Music"
+                            : "  lyrics: DISABLED (the worker could not start)");
+    std::fflush(stdout);
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -945,24 +1064,11 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
         systems.renderer.SetTextRenderer(&systems.text);
     }
 
-    // --- the local push channel ---
-    //
-    // Started before the loop so a sender that connects immediately is served
-    // rather than refused. A failure here is reported and the bar keeps working:
-    // the clock and the hover states do not depend on notifications.
-    const bool listening = systems.notificationServer.Start();
-    island::LogAndPrint(listening ? "  notifications: listening on \\\\.\\pipe\\%ls"
-                                  : "  notifications: DISABLED (could not create the pipe)",
-                        island::kPipeName);
-
-    // The SECOND notification channel: Windows' own toasts, read out of the database the notification centre
-    // uses. Polled on the frame loop's slow timer rather than by a thread of its own -- one indexed SELECT
-    // every couple of seconds costs less than a thread would -- and a failure to read it leaves the bar exactly
-    // as it was, because the push channel does not depend on it.
-    const bool toastsAvailable = systems.toasts.Start();
-    if (!toastsAvailable) {
-        island::LogAndPrint("  notifications: system toasts are NOT being read (see above)");
-    }
+    // The two notification channels. The phase lives above RunBar; the flags stay here because the frame
+    // loop reads them (see the note on the phase functions).
+    bool listening = false;
+    bool toastsAvailable = false;
+    StartNotificationChannels(listening, toastsAvailable, systems);
 
     // The THIRD channel: WeChat, which tells Windows nothing at all and shows its own popup instead.
     //
@@ -972,92 +1078,22 @@ int RunBar(bool hideNativeTaskbar, bool claimAppBar, bool keepStrip, const wchar
 unsigned long long lastMusicMeterMs = 0;
     std::fflush(stdout);
 
-    // --- what is playing ---
-    //
-    // Polled on a worker thread; the frame loop only reads a snapshot. A failure
-    // here is not fatal: the bar is a taskbar replacement, not a music player.
-    //
-    // ISLANDBAR_NO_MEDIA=1 leaves the reader unstarted, which is how the bar looks on a machine
-    // where nothing is playing -- a state that cannot otherwise be photographed on this one, whose
-    // owner keeps a player running all day. It is the switch the idle island's own line needs: with
-    // no session the pill shows the date and the time, and with one it shows the lyric and the line
-    // stands beside the deck (see StatusPlacementFor).
-    wchar_t noMediaSetting[8] = {};
-    const bool noMedia = GetEnvironmentVariableW(L"ISLANDBAR_NO_MEDIA", noMediaSetting, 8) > 0 &&
-                         noMediaSetting[0] == L'1';
-    // ISLANDBAR_NO_SESSION=1 leaves the SESSION reader unstarted while the window-title source below
-    // stays on. That is the switch for exercising the fallback on a machine whose player does publish
-    // a session -- this one, since NetEase's own switch was turned on (HANDOFF 8.72) -- because the
-    // fallback only reads while there is no session at all.
-    wchar_t noSessionSetting[8] = {};
-    const bool noSession = GetEnvironmentVariableW(L"ISLANDBAR_NO_SESSION", noSessionSetting, 8) > 0 &&
-                           noSessionSetting[0] == L'1';
-    const bool musicAvailable = !noMedia && !noSession && systems.music.Start();
-    island::LogAndPrint(musicAvailable
-                            ? "  music: reading the system media session"
-                            : (noMedia ? "  music: DISABLED BY ISLANDBAR_NO_MEDIA (as if nothing were"
-                                         " playing)"
-                                       : (noSession ? "  music: the session reader is DISABLED BY"
-                                                      " ISLANDBAR_NO_SESSION (the window-title source"
-                                                      " below is what is left)"
-                                                    : "  music: DISABLED (the media API is"
-                                                      " unavailable)")));
-    std::fflush(stdout);
-
-    // --- the player that never publishes a session ------------------------------
-    //
-    // Its own window title is then the only thing it says out loud, and that is enough for the words
-    // (the lyrics come from the online lyric APIs by title and artist). Read ONLY while there is no
-    // session: a session carries the cover, the position and the transport keys as well, and it wins
-    // every time. See PlayerWindow.h for what this source cannot do.
-    //
-    // Off under ISLANDBAR_NO_MEDIA, which means "as if nothing were playing" -- the idle island's own
-    // screenshot depends on that meaning exactly what it says.
-    const bool playerWindowAvailable = !noMedia && systems.playerWindow.Start();
-    island::LogAndPrint(playerWindowAvailable
-                            ? "  music: player window titles are watched too (used only while no"
-                              " session exists)"
-                            : "  music: player window titles DISABLED");
-    std::fflush(stdout);
+    // The two media sources. The phase lives above RunBar; the flags stay here because the frame loop
+    // reads them.
+    bool musicAvailable = false;
+    bool playerWindowAvailable = false;
+    StartMediaReaders(musicAvailable, playerWindowAvailable, systems);
 
     // --- lyrics ---
     //
     // Also on a worker thread, because fetching them is a network round trip. A
     // failure here is not fatal either: the strip falls back to the bar.track name.
-    // --- the output volume ---
-    //
-    // On its own worker, because IMMDeviceEnumerator touches the audio service and can block
-    // for tens of milliseconds; blocking the frame loop is exactly what the stutter reports
-    // were about.
-    const bool volumeAvailable = systems.volume.Start();
-    island::LogAndPrint(volumeAvailable ? "  volume: reading the default output endpoint"
-                                        : "  volume: DISABLED (no audio endpoint)");
-    std::fflush(stdout);
-
-    // --- the 声音输出 page's own data -------------------------------------
-    //
-    // The output devices and the per-application mixer, on a worker of its own for the same reason the
-    // volume is: enumeration touches the audio service, and an application's icon comes off the disk.
-    //
-    // On the HEAP, because the object carries the mixer's icons and a whole snapshot of the list -- tens of
-    // kilobytes -- and this function's own frame is not the place for that.
-    //
-    // STARTED AT STARTUP, not when the 声音输出 page is first opened, and that changed when the WeChat channel
-    // was added: its SOUND signal is read from the per-application session list, and that signal has to work
-    // whether or not anybody has ever looked at the mixer. (It did not, silently: the page's lazy start meant
-    // the list was never read at all, and the sound channel sat there with nothing to look at.)
-    const bool soundOutputStarted = systems.soundOutput->Start();
-    island::LogAndPrint(soundOutputStarted
-                            ? "  sound: audio sessions are being read (for the mixer and the WeChat channel)"
-                            : "  sound: audio sessions are NOT readable; the mixer and the WeChat sound"
-                              " channel are unavailable");
-    std::fflush(stdout);
-
-    const bool lyricsAvailable = systems.lyrics.Start();
-    island::LogAndPrint(lyricsAvailable
-                            ? "  lyrics: on demand, NetEase then QQ Music"
-                            : "  lyrics: DISABLED (the worker could not start)");
-    std::fflush(stdout);
+    // The output side: the volume, the sound page's own data, and the lyric fetcher. The phase lives above
+    // RunBar; the flags stay here because the frame loop reads them.
+    bool volumeAvailable = false;
+    bool soundOutputStarted = false;
+    bool lyricsAvailable = false;
+    StartOutputWorkers(volumeAvailable, soundOutputStarted, lyricsAvailable, systems);
 
     // --- the weather on the status strip ----------------------------------
     //

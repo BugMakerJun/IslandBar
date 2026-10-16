@@ -46,10 +46,12 @@ if (-not (Test-Path $In)) { throw "no raw log at $In -- run run-demo.ps1 first" 
 New-Item -ItemType Directory -Force -Path $Baseline | Out-Null
 
 # Lines whose NUMBERS are part of what is being checked: what exists, and in what order.
+# NOT in here: the weather position, which is the Windows location service's answer and jitters in its fifth
+# decimal between two runs (MEASURED: 41.775621,123.441200 then 41.775624,123.441217).
 $Strict = @(
     'theme:', 'monitor ', 'native taskbar:', 'work area:', 'notifications: ', 'music: reading',
     'music: player window titles', 'volume: reading', 'sound: audio sessions', 'lyrics: on demand',
-    'weather: position', 'preview: ', 'start: account'
+    'preview: ', 'start: account'
 )
 
 # Lines that are only measurements of the machinery, never of what the bar did.

@@ -50,6 +50,6 @@ SHAPE  tray learn: <N> of <N> icon(s) known; asking the applications to register
 SHAPE  tray learn: the shell (<N> process(es) offered) was already carrying the module, <N> registration(s) captured, <N> new entr(ies) -- <N> of <N> icon(s) have a callback entry (in <N> ms) -- observer did not report in <N> ms (<N> of the hooked threads took the message that loads the module)
 SHAPE  volume: peak meter acquired
 SHAPE  weather: <N>.<N> C, code <N> -> 晴 <N>°
+SHAPE  weather: position from Windows -> <N>.<N>, <N>.<N>
+SHAPE  weather: position from Windows, forecast from Open-Meteo (weather.txt can pin a city instead)
 STRICT volume: reading the default output endpoint
-STRICT weather: position from Windows -> 41.775621, 123.441200
-STRICT weather: position from Windows, forecast from Open-Meteo (weather.txt can pin a city instead)
