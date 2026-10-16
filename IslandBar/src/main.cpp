@@ -1610,6 +1610,38 @@ static void ApplyPointerShapePolicy(island::BarState& bar, island::BarSystems& s
     }
 }
 
+// --- the wheel, for the two lists that scroll ---
+//
+// Moved out of the frame loop verbatim (indentation aside). It touches nothing but BarState and the window,
+// which is why it needs no other parameters.
+static void ApplyWheelScroll(island::BarState& bar, island::BarSystems& systems) {
+    // The window counts the notches and hands them over; the OFFSET belongs here, where the page is
+    // built and where the same value goes out to the drawing and the hit test. The window clamps it
+    // (it is the one that knows how many rows there are) and the clamped value is copied straight
+    // back, so there is still only one offset in play.
+    {
+        int wheelNotches = 0;
+        if (bar.soundPageOpen && systems.window.TakeSoundWheel(&wheelNotches)) {
+            bar.soundPageScroll -= static_cast<float>(wheelNotches) * 60.0f;
+            systems.window.SetSoundPageScroll(bar.soundPageScroll);
+            bar.soundPageScroll = systems.window.SoundPageScroll();
+            island::LogAndPrint("  sound page: wheel %d -> scroll %.0f\n", wheelNotches,
+                                bar.soundPageScroll);
+            std::fflush(stdout);
+        } else if (bar.startPageOpen && bar.startPageState == 1 &&
+                   systems.window.TakeSoundWheel(&wheelNotches)) {
+            // The picker scrolls one NOTCH per row, not in pixels: 121 applications at 34 DIP a row
+            // is 4,114 DIP of list, and a pixel-per-notch wheel would take a minute to reach the
+            // end alphabetically. Clamped so the last screenful is the last thing reachable.
+            systems.window.ScrollStartPicker(wheelNotches);
+            bar.startPickerScroll = systems.window.StartPickerScroll();
+            island::LogAndPrint("  start: picker wheel %d -> row %d of %d\n", wheelNotches,
+                                bar.startPickerScroll, bar.startAppCount);
+            std::fflush(stdout);
+        }
+    }
+}
+
 // `forcedState` pins the shape so it can be looked at, and `forcedStartHover` pins the Start button's
 // hover. Debug only, and they exist because a shape can satisfy every assertion and still be wrong to
 // look at: a screenshot of a named state settles in seconds what reasoning about geometry does not.
@@ -2575,33 +2607,9 @@ float musicWavePhase = 0.0f;
                 }
             }
 
-            // --- the wheel, for the one list that scrolls ---
-            //
-            // The window counts the notches and hands them over; the OFFSET belongs here, where the page is
-            // built and where the same value goes out to the drawing and the hit test. The window clamps it
-            // (it is the one that knows how many rows there are) and the clamped value is copied straight
-            // back, so there is still only one offset in play.
-            {
-                int wheelNotches = 0;
-                if (bar.soundPageOpen && systems.window.TakeSoundWheel(&wheelNotches)) {
-                    bar.soundPageScroll -= static_cast<float>(wheelNotches) * 60.0f;
-                    systems.window.SetSoundPageScroll(bar.soundPageScroll);
-                    bar.soundPageScroll = systems.window.SoundPageScroll();
-                    island::LogAndPrint("  sound page: wheel %d -> scroll %.0f\n", wheelNotches,
-                                        bar.soundPageScroll);
-                    std::fflush(stdout);
-                } else if (bar.startPageOpen && bar.startPageState == 1 &&
-                           systems.window.TakeSoundWheel(&wheelNotches)) {
-                    // The picker scrolls one NOTCH per row, not in pixels: 121 applications at 34 DIP a row
-                    // is 4,114 DIP of list, and a pixel-per-notch wheel would take a minute to reach the
-                    // end alphabetically. Clamped so the last screenful is the last thing reachable.
-                    systems.window.ScrollStartPicker(wheelNotches);
-                    bar.startPickerScroll = systems.window.StartPickerScroll();
-                    island::LogAndPrint("  start: picker wheel %d -> row %d of %d\n", wheelNotches,
-                                        bar.startPickerScroll, bar.startAppCount);
-                    std::fflush(stdout);
-                }
-            }
+            // The wheel, for the two lists that scroll (the sound page and the Start picker). The phase
+            // lives above RunBar; it touches nothing but BarState and the window.
+            ApplyWheelScroll(bar, systems);
 
             // --- a press on a slider, which is where a drag BEGINS ---
             //
